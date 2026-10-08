@@ -1235,7 +1235,104 @@ from tests.conftest import sdk_root
 #: (`iot-dashboard` drops `st7789`); `ce8f3573e` (`v2n-m1-ros-perception`
 #: E1M-X EVK parts); and two new boards, `v2n/v2n-pmic-inspect`
 #: (`905b210a0`) and `v2n/v2n-drpai-inference` (`f958b6083`).
-PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #866/#2469/#2316/#2597 resync (tan-cli#1278, this change)
+#:
+#: `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309 re-sync). FIVE of the 23 tracked
+#: modules changed and the module SET grew by TWO: `ownership.py` and
+#: `linux_ownership.py` are new upstream, relocated byte-identical and added
+#: to PINNED_HASHES below (`git diff --stat 34c11c9d..ac0e2a5e --
+#: scripts/alp_orchestrate/`; the other eighteen hashes re-measured
+#: unchanged). Neither new module imports anything outside the package, and no
+#: mirror file gained an import of a flat `scripts/*.py`. SIX upstream commits
+#: touch this tree (`git log --oneline 34c11c9d..ac0e2a5e --
+#: scripts/alp_orchestrate/`); classified by reading each diff, not its
+#: subject line:
+#:
+#:   - `9baf8ab9c` (#2735) BEHAVIOURAL, `kconfig.py::_slice_local_conf`: a
+#:     `${NAME}` `ota.server.tenant` no longer emits a self-referencing
+#:     `MENDER_TENANT_TOKEN ?= "${...}"`; a comment line points at the
+#:     documented local.conf override instead. Yocto slices only.
+#:   - `d7d17c7ae` (#2705) BEHAVIOURAL, `buildplan.py`: every build-plan now
+#:     carries a top-level `deferredPlaceholders` (always present, additive
+#:     under schemaVersion 1), and `emit_build_plan` refuses a placeholder that
+#:     collides with a plan token, is not upper-case, is absent from the
+#:     project's board.yaml or sits outside `configArtefacts`. `kconfig.py::
+#:     _slice_alp_conf` gains `_refuse_live_kconfig_placeholders`: a `${NAME}`
+#:     on a LIVE Zephyr Kconfig line is refused (a commented hint line is
+#:     not); the `_split_server_url`/`_emit_ota` docstrings are reworded to
+#:     match (cosmetic). `test_build_plan_deferred_placeholders.py`.
+#:   - `e856e7f53` (#2677) BEHAVIOURAL, `kconfig.py`: new
+#:     `_inference_auto_order` reads the SoM preset's `inference.auto_order`
+#:     and emits `CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER="..."` in the Zephyr
+#:     inference block and `ALP_SDK_INFERENCE_AUTO_ORDER ?= "..."` in a Yocto
+#:     slice's local.conf.
+#:   - `8d17d15b7` (#2674) BEHAVIOURAL, NEW `linux_ownership.py` (the
+#:     `--emit linux-ownership-dts` renderer, an `alp_project.py` mode) and a
+#:     refactor of `ownership.py`'s doc lookup (`_ownership_doc_path`/
+#:     `ownership_doc_rel`) plus override acceptance for an instance with an
+#:     `m33` candidate and an `m33:` block.
+#:   - `5a46a9ec8` (#2673) BEHAVIOURAL, NEW `ownership.py`; `loader.py::
+#:     load_board_yaml` resolves board.yaml `ownership:` against the family's
+#:     `core-ownership.yaml` (`BoardProject.ownership`, a new `models.py`
+#:     field), `SystemManifest.to_dict` emits it additively as `ownership:`,
+#:     and `kconfig.py::_slice_alp_conf` appends the Kconfig of assignable
+#:     peripherals a project hands to the M33 core. `test_core_ownership.py`.
+#:   - `319812a16` (#2670) BEHAVIOURAL (a filter), `slugs.py`: `dxm1` joins
+#:     `_ON_MODULE_NON_CHIP_FIELDS`, so the new `on_module.dxm1` strap/reset
+#:     sub-block is never read as a chip slug.
+#:
+#: RE-MEASURED against the planner oracle, not assumed: re-captured at
+#: `ac0e2a5e0` -- 103 boards, 721 emits (7 error-contract), 1,371,793 B (was
+#: 102/714/1,355,493). Every changed byte attributed by a YAML/JSON-level
+#: compare (long strings diffed line by line) over the 99 boards present in
+#: both captures, nothing left over: `d7d17c7ae` -- `deferredPlaceholders`
+#: added to every one of their 98 `build-plan.json` goldens
+#: (`["MENDER_TENANT_TOKEN"]` on `connectivity/iot-fleet-ota` and
+#: `connectivity/production-deployment`, `[]` on the other 96; the four new
+#: boards' plans carry it too, 102 of 102); `e856e7f53` -- `CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER`
+#: in 15 plans' Zephyr `alp.conf` and `ALP_SDK_INFERENCE_AUTO_ORDER ?=` in 51
+#: plans' Yocto local.conf (the same commit adds `inference.auto_order` to the
+#: presets); `5a46a9ec8` -- `ownership:` added to 23 V2N-family
+#: `system-manifest.yaml` goldens. alp-sdk DATA read by unchanged code:
+#: `ac62fdc6c` (#2653, INA228 in the EVK I2C inventory) --
+#: `CONFIG_ALP_SDK_CHIP_INA228` in 21 plans. Board set: `78a71e69b` (#2669)
+#: retires `v2n/v2n-emmc-block-stat`, `v2n/v2n-ethernet-dual` and
+#: `v2n/v2n-xspi-flash-readwrite`; `8c5e1e23f` (#2678) adds
+#: `v2n/v2n-gpu2d-compose`, `8de1d0ca6` (#2672) `v2n/v2n-ros2-som-temperature`,
+#: `6916ab968` (#2668) `v2n/v2n-soc-temperature`, `642e81ea3` (#2676)
+#: `v2n/v2n-two-models`. NOT VISIBLE in the oracle, by construction:
+#: `9baf8ab9c` (no example has a Yocto slice with a `${NAME}` tenant -- both
+#: Mender examples' `MENDER_TENANT_TOKEN` text sits on commented Zephyr hint
+#: lines, unchanged), `d7d17c7ae`'s live-line refusal (no example trips it),
+#: `5a46a9ec8`'s M33 ownership Kconfig (no example assigns a peripheral to
+#: m33) and `319812a16` (a filter).
+#:
+#: RE-MEASURED again at `2d2a85333` (tan-cli#1216) -- 104 boards, 728 emits
+#: (7 error-contract), 2,539,625 B (was 103/721/1,371,793). Every changed byte
+#: attributed, none left over: #2771 -- the additive `alp.overlay` and
+#: `cmake-args.txt` `configArtefacts` entries on every zephyr/baremetal slice
+#: of the 99 changed `build-plan.json` goldens (the whole byte growth); board
+#: set -- one NEW board, `multicore/microros-ros2-v2n` (`042527fd0`, #2721; 7
+#: added files). The V2N board-tree changes (#2747, #2685) are not an oracle
+#: mode, and `loader.py`'s itcm refusal is exercised by no example.
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
+#: supersedes the bot's #1310 proposal for the same range, which could not
+#: apply the hand-ports and would have broken two things -- see below).
+#:
+#:   * `buildplan.py` / `__init__.py` -- ported: `_slice_dts_overlay`,
+#:     `_slice_cmake_args_artefact`, `_v1_shaped_project`,
+#:     `DtsOverlayUnavailable`, and the additive `alp.overlay` /
+#:     `cmake-args.txt` `configArtefacts` (alp-sdk#2771). tan adaptations: the
+#:     DTS emitter is `tan.planner.project_emit.dts`, which RAISES
+#:     `DtsOverlayUnavailable` for a missing header (upstream `sys.exit`s and
+#:     converts), and `_sku_family` comes from `tan.planner.som_metadata`.
+#:     #1310's clean 3-way merge kept upstream's sibling-package import
+#:     (`alp_project_emit`), which does not exist in tan.
+#:   * `loader.py` -- upstream (alp-sdk#2762, tan-cli#1350) refuses
+#:     `diagnostics.link: itcm`, because alp-sdk's planner cannot emit an
+#:     ITCM-linked image. tan's planner implements it, so the refusal is NOT
+#:     taken (#1310 took it, which would make `tan build` refuse the knob tan
+#:     itself implements); only the pinned hash moves.
+PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2771 (build-plan alp.overlay/cmake-args.txt) + #2762/#2747 resync (tan-cli#1216)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1275,30 +1372,32 @@ PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin
 #: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "bc8a414122a59e04dcd37087328d692c15b8574bf6d470d6881d8f2866735aff",
+    "__init__.py": "85cc05f1fe9f2bd859b8c7eef37f21d7092027031993817fc5fdbe519faf528a",
     "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
-    "buildplan.py": "f5b5caaf6be840e8889b01fd488f0246a3c733c9aeb4d3171a013035a0c6748a",
+    "buildplan.py": "592f1b70f214593a34ae63e24cedad49062b4bfffc69caf0c773495ce2427368",
     "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "d3d35a4875c9a30bf5aa732258fcbc0063bbc2f63e952e749e076fa5b9b16913",
+    "kconfig.py": "c63326306c89b0f6320ff1771cb3db46562693460bd669120169aaf993cbf108",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
+    "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
     # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The next planner re-sync must NOT port that
-    # refusal: tan's `link_target.apply_link_target` (called at the end of
+    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
+    # that refusal: tan's `link_target.apply_link_target` (called at the end of
     # tan's `load_board_yaml`) replaces it with the real HE-only feature.
-    "loader.py": "829b41bdf316114098c7001f588d57e650124b09530645cd9d084a59ca890bfd",
+    "loader.py": "e31e53dbebbb4c7095a87a19cc5c46b572efd4c043adee04d8003bacaa36723e",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
-    "models.py": "3ba426ab5477bedc446bee7ab63eeb9cf56fc1b677397fdc892ba3826567a45c",
+    "models.py": "0f47b346daa008eebd07c03fd640df76318757843e10bcd2b9f5ba2966cc5a9d",
     "orchestrator.py": "a322bba505b4f3c35b30f4988343dd061460d48e901665e05cdfa60780b1fcaa",
+    "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
     "partition.py": "9ef943ce8f2c9651067b4e58c2e878e4f87eac2ff495de7342a57cd276b9b711",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ba22c0fc1885f510edec051f934e16654ba3d7a627ba741383d8e2c0a3e4c4b8",
     "secure.py": "c250782df6bca7b8b6b25e82375044eb87302f1b7cf656931658fe8ef3c37212",
-    "slugs.py": "7db83e2dd4ea8b47edb81ad657bfc30d62ca283d51e99cd275ce2578de0dd3ed",
+    "slugs.py": "4e914a71468ec41529a970783f29501d1ec387ad748fc792cb6dfb53b9818adb",
     "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
     "validate.py": "9d66cc7cebfe4bbb355b8d424f784f62ad652a9fa6560280942198c16079a5f2",
 }
@@ -2171,7 +2270,79 @@ PINNED_HASHES: dict[str, str] = {
 #:     (HAND_PORT_NO_TAN_FILE_PAIRING), which neither commit touches, and
 #:     `tan validate` spawns the bound SDK's own `scripts/validate_board_yaml.py`
 #:     (`validate_cmd.VALIDATOR_SCRIPT`), so it picks up #2615 from the SDK.
-HAND_PORT_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #866/#2024/#915 audit (tan-cli#1278, this change)
+#:
+#: `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309, alongside the mirror-table bump
+#: above). Of the thirteen HAND_PORT_HASHES sources tracked until now
+#: (`gen_zephyr_board.py`, `sentinels.py`, `whole_device_alias.py`,
+#: `alp_project_loader.py`, `alp_template.py`, the six `alp_project_emit/`
+#: files, `alp_cli/diagnostic_format.py`, `alp_cli/validator.py`), exactly
+#: three changed in range (`git diff --stat 34c11c9d..ac0e2a5e` per file; the
+#: other ten re-hashed byte-identical). ONE source is ADDED, so the table is
+#: now fourteen: `scripts/alp_project.py`, which `tan/planner_emit.py`
+#: hand-ports (its `_run_v2_per_core_emit`/`main()` emit dispatch) but which
+#: no table tracked -- the gap that let the `dts-overlay` M33-ownership
+#: append below ship unported. It is a key in HAND_PORT_HASHES and in
+#: `test_hand_port_tan_side.py`'s HAND_PORT_TAN_SIDE (paired with
+#: `tan/planner_emit.py`); it is NOT in HAND_PORT_SOURCES, whose keys are
+#: `tan/planner/`-relative and whose coverage walk (`tan/planner/**.py`)
+#: cannot name a file outside that package. Every other key above is still in
+#: exactly one of the tan-side tables, and every tan file they name still
+#: holds its port:
+#:
+#:   - `scripts/gen_zephyr_board.py` -- three commits, all BEHAVIOURAL for the
+#:     emitted V2N/V2M `m33_sm` board tree, PORTED into `zephyr_board.py`:
+#:     `5a46a9ec8` (#2673) -- new `_v2n_assignable_m33`/
+#:     `_v2n_assignable_pinctrl`/`_v2n_assignable_dts`: every
+#:     `core-ownership.yaml` `assignable:` instance with an `m33:` block is
+#:     declared `status = "disabled"` with its pinctrl group, PFC codes from
+#:     the SoC JSON's `linux_dt` via the mirrored `ownership.instance_pfc`
+#:     (upstream imports `alp_orchestrate.ownership`; tan imports
+#:     `.ownership`). `ec4e63dad` (#2679) -- the CM33 `wdt0` node
+#:     (`renesas,rzv-wdt`, disabled) and the `alp-wdt0` alias from the SoC
+#:     spec's `m33_sm` `watchdog` block, refusing a spec with none; the three
+#:     `_V2N_WDT0_*` prose tuples are deleted. `53eeda84d` (#2695) -- an
+#:     optional `gd32-pads` node (`alp,gd32-pads`: swdio/swclk/nrst/attn) and
+#:     the matching GPIO-controller enable, when the links declare
+#:     `gd32_pads`. Zephyr-board bytes only; the planner oracle captures no
+#:     `zephyr-board` mode, so `test_planner_emit_parity.py`'s board-tree
+#:     test is what measures it. `test_zephyr_board_assignable_m33.py`,
+#:     `test_zephyr_board_v2n_gd32_pads_and_wdt.py`.
+#:   - `scripts/alp_project_loader.py` (`8c5e1e23f`, #2678) -- BEHAVIOURAL,
+#:     PORTED into `som_metadata.py::resolve_capabilities`: `gpu2d` is now
+#:     the silicon variant's `optional_features.gpu_mali_g31` (a per-die
+#:     fact: four of the eight RZ/V2N dies are fused without the Mali-G31),
+#:     overriding the SoC-level block. `test_capabilities_gpu2d_per_die.py`.
+#:   - `scripts/alp_project_emit/__init__.py` (`ac62fdc6c`, #2653) --
+#:     BEHAVIOURAL, PORTED: `"ina228": ("I2C",)` joins `_CHIP_SUBSYSTEMS`,
+#:     which tan keeps in `slugs.py` (`test_hand_port_tan_side.py` pairs this
+#:     source with both files for exactly that reason); tan's
+#:     `project_emit/__init__.py` needs no edit.
+#:   - `scripts/alp_project.py` (two commits; newly tracked) --
+#:     `5a46a9ec8` (#2673) BEHAVIOURAL, PORTED into
+#:     `tan/planner_emit.py::_render_dts_overlay`: `--emit dts-overlay`
+#:     appends `project_m33_overlay(project, core)[0]`
+#:     (the `&<label> { status = "okay"; }` + alias block enabling the nodes
+#:     board.yaml `ownership:` assigns to the M33) in BOTH the `--core`-scoped
+#:     and unscoped paths, and maps an `OrchestratorError` to a refusal
+#:     (`PlannerEmitError`). `8d17d15b7` (#2674) adds the
+#:     `linux-ownership-dts` project-wide emit mode, NOT ported here; tan's
+#:     `planner_emit.py` does not serve it (its renderer is the mirrored
+#:     `linux_ownership.py`, compared at library level by
+#:     `test_planner_emit_parity.py`).
+#:     `tests/planner/test_dts_overlay_m33_ownership.py`.
+#: AUDIT `ac0e2a5e` -> `2d2a8533` (tan-cli#1216), the two hand-ports that moved:
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#2747, #2685) -- PORTED into
+#:     `tan/planner/zephyr_board.py` by a 3-way merge of the upstream delta
+#:     (function-placement conflict resolved by hand): V2N `supported:` lists only gpio/spi, sci0 RXD
+#:     `bias-pull-up`, the RAM console node + `zephyr,ram-console` chosen,
+#:     OpenAMP window tokens from the SoC's `openamp_carveout`
+#:     (`_openamp_subst`, `_ram_console`), the ATTN TINT-slot route, and
+#:     `_v2n_defconfig(links, soc_spec)` with the RAM-console Kconfig.
+#:   - `scripts/alp_project.py` (alp-sdk#2771) -- PORTED already: its
+#:     `--emit dts-overlay --core` now calls `_slice_dts_overlay`, which is
+#:     what `planner_emit._render_dts_overlay` does for `--core`, and the
+#:     shared `_v1_shaped_project` is the one `planner_emit` now reuses.
+HAND_PORT_PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2747/#2685/#2771 audit (tan-cli#1216)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2235,12 +2406,12 @@ HAND_PORT_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "c958d0b62f87c390dde1907e055bac0ed66dec1483242b6a314f9d259ed462cf",
+    "scripts/gen_zephyr_board.py": "a93231812432480a432f0600f0e600e889744eaaa5ce516ff639d50524596151",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
-    "scripts/alp_project_loader.py": "cc8a218d1ae16f5d99ab13bb87d2a377e92be0c4da706d3cec7cbeb863a4f0b0",
+    "scripts/alp_project_loader.py": "72c1c77696d175c704161241da32b88432f0e55acba2c0f4f7c40dbd7a5a5960",
     "scripts/alp_template.py": "5394e12b2cce92fac79507603147ed8c7ce18abc2fc76e0d210bb1bc1ca7a728",
-    "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
+    "scripts/alp_project_emit/__init__.py": "64e7b79839c3e51b5b065a8554c70f02c228e0bff9a07d7bf9e250751abec0f3",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
     "scripts/alp_project_emit/hw_info.py": "1a9ccd2180f58ee38748ec261da11ea7389ac3f26593c002c73f0fa5cdb53f35",
@@ -2248,6 +2419,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
     "scripts/alp_cli/diagnostic_format.py": "9fd45d268b12527b8e93720a380dab57d4bd67e00c0066505e7d587eea19eb18",
     "scripts/alp_cli/validator.py": "cd97160c7cbef25994d9b03a6a0a4f5e5c18f6525c8f5ba3c6366c7a419f3eec",
+    "scripts/alp_project.py": "2c636015657fbb711002d3bdaeb1ea69013bb7a3e93636183d8499f342d2d576",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
@@ -2353,6 +2525,15 @@ def test_hand_port_sources_declares_its_one_strict_loaders_exception():
 #: load_family_table` now calls `fast_safe_load` exactly as upstream's does.
 #: `python/tests/planner/test_strict_loaders_libyaml.py` pins both the
 #: libyaml selection and the unchanged duplicate-key rejection.
+#:
+#: NOT moved at the `34c11c9de` -> `ac0e2a5e0` re-sync (tan-cli#1309):
+#: `git log 34c11c9d..ac0e2a5e -- scripts/strict_loaders.py` is empty and the
+#: file re-hashes to STRICT_LOADERS_HASH at `ac0e2a5e0`, so there is nothing
+#: to audit and the pin keeps naming the commit it was audited at.
+#:
+#: NOT moved at the `ac0e2a5e0` -> `2d2a85333` re-sync (tan-cli#1216) either:
+#: `git log ac0e2a5e..2d2a8533 -- scripts/strict_loaders.py` is empty and the
+#: file still re-hashes to STRICT_LOADERS_HASH at `2d2a85333`.
 STRICT_LOADERS_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #2328 audit (tan-cli#1278, this change)
 
 #: sha256 of `scripts/strict_loaders.py` at STRICT_LOADERS_PINNED_SDK_COMMIT.
@@ -2430,6 +2611,10 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # is tan's; alp-sdk's `alp_orchestrate` does not implement the knob), so
     # there is no alp-sdk source to drift against.
     "link_target.py",
+    # tan-cli#1370: the one-slice system-manifest a `board.yaml`-less
+    # `tan build --board` writes. Tan-native -- it composes the planner's own
+    # loader helpers and `_slice_flash_recipe`; alp-sdk has no such module.
+    "plain_slice.py",
     # `aperture.py` RETIRED from this set at the eff266b6 -> 15b2f32c bump
     # (tan-cli#1239/#1223): PINNED_SDK_COMMIT now advances past alp-sdk#1365
     # split B, the commit that added `scripts/alp_orchestrate/aperture.py`,

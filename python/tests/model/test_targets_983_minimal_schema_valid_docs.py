@@ -113,7 +113,7 @@ def _minimal_som_preset() -> dict:
     `mailbox:` required whenever every `topology` entry's `os` is
     `zephyr`/`baremetal`, and `off` is the one legal value that sidesteps
     that conditional rather than fabricating a mailbox controller this
-    fixture doesn't need. `inference.preferred_backend` avoids `ethos_u` for
+    fixture doesn't need. `inference.auto_order` avoids a leading `ethos_u` for
     the same reason: that value conditionally requires `ethos_u_variant`
     too."""
     return {
@@ -124,7 +124,7 @@ def _minimal_som_preset() -> dict:
         "display_name": "Fake 983 SoM",
         "on_module": {"silicon": _SILICON},
         "memory": {"dram_mbit": 1024, "flash_mbit": 1024},
-        "inference": {"preferred_backend": "drpai"},
+        "inference": {"auto_order": ["drpai"]},
         "topology": {"cpu0": {"os": "off"}},
         "default_hw_rev": "a",
         "default_board": "fake-983-board",

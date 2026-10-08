@@ -67,6 +67,7 @@ _PINNED_SCOPES = {
     # the answer is identical for every project built here.
     "devicetreeLint": "host",
     "homePath": "host",
+    "tanInstall": "host",
     "hostPrerequisites": "host",
     "hostPython": "host",
     "jlink": "host",
@@ -93,6 +94,8 @@ _PINNED_SCOPES = {
     "workspace": "project",
     "zephyrVersion": "project",
     "zephyrWorkspace": "project",
+    "workspacePatches": "project",
+    "zephyrBase": "project",
     # support_bundle_cmd's own debug report, built from the same class.
     "gdb": "host",
     "lldb": "host",

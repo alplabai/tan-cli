@@ -672,6 +672,16 @@ def test_explicit_core_of_a_non_ram_slice_proceeds_normally(tmp_path):
     assert [e["id"] for e in payload["data"]["entries"]] == ["m55_hp"], payload
 
 
+def test_flash_ram_on_a_ram_only_project_is_not_refused_by_the_whole_run_rule(tmp_path):
+    """Bench finding (evk-02, 2026-10-07): the `diagnostics.link: itcm` whole-run
+    refusal fired on `tan flash --ram --core m55_he` -- the exact command its own
+    message recommends -- because the CLI never forwarded `ram` to the rule."""
+    _, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--ram", "--core", "m55_he",
+        manifest=_RAM_ONLY_PROJECT)
+    assert "flash.ram-run-only-project" not in codes(envelope(out)), envelope(out)
+
+
 def test_the_ram_only_rule_is_pure_and_ram_runs_are_unaffected():
     from tan.core.link_refusal import ram_run_only_project_refusal as rule
 
@@ -1860,7 +1870,7 @@ def test_require_dpidr_refuses_flow_d_before_the_setools_sign(tmp_path, monkeypa
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -1955,6 +1965,18 @@ _MANIFEST_ACKNOWLEDGED_FLOW_D_ARGS = (
 )
 
 
+def _is_the_atoc_refusal(message: str) -> bool:
+    """The pinned tan-cli#1252 refusal text, followed by tan-cli#1322's
+    specifics: the entries the new ATOC names (DEVICE first) and that the
+    resident table is unknown to Flow D."""
+    detail = message[len(_ATOC_REPLACEMENT_REFUSAL):]
+    return (
+        message.startswith(_ATOC_REPLACEMENT_REFUSAL)
+        and " This ATOC names: DEVICE, " in detail
+        and "The resident table is UNKNOWN" in detail
+    )
+
+
 def test_a_confirmed_flow_d_write_refuses_until_the_atoc_replacement_is_acknowledged(
     tmp_path, monkeypatch
 ):
@@ -1976,10 +1998,10 @@ def test_a_confirmed_flow_d_write_refuses_until_the_atoc_replacement_is_acknowle
     assert exit_code == 1
     entry = data["entries"][0]
     assert entry["status"] == "failed", entry
-    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert _is_the_atoc_refusal(entry["message"]), entry
     assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
     assert issues[0].severity == "error"
-    assert issues[0].message == _ATOC_REPLACEMENT_REFUSAL
+    assert _is_the_atoc_refusal(issues[0].message)
     # Text mode is the default human invocation and prints only these lines.
     assert any(_ATOC_REPLACEMENT_REFUSAL in line for line in lines), lines
     # And nothing was spawned: the refusal is the last word before any tool runs.
@@ -2068,7 +2090,7 @@ def test_alp_flash_force_arms_the_write_but_does_not_acknowledge_the_replacement
     assert exit_code == 1
     entry = data["entries"][0]
     assert entry["status"] == "failed", entry
-    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert _is_the_atoc_refusal(entry["message"]), entry
     assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
 
 
@@ -2086,7 +2108,7 @@ def test_the_atoc_refusal_fires_before_the_setools_sign(tmp_path, monkeypatch):
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -2879,7 +2901,7 @@ def test_flow_d_script_writes_both_blobs_verifies_and_pin_resets():
     # loader -- the three values a bench log needs to reproduce the burn.
     assert plan.ok_message == (
         "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 "
-        "via J-Link (PART_PROFILE); verified and PIN-reset"
+        "via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     )
 
 
@@ -2964,7 +2986,7 @@ def test_flow_d_default_shape_omits_the_app_blob_when_slot0_load_address_is_abse
     assert not any("zephyr.bin" in line for line in lines)
     assert plan.ok_message == (
         "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 "
-        "via J-Link (PART_PROFILE); verified and PIN-reset"
+        "via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     )
 
 
@@ -3281,6 +3303,16 @@ def _flow_d_preflight_inputs():
     return FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
 
 
+def _preflight(inputs, **kwargs):
+    """`_flow_d_preflight` with the run's resolved J-Link, as `_flash_entry` passes it
+    (tan-cli#1348: the preflight never re-resolves the binary itself)."""
+    import shutil as _shutil
+
+    return flash_cmd._flow_d_preflight(
+        inputs, jlink_exe=_shutil.which("JLinkExe") or _shutil.which("JLinkExe.exe"), **kwargs
+    )
+
+
 def _stub_flow_d_probe(monkeypatch, tmp_path, stdout: str, stderr: str = "", success: bool = True):
     """Make `_flow_d_preflight` reach a fake connect banner without touching a
     real probe: a resolvable but INERT `JLinkExe` as the only thing on PATH,
@@ -3339,7 +3371,7 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the wiring and which board is physically attached" in message
     assert "re-enumerat" not in message
@@ -3362,7 +3394,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch, tmp_p
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "0x4C013477" in message, message  # the expected id (unchanged)
     assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
@@ -3380,7 +3412,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkey
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "SW-DP ID is the real" in message
     assert "cannot disambiguate" in message
@@ -3400,7 +3432,7 @@ def test_flow_d_preflight_no_dp_id_at_all_gets_the_re_enumeration_message(monkey
         stderr="J-Link uptime (since boot): 0d 00h 00m 01s\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "re-enumerat" in message
     assert "Check the probe selection" not in message
@@ -3427,7 +3459,7 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     that this is an unparsed banner, not a confirmed wiring diagnosis. The
     remediation stays byte-for-byte the same either way."""
     _stub_flow_d_probe(monkeypatch, tmp_path, stdout="some unrecognised probe banner\n")
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "could not recognise the connect banner" in message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
@@ -3459,7 +3491,7 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
         ),
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
@@ -3490,7 +3522,7 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
         stdout="Connecting to J-Link via USB...FAILED: Cannot connect to J-Link.\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "tan-cli#353" in message
@@ -3634,7 +3666,7 @@ def test_flow_d_preflight_refuses_a_truncated_expect_dpidr_before_probing(monkey
     )
     args = {**FLOW_D_ARGS, "expect_dpidr": "0x2477", "jlink_device": "Generic-Attach"}
     inputs = FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
-    message = flash_cmd._flow_d_preflight(inputs)
+    message = _preflight(inputs)
     assert message is not None
     assert "expect_dpidr" in message
     assert "32-bit" in message
@@ -3935,7 +3967,19 @@ def _setools_script_name() -> str:
     return "app-gen-toc.bat" if os.name == "nt" else "app-gen-toc"
 
 
-def _write_working_app_gen_toc(dest: Path, address: str = "0x8057ea50") -> str:
+def _stock_device_config(setools_dir: Path) -> Path:
+    """The stock device configuration a SETOOLS install ships
+    (`build/config/app-device-config.json`) -- the DEVICE entry's default source
+    (tan-cli#1322)."""
+    stock = setools_dir / "build" / "config" / "app-device-config.json"
+    stock.parent.mkdir(parents=True, exist_ok=True)
+    stock.write_text('{"metadata": {"device": "PART_STOCK"}}\n', encoding="utf-8")
+    return stock
+
+
+def _write_working_app_gen_toc(
+    dest: Path, address: str = "0x8057ea50", *, device_config: bool = True
+) -> str:
     """A fake `app-gen-toc` that writes a real `build/app-package-map.txt` +
     `build/AppTocPackage.bin` under its OWN cwd and exits 0 -- proves the
     WIRING (`tan.core.setools.sign_slot0`'s own tests cover the failure
@@ -3960,7 +4004,33 @@ def _write_working_app_gen_toc(dest: Path, address: str = "0x8057ea50") -> str:
             encoding="utf-8",
         )
         os.chmod(dest, 0o755)
+    if device_config:
+        _stock_device_config(dest.parent)
     return str(dest)
+
+
+def _tree_digest(root: Path) -> str:
+    """sha256 over every path (relative), file content and symlink target under
+    `root` -- the byte-identical proof tan-cli#1325 asks of the shared SETOOLS
+    install."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            digest.update(f"L {rel} {os.readlink(path)}\n".encode())
+        elif path.is_dir():
+            digest.update(f"D {rel}\n".encode())
+        else:
+            digest.update(f"F {rel}\n".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _scratch_remnants(parent: Path) -> list[str]:
+    return sorted(p.name for p in parent.iterdir()) if parent.exists() else []
+
 
 
 def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related(
@@ -3997,7 +4067,6 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
     flash_args = {
         "jlink_flash_device": "PART_PROFILE",
         "slot0_load_address": "0x80010000",
-        "setools_dir": str(setools_dir),
     }
     ctx = _Context(
         sku="S",
@@ -4007,55 +4076,64 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         skip_missing_tools=False,
         force_confirm=False,
         capture=True,
+        setools_dir=str(setools_dir),  # operator-named (--setools-dir)
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
-    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", True)
+    import contextlib
+    import tempfile
 
-    # tan-cli#373: a real (non-dry-run) sign now returns an informational
-    # NOTE (not `None`) naming which SETOOLS install actually signed --
-    # `setools.source` used to reach a customer only via a FAILURE message.
-    # `flash_args.setools_dir` is what resolved it here, so its OWN value
-    # names the source, matching `resolve_setools_dir`'s own precedence text.
-    assert note is not None
-    assert str(setools_dir) in note
-    assert "flash_args.setools_dir" in note
-    assert merged["atoc_address"] == "0x8057ea50"
-    assert Path(merged["atoc"]).is_file()
-    assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    with contextlib.ExitStack() as stack:
+        merged, note = _resolve_flow_d_atoc_via_setools(
+            flash_args, shape, ctx, "m55_he", True, stack=stack
+        )
 
-    plan = plan_alif_mram_jlink(
-        FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
-        lambda _t: True,
-    )
-    script_text = plan.jlink_script or ""
-    assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
-    assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
+        # tan-cli#373: a real (non-dry-run) sign returns an informational NOTE
+        # (not `None`) naming which SETOOLS install actually signed --
+        # `setools.source` used to reach a customer only via a FAILURE message.
+        # `flash_args.setools_dir` is what resolved it here, so its OWN value
+        # names the source, matching `resolve_setools_dir`'s own precedence text.
+        assert note is not None
+        assert str(setools_dir) in note
+        assert "the --setools-dir flag" in note
+        assert merged["atoc_address"] == "0x8057ea50"
+        assert Path(merged["atoc"]).is_file()
+        assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+
+        plan = plan_alif_mram_jlink(
+            FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
+            lambda _t: True,
+        )
+        script_text = plan.jlink_script or ""
+        assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
+        assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
 
 
-def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, monkeypatch):
-    """tan-cli#487, defect 5. Identical setup to (a) above -- a working fake
-    `app-gen-toc`, a manifest with only `jlink_flash_device` + `slot0_load_
-    address` -- but `confirm=False` on a non-dry-run `ctx` (a plain `tan
-    flash`: not `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE`).
+def test_flow_d_setools_signs_in_scratch_when_the_run_is_not_confirmed(tmp_path, monkeypatch):
+    """tan-cli#1325 supersedes tan-cli#487's defect-5 guard. That guard skipped
+    the sign on an unconfirmed run because the sign wrote `build/` into the
+    customer's SETOOLS install; the sign now runs in a private scratch overlay,
+    so an unconfirmed run (and `--dry-run`) signs too -- which is what lets the
+    preview show the real ATOC placement. What stays pinned: the shared install
+    is byte-identical afterwards, and the package lives in the scratch tree."""
+    import contextlib
+    import tempfile
 
-    Before this fix `_resolve_flow_d_atoc_via_setools` gated its real sign on
-    `ctx.dry_run` ALONE, so this exact call still spawned `app-gen-toc` for
-    real -- into the customer's SETOOLS install, on a run that goes on to
-    refuse the MRAM write it was signing for. Proven two ways, mirroring (a)'s
-    own structure: the returned `note` PREVIEWS rather than reports a
-    completed sign, and none of the real sign's side effects
-    (`build/AppTocPackage.bin`, `build/config/`, the appended `build/app-
-    package-map.txt`) exist afterwards."""
     from tan.commands.flash_cmd import _Context, _is_file, _resolve_flow_d_atoc_via_setools
     from tan.core import setools as setools_module
     from tan.core.flash_plan import validate_flow_d_shape
 
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     name = _setools_script_name()
     if name != setools_module.APP_GEN_TOC:
         monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
     _write_working_app_gen_toc(setools_dir / name)
+    before = _tree_digest(setools_dir)
 
     build_root = tmp_path / "build"
     build_root.mkdir()
@@ -4065,7 +4143,6 @@ def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, mo
     flash_args = {
         "jlink_flash_device": "PART_PROFILE",
         "slot0_load_address": "0x80010000",
-        "setools_dir": str(setools_dir),
     }
     ctx = _Context(
         sku="S",
@@ -4075,42 +4152,53 @@ def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, mo
         skip_missing_tools=False,
         force_confirm=False,
         capture=True,
+        setools_dir=str(setools_dir),  # operator-supplied (--setools-dir)
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
-    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", False)
-
-    assert note is not None
-    assert "would sign" in note
-    assert "flash_args.confirm is false" in note
-    assert "atoc" not in merged
-    assert "atoc_address" not in merged
+    report: dict = {}
+    with contextlib.ExitStack() as stack:
+        merged, note = _resolve_flow_d_atoc_via_setools(
+            flash_args, shape, ctx, "m55_he", False, stack=stack, report=report
+        )
+        assert note is not None and "signed" in note
+        assert merged["atoc_address"] == "0x8057ea50"
+        scratch = Path(report["setools"]["scratch"])
+        assert Path(merged["atoc"]).parent == scratch / "build"
+        assert Path(merged["atoc"]).is_file()
+        assert scratch.parent == scratch_parent
+        assert report["setools"]["dir"] == str(setools_dir)
+    # Torn down with the stack, and the envelope block says so.
+    assert report["setools"]["scratchRemoved"] is True
+    assert not scratch.exists()
+    assert _tree_digest(setools_dir) == before
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
-    assert not (setools_dir / "build" / "app-package-map.txt").exists()
+    assert not (setools_dir / "build" / "images").exists()
 
 
-def test_flow_d_end_to_end_does_not_sign_via_setools_when_unconfirmed(tmp_path, monkeypatch):
-    """tan-cli#487, defect 5, driven through `_run` (the real CLI entry point
-    below argument parsing, the same seam
-    `test_flow_d_atoc_is_resolved_against_build_root_not_the_spawn_cwd` uses
-    for a confirmed Flow D write). A fresh AEN801-shaped manifest -- the
-    exact real-silicon shape the ticket measures, `jlink_flash_device` +
-    `slot0_load_address` only -- with a resolving `--setools-dir`, NO
-    `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE` must NOT spawn
-    `app-gen-toc`: `tan.core.setools.subprocess.run` (the ACTUAL spawn site
-    `sign_slot0` uses, a different module than `flash_cmd`'s own) is
-    monkeypatched to raise if called at all, so a regression back to the
-    pre-fix `ctx.dry_run`-only gate fails LOUDLY here rather than merely
-    leaving a stray file somewhere this assertion forgot to check."""
+def test_flow_d_end_to_end_unconfirmed_signs_in_scratch_and_touches_nothing_shared(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1325 (replacing tan-cli#487 defect 5's "never spawn"), driven
+    through `_run`. A fresh AEN801-shaped manifest with a resolving
+    `--setools-dir`, NO `--dry-run`, no `flash_args.confirm`: the entry is
+    `planned` (nothing written to the device, exit non-zero since #719), the ATOC
+    was signed in a scratch overlay that is gone afterwards, no JLinkExe was
+    spawned, and the shared SETOOLS install is byte-identical."""
+    import tempfile
+
     from tan.commands import flash_cmd
     from tan.core import setools as setools_module
 
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     name = _setools_script_name()
     if name != setools_module.APP_GEN_TOC:
         monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
     _write_working_app_gen_toc(setools_dir / name)
+    before = _tree_digest(setools_dir)
 
     (tmp_path / "sdk" / "scripts").mkdir(parents=True)
     (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
@@ -4135,34 +4223,33 @@ boot_order: []
     jlink_path.write_text("", encoding="utf-8")
     if os.name != "nt":
         os.chmod(jlink_path, 0o755)
-    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setenv("PATH", str(fake_tools) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
     monkeypatch.delenv("ALP_FLASH_FORCE", raising=False)
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
 
-    def _fail_if_spawned(*_a, **_k):
-        raise AssertionError("app-gen-toc was spawned on an unconfirmed run")
+    def _fail_if_jlink_spawned(*_a, **_k):
+        raise AssertionError("JLinkExe was spawned on an unconfirmed run")
 
-    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+    monkeypatch.setattr(flash_cmd, "_execute", _fail_if_jlink_spawned)
 
     exit_code, data, issues, _lines, _sdk = flash_cmd._run(
         app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
         board_yaml=None, core=None, helper=None, dry_run=False,
         skip_missing_tools=False, capture=True, cwd=str(tmp_path),
     )
-    # Non-zero since tan-cli#719: this run signed nothing and wrote nothing, so
-    # it must not exit 0. What this test pins is that SETOOLS was never
-    # spawned and nothing was signed -- see `_fail_if_spawned` and the two
-    # `.exists()` assertions below.
     assert exit_code != 0
     entry = data["entries"][0]
     assert entry["status"] == "planned"
-    assert "would sign" in entry["message"]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
     assert "flash_args.confirm is false" in entry["message"]
     assert any(i.code == "flash.confirm-required" for i in issues)
     assert any(i.code == "flash.nothing-flashed" for i in issues)
-    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
+    block = entry["setools"]
+    assert block["dir"] == str(setools_dir) and block["scratchRemoved"] is True
+    assert not Path(block["scratch"]).exists()
+    assert _scratch_remnants(scratch_parent) == []
+    assert _tree_digest(setools_dir) == before
 
 
 def test_flow_d_wrong_board_refuses_before_any_setools_write(tmp_path, monkeypatch):
@@ -4218,12 +4305,13 @@ slices:
    flash_method: alif_mram_jlink,
    flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
-                setools_dir: "{setools_dir.as_posix()}", confirm: true,
-                atoc_unqueryable: true}}}}
+                confirm: true, atoc_unqueryable: true}}}}
 helper_mcus: []
 boot_order: []
 """
     (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+    # The operator names the install (a manifest-only one is refused outright now).
+    monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
 
     fake_tools = tmp_path / "faketools"
     fake_tools.mkdir()
@@ -4268,7 +4356,7 @@ boot_order: []
 
     # The core assertion: nothing was written into the SETOOLS install.
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "images").exists()
     assert not (setools_dir / "build" / "app-package-map.txt").exists()
 
 
@@ -4308,6 +4396,446 @@ boot_order: []
     # from.
     assert "both required" not in entry["message"]
     assert codes(payload) == ["flash.entry-failed"]
+
+
+def test_flow_d_entry_reports_the_resolved_method_and_the_declared_one(tmp_path):
+    """tan-cli#1320: a `zephyr_west_flash` slice carrying `jlink_flash_device`
+    runs as Flow D; the envelope's `method` says so and `methodDeclared` keeps
+    what the manifest said. An entry that was not upgraded carries no
+    `methodDeclared`."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN803}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, err = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    entry = envelope(out)["data"]["entries"][0]
+    assert entry["method"] == "alif_mram_jlink"
+    assert entry["methodDeclared"] == "zephyr_west_flash"
+    plain = manifest.replace(
+        "flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}", "flash_args: {}"
+    )
+    _, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=plain)
+    entry = envelope(out)["data"]["entries"][0]
+    assert entry["method"] == "zephyr_west_flash"
+    assert "methodDeclared" not in entry
+
+
+_FLOW_D_SIGN_MANIFEST = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000"%s}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def _require_posix_sign_tool():
+    """These tests run `tan flash` as a SUBPROCESS against a fake `app-gen-toc`. A
+    child process cannot monkeypatch `setools.APP_GEN_TOC` to the fixture's `.bat`
+    (the in-process tests do, and cover the Windows path), and `find_app_gen_toc`
+    only knows `app-gen-toc` / `app-gen-toc.exe` -- a real SETOOLS ships a PE
+    executable no fixture can stand in for. So the subprocess variants are POSIX-only;
+    the scratch overlay itself is exercised on Windows by the in-process tests."""
+    if os.name == "nt":
+        pytest.skip("subprocess run cannot reach a .bat fake app-gen-toc (see docstring)")
+
+
+def _flow_d_sign_setup(tmp_path, *, stock=True):
+    _require_posix_sign_tool()
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    _write_working_app_gen_toc(setools_dir / _setools_script_name(), device_config=stock)
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
+    return setools_dir, scratch_parent
+
+
+def test_the_dry_run_envelope_shows_the_script_the_writes_and_the_atoc(tmp_path):
+    """tan-cli#1318: a `--dry-run` reports the planned J-Link command script, every
+    write as {address, size, sectorSpan} (16 KiB sectors) and the ATOC placement
+    and entries -- and spawns NO J-Link tool (a stub on PATH records any spawn)."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    marker = tmp_path / "jlink-was-spawned"
+    tools = tmp_path / "faketools"
+    tools.mkdir()
+    stub = tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    stub.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(stub, 0o755)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_FLOW_D_SIGN_MANIFEST % "",
+        env={
+            "SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent),
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+        },
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert not marker.exists(), "--dry-run spawned the J-Link tool"
+    plan = payload["data"]["entries"][0]["plan"]
+    script = plan["jlinkScript"]
+    assert script[0] == "exec DisableAutoUpdateFW"
+    assert any(line.startswith("loadbin ") and line.endswith(" 0x80010000") for line in script)
+    assert any(line.startswith("loadbin ") and line.endswith(" 0x8057ea50") for line in script)
+    assert script[-1] == "exit"
+    app, atoc_write = plan["writes"]
+    assert (app["name"], app["address"], app["size"]) == ("app", "0x80010000", 68)
+    assert app["sectorSpan"] == {
+        "first": "0x80010000", "end": "0x80014000", "count": 1, "bytes": 16384,
+        "sectorBytes": 16384,
+    }
+    assert atoc_write["address"] == "0x8057ea50" and atoc_write["sectorSpan"]["count"] == 1
+    assert plan["atoc"]["address"] == "0x8057ea50"
+    assert plan["atoc"]["signedByTan"] is True
+    assert plan["atoc"]["size"] == atoc_write["size"]
+    assert plan["argv"][0] == "JLinkExe"
+    assert "scratch overlay" in plan["scratchNote"]
+
+
+def test_a_hand_supplied_atoc_is_planned_with_unknown_entries(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 20000)
+    manifest = _FLOW_D_SIGN_MANIFEST % ', atoc: atoc.bin, atoc_address: "0x8057F5B0"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    plan = payload["data"]["entries"][0]["plan"]
+    assert plan["atoc"]["entries"] is None and plan["atoc"]["signedByTan"] is False
+    atoc = plan["writes"][1]
+    assert atoc["size"] == 20000
+    # 0x8057F5B0 + 20000 B reaches 0x805843D0: three 16 KiB sectors.
+    assert atoc["sectorSpan"]["count"] == 3
+    assert plan["scratchNote"] is None
+
+
+def test_a_confirmed_write_refuses_a_setools_only_the_manifest_named(tmp_path):
+    """tan-cli#1344: the operator armed the write, not the binary a checkout picked."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    marker = tmp_path / "ran"
+    tool = setools_dir / _setools_script_name()
+    tool.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    os.chmod(tool, 0o755)
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    stub = fake_tools / "JLinkExe"
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    os.chmod(stub, 0o755)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        f', setools_dir: "{setools_dir}", confirm: true, atoc_unqueryable: true'
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", manifest=manifest,
+        env={"SETOOLS_DIR": "", "TMPDIR": str(scratch_parent),
+             "PATH": str(fake_tools) + os.pathsep + os.environ["PATH"]},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.setools-untrusted-source"]
+    assert "--setools-dir" in payload["data"]["entries"][0]["message"]
+    assert not marker.exists()
+    assert _scratch_remnants(scratch_parent) == []
+
+
+def test_a_device_config_outside_the_setools_dir_and_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{outside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.setools-untrusted-source"]
+    assert "outside the SETOOLS install" in payload["data"]["entries"][0]["message"]
+    # Inside the operator-named SETOOLS dir: accepted.
+    inside = setools_dir / "build" / "config" / "mine.json"
+    inside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{inside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_device_config_symlinked_out_of_the_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-secret.json"
+    elsewhere.write_text("{}", encoding="utf-8")
+    os.symlink(elsewhere, tmp_path / "build" / "dev.json")
+    manifest = _FLOW_D_SIGN_MANIFEST % ", setools_device_config: dev.json"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 1 and codes(envelope(out)) == ["flash.setools-untrusted-source"]
+
+
+def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
+    """tan-cli#1343 review, MAJOR 1: `flash_args.setools_dir` is project-controlled,
+    so a --dry-run / unconfirmed run with ONLY that source must not execute the
+    `app-gen-toc` it names. The placeholder tool writes a marker if it ever runs."""
+    _require_posix_sign_tool()
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    marker = tmp_path / "ran"
+    tool = setools_dir / _setools_script_name()
+    tool.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    os.chmod(tool, 0o755)
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_dir: "{setools_dir}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert not marker.exists(), "the preview executed the manifest-chosen app-gen-toc"
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok"
+    assert "ATOC placement not computed; pass --setools-dir" in entry["message"]
+    assert "REPLACES the ENTIRE ATOC" in entry["message"]
+    assert entry["setools"]["signSkipped"] is True
+    assert "plan" not in entry
+    skipped = [i for i in payload["issues"] if i["code"] == "flash.preview-sign-skipped"]
+    assert skipped and skipped[0]["severity"] == "info"
+
+    # The SAME install named by the OPERATOR (--setools-dir) is run.
+    _write_working_app_gen_toc(tool)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--setools-dir", str(setools_dir),
+        manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    entry = envelope(out)["data"]["entries"][0]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
+    assert "signSkipped" not in entry["setools"]
+
+
+def test_the_stock_device_config_mismatch_is_info_not_a_warning(tmp_path):
+    """tan-cli#1344 review: the stock SETOOLS file declares an E7 part on every
+    default E8 run (its blob is the board's original DEVICE), so it is `info`."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (setools_dir / "build" / "config" / "app-device-config.json").write_text(
+        '{"metadata": {"device": "AE722F80F55D5AS"}}', encoding="utf-8"
+    )
+    manifest = _FLOW_D_SIGN_MANIFEST.replace("PART_PROFILE", "AE822FA0E5597LS0_M55_HE") % ""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    mismatch = [i for i in payload["issues"] if i["code"] == "flash.device-config-mismatch"]
+    assert [i["severity"] for i in mismatch] == ["info"]
+    assert payload["data"]["entries"][0]["setools"]["deviceConfig"]["stock"] is True
+
+
+def test_a_resident_entry_at_a_writes_own_address_is_replaced_whatever_its_name(tmp_path):
+    """The bench names the resident app `ALP-HE`; tan's entry is `m55_he`. A resident
+    region starting exactly where the app write starts is that write's predecessor."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x40)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        ', atoc: atoc.bin, atoc_address: "0x80100000", '
+        "resident_atoc_entries: [DEVICE, ALP-HE@0x80010000+0x14688]"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_device_config_for_another_family_warns_but_is_accepted(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (tmp_path / "build" / "dev.json").write_text(
+        '{"metadata": {"device": "AE722F80F55D5AS"}}', encoding="utf-8"
+    )
+    manifest = (_FLOW_D_SIGN_MANIFEST % ", setools_device_config: dev.json").replace(
+        "PART_PROFILE", "AE822FA0E5597LS0_M55_HE"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    warn = [i for i in payload["issues"] if i["code"] == "flash.device-config-mismatch"]
+    assert warn and warn[0]["severity"] == "warning"
+    assert "AE722F80F55D5AS" in warn[0]["message"]
+    device = payload["data"]["entries"][0]["setools"]["deviceConfig"]
+    assert device["metadataDevice"] == "AE722F80F55D5AS" and "warning" in device
+
+
+def test_an_app_whose_tail_reaches_the_atocs_first_sector_is_refused(tmp_path):
+    """tan-cli#1343 review, MAJOR 2: the loader rewrites whole 16 KiB sectors. An
+    app of 0x4001 bytes at 0x80010000 spills into the sector the ATOC at
+    0x80014000 starts in, so the ATOC write would erase the app's tail (or the
+    reverse). Refused before anything runs -- under --dry-run too."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4001)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % ', atoc: atoc.bin, atoc_address: "0x80014000"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.write-sector-overlap"]
+    message = payload["data"]["entries"][0]["message"]
+    assert "app write and the atoc write share" in message and "0x80014000-0x80018000" in message
+
+    # One byte shorter -> exactly one sector, no overlap.
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4000)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_resident_entry_in_the_written_sectors_is_refused(tmp_path):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x40)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        ', atoc: atoc.bin, atoc_address: "0x80100000", '
+        "resident_atoc_entries: [DEVICE, HP-OWNER@0x80012000+0x40]"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.write-sector-overlap"]
+    assert "HP-OWNER" in payload["data"]["entries"][0]["message"]
+
+
+def test_flow_d_signs_a_device_entry_by_default_and_reports_it(tmp_path):
+    """tan-cli#1322: the auto-signed ATOC leads with DEVICE, sourced from the
+    stock SETOOLS config, and the envelope says where it came from."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_FLOW_D_SIGN_MANIFEST % "",
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    entry = payload["data"]["entries"][0]
+    device = entry["setools"]["deviceConfig"]
+    assert device["included"] is True
+    assert device["path"] == str(setools_dir / "build" / "config" / "app-device-config.json")
+    assert "stock SETOOLS" in device["source"]
+    assert "This ATOC names: DEVICE, m55_he." in entry["message"]
+
+
+def test_flow_d_without_any_device_config_refuses_with_the_registered_code(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path, stock=False)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_FLOW_D_SIGN_MANIFEST % "",
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.device-config-missing"]
+    message = payload["data"]["entries"][0]["message"]
+    assert "--no-device-config" in message and "flash_args.setools_device_config" in message
+    assert _scratch_remnants(scratch_parent) == []
+
+
+def test_no_device_config_signs_an_app_only_atoc_and_says_what_that_deletes(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path, stock=False)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--no-device-config",
+        manifest=_FLOW_D_SIGN_MANIFEST % "",
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["setools"]["deviceConfig"] == {
+        "included": False, "optOut": "--no-device-config",
+    }
+    assert "NO DEVICE entry (--no-device-config)" in entry["message"]
+    assert "This ATOC names: m55_he." in entry["message"]
+
+
+def test_an_explicit_setools_device_config_is_resolved_against_the_build_root(tmp_path):
+    """`flash_args.setools_device_config` wins over the stock file and a relative
+    path resolves against the build root like every other manifest path."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (tmp_path / "build" / "my-device.json").write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % ", setools_device_config: my-device.json"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    device = payload["data"]["entries"][0]["setools"]["deviceConfig"]
+    assert os.path.normpath(device["path"]) == str(tmp_path / "build" / "my-device.json")
+    assert device["source"] == "flash_args.setools_device_config"
+
+
+def test_a_known_resident_table_is_named_in_the_preview(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    manifest = _FLOW_D_SIGN_MANIFEST % ", resident_atoc_entries: [DEVICE, ALP-HE, HP-OWNER]"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    entry = envelope(out)["data"]["entries"][0]
+    assert exit_code == 0
+    assert "NOT be rewritten (delisted): ALP-HE, HP-OWNER." in entry["message"]
+
+
+def test_a_malformed_resident_table_refuses_at_plan_time(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    manifest = _FLOW_D_SIGN_MANIFEST % ", resident_atoc_entries: DEVICE"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert "resident_atoc_entries" in payload["data"]["entries"][0]["message"]
+    assert _scratch_remnants(scratch_parent) == []
+
+
+def test_flow_d_setools_refusal_names_the_manifest_sku_not_aen801(tmp_path):
+    """tan-cli#1319: an E1M-AEN803 build must not be told it has an AEN801
+    image."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN803}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    message = envelope(out)["data"]["entries"][0]["message"]
+    assert exit_code == 1
+    assert "the E1M-AEN803 slot0 image (AE822FA0E5597LS0_M55_HE) needs a SIGNED ATOC" in message
+    assert "AEN801" not in message
 
 
 def test_flow_d_setools_dir_precedence_is_flag_then_env_then_manifest(tmp_path):
@@ -4360,21 +4888,18 @@ boot_order: []
     assert str(manifest_dir) not in entry["message"]
 
 
-def test_flow_d_dry_run_signs_nothing_via_setools(tmp_path):
-    """(c) `--dry-run` must NOT invoke `app-gen-toc`, even though SETOOLS
-    fully resolves here -- planning only. Proven two ways: the entry reports
-    a WOULD-sign preview (`status: ok`, not `planned`/`failed`), and nothing
-    a real sign would produce (`build/AppTocPackage.bin`, `build/config/`)
-    exists afterwards -- if `--dry-run` ever DID invoke the fake tool below,
-    it would either fail loudly (the file has no execute bit on POSIX) or, on
-    a host where it somehow ran, leave exactly the files these assertions
-    check for."""
+def test_flow_d_dry_run_signs_in_scratch_and_leaves_the_install_untouched(tmp_path):
+    """tan-cli#1325 / #1318: `--dry-run` runs `app-gen-toc` -- in a scratch
+    overlay, so it is side-effect-free -- and previews the REAL ATOC placement.
+    The shared SETOOLS install is byte-identical afterwards, the scratch tree is
+    gone, and the entry still reports `status: ok` with no issues."""
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
-    # Present, but NEVER executed under --dry-run -- a real script would prove
-    # nothing extra here (see (a) above for that), so the placeholder is
-    # deliberately not spawnable at all (posix: no execute bit).
-    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+    _write_working_app_gen_toc(setools_dir / _setools_script_name())
+    before = _tree_digest(setools_dir)
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
 
     manifest = """schema_version: 1
 hw_info: {sku: S}
@@ -4389,18 +4914,19 @@ boot_order: []
     (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
     exit_code, out, _ = run_flash(
         tmp_path, "--format", "json", "--dry-run", manifest=manifest,
-        env={"SETOOLS_DIR": str(setools_dir)},
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
     )
     payload = envelope(out)
     assert exit_code == 0
     entry = payload["data"]["entries"][0]
     assert entry["status"] == "ok"
-    assert "would sign" in entry["message"]
-    assert "app-gen-toc" in entry["message"]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
     assert not payload["issues"], payload["issues"]
-    # The real signing side effects a live run would produce -- absent.
+    assert entry["setools"]["scratchRemoved"] is True
+    assert _scratch_remnants(scratch_parent) == []
+    assert _tree_digest(setools_dir) == before
     assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
+    assert not (setools_dir / "build" / "images").exists()
 
 
 def test_flow_d_dry_run_with_setools_still_surfaces_a_half_armed_preflight(tmp_path):
@@ -5249,7 +5775,7 @@ def test_flow_d_ok_message_qualifies_a_reset_the_transcript_says_failed(tmp_path
     actually proves); it is the `PIN-reset` HALF of the static `ok_message`
     that overstates -- the identical string used to report both cases alike.
     Fails against the pre-fix source (measured: the entry message ends
-    `verified and PIN-reset` here too, indistinguishable from a run whose
+    `cache-verified and PIN-reset` here too, indistinguishable from a run whose
     reset actually landed)."""
     work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
     transcript = (
@@ -5277,7 +5803,7 @@ def test_flow_d_ok_message_qualifies_a_reset_the_transcript_says_failed(tmp_path
     assert data["entries"][0]["status"] == "ok", data
     message = data["entries"][0]["message"]
     assert "verified" in message, message
-    assert "verified and PIN-reset" not in message, message
+    assert "cache-verified and PIN-reset" not in message, message
     assert "did not halt" in message, message
 
 
@@ -5304,7 +5830,7 @@ def test_flow_d_ok_message_keeps_pin_reset_when_the_transcript_says_nothing_of_t
 
     assert exit_code == 0, data
     assert data["entries"][0]["status"] == "ok", data
-    assert "verified and PIN-reset" in data["entries"][0]["message"], data
+    assert "cache-verified and PIN-reset" in data["entries"][0]["message"], data
 
 
 @pytest.mark.skipif(
@@ -5326,7 +5852,7 @@ def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypa
     directly, so this test spawns a REAL fake `JLinkExe` -- a tiny POSIX
     shell script that prints the same busy-resident transcript -- instead.
     Fails against the pre-fix source (measured: the entry message ends
-    `verified and PIN-reset` here too, in text mode, same as JSON mode
+    `cache-verified and PIN-reset` here too, in text mode, same as JSON mode
     before that fix landed)."""
     work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
     jlink_path = _jlink_stub_path(work / "faketools")
@@ -5353,7 +5879,7 @@ def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypa
     assert data["entries"][0]["status"] == "ok", data
     message = data["entries"][0]["message"]
     assert "verified" in message, message
-    assert "verified and PIN-reset" not in message, message
+    assert "cache-verified and PIN-reset" not in message, message
     assert "did not halt" in message, message
 
 
@@ -5361,31 +5887,31 @@ def test_flow_d_reset_qualified_message_is_a_pure_substring_swap():
     """The helper itself, in isolation: the one tail `plan_alif_mram_jlink`
     always appends is swapped for the honest one, and nothing else about the
     message moves."""
-    base = "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    base = "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     outcome = flash_cmd._Outcome(
         success=True, stdout="****** Error: Failed to halt CPU\n", captured=True
     )
     qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
     assert qualified == (
         "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via "
-        "J-Link (PART_PROFILE); verified; reset requested, core was busy and did "
-        "not halt"
+        "J-Link (PART_PROFILE); cache-verified; PIN-reset NOT confirmed (reset "
+        "requested, core was busy and did not halt)"
     )
 
 
 def test_flow_d_reset_qualified_message_matches_cpu_is_not_halted_too():
     """The second marker: JLinkExe's OWN post-reset `g`/status line, not only
     the mid-transcript error banner -- either one alone is enough."""
-    base = "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    base = "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     outcome = flash_cmd._Outcome(success=True, stdout="", stderr="CPU is not halted\n", captured=True)
     qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
     assert "CPU is not halted" not in qualified
     assert "reset requested, core was busy and did not halt" in qualified
-    assert "PIN-reset" not in qualified
+    assert "and PIN-reset" not in qualified
 
 
 def test_flow_d_reset_qualified_message_untouched_without_the_reset_tail():
-    """A message that never carried `verified and PIN-reset` in the first
+    """A message that never carried `cache-verified and PIN-reset` in the first
     place (any other backend's `ok_message`) passes through unchanged,
     regardless of what the transcript says -- the substring guard, not a
     method check, is what scopes this."""
@@ -5677,10 +6203,10 @@ def test_the_pty_transcript_still_feeds_the_flow_d_qualification(tmp_path):
     from tan.commands.flash_cmd import _Outcome, _flow_d_reset_qualified_message
 
     qualified = _flow_d_reset_qualified_message(
-        "alif_mram_jlink[m55-he]: written; verified and PIN-reset",
+        "alif_mram_jlink[m55-he]: written; cache-verified and PIN-reset",
         _Outcome(success=True, stdout=transcript),
     )
-    assert qualified.endswith("core was busy and did not halt"), qualified
+    assert qualified.endswith("core was busy and did not halt)"), qualified
 
 
 def test_a_non_terminal_sink_gets_no_pty(tmp_path):
@@ -5866,9 +6392,9 @@ def test_flow_d_still_reads_its_markers_positionlessly(tmp_path):
         success=True, stdout=_LOAD_THEN_RESET_FAILURE_TRANSCRIPT, captured=True
     )
     qualified = _flow_d_reset_qualified_message(
-        "alif_mram_jlink[m55-he]: AE822 MRAM written; verified and PIN-reset", outcome
+        "alif_mram_jlink[m55-he]: AE822 MRAM written; cache-verified and PIN-reset", outcome
     )
-    assert qualified.endswith("; verified; reset requested, core was busy and did not halt")
+    assert qualified.endswith("; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and did not halt)")
 
 
 # ── tan-cli#541 review, MAJOR 2: the pty must not degrade the diagnostic ─────
@@ -6408,16 +6934,12 @@ boot_order: []
 
 
 def test_the_setools_preview_also_names_the_atoc_replacement(tmp_path):
-    """Flow D has TWO preview returns, and this is the one a FRESH AEN
-    manifest actually takes: with no `atoc`/`atoc_address` yet, the SETOOLS
-    auto-sign preview returns before `meta.build` is ever called, so the entry
-    never reaches `plan_alif_mram_jlink` at all. A note added only to the
-    shared preview block below would be missing from exactly the most common
-    AEN preview."""
+    """The SETOOLS-signing preview -- the one a FRESH AEN manifest actually
+    takes -- must state what arming the write would do to the ATOC."""
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
-    # Present but never spawnable (no execute bit): --dry-run must not run it.
-    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+    _write_working_app_gen_toc(setools_dir / _setools_script_name())
 
     manifest = """schema_version: 1
 hw_info: {sku: S}
@@ -6438,9 +6960,7 @@ boot_order: []
     assert exit_code == 0
     entry = payload["data"]["entries"][0]
     assert entry["status"] == "ok", entry
-    # Still the SETOOLS preview it always was...
-    assert "would sign" in entry["message"], entry
-    # ...now also stating what arming the write would do to the ATOC.
+    assert "signed" in entry["message"], entry
     assert "REPLACES the ENTIRE ATOC" in entry["message"], entry
     assert "--atoc-unqueryable" in entry["message"], entry
 
@@ -6572,7 +7092,7 @@ def test_the_real_cli_refuses_a_confirmed_flow_d_write_without_the_flag(tmp_path
     assert exit_code == 1
     entry = payload["data"]["entries"][0]
     assert entry["status"] == "failed", entry
-    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert _is_the_atoc_refusal(entry["message"]), entry
     assert codes(payload) == ["flash.atoc-replacement-unacknowledged"], payload
 
 
@@ -6657,7 +7177,7 @@ def test_no_environment_variable_acknowledges_the_atoc_replacement(
     )
 
     assert exit_code == 1
-    assert data["entries"][0]["message"] == _ATOC_REPLACEMENT_REFUSAL, data["entries"][0]
+    assert _is_the_atoc_refusal(data["entries"][0]["message"]), data["entries"][0]
     assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
 
 
