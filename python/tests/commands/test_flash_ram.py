@@ -1031,3 +1031,75 @@ def test_the_ram_help_names_trcena_and_survives_rich_markup():
     help_text = next(p.help for p in flash.params if "--ram" in p.opts)
     assert "TRCENA" in help_text and "DEMCR" in help_text
     assert "[" not in help_text  # rich markup eats `[...]` in help text
+
+
+# ── --watch (tan-cli#1436) ──────────────────────────────────────────────────
+
+WATCH_DUMP = (
+    "J-Link>mem32 0x42002000, 0x1\n42002000 = 00000001\n"
+    "J-Link>mem32 0x42002000, 0x1\n42002000 = 00000003\n"
+)
+
+
+def test_a_watched_ram_run_samples_in_the_load_session_and_reports_data_watch(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch, load_out=CLEAN_LOAD + WATCH_DUMP)
+    rc, data, issues, _l, _s = _run(
+        tmp_path, ram_wait=0.1, ram_watch=("0x42002000@100",),
+    )
+    assert rc == 0, (data, issues)
+    load = next(x for x in jl.scripts if jl.kind(x) == "load").splitlines()
+    assert load[load.index("go") + 1 :] == ["mem32 0x42002000, 0x1", "Sleep 100", "mem32 0x42002000, 0x1", "exit"]
+    assert [jl.kind(s) for s in jl.scripts] == ["check", "load"]  # no extra session
+    assert data["watch"] == [
+        {"address": "0x42002000", "words": 1, "index": 0, "elapsedMs": 0, "values": ["0x00000001"]},
+        {"address": "0x42002000", "words": 1, "index": 1, "elapsedMs": 100, "values": ["0x00000003"]},
+    ]
+    assert "watch" not in data["entries"][0]
+    assert data["entries"][0]["ram"]["watch"]["timeBasis"] == "scheduled"
+    assert "flash.ram-watch-incomplete" not in _codes(issues)
+
+
+def test_missing_samples_are_null_with_a_warning(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch)  # the load transcript carries no mem32 dump
+    rc, data, issues, _l, _s = _run(tmp_path, ram_wait=0.0, ram_watch=("0x42002000",))
+    assert rc == 0
+    assert data["watch"][0]["values"] is None
+    assert "flash.ram-watch-incomplete" in _codes(issues)
+
+
+@pytest.mark.parametrize(
+    "spec,code",
+    [
+        ("0x42002002", "flash.ram-watch-invalid"),
+        ("0x42002000:0", "flash.ram-watch-invalid"),
+        ("0x42002000:65", "flash.ram-watch-invalid"),
+        ("0x42002000@5", "flash.ram-watch-invalid"),
+        ("nonsense", "flash.ram-watch-invalid"),
+        ("0x50000000", "flash.ram-watch-unsafe-address"),
+        ("0x4FFFFFFC:2", "flash.ram-watch-unsafe-address"),
+        ("0x57FFFFFC", "flash.ram-watch-unsafe-address"),
+    ],
+)
+def test_unsafe_or_invalid_watches_are_refused_before_any_spawn(tmp_path, monkeypatch, spec, code):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_watch=(spec,))
+    assert rc != 0 and code in _codes(issues)
+    assert jl.scripts == []
+
+
+def test_the_he_window_and_neighbours_are_not_refused(tmp_path, monkeypatch):
+    from tan.core import ram_watch
+
+    for ok in ("0x58000000", "0x4FFFFFFC", "0x0:4", "0x42002000:64@10"):
+        ram_watch.parse_watch(ok)
+
+
+def test_watch_refusals_hold_under_dry_run(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, _d, issues, _l, _s = _run(tmp_path, dry_run=True, ram_watch=("0x50000000",))
+    assert rc != 0 and "flash.ram-watch-unsafe-address" in _codes(issues)
+    assert jl.scripts == []

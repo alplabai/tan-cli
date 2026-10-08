@@ -58,6 +58,7 @@ from tan.core.flash_plan import (
     validate_identifier,
 )
 from tan.core.jlink_binary import resolve_jlink
+from tan.core import ram_watch
 from tan.core.ram_run import (
     CODE_CONSOLE_SYMBOL_MISSING,
     CODE_CORE_MISMATCH,
@@ -146,6 +147,13 @@ def _run_ram_entry(
         return fail("only a slice can be RAM-run, not a helper MCU")
     if not isinstance(target.flash_args, dict) and target.flash_args is not None:
         return fail("flash_args is not a mapping")
+    # `--watch` is refused before anything is read or spawned, under --dry-run too.
+    watch_ms = int(round(max(ctx.ram_wait, 0.0) * 1000))
+    try:
+        watches = ram_watch.parse_watches(ctx.ram_watch)
+        watch_script = ram_watch.watch_lines(watches, watch_ms) if watches else []
+    except ram_watch.WatchError as err:
+        return fail(str(err), err.code)
     flash_args: Any = dict(target.flash_args or {})
 
     # ── the image ──
@@ -221,7 +229,7 @@ def _run_ram_entry(
         return fail(f"cannot prepare the RAM-run ({err})")
     # `image.base`/`entry` and the console address/size are ints rendered with
     # `0x%X` by `ram_run`; the symbol NAME never reaches a script at all.
-    load = load_script(pre, commander_path(staged), image)
+    load = load_script(pre, commander_path(staged), image, watch_script)
     console = image.console
     argv = (
         "JLinkExe", "-device", device, "-if", "SWD", "-speed", str(speed),
@@ -243,6 +251,16 @@ def _run_ram_entry(
         "spNote": "from the vector table; applied by loadbin's reset, not written by tan",
         "wait": ctx.ram_wait, "writesMram": False,
     }
+    if watches:
+        report["ram"]["watch"] = {
+            "specs": [
+                {"address": f"0x{w.address:08X}", "words": w.words, "periodMs": w.period_ms}
+                for w in watches
+            ],
+            "durationMs": watch_ms,
+            "timeBasis": "scheduled",
+            "access": "mem32 (read-only)",
+        }
     report["plan"] = {
         "argv": list(argv),
         "jlinkScript": (fc._DISABLE_FW_UPDATE + load).splitlines(),
@@ -419,6 +437,18 @@ def _run_ram_entry(
     trouble = trouble_markers(transcript)
     report["jlink"]["resetFailures"] = list(dict.fromkeys([*check_trouble, *trouble]))
 
+    # ── the watch samples (tan-cli#1436) ──
+    watch_note = None
+    if watches:
+        samples = ram_watch.parse_samples(transcript, watches, watch_ms)
+        report["watch"] = samples
+        missing = sum(1 for s in samples if s["values"] is None)
+        if missing:
+            watch_note = (
+                f"{entry_id}: {missing} of {len(samples)} --watch samples have no mem32 dump in "
+                "the J-Link transcript (values: null); the rest are in data.watch[]"
+            )
+
     # ── the console ──
     message = f"{METHOD}[{entry_id}]: {summary}; running"
     if check_trouble and not trouble:
@@ -437,7 +467,8 @@ def _run_ram_entry(
                 "(read it on the console, e.g. `tan monitor`); nothing to read over SWD"
             )
         else:
-            time.sleep(max(ctx.ram_wait, 0.0))
+            if not watches:  # a watch session already ran for the whole --wait window
+                time.sleep(max(ctx.ram_wait, 0.0))
             read = fc._execute(
                 FlashPlan(argv=argv, ok_message="", jlink_script=read_script(pre, *console)),
                 True, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
@@ -462,7 +493,7 @@ def _run_ram_entry(
         0,
         entry("ok", 0, message, preflight_unarmed=unarmed,
               reset_unconfirmed=bool(trouble or check_trouble), trcena_note=True,
-              **warn_missing),
+              ram_watch_incomplete=watch_note, **warn_missing),
         lines,
     )
 

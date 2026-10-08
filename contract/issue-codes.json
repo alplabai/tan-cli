@@ -2140,6 +2140,30 @@
       "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram --ram-console` on an ELF with no ram_console_buf symbol -- the build selected the UART console (the customer default since alp-sdk#389), so there is nothing to read over SWD. Deliberately a WARNING, not an error: an empty RAM console on a UART-console build is expected, the run itself succeeded, and ramConsole.selected in the envelope says \"uart\". Read the console where it is (`tan monitor`, UART5), or rebuild with CONFIG_RAM_CONSOLE (alp-sdk aen-bench-shared.conf) to read it over SWD. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.ram-watch-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch <addr>[:<words>][@<period-ms>]` spec is malformed or out of range: not that grammar, an address that is not 4-byte aligned (mem32), beyond 32 bits, a word count of 0 or above 64, a period outside 10..60000 ms, more than 8 --watch options, or more than 2000 scheduled samples over the --wait window. Refused before any J-Link spawn, under --dry-run too. Answered by fixing the spec, raising the period or shortening --wait. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-watch-unsafe-address",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch` read overlaps the HP core's ITCM global window 0x50000000..0x57FFFFFF. A RAM-run attaches to the M55 HE only, and reading the HP window from an HE attach is the bench's known-bad read (round 8, 2026-10-07): the read itself succeeds but the core then cannot be halted until a PIN reset. Refused before any J-Link spawn, under --dry-run too. Deliberately DISTINCT from flash.ram-watch-invalid: this one is not answered by fixing a typo, the address must not be read from this attach at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-watch-incomplete",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: `tan flash --ram --watch` ran, but the J-Link transcript carries no mem32 dump for some scheduled samples, so those data.watch[] entries have `values: null`. A WARNING: the image is running and the remaining samples are valid. Sample times are the scheduled Sleep offsets, not measurements. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.ram-failed",
       "status": "reserved",
       "severity": "error",
