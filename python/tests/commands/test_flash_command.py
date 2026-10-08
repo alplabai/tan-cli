@@ -7285,3 +7285,15 @@ def test_build_root_manifest_not_found_names_both_paths(tmp_path):
     message = payload["issues"][0]["message"]
     assert os.path.join("X", "system-manifest.yaml") in message
     assert os.path.join("X", "build", "system-manifest.yaml") in message
+
+
+def test_nested_manifest_makes_its_directory_the_effective_build_root(tmp_path):
+    # Relative artefact paths in X/build/system-manifest.yaml are relative to
+    # X/build, not X (tan-cli#1405 review).
+    _plant_manifest(tmp_path / "X" / "build" / "system-manifest.yaml")
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--build-root", "X", write_manifest=False
+    )
+    payload = envelope(out)
+    assert payload["data"]["buildRoot"] == str(tmp_path / "X" / "build")
+    assert f"west flash --build-dir {tmp_path / 'X' / 'build'}" in out

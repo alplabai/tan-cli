@@ -67,6 +67,14 @@ def find_manifest(build_root: str, is_file=os.path.isfile) -> str:
             return candidate
     return candidates[0]
 
+
+def effective_build_root(build_root: str, is_file=os.path.isfile) -> str:
+    """The directory the manifest was actually found in. Every relative
+    artefact path in the manifest (and the slice build-dir fallbacks) is
+    relative to THIS, so for `--build-root X` with the nested spelling it is
+    `X/build`, not `X` (tan-cli#1405). With no manifest present it is `X`."""
+    return os.path.dirname(find_manifest(build_root, is_file))
+
 #: Subdirectory `west build` writes into when it is emitted with NO `-d` --
 #: which is exactly how the SDK's build plan emits it (I-18). See
 #: [`slice_elf_candidates`].

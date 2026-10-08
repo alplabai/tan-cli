@@ -4050,6 +4050,8 @@ def _run(
             f"`tan build --project {app_path}` first."
         )
         return _error(build_root, "flash.manifest-not-found", message, sdk)
+    # Relative artefact paths resolve against the manifest's own directory.
+    build_root = os.path.dirname(manifest_path)
     try:
         text = _read(manifest_path)
     except OSError as err:

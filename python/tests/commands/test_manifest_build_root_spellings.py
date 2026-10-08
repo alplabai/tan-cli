@@ -42,3 +42,14 @@ def test_miss_names_both_paths(tmp_path):
         load_manifest(str(tmp_path))
     assert os.path.join(str(tmp_path), "system-manifest.yaml") in info.value.path
     assert os.path.join(str(tmp_path), "build", "system-manifest.yaml") in info.value.path
+
+
+def test_effective_build_root_is_the_manifest_directory(tmp_path):
+    from tan.core.system_manifest import effective_build_root
+
+    assert effective_build_root(str(tmp_path)) == str(tmp_path)  # no manifest: X
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "system-manifest.yaml").write_text(MANIFEST, encoding="utf-8")
+    assert effective_build_root(str(tmp_path)) == str(tmp_path / "build")
+    (tmp_path / "system-manifest.yaml").write_text(MANIFEST, encoding="utf-8")
+    assert effective_build_root(str(tmp_path)) == str(tmp_path)
