@@ -2188,6 +2188,14 @@
       "note": "Added by the tan-cli#1267 review. EMISSION CONDITION: --replace-atoc was passed and more than one entry of the run would carry it (more than one guarded alif_flash west entry after --core/--helper narrowing). The whole run is refused before anything is written, previews included. Each alif_flash write replaces the whole ATOC with only its own entry, so one override given to accept losing what is on the board now would also override every later write's guard into delisting what an earlier write of the same run had just put there. The message names every entry, --core CORE_ID / --helper NAME, and alp-sdk's flash-run-dualcore.sh for putting both M55 cores in one ATOC. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.replace-atoc-ignored",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added by the tan-cli#1267 review. EMISSION CONDITION: --replace-atoc was passed together with --ram. A RAM-run loads the image into RAM and never writes the ATOC, so the flag has nothing to act on; the warning exists so it is never silently dropped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "run.flash-flags-ignored",
       "status": "reserved",
       "severity": "warning",

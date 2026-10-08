@@ -102,6 +102,7 @@ import typer
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
+from tan.core.system_manifest import manifest_candidates
 from tan.core.dp_id import (
     _CONNECT_FAILED_TARGET_RE,
     _connect_failed_outright,
@@ -3075,7 +3076,9 @@ def _flash_entry_body(
         lines.append(gate.message)
         return 1, entry(method, "failed", 1, gate.message), lines
 
-    flash_args = entry_flash_args
+    # The absolutised `build_dir` only matters where the guard reads files under
+    # it; an entry the guard does not cover keeps the manifest's own argv.
+    flash_args = entry_flash_args if guard.guarded else target.flash_args
     # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
     # run's own sign actually ran -- carried past the `if` block so the
     # eventual success message (tan-cli#373) can name which SETOOLS install
@@ -4153,13 +4156,19 @@ def _run(
             None,
         )
 
-    manifest_path = _abs_join(build_root, "system-manifest.yaml")
+    # tan-cli#1405: `tan build --build-root X` writes `X/build/system-manifest.yaml`,
+    # so the SAME `X` must work here -- `X/system-manifest.yaml` first, then
+    # the nested spelling. The error names every path tried.
+    tried = manifest_candidates(build_root)
+    manifest_path = next((p for p in tried if _is_file(p)), tried[0])
     if not _is_file(manifest_path):
         message = (
-            f"system-manifest.yaml not found at {manifest_path}; run "
+            f"system-manifest.yaml not found at {' or '.join(tried)}; run "
             f"`tan build --project {app_path}` first."
         )
         return _error(build_root, "flash.manifest-not-found", message, sdk)
+    # Relative artefact paths resolve against the manifest's own directory.
+    build_root = os.path.dirname(manifest_path)
     try:
         text = _read(manifest_path)
     except OSError as err:
@@ -4324,6 +4333,16 @@ def _run(
             [f"flash: {m}" for _, m in unsupported],
             sdk,
         )
+    if replace_atoc and ram:
+        # tan-cli#1267: a RAM-run writes nothing to MRAM, so there is no ATOC for
+        # the override to apply to. Said out loud rather than dropped, the same
+        # way `tan run` discloses a flag it will not act on.
+        note = (
+            "flash: --replace-atoc had no effect -- --ram loads the image into RAM "
+            "and never writes the ATOC (it only acts on a Flow A MRAM write)."
+        )
+        text_lines.append(note)
+        issues.append(Issue("flash.replace-atoc-ignored", "warning", note))
     if replace_atoc and not ram:
         # tan-cli#1267: one `--replace-atoc` must never override more than one
         # alif_flash write -- see `ambiguous_replace_message`. Refused before

@@ -651,6 +651,59 @@ def test_a_relative_build_dir_names_the_tree_west_writes_to(tmp_path, monkeypatc
     ), issues[0].message
 
 
+def test_an_unguarded_entry_keeps_its_relative_build_dir_on_the_argv(tmp_path, monkeypatch):
+    """The absolutised `build_dir` exists so the guard's files and the argv name
+    one tree; an entry the guard does not cover (another runner) keeps the
+    manifest's own spelling on its `west flash` argv."""
+    _project(tmp_path, flash_runner="jlink")
+    west_top = tmp_path / "westtop"
+    _image(west_top / "out" / "he", flash_runner="jlink")
+    _manifest(tmp_path, [("m55_he", "app/zephyr/zephyr.bin", "{build_dir: out/he}")])
+    spawned = []
+    _flash(tmp_path, monkeypatch, spawned=spawned, workspace=west_top)
+    assert spawned[0][spawned[0].index("--build-dir") + 1] == "out/he", spawned
+
+
+def test_replace_atoc_with_ram_warns_that_it_had_no_effect(tmp_path, monkeypatch):
+    from tan.commands import flash_ram
+
+    _project(tmp_path)
+    monkeypatch.setattr(
+        flash_ram, "run_ram_entry",
+        lambda target, ctx: (0, flash_cmd._Entry("slice", target.id, "ram", "ok", 0, "ran"), []),
+    )
+    spawned = []
+    monkeypatch.setattr(flash_cmd, "_spawn", lambda argv, *_a, **_k: spawned.append(argv))
+    _exit, _data, issues, text, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core="m55_he", helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+        replace_atoc=True, ram=True, confirm_flag=True,
+    )
+    ignored = [i for i in issues if i.code == "flash.replace-atoc-ignored"]
+    assert len(ignored) == 1 and ignored[0].severity == "warning", issues
+    assert ignored[0].message in text
+    assert "flash.replace-atoc-ambiguous" not in _codes(issues)
+    assert spawned == []
+
+
+def test_ram_without_replace_atoc_stays_quiet(tmp_path, monkeypatch):
+    from tan.commands import flash_ram
+
+    _project(tmp_path)
+    monkeypatch.setattr(
+        flash_ram, "run_ram_entry",
+        lambda target, ctx: (0, flash_cmd._Entry("slice", target.id, "ram", "ok", 0, "ran"), []),
+    )
+    _exit, _data, issues, _text, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core="m55_he", helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+        ram=True, confirm_flag=True,
+    )
+    assert "flash.replace-atoc-ignored" not in _codes(issues)
+
+
 # ── review round 1: sysbuild (item 6) ────────────────────────────────────────
 
 
