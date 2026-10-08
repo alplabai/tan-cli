@@ -61,6 +61,7 @@ from typing import Any
 import typer
 
 from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
+from tan.core.system_manifest import effective_build_root
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -525,6 +526,7 @@ def _run(
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
 
+    build_root = effective_build_root(build_root)
     try:
         yaml_text, manifest = load_manifest(build_root)
     except ManifestUnavailable as err:

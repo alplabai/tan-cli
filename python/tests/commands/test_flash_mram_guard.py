@@ -19,7 +19,10 @@ from tan.core import mram_link
 from tests.commands.test_flash_command import _flow_d_run
 from tests.commands.test_flash_ram import make_elf
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
+#: The `mram_link` tests above the pairing section are pure byte parsing and run
+#: everywhere; everything from there on spawns POSIX stubs or relies on POSIX
+#: filenames/executables.
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
 
 SLOT0 = 0x80010000
 SOC_FLASH_BASE = 0x80000000
@@ -120,6 +123,7 @@ def _pair(tmp_path, *, elf_age_s):
     return str(binary)
 
 
+@posix_only
 def test_find_elf_returns_the_bytes_of_the_artefact_or_its_same_stem_elf(tmp_path):
     (tmp_path / "a.elf").write_bytes(make_elf(base=SLOT0))
     (tmp_path / "a.bin").write_bytes(b"\x00" * 8)
@@ -130,6 +134,7 @@ def test_find_elf_returns_the_bytes_of_the_artefact_or_its_same_stem_elf(tmp_pat
     assert flash_mram_guard.find_elf(str(tmp_path / "b.bin")) is None
 
 
+@posix_only
 def test_an_elf_far_older_than_its_bin_is_refused_as_stale(tmp_path):
     message = flash_mram_guard.mram_link_guard(
         _pair(tmp_path, elf_age_s=3600), "m55_he", slot0=SLOT0
@@ -138,6 +143,7 @@ def test_an_elf_far_older_than_its_bin_is_refused_as_stale(tmp_path):
     assert "a.elf" in message and "m55_he" in message
 
 
+@posix_only
 @pytest.mark.parametrize("age", [-3600, 0, 5], ids=["newer", "same-time", "seconds-older"])
 def test_an_elf_newer_or_just_older_than_its_bin_is_trusted(tmp_path, age):
     """A normal build links the ELF, then `objcopy`s the .bin seconds later."""
@@ -148,6 +154,7 @@ def test_an_elf_newer_or_just_older_than_its_bin_is_trusted(tmp_path, age):
     assert "lowest LOAD segment" in message  # judged on its load address, not its age
 
 
+@posix_only
 def test_a_stale_elf_beside_the_bin_is_refused_on_flow_d(tmp_path, monkeypatch):
     (tmp_path / "build").mkdir(exist_ok=True)
     elf = tmp_path / "build" / "a.elf"
@@ -175,6 +182,7 @@ def _run(tmp_path, monkeypatch, *, elf, flash_args=SLOT0_AND_ATOC, dry_run=False
     return result, spawned, jlink
 
 
+@posix_only
 @pytest.mark.parametrize("flash_args", [SLOT0_AND_ATOC, AUTO_SIGN], ids=["slot0+atoc", "auto-sign"])
 def test_an_itcm_linked_image_is_refused_before_any_spawn(tmp_path, monkeypatch, flash_args):
     (rc, data, issues, _l, _s), spawned, jlink = _run(
@@ -188,6 +196,7 @@ def test_an_itcm_linked_image_is_refused_before_any_spawn(tmp_path, monkeypatch,
     assert data["entries"][0]["status"] == "failed"
 
 
+@posix_only
 def test_the_refusal_holds_under_dry_run_too(tmp_path, monkeypatch):
     (rc, _d, issues, _l, _s), _sp, _jl = _run(
         tmp_path, monkeypatch, elf=make_elf(base=0x0), dry_run=True
@@ -195,11 +204,13 @@ def test_the_refusal_holds_under_dry_run_too(tmp_path, monkeypatch):
     assert rc == 1 and [i.code for i in issues] == [CODE]
 
 
+@posix_only
 def test_an_image_below_slot0_but_inside_the_aperture_is_refused(tmp_path, monkeypatch):
     (rc, _d, issues, _l, _s), _sp, _jl = _run(tmp_path, monkeypatch, elf=make_elf(base=0x80000000))
     assert rc == 1 and [i.code for i in issues] == [CODE]
 
 
+@posix_only
 def test_a_correctly_linked_image_is_not_refused(tmp_path, monkeypatch):
     (rc, _d, issues, _l, _s), _sp, _jl = _run(
         tmp_path, monkeypatch, elf=make_elf(base=SLOT0, entry=SLOT0 | 1)
@@ -207,11 +218,13 @@ def test_a_correctly_linked_image_is_not_refused(tmp_path, monkeypatch):
     assert CODE not in [i.code for i in issues] and rc == 0
 
 
+@posix_only
 def test_an_image_loaded_into_mram_but_run_from_itcm_is_not_refused(tmp_path, monkeypatch):
     (rc, _d, issues, _l, _s), _sp, _jl = _run(tmp_path, monkeypatch, elf=mini_elf([(0x0, SLOT0, 64)]))
     assert CODE not in [i.code for i in issues] and rc == 0
 
 
+@posix_only
 def test_a_supplied_atoc_with_no_slot0_is_not_checked(tmp_path, monkeypatch):
     """The ATOC may carry a legitimate ITCM load entry; it is the operator's, not tan's."""
     (rc, _d, issues, _l, _s), _sp, _jl = _run(
@@ -220,6 +233,7 @@ def test_a_supplied_atoc_with_no_slot0_is_not_checked(tmp_path, monkeypatch):
     assert CODE not in [i.code for i in issues] and rc == 0
 
 
+@posix_only
 def test_an_unparseable_elf_is_refused_on_flow_d(tmp_path, monkeypatch):
     (rc, _d, issues, _l, _s), spawned, jlink = _run(
         tmp_path, monkeypatch, elf=mini_elf(ident_class=2)
@@ -228,6 +242,7 @@ def test_an_unparseable_elf_is_refused_on_flow_d(tmp_path, monkeypatch):
     assert "could not be parsed" in issues[0].message and spawned == [] and jlink == []
 
 
+@posix_only
 def test_a_bare_bin_with_no_elf_beside_it_is_not_checked(tmp_path, monkeypatch):
     rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
     assert CODE not in [i.code for i in issues] and rc == 0

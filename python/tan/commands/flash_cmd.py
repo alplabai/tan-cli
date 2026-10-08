@@ -104,6 +104,7 @@ from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
+from tan.core.system_manifest import manifest_candidates
 from tan.core.dp_id import (
     _CONNECT_FAILED_TARGET_RE,
     _connect_failed_outright,
@@ -4067,13 +4068,19 @@ def _run(
             None,
         )
 
-    manifest_path = _abs_join(build_root, "system-manifest.yaml")
+    # tan-cli#1405: `tan build --build-root X` writes `X/build/system-manifest.yaml`,
+    # so the SAME `X` must work here -- `X/system-manifest.yaml` first, then
+    # the nested spelling. The error names every path tried.
+    tried = manifest_candidates(build_root)
+    manifest_path = next((p for p in tried if _is_file(p)), tried[0])
     if not _is_file(manifest_path):
         message = (
-            f"system-manifest.yaml not found at {manifest_path}; run "
+            f"system-manifest.yaml not found at {' or '.join(tried)}; run "
             f"`tan build --project {app_path}` first."
         )
         return _error(build_root, "flash.manifest-not-found", message, sdk)
+    # Relative artefact paths resolve against the manifest's own directory.
+    build_root = os.path.dirname(manifest_path)
     try:
         text = _read(manifest_path)
     except OSError as err:
