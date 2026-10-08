@@ -45,14 +45,17 @@ def project(root: Path, name: str, manifest: str | None = MANIFEST) -> Path:
     return p
 
 
-def flow_result(text="x", status="ok", rc=0, issues=(), selected="ram"):
+def flow_result(text="x", status="ok", rc=0, issues=(), selected="ram", build_root=None):
     console = {"selected": selected, "requested": True}
     if text is not None:
         console["text"] = text
     entry = {"status": status, "message": "stub", "ramConsole": console,
              "jlink": {"transcriptPath": "/t/ram_run-m55_he-1.log", "attachedCore": {"apAddr": "0x00300000"},
                        "dpidr": "0x4C013477"}}
-    return ExitCode(rc), {"entries": [entry]}, list(issues), [], None
+    data = {"entries": [entry]}
+    if build_root is not None:
+        data["buildRoot"] = str(build_root)
+    return ExitCode(rc), data, list(issues), [], None
 
 
 class Stub:
@@ -324,7 +327,7 @@ def test_refusals_after_a_successful_load_keep_the_flash_provenance(tmp_path, mo
     assert code == 2 and doc["issues"][-1]["code"] == "model.device-console-empty"
     flash = doc["data"]["flash"]
     assert flash["core"] == "m55_he" and flash["wait"] == 3.0
-    assert flash["transcriptPath"] == "/t/ram_run-m55_he-1.log" and "consolePath" in flash
+    assert flash["transcriptPath"] == "/t/ram_run-m55_he-1.log" and "consolePath" not in flash  # a blank console is not saved
     assert doc["data"]["result"] is None
     Stub(monkeypatch, [flow_result("not a benchmark console\n")])
     code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
@@ -360,3 +363,42 @@ def test_top_level_model_matches_the_row(tmp_path, monkeypatch):
     Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
     code, doc = invoke("run", "m.onnx", "--device", "--confirm", "--project", str(p))
     assert doc["data"]["model"] == doc["data"]["result"]["model"] and doc["data"]["model"].endswith("m.onnx")
+
+
+def test_ab_refusal_on_b_after_a_loaded_keeps_a_provenance(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")), flow_result("garbage\n")])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.device-capture-invalid"
+    flash = doc["data"]["flash"]
+    assert set(flash) == {"a", "b"}
+    assert Path(flash["a"]["consolePath"]).parent == a / "build" / "flash-logs"
+    assert Path(flash["a"]["consolePath"]).is_file() and Path(flash["b"]["consolePath"]).is_file()
+
+
+def test_ab_b_failing_before_its_load_still_reports_a(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")),
+                       flow_result(None, status="failed", rc=1)])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 1 and doc["issues"][-1]["code"] == "model.device-flash-failed"
+    assert set(doc["data"]["flash"]) == {"a"}
+    assert Path(doc["data"]["flash"]["a"]["consolePath"]).is_file()
+
+
+def test_console_is_saved_under_the_build_root_flow_c_used(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    nested = tmp_path / "elsewhere" / "build" / "m55_he"
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"), build_root=nested)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    saved = Path(doc["data"]["result"]["flash"]["consolePath"])
+    assert code == 0 and saved.parent == nested / "flash-logs" and saved.is_file()
+    assert not (p / "build" / "flash-logs").exists()
+
+
+def test_blank_console_is_not_saved_or_reported(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    Stub(monkeypatch, [flow_result("  \n")])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 2 and "consolePath" not in doc["data"]["flash"]
+    assert not (p / "build" / "flash-logs").exists()

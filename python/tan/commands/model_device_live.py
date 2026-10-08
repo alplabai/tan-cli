@@ -130,14 +130,19 @@ def _provenance(entry: dict, live: LiveOptions, console_path: str | None = None)
     return block
 
 
-def _save_console(context: ProjectContext, text: object) -> tuple[str | None, list[Issue]]:
+def _save_console(
+    context: ProjectContext, text: object, build_root: object = None
+) -> tuple[str | None, list[Issue]]:
     """Write the raw RAM console next to the Flow C transcript
     (`<build>/flash-logs/model-console-<UTC ts>.txt`, never overwritten) so
     `latencyMs` can be checked against the app's own `LATENCY-RESULT`. A write
-    failure is a warning: the measurement is still valid."""
-    if not isinstance(text, str):
+    failure is a warning: the measurement is still valid. `build_root` is the one
+    Flow C itself used (so the file sits beside its transcript, nested layouts
+    included); a blank console is not saved."""
+    if not isinstance(text, str) or not text.strip():
         return None, []
-    logs = Path(context.workspace_root) / "build" / "flash-logs"
+    root = Path(build_root) if isinstance(build_root, str) and build_root else Path(context.workspace_root) / "build"
+    logs = root / "flash-logs"
     base = time.strftime("model-console-%Y%m%dT%H%M%SZ", time.gmtime())
     try:
         logs.mkdir(parents=True, exist_ok=True)
@@ -203,8 +208,7 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
         return LiveRefusal(flash_issues, ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE)
     console = entry.get("ramConsole") or {}
     text = console.get("text")
-    console_path, save_issues = _save_console(context, text)
-    flash_issues.extend(save_issues)
+    console_path, save_issues = _save_console(context, text, data.get("buildRoot"))
     flash = _provenance(entry, live, console_path)
     if not isinstance(text, str) or not text.strip():
         which = console.get("selected")
@@ -215,5 +219,5 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
         return LiveRefusal([*flash_issues, Issue(
             "model.device-console-empty", "error",
             f"The RAM console is empty ({why}); raise --wait or check the benchmark app.",
-        )], flash=flash)
-    return LiveRun(text, flash_issues, flash, console_path)
+        ), *save_issues], flash=flash)
+    return LiveRun(text, [*flash_issues, *save_issues], flash, console_path)

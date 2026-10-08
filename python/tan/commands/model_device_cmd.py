@@ -54,9 +54,10 @@ Result = tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]
 #: ceiling; this only stops a wrong file being slurped).
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 
-#: Longest `consoleText` carried in a live row (the app's RAM console is 64 KiB at
-#: most, so this never trims a real capture; the saved file always holds all of it).
-#: Over the cap the TAIL is kept -- `LATENCY-RESULT` is printed last.
+#: Longest `consoleText` carried in a live row, in CHARACTERS (not bytes). A larger
+#: console is trimmed (`consoleTruncated: true`); the saved
+#: `model-console-*.txt` always holds all of it. Over the cap the TAIL is kept --
+#: `LATENCY-RESULT` is printed last.
 MAX_CONSOLE_TEXT_CHARS = 64 * 1024
 
 #: `(context, model_label, options) -> console text | Issue`: RAM-run the project
@@ -214,10 +215,12 @@ def run_device_run(
     return project, sdk, data, [*run.issues, *_degraded(row, "device run")], ExitCode.SUCCESS
 
 
-def _note_loaded(data: dict, role: str, flash: dict | None) -> None:
-    """Record, per side, that a refused `ab` run had already RAM-loaded and reset the board."""
+def _note_loaded(data: dict, flashes: dict, role: str, flash: dict | None) -> None:
+    """Refused `ab`: report every side that had already RAM-loaded and reset the board."""
     if flash is not None:
-        data.setdefault("flash", {})[role.lower()] = flash
+        flashes[role.lower()] = flash
+    if flashes:
+        data["flash"] = dict(flashes)
 
 
 def run_device_ab(
@@ -233,6 +236,7 @@ def run_device_ab(
     data = ab_empty_data()
     rows: list[tuple[dict, Any]] = []
     issues: list[Issue] = []
+    flashes: dict[str, dict] = {}
     live = live or LiveOptions()
     if bool(capture) != bool(against_capture):
         return project, sdk, data, [Issue(
@@ -257,13 +261,15 @@ def run_device_ab(
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
         run = _console_for(ctx, cap, label, f"model {role}", live)
         if isinstance(run, LiveRefusal):
-            _note_loaded(data, role, run.flash)
+            _note_loaded(data, flashes, role, run.flash)
             return project, sdk, data, [*issues, *run.issues], run.exit_code
         built = _row(label, run.text, run, ctx.workspace_root)
         if isinstance(built, Issue):
-            _note_loaded(data, role, run.flash)
+            _note_loaded(data, flashes, role, run.flash)
             return project, sdk, data, [*issues, *run.issues, built], ExitCode.VALIDATION_FAILURE
         rows.append(built)
+        if run.flash is not None:
+            flashes[role.lower()] = run.flash
         issues.extend(run.issues)
         issues.extend(_degraded(built[0], f"device run {role}"))
     (a_row, a_res), (b_row, b_res) = rows
