@@ -101,10 +101,16 @@ from tan.commands.build.materialise import MaterialiseError, materialise_plan
 from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
+    deferred_placeholder_issues,
 )
+from tan.commands.build.workspace_patches import workspace_patch_issues
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
+from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
+from tan.core.board_files import all_topology_boards, unmatched_board_file_messages
+from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
+from tan.core.link_refusal import refusal_code
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     MISSING_TOOL_RE,
@@ -112,10 +118,10 @@ from tan.core.plan_exec import (
     normalize_path,
     resolve_action,
 )
-from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
+from tan.commands.build.host_python import refusal_message, resolve_build_python
+from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT, DeferredPlaceholder
 from tan.core.sdk_discovery import (
     _abs_posix,
-    _planner_python,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_root_ladder,
@@ -453,8 +459,10 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
     if board_yaml is None:
         raise BuildError(
             "build.plan-unavailable",
-            "no board.yaml found -- pass `--board-yaml <PATH>` or run from a project. "
-            "Run `tan init` to create one, or `tan examples` to list ready-made projects.",
+            "no board.yaml found -- pass `--board-yaml <PATH>` or run from a project; "
+            "for a plain Zephyr example without a board.yaml (alp-sdk's bench examples), "
+            "pass `--board <zephyr-board-target>` instead. "
+            "Run `tan init` to create a project, or `tan examples` to list ready-made ones.",
             ExitCode.RUNTIME_FAILURE,
         )
     # `--sdk-root` is terminal and returned as-is even when wrong (I-31), so the
@@ -503,6 +511,12 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
             ExitCode.RUNTIME_FAILURE,
         ) from err
     except Exception as err:
+        # `diagnostics.link: itcm` refused (tan-cli#1350): a board.yaml input
+        # error with its own code, not a planner fault. Recognised by its code
+        # (`refusal_code`), not its class: the planner needs a bound SDK root
+        # to import.
+        if refusal_code(err) is not None:
+            raise BuildError(err.code, str(err), ExitCode.VALIDATION_FAILURE) from err
         # Every planner failure is an envelope, never a traceback -- the same
         # thing the subprocess boundary used to buy for free. Includes the bare
         # `ValueError`s the Ethos-U sizing path still raises (I-48).
@@ -597,6 +611,8 @@ def _dispatch(
     *,
     json_mode: bool = False,
     pristine: bool = False,
+    slice_refusals: dict[str, str] | None = None,
+    user_defines: dict[str, list[str]] | None = None,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted
     -- and, since tan-cli#483, the ones whose `cores.<id>.app` resolved to a
@@ -782,6 +798,8 @@ def _dispatch(
                 sdk_root_for_stamp=sdk_root_for_stamp,
                 held_outcomes=held_outcomes.values(),
                 force_pristine=pristine,
+                slice_refusals=slice_refusals,
+                user_defines=user_defines,
             )
         )
 
@@ -811,8 +829,33 @@ def _dispatch(
             substituted = substituted_app_dirs.get(i)
             if substituted is not None:
                 issues.append(Issue("build.app-dir-substituted", "info", substituted))
-            outcomes.append(next(dispatched))
+            outcome = next(dispatched)
+            outcomes.append(outcome)
+            if slice_refusals and outcome.message == slice_refusals.get(sl.core_id):
+                issues.append(Issue("build.host-python-unsuitable", "error", outcome.message))
+    # tan-cli#1351: per-board files naming a different board are silently
+    # ignored by Zephyr.
+    issues.extend(
+        Issue("build.board-file-unmatched", "warning", msg)
+        for msg in unmatched_board_file_messages(
+            [
+                (sl.backend, sl.command.args if sl.command else [], sl.app_dir)
+                for sl in plan.slices
+            ],
+            build_root,
+            _known_boards(sdk_root_for_stamp),
+        )
+    )
     return outcomes, issues
+
+
+def _known_boards(sdk_root_for_stamp: str | None) -> list[str]:
+    """Every board target the SDK's SoM presets declare (tan-cli#1403).
+    Takes the workspace-anchored, normalized SDK root (a relative `--sdk-root`
+    is anchored on the workspace, not the build root)."""
+    if not sdk_root_for_stamp:
+        return []
+    return all_topology_boards(Path(sdk_root_for_stamp) / "metadata")
 
 
 #: `os` values the schema requires `cores.<id>.app` to resolve to a real
@@ -1025,6 +1068,26 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     return issues
 
 
+def _host_python_issues(build_python, mode) -> list[Issue]:
+    """tan-cli#1317. Where CMake will NOT run (`--materialise`) the refusal is a
+    plain warning and the bare fallback stays. On the native dispatch it is a
+    PER-SLICE outcome instead (`_python_refusals` -> `execute_slices`), applied
+    after `executionPolicy`'s null-command / missing-tool skips."""
+    if build_python.refusal is None or mode == _MODE_NATIVE:
+        return []
+    return [Issue("build.host-python-unsuitable", "warning", build_python.refusal)]
+
+
+def _python_refusals(build_python, demotions, mode) -> dict[str, str]:
+    if build_python.refusal is None or mode != _MODE_NATIVE:
+        return {}
+    message = refusal_message(build_python.refusal)
+    return {
+        c: f"core `{c}`: {message}"
+        for c in build_python.users - {d.core_id for d in demotions}
+    }
+
+
 def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
     """tan-cli#697: promote `tan.core.plan_exec.cross_drive_source_refusal`'s
     refusal -- matched on its own `CROSS_DRIVE_MSG` marker, same idiom as
@@ -1221,8 +1284,32 @@ def _build(
     # no `tan build --pristine` equivalent of its own yet (`tan run` has no
     # `--pristine` flag). Threaded straight through to `_dispatch`.
     pristine: bool = False,
+    # tan-cli#1359: the synthesised single-Zephyr-slice plan text for a
+    # `board.yaml`-less example (`tan build --board`). Replaces the planner.
+    plain_plan_text: str | None = None,
+    # tan-cli#1382: normalised `-D` args (and optional `--core` scope) spliced
+    # into a PLANNED build's Zephyr slices. Unused on the plain route, which
+    # already carries its defines in `plain_plan_text`.
+    defines: list[str] | None = None,
+    define_cores: list[str] | None = None,
 ) -> tuple[ExitCode, dict, list[Issue]]:
-    text, plan = _acquire_plan(plan_from, sdk_root, board_yaml)
+    define_slices: list[str] = []
+    if plain_plan_text is not None:
+        text = plain_plan_text
+        try:
+            plan = parse_build_plan(text)
+        except PlanParseError as err:  # pragma: no cover -- tan's own plan
+            raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
+        if defines:
+            define_slices = [sl.core_id for sl in plan.slices]
+    else:
+        text, plan = _acquire_plan(plan_from, sdk_root, board_yaml)
+        if defines:
+            try:
+                text, define_slices = apply_user_defines(text, defines, define_cores)
+            except UserDefineError as err:
+                raise BuildError(err.code, err.message, ExitCode.VALIDATION_FAILURE) from err
+            plan = parse_build_plan(text)
 
     if mode == _MODE_PLAN:
         # Parsed (so a plan that will not load is still refused with its own
@@ -1238,15 +1325,19 @@ def _build(
     # can never reach disk or an argv. A no-op on an untokened plan -- e.g. an
     # old `--plan-from` file (the planner itself now tags every plan tokened).
     toolchain = _toolchain_for_plan(text)
+    deferred: list[DeferredPlaceholder] = []
+    build_python = resolve_build_python(plan, text, build_root, sdk_root)
     try:
         plan, demotions = apply_plan_token_substitution(
             plan,
             board_yaml_path=board_yaml,
             exec_base=build_root,
             sdk_root=sdk_root,
-            python=_planner_python(build_root, sdk_root),
+            python=build_python.python,
             toolchain_root=toolchain.root,
             toolchain_advice=toolchain.advice,
+            deferred_out=deferred,
+            project_root=build_root if plain_plan_text is not None else None,
         )
     except TokenSubstitutionError as err:
         # RuntimeFailure for every code this pass raises, `build.plan-invalid`
@@ -1254,6 +1345,8 @@ def _build(
         # oracle gives them (`native.rs:132-142`), and the same code must not
         # mean two different exits depending on which module raised it.
         raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
+
+    python_issues = _host_python_issues(build_python, mode)
 
     # tan-cli#566, and tan-cli#565's `fail` arm: BOTH sit here, between
     # substitution and `materialise_plan` below, because both must leave a
@@ -1298,6 +1391,10 @@ def _build(
         if mode == _MODE_MATERIALISE and demotions
         else []
     )
+    # tan-cli#1302: placeholders deliberately left in a config artefact, and a
+    # malformed `deferredPlaceholders`. Reported on EVERY path that
+    # materialises, so the native build says it too, not just `--materialise`.
+    deferred_issues = deferred_placeholder_issues(plan, deferred)
 
     # I-20. ALL of them, then dispatch -- never interleaved.
     try:
@@ -1321,7 +1418,7 @@ def _build(
         return (
             ExitCode.SUCCESS,
             {"schemaVersion": "1", "baseDir": build_root, "written": written},
-            demotion_issues,
+            demotion_issues + deferred_issues + python_issues,
         )
 
     # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a
@@ -1329,6 +1426,12 @@ def _build(
     # harness calling `build()` more than once) never gets misread as THIS
     # run's own write outcome below.
     reset_last_manifest_write()
+    # tan-cli#1376: advisory only -- never changes `ok`/the exit code.
+    patch_issues = workspace_patch_issues(
+        Path(build_root),
+        sdk_root,
+        has_zephyr_slice=any(sl.backend == "zephyr" for sl in plan.slices),
+    )
     outcomes, issues = _dispatch(
         plan,
         demotions,
@@ -1337,6 +1440,8 @@ def _build(
         sdk_root_for_stamp,
         json_mode=json_mode,
         pristine=pristine,
+        slice_refusals=_python_refusals(build_python, demotions, mode),
+        user_defines={c: define_pairs(defines) for c in define_slices} if defines else None,
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
@@ -1383,6 +1488,9 @@ def _build(
     # are the only place the planner explains a `command: null` slice, and
     # they reached `data.warnings` alone until now.
     issues.extend(_plan_warning_issues(plan.warnings))
+    issues.extend(deferred_issues)
+    issues.extend(python_issues)
+    issues.extend(patch_issues)
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity
@@ -1396,7 +1504,9 @@ def _build(
     issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
-    if manifest_reason is not None:
+    # A plain Zephyr build (`--board`) has no board.yaml, so no manifest to write:
+    # expected, not a warning (the stderr note still says why).
+    if manifest_reason is not None and plain_plan_text is None:
         # A failed manifest write used to report only through `on_output`
         # (stderr) -- so the envelope said `ok: true, issues: []` while
         # `system-manifest.yaml` still named the PREVIOUS run's status and
@@ -1428,7 +1538,58 @@ def _build(
         # them as a closed set, and neither may this.
         "warnings": plan.warnings,
     }
+    if defines and define_slices:
+        data["defines"] = {"args": list(defines), "slices": define_slices}
     return exit_code, data, issues
+
+
+def _plain_core_id(board: str, sdk_root: str | None) -> str | None:
+    """The planner core id (`m55_he`) the plain route's board target maps to,
+    from the bound SDK's SoM presets; `None` (the slice keeps the board
+    qualifier's name) when the SDK or the target is unknown (tan-cli#1370)."""
+    if sdk_root is None or not is_sdk_root(sdk_root):
+        return None
+    try:
+        from tan.planner_root import bind_sdk_root
+
+        bind_sdk_root(sdk_root)
+        from tan.planner.plain_slice import plain_core_id
+
+        return plain_core_id(board, Path(sdk_root) / "metadata")
+    except Exception:  # noqa: BLE001 -- best effort; the fallback name still builds
+        return None
+
+
+def _refuse_plain_route(
+    board: str | None,
+    define: list[str] | None,
+    board_yaml: str | None,
+    plan_from: str | None,
+    mode: str,
+    json_mode: bool,
+) -> None:
+    """Refuse a bad `--board` / `-D` combination up front (exit 2), else return."""
+    conflict = None
+    if board is not None and (board_yaml is not None or plan_from is not None):
+        flag = "--board-yaml" if board_yaml is not None else "--plan-from"
+        conflict = (
+            "`--board` (a plain Zephyr example, no board.yaml) cannot be combined with "
+            f"`{flag}` (a planned build). Pick one route."
+        )
+    elif board is not None and mode != _MODE_NATIVE:
+        conflict = "`--board` only builds; drop `--materialise`."
+    if conflict is not None:
+        _refuse("build.conflicting-flags", conflict, ExitCode.VALIDATION_FAILURE, json_mode)
+    problem = (board_target_problem(board) if board is not None else None) or normalise_defines(
+        define or []
+    )[1]
+    if problem is not None:
+        _refuse("build.invalid-argument", problem, ExitCode.VALIDATION_FAILURE, json_mode)
+    reserved = user_defines_problem(normalise_defines(define or [])[0])
+    if reserved is not None and reserved[0] == "build.define-reserved":
+        _refuse("build.define-reserved", reserved[1], ExitCode.VALIDATION_FAILURE, json_mode)
+    if reserved is not None:
+        _refuse("build.invalid-argument", reserved[1], ExitCode.VALIDATION_FAILURE, json_mode)
 
 
 def _refuse(code: str, message: str, exit_code: ExitCode, json_mode: bool) -> None:
@@ -1507,6 +1668,34 @@ def build(
     ),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
+    board: str = typer.Option(
+        None,
+        "--board",
+        metavar="TARGET",
+        help="Build a plain Zephyr example that has no board.yaml (alp-sdk's bench "
+        "examples) as one Zephyr slice for this board target, e.g. "
+        "`alp_e1m_aen803_m55_he/ae822fa0e5597ls0/rtss_he`. The app is `--project` "
+        "(default '.'); west, toolchain, SDK and host-Python resolve as for a planned "
+        "build (tan-cli#1359).",
+    ),
+    define: list[str] = typer.Option(
+        None,
+        "-D",
+        "--define",
+        metavar="NAME=VALUE",
+        help="A CMake definition passed after `--` to west on every Zephyr slice "
+        "(or those named by --core), repeatable (`-D SHIELD=...`, `-D CONFIG_X=y`). "
+        "Applied AFTER the plan's own args so it overrides them, except "
+        "EXTRA_CONF_FILE / EXTRA_DTC_OVERLAY_FILE, which are appended `;`-joined to "
+        "tan's list; BOARD and Python3_EXECUTABLE are refused (tan-cli#1382).",
+    ),
+    core: list[str] = typer.Option(
+        None,
+        "--core",
+        metavar="ID",
+        help="Scope -D to the Zephyr slice(s) with this coreId, repeatable "
+        "(default: every Zephyr slice).",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     pristine: bool = typer.Option(
@@ -1646,6 +1835,17 @@ def build(
             json_mode,
         )
 
+    if core and not define:
+        _refuse(
+            "build.invalid-argument",
+            "`--core` only scopes `-D`; pass `-D NAME=VALUE` with it.",
+            ExitCode.VALIDATION_FAILURE,
+            json_mode,
+        )
+    plain_plan_text: str | None = None
+    if board is not None or define:
+        _refuse_plain_route(board, define, board_yaml, plan_from, mode, json_mode)
+
     # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
     # everything below anchors on this instead of the bare cwd -- board.yaml
     # discovery, the default build root, and SDK discovery. Was previously
@@ -1722,6 +1922,13 @@ def build(
             # divergence that would reappear the moment `--project` differs
             # from cwd.
             board_yaml = str(workspace_root / "board.yaml")
+            if board is not None:
+                raise BuildError(
+                    "build.conflicting-flags",
+                    f"`--board` builds a project WITHOUT a board.yaml, but `{board_yaml}` "
+                    "exists -- drop `--board` to build it as a planned project.",
+                    ExitCode.VALIDATION_FAILURE,
+                )
         if build_root is None:
             build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
         build_root = _abs_posix(build_root)
@@ -1764,6 +1971,13 @@ def build(
             resolved_sdk_root = None
         sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
         sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+        if board is not None:
+            plain_plan_text = plain_zephyr_plan(
+                _abs_posix(str(workspace_root)),
+                board,
+                normalise_defines(define or [])[0],
+                core_id=_plain_core_id(board, sdk_root),
+            )
         # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
         # sdk-switch-pristine guard actually compares (tan-cli#163), kept
         # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
@@ -1800,6 +2014,9 @@ def build(
             board_yaml=board_yaml,
             json_mode=json_mode,
             pristine=pristine,
+            plain_plan_text=plain_plan_text,
+            defines=normalise_defines(define or [])[0],
+            define_cores=list(core) if core else None,
         )
     except BuildError as err:
         exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", err.message)]

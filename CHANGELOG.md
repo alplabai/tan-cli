@@ -13,9 +13,11 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` (moved from
-  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` by the planner re-sync
-  tan-cli#1278, which had itself moved it from
+  containing commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (moved from
+  `ac0e2a5e096a1c8c102818650a688d0f7e709066` by tan-cli#1216, which the
+  planner re-sync tan-cli#1309 had moved from
+  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`; `34c11c9de` had itself replaced
+  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` at tan-cli#1278, and that
   `81a9d515a90403cce30588704e31faf9dc893838` at tan-cli#1275; each is an
   ancestor of the next); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
@@ -62,24 +64,18 @@ exact before/after:
   succeed: `init.som-flow-style-unsupported` (#1035) and
   `init.som-block-unsupported` (#1041)
 
-*DRAFT — replace this paragraph before tagging.* The tag itself is blocked
-on this: no alp-sdk release contains `34c11c9de` yet (tan-cli#1258, still
-OPEN; `git tag --contains 34c11c9de` is empty), so this note cannot yet name
-a real floor version. Once one ships, replace this whole paragraph with one
-line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
-tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
-tag-day checklist. Measured 2026-09-23, for reference only — re-check both
-facts before the tag, they move independently of this note: the newest
-stable alp-sdk release is `v0.16.0` (`gh release list --repo
-alplabai/alp-sdk`), which carries neither
-`metadata/e1m_modules/aen/on-module-links.yaml` nor
-`metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
-planner now requires, nor the som-preset v2 presets (alp-sdk#2024) tan now
-reads. The floor itself moved twice since this paragraph was first written:
-`81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db` when
-tan-cli#1275 re-synced `tan/planner/` further, and `c81cb5db` by
-`34c11c9de` at tan-cli#1278; each is an ancestor of the next. See
-`docs/release-contract.md` and tan-cli#1258 for the full gate measurement.
+*This release requires alp-sdk **v0.17.0** (pending, alp-sdk#2047) or newer.
+tan's planner mirror and vendored scaffold are pinned to alp-sdk
+`ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from `34c11c9de` by the
+planner re-sync tan-cli#1309), and v0.17.0 is the first stable alp-sdk
+release planned to contain it. As of 2026-10-07 no alp-sdk tag does, and the
+newest stable release is `v0.16.0`, which is too old: it lacks
+`metadata/e1m_modules/aen/on-module-links.yaml`,
+`metadata/e1m_modules/v2n/supervisor-links.yaml`, the `ALP_SDK_SOM_HW_REV`
+Kconfig symbol, the som-preset v2 presets (alp-sdk#2024) and the som-preset
+`inference.auto_order` field (alp-sdk#2677). Do not tag until that release
+exists and contains the pin; if its number differs, correct this line. See
+`docs/release-contract.md` and tan-cli#1258.*
 
 ### Fixed
 
@@ -8268,6 +8264,51 @@ tan-cli#1275 re-synced `tan/planner/` further, and `c81cb5db` by
 
 ### Added
 
+- **`tan build -D NAME=VALUE` (repeatable) now works on planned (`board.yaml`)
+  builds**, so examples documented with `-DSHIELD=...` /
+  `-DCONFIG_...=...` build as documented. The definitions go after the plan's
+  own args on every Zephyr slice (or only those named by the new
+  `--core <id>`, repeatable), so CMake's last-wins lets them override the
+  plan; `EXTRA_CONF_FILE` / `EXTRA_DTC_OVERLAY_FILE` (and a sysbuild
+  `<image>_` form) are appended `;`-joined to tan's list instead, and
+  `-D BOARD` / `-D Python3_EXECUTABLE` are refused (`build.define-reserved`).
+  A changed `-D` set (added, removed or re-valued) on an already-configured slice wipes that slice's build dir (`build.configure-cache-reset`), since Zephyr caches SHIELD and friends.
+  The envelope records them as `data.defines` (`args`, `slices`); `-D` with
+  no Zephyr slice is `build.define-no-target` (tan-cli#1382)
+- **`tan build --project <dir> --board <zephyr-board-target>` builds a
+  `board.yaml`-less Zephyr example** (alp-sdk's bench examples such as
+  `examples/aen/aen-inference-latency`) as one Zephyr slice, through the same
+  west, toolchain, SDK-root and host-Python resolution, pristine policy and
+  envelope as a planned build. `-D NAME=VALUE` (repeatable) passes CMake
+  definitions after `--`. The no-board.yaml `build.plan-unavailable` message
+  now names both routes; a bad `--board`/`-D` is `build.invalid-argument`
+  (tan-cli#1359)
+- **`tan doctor` and `tan build` now notice a west workspace that lacks
+  alp-sdk's `zephyr/patches.yml`** (tan-cli#1376). A workspace without them
+  builds with `ok: true` and then fails on the device (for example
+  `alp_camera_open` returns `ALP_ERR_NOSUPPORT` without the Alif clock
+  `set_rate` patch). The new `workspacePatches` doctor check and the
+  `build.workspace-patches-missing` build warning run alp-sdk's own
+  `scripts/verify_west_patches.py`, name each ABSENT or DRIFTED patch and its
+  module, and give the fix (`tan bootstrap`, or `west patch --dst-module <m>
+  apply`). The build warning never changes `ok` or the exit code; a verified
+  result is cached under `build/`, keyed by workspace HEADs, patches.yml and
+  the patched files' mtimes. An older SDK without the verifier reports the
+  check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
+  zephyr, which tan has always ignored, is now reported (`zephyrBase` check,
+  `build.zephyr-base-ignored` info).
+- **`tan build --board` now writes `system-manifest.yaml`**, so `tan flash`,
+  `tan flash --ram` and `tan size` can use a plain Zephyr build without a
+  hand-written manifest. The one slice is named by the planner core id of the
+  SoM topology entry whose `board:` is the target (`.../rtss_he` is `m55_he`,
+  `.../rtss_hp` is `m55_hp`), not the Zephyr board qualifier, and carries the
+  `flash_method`/`flash_args` (`expect_dpidr`, `jlink_device`,
+  `jlink_flash_device`, `slot0_load_address`) a planned slice for that board
+  gets. An ELF whose lowest load address is below the SoC's `soc_flash_base`
+  (an ITCM image) is marked `flash_method: ram_run_only`. The "skipped writing
+  system-manifest.yaml" note is gone for this route. A target no SoM preset
+  names gets the reserved `flash_method: none` (schema-valid), which `tan flash`
+  skips (tan-cli#1370)
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`

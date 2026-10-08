@@ -173,6 +173,34 @@ def _cached_validator(schema_path: Path) -> Any:
     return _cached_validator_by_stat(str(schema_path), stat.st_mtime_ns, stat.st_size)
 
 
+@functools.lru_cache(maxsize=64)
+def _cached_schema_problem_by_stat(schema_path: str, mtime_ns: int, size: int) -> str | None:
+    """What is wrong with the schema itself, or `None` when it is a valid
+    JSON Schema -- cached on the same `(mtime_ns, size)` key as the validator,
+    so the metaschema check runs once per schema file, not once per document.
+
+    `check_schema` is what turns `{"type": 5}` into a `SchemaError` with a
+    readable message; without it the same file reaches `iter_errors` and
+    escapes as a raw `TypeError` (tan-cli#1303)."""
+    import jsonschema  # noqa: PLC0415
+
+    validator = _cached_validator_by_stat(schema_path, mtime_ns, size)
+    try:
+        jsonschema.Draft202012Validator.check_schema(validator.schema)
+    except jsonschema.exceptions.SchemaError as exc:
+        return f"not a valid JSON Schema: {exc.message}"
+    return None
+
+
+def _schema_problem(schema_path: Path) -> str | None:
+    """`_cached_schema_problem_by_stat` keyed off *schema_path*'s current
+    `stat()`. Raises exactly what `_cached_validator` raises for a file that
+    is absent or unreadable, so `validate_document` keeps classifying those
+    the way it always has."""
+    stat = Path(schema_path).stat()
+    return _cached_schema_problem_by_stat(str(schema_path), stat.st_mtime_ns, stat.st_size)
+
+
 def validate_document(doc: object, schema_path: Path, source: Path | str) -> list[str]:
     """Read-path `schema_errors`: never raises.
 
@@ -203,6 +231,11 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
       to "nothing to report". This is the half that keeps the promise: a
       customer whose checkout's schema file itself is corrupt still gets
       told their document could not be validated, not a false "clean".
+      A file that parses as JSON but is not a valid JSON Schema
+      (`{"type": 5}`) belongs to this half too: it is checked against the
+      metaschema first and reported as `not a valid JSON Schema: ...`,
+      where it used to reach `iter_errors` and escape as a raw `TypeError`
+      (tan-cli#1303).
 
     `source` is required (unlike `schema_errors`'s optional one): every
     caller of this function has a real file on disk to name; the one caller
@@ -258,6 +291,9 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
     happens to swallow this Python version.
     """
     try:
+        problem = _schema_problem(Path(schema_path))
+        if problem is not None:
+            return [f"{_posix(source)}: could not validate against {_posix(schema_path)}: {problem}"]
         return schema_errors(doc, schema_path, source=source)
     except FileNotFoundError:
         return []

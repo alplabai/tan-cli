@@ -132,6 +132,23 @@ def test_content_only_mutation_passes():
     assert not _fails(oracle, mutated)
 
 
+def test_deferred_placeholders_is_not_diffed():
+    """alp-sdk#2696 / tan-cli#1307: derived from artefact contents, which are
+    not diffed either."""
+    oracle = _load("multicore_rpmsg-aen")
+    mutated = copy.deepcopy(oracle)
+    mutated["deferredPlaceholders"] = ["MENDER_TENANT_TOKEN"]
+    assert not _fails(oracle, mutated)
+
+
+def test_other_new_top_level_key_still_fails():
+    """Dropping `deferredPlaceholders` must not become a blanket rule."""
+    oracle = _load("multicore_rpmsg-aen")
+    mutated = copy.deepcopy(oracle)
+    mutated["someNewTopLevelKey"] = []
+    assert _fails(oracle, mutated)
+
+
 def test_sdk_version_only_mutation_passes():
     """alp-sdk#883 (mirrored here): `sdkVersion` bumps on every version-bump
     PR with zero shape change (e.g. the oracle's 0.11.1 vs. a live 0.13.0
@@ -385,4 +402,57 @@ def test_sysbuild_slice_wrong_image_extra_conf_file_still_fails():
     sl = mutated["slices"][0]
     sl["command"]["args"] = list(sl["command"]["args"]) + [
         "-Dmcuboot_EXTRA_CONF_FILE=/some/path/alp.conf"]
+    assert _fails(oracle, mutated)
+
+
+# --- the rendered reference artefacts (alp-sdk #2771, tan-cli #1216/#1394) ---
+
+
+def _with_extras(plan: dict, *names: str) -> dict:
+    mutated = copy.deepcopy(plan)
+    sl = mutated["slices"][_first_commanded_slice(mutated)]
+    base = sl["configArtefacts"][0]["path"].rsplit("/", 1)[0]
+    for name in names:
+        sl["configArtefacts"].append({"path": f"{base}/{name}", "contents": "x\n"})
+    return mutated
+
+
+def test_rendered_artefacts_after_the_oracles_entries_pass():
+    oracle = _load("multicore_rpmsg-aen")
+    allowed, failing = s.diff_plans(
+        s.normalize_plan(oracle),
+        s.normalize_plan(_with_extras(oracle, "alp.overlay", "cmake-args.txt")))
+    assert not failing
+    assert any(p.endswith("[+rendered]") for p, _, _ in allowed)
+
+
+def test_cmake_args_only_no_header_case_passes():
+    oracle = _load("multicore_rpmsg-aen")
+    assert not _fails(oracle, _with_extras(oracle, "cmake-args.txt"))
+
+
+def test_an_unknown_extra_artefact_fails():
+    oracle = _load("multicore_rpmsg-aen")
+    assert _fails(oracle, _with_extras(oracle, "alp.overlay", "surprise.txt"))
+    assert _fails(oracle, _with_extras(oracle, "alp-link-itcm.conf"))
+
+
+def test_a_modified_primary_artefact_fails_even_with_the_extras():
+    oracle = _load("multicore_rpmsg-aen")
+    mutated = _with_extras(oracle, "alp.overlay", "cmake-args.txt")
+    sl = mutated["slices"][_first_commanded_slice(mutated)]
+    sl["configArtefacts"][0]["path"] += ".moved"
+    assert _fails(oracle, mutated)
+
+
+def test_reordered_extras_fail():
+    oracle = _load("multicore_rpmsg-aen")
+    assert _fails(oracle, _with_extras(oracle, "cmake-args.txt", "alp.overlay"))
+
+
+def test_extras_inserted_before_the_oracles_entries_fail():
+    oracle = _load("multicore_rpmsg-aen")
+    mutated = _with_extras(oracle, "alp.overlay")
+    sl = mutated["slices"][_first_commanded_slice(mutated)]
+    sl["configArtefacts"].reverse()
     assert _fails(oracle, mutated)

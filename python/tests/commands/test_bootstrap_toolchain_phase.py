@@ -90,7 +90,7 @@ def _fake_west_sdk_install_writes(install_dir_arg_index: int, *, version="1.0.1"
     left there (`sdk_version`, the compiler binary path) and returns success
     -- the "stubbed fetch" the task calls for, never a real network call."""
 
-    def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
+    def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):  # noqa: ARG001
         if "install" in argv and "sdk" in argv:
             install_dir = Path(argv[install_dir_arg_index])
             (install_dir / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True, exist_ok=True)
@@ -660,7 +660,7 @@ def _echoing_rate_limit_failure(seen: dict):
     `--personal-access-token <token>` to the argv.
     """
 
-    def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
+    def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):  # noqa: ARG001
         # `self.planned.append(list(argv))` is the FIRST thing the real
         # `Runner.run` does, and `planned` is `data.plannedCommands`. Without
         # it here, monkeypatching `run` wholesale leaves `runner.planned`

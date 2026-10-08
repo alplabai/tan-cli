@@ -28,6 +28,16 @@ from ..som_metadata import _sku_family
 from . import _e1m_gpio_canonical
 
 
+class DtsOverlayUnavailable(OrchestratorError):
+    """The board has no header under `include/alp/boards/` to render from.
+
+    tan adaptation: upstream `sys.exit`s here and `buildplan._slice_dts_overlay`
+    converts that to its own `DtsOverlayUnavailable`; in `tan`'s process a
+    `SystemExit` is unacceptable (see the module docstring), so the emitter
+    raises the buildplan's type directly (`buildplan` re-exports this class).
+    """
+
+
 # ---------------------------------------------------------------------
 # DTS overlay emission (v0.3: i2c / spi / uart / pwm / gpio aliases)
 # ---------------------------------------------------------------------
@@ -406,7 +416,7 @@ def _emit_dts_overlay(
 
     header_path = _board_header_path(board_name, REPO)
     if not header_path.is_file():
-        raise OrchestratorError(
+        raise DtsOverlayUnavailable(
             f"no board header at "
             f"{header_path.relative_to(REPO)} for board '{board_name}' "
             f"-- DTS overlay emission requires one.")

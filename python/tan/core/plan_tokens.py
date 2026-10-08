@@ -51,11 +51,17 @@ the same as its siblings. `appDir` is nullable per the SDK schema (a Yocto
 slice built from the stock-image token has none) -- `None` passes through
 untouched, the same as `command.cwd`.
 """
+import re
 import sys
 from dataclasses import dataclass, replace
 from typing import Any
 
-from tan.core.build_plan import BuildPlan, Slice, SliceCommand
+from tan.core.build_plan import (
+    DEFERRED_PLACEHOLDER_NAME,
+    BuildPlan,
+    Slice,
+    SliceCommand,
+)
 
 PLAN_PATH_MODE_TOKENED = "tokened"
 
@@ -87,6 +93,95 @@ class TokenValues:
     toolchain_root: str | None
 
 
+#: The artefact kinds a placeholder may stay in, told apart by the artefact's
+#: file name (the only thing a plan carries about it). `alp.conf` and every
+#: other `*.conf` except `local.conf` is a Zephyr Kconfig fragment; `local.conf`
+#: is a Yocto bitbake fragment. A `.cmake` file (`alp-baremetal.cmake`, read by
+#: `-DCMAKE_PROJECT_INCLUDE`) or anything unrecognised is never exempt: CMake
+#: WOULD expand `${NAME}`, to empty or to a host value.
+KIND_KCONFIG = "kconfig"
+KIND_BITBAKE = "bitbake"
+
+PLAN_TOKEN_NAMES = frozenset(
+    t[2:-1] for t in (TOKEN_SDK_ROOT, TOKEN_PROJECT_ROOT, TOKEN_PYTHON, TOKEN_TOOLCHAIN_ROOT)
+)
+_BRACE_NAME = re.compile(r"\$\{(" + DEFERRED_PLACEHOLDER_NAME.pattern + r")\}")
+
+
+def artefact_kind(path: str) -> str | None:
+    """`KIND_KCONFIG` / `KIND_BITBAKE`, or `None` for a file a placeholder
+    must never stay in."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if name == "local.conf":
+        return KIND_BITBAKE
+    if name.endswith(".conf"):
+        return KIND_KCONFIG
+    return None
+
+
+@dataclass(frozen=True)
+class DeferredPlaceholder:
+    """A `${NAME}` left standing in a `configArtefacts[*].contents` value on
+    purpose (tan-cli#1302). `live_kconfig` is True when it sits on a
+    non-comment line of a Kconfig fragment: Kconfig does not expand `${NAME}`,
+    so the firmware would carry the literal text."""
+
+    name: str
+    field: str
+    live_kconfig: bool = False
+
+
+def _line_is_comment(text: str, start: int) -> bool:
+    line_start = text.rfind("\n", 0, start) + 1
+    return text[line_start:start].lstrip().startswith("#")
+
+
+class DeferredPolicy:
+    """Which leftover `${NAME}` values a config artefact may keep (tan-cli#1302).
+
+    `listed` is the plan's own `deferredPlaceholders` (alp-sdk#2696), the
+    ONLY source: a name is admitted when the plan lists it, and nothing is
+    admitted when the plan carries no such key (`None`) -- every plan tan's
+    own planner renders carries one, so an absent key means an older or
+    hand-written plan, and that keeps the unresolved-token refusal.
+
+    `exempted` collects every placeholder admitted, in encounter order -- the
+    caller reports them.
+    """
+
+    def __init__(self, listed: tuple[str, ...] | None) -> None:
+        self._listed = frozenset(listed) if listed is not None else None
+        self.exempted: list[DeferredPlaceholder] = []
+
+    @property
+    def has_plan_list(self) -> bool:
+        return self._listed is not None
+
+    @staticmethod
+    def hintable(token: str, artefact_path: str) -> bool:
+        """Whether a refusal of `token` in this artefact is one a plan
+        `deferredPlaceholders` entry would have cured."""
+        m = _BRACE_NAME.fullmatch(token)
+        return (
+            m is not None
+            and m.group(1) not in PLAN_TOKEN_NAMES
+            and artefact_kind(artefact_path) is not None
+        )
+
+    def admit(self, field: str, token: str, artefact_path: str, text: str, start: int) -> bool:
+        """Record and return True when `token` (a full `${...}` string found
+        at `start` in `text`, the contents of the artefact at `artefact_path`)
+        may stay."""
+        if not self.hintable(token, artefact_path):
+            return False
+        name = _BRACE_NAME.fullmatch(token).group(1)  # type: ignore[union-attr]
+        if self._listed is None or name not in self._listed:
+            return False
+        live = artefact_kind(artefact_path) == KIND_KCONFIG and not _line_is_comment(text, start)
+        self.exempted.append(DeferredPlaceholder(name=name, field=field, live_kconfig=live))
+        return True
+
+
 @dataclass(frozen=True)
 class DemotedSlice:
     """A slice whose fields still name `${TOOLCHAIN_ROOT}` with no host
@@ -109,12 +204,15 @@ class LeftoverToken(PlanTokenError):
     5th token this CLI doesn't resolve), an unterminated `${` (truncation/
     typo), or a plan bug."""
 
-    def __init__(self, field: str, token: str) -> None:
+    def __init__(self, field: str, token: str, deferrable: bool = False) -> None:
         super().__init__(
             f"plan field `{field}` still contains an unresolved token `{token}` after substitution"
         )
         self.field = field
         self.token = token
+        #: A config-artefact `${NAME}` that a plan `deferredPlaceholders`
+        #: entry would have admitted (tan-cli#1302).
+        self.deferrable = deferrable
 
 
 class UnresolvedToolchainRoot(PlanTokenError):
@@ -220,7 +318,13 @@ def _find_brace_token_from(value: str, offset: int) -> tuple[int, str] | None:
     return start, rest[: end + 1]
 
 
-def _sub_field_lenient(field: str, raw: str, values: TokenValues) -> tuple[str, bool]:
+def _sub_field_lenient(
+    field: str,
+    raw: str,
+    values: TokenValues,
+    deferred: DeferredPolicy | None = None,
+    artefact_path: str = "",
+) -> tuple[str, bool]:
     """Substitute `values` into `raw`, then scan the WHOLE result for every
     remaining `${...}`-shaped token -- not just the first: a field can carry
     BOTH an unresolved `${TOOLCHAIN_ROOT}` and a genuinely unknown token, and
@@ -239,6 +343,13 @@ def _sub_field_lenient(field: str, raw: str, values: TokenValues) -> tuple[str, 
             break
         start, token = found
         if token != TOKEN_TOOLCHAIN_ROOT:
+            if deferred is not None:
+                if deferred.admit(field, token, artefact_path, substituted, start):
+                    offset = start + len(token)
+                    continue
+                raise LeftoverToken(
+                    field, token, deferrable=deferred.hintable(token, artefact_path)
+                )
             raise LeftoverToken(field, token)
         # Reaching here means values.toolchain_root is unresolved: `_apply`
         # already replaced every occurrence when a value WAS resolved.
@@ -272,7 +383,10 @@ def _substitute_artefact(field: str, art: dict[str, Any], values: TokenValues) -
 
 
 def _substitute_artefact_lenient(
-    field: str, art: dict[str, Any], values: TokenValues
+    field: str,
+    art: dict[str, Any],
+    values: TokenValues,
+    deferred: DeferredPolicy | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """The slice-owned variant of `_substitute_artefact`: `configArtefacts`
     live inside a slice, so an unresolved `${TOOLCHAIN_ROOT}` in one is
@@ -287,7 +401,9 @@ def _substitute_artefact_lenient(
     demoted_field = _record_first(path_field, path_unresolved, demoted_field)
 
     contents_field = f"{field}.contents"
-    contents_sub, contents_unresolved = _sub_field_lenient(contents_field, art["contents"], values)
+    contents_sub, contents_unresolved = _sub_field_lenient(
+        contents_field, art["contents"], values, deferred, path_sub
+    )
     demoted_field = _record_first(contents_field, contents_unresolved, demoted_field)
 
     out = dict(art)
@@ -325,7 +441,9 @@ def _substitute_command_lenient(
     return replace(cmd, cwd=new_cwd, args=new_args), demoted_field
 
 
-def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, str | None]:
+def _substitute_slice(
+    i: int, sl: Slice, values: TokenValues, deferred: DeferredPolicy | None = None
+) -> tuple[Slice, str | None]:
     """Substitute every field of one slice, leniently for
     `${TOOLCHAIN_ROOT}`: returns the first field that still names it
     unresolved, if any, so the caller can build a `DemotedSlice` -- but a
@@ -357,7 +475,7 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
     new_artefacts: list[dict[str, Any]] = []
     for j, art in enumerate(sl.config_artefacts):
         base = f"slices[{i}].configArtefacts[{j}]"
-        new_art, art_demoted = _substitute_artefact_lenient(base, art, values)
+        new_art, art_demoted = _substitute_artefact_lenient(base, art, values, deferred)
         new_artefacts.append(new_art)
         if art_demoted is not None:
             demoted_field = _record_first(art_demoted, True, demoted_field)
@@ -416,7 +534,7 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
 
 
 def substitute_plan_tokens(
-    plan: BuildPlan, values: TokenValues
+    plan: BuildPlan, values: TokenValues, deferred: DeferredPolicy | None = None
 ) -> tuple[BuildPlan, list[DemotedSlice]]:
     """ONE blind string-substitution pass over every path-bearing string
     field of `plan`, swapping the four literal tokens for `values`. A no-op
@@ -432,6 +550,11 @@ def substitute_plan_tokens(
     same token surviving in `boardYaml`/`sharedArtefacts[]` (no owning
     slice) is still the hard `UnresolvedToolchainRoot` this pass always
     raised.
+
+    `deferred` (tan-cli#1302) lets a leftover `${NAME}` that the policy admits
+    stay, byte-identical, in a slice's `configArtefacts[*].contents` -- and
+    nowhere else; `deferred.exempted` reports them. A demoted slice's
+    admissions are dropped with its stripped artefacts.
 
     Ordering matches the Rust oracle: `boardYaml` first (hard site), then
     every slice in order (each slice's own `configArtefacts` substituted
@@ -451,8 +574,11 @@ def substitute_plan_tokens(
     demoted: list[DemotedSlice] = []
     new_slices: list[Slice] = []
     for i, sl in enumerate(plan.slices):
-        new_slice, demoted_field = _substitute_slice(i, sl, values)
+        mark = len(deferred.exempted) if deferred is not None else 0
+        new_slice, demoted_field = _substitute_slice(i, sl, values, deferred)
         if demoted_field is not None:
+            if deferred is not None:
+                del deferred.exempted[mark:]
             demoted.append(DemotedSlice(slice_index=i, core_id=sl.core_id, field=demoted_field))
             # Strip AFTER the slice's fields (including these artefacts' own
             # contents) have been fully scanned -- a ${UNKNOWN} inside a

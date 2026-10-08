@@ -2026,11 +2026,11 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
     ok_message = (
         f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}, signed ATOC -> "
-        f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
+        f"{atoc_address} via J-Link ({device}); cache-verified and PIN-reset"
         if app_address is not None
         else (
             f"{FLOW_D_METHOD}[{inp.core_id}]: signed ATOC (app embedded) -> "
-            f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
+            f"{atoc_address} via J-Link ({device}); cache-verified and PIN-reset"
         )
     )
     return FlashPlan(

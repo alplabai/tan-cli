@@ -203,12 +203,36 @@ def _read_text(path: str) -> str | None:
         return None
 
 
+def _minus_off_budget_ram(
+    sizes: tuple[int, int], elf: str, spans: tuple[tuple[int, int], ...]
+) -> tuple[int, int]:
+    """`sizes` with the RAM that the ELF places inside *spans* removed; unchanged
+    when there are no spans or the section headers cannot be read."""
+    if not spans:
+        return sizes
+    raw = _read_bytes(elf)
+    if raw is None:
+        return sizes
+    whole = sizes_from_elf_sections(raw)
+    kept = sizes_from_elf_sections(raw, spans)
+    if whole is None or kept is None:
+        return sizes
+    return sizes[0], max(sizes[1] - (whole[1] - kept[1]), 0)
+
+
 def _extract_sizes(
-    elf_candidates: list[str], footprint_dirs: list[str], size_bin: str | None
+    elf_candidates: list[str],
+    footprint_dirs: list[str],
+    size_bin: str | None,
+    off_budget_spans: tuple[tuple[int, int], ...] = (),
 ) -> tuple[tuple[int, int] | None, str | None, str]:
     """`(sizes, source_label, probed_elf)` via the best available source, in the
     oracle's order: the size tool (only if the elf exists), then the elf's own
     section headers, then `rom.json` + `ram.json`.
+
+    *off_budget_spans* (tan-cli#1402): writable sections linked inside one (SRAM0
+    under an ITCM link) are not counted as RAM. The size tool cannot see section
+    addresses, so its RAM column is corrected by the section reader's difference.
 
     `probed_elf` is the path named in a `not-built` note -- the FIRST candidate,
     which is the one the oracle would have named.
@@ -219,13 +243,14 @@ def _extract_sizes(
         if size_bin is not None:
             sizes = _sizes_from_size_tool(size_bin, elf)
             if sizes is not None:
+                sizes = _minus_off_budget_ram(sizes, elf, off_budget_spans)
                 return sizes, "size-tool", elf_candidates[0]
         # Middle rung: no size tool, or it failed to parse -- read the section
         # headers directly so a present elf is still measured. The `pyelftools`
         # label is kept for JSON parity with the retired command.
         raw = _read_bytes(elf)
         if raw is not None:
-            sizes = sizes_from_elf_sections(raw)
+            sizes = sizes_from_elf_sections(raw, off_budget_spans)
             if sizes is not None:
                 return sizes, "pyelftools", elf_candidates[0]
     for directory in footprint_dirs:
@@ -530,13 +555,14 @@ def _measure_slice(
             note="no Zephyr image (Yocto/baremetal)",
         )
 
+    budget = _resolve_slice_budget(
+        sku, core_id, metadata_root, warnings=warnings, skipped=skipped
+    )
     sizes, source, probed_elf = _extract_sizes(
         slice_elf_candidates(slice_, build_root),
         slice_footprint_dirs(slice_, build_root),
         size_bin,
-    )
-    budget = _resolve_slice_budget(
-        sku, core_id, metadata_root, warnings=warnings, skipped=skipped
+        budget.ram_off_budget_spans,
     )
 
     # tan-cli#499 defect 2: `size` never consulted the manifest `status`, so a

@@ -630,6 +630,15 @@ jobs:
       # `alp_template.py`, `alp_project_emit/hw_info.py` and
       # `alp_cli/validator.py` all changed in range.
       #
+      # `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF`,
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` and
+      # `HAND_PORT_PINNED_SDK_COMMIT`, `planner_oracle/PROVENANCE.txt` and the
+      # vendored scaffold's vendor point -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the audit (#2705/#2735/#2673/#2674/#2677/#2679/#2695/
+      # #2678/#2653/#2670). `STRICT_LOADERS_PINNED_SDK_COMMIT` stays put
+      # (`scripts/strict_loaders.py` unchanged in range).
+      #
       # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
       # between them. `python/scripts/pin_move_verify.py`'s
       # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
@@ -643,7 +652,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 34c11c9de04e264fdcab2bc0d58b328d9d117ca8
+          ref: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

@@ -48,17 +48,17 @@ def _image(build_dir, flash_runner="alif_flash", modules_txt=None):
     (build_dir / "zephyr" / "zephyr.bin").write_bytes(b"\x00")
     if flash_runner is not None:
         (build_dir / "zephyr" / "runners.yaml").write_text(
-            f"runners:\n- {flash_runner}\n\nflash-runner: {flash_runner}\n", encoding="utf-8"
+            f"runners:\n- {flash_runner}\n\nflash-runner: {flash_runner}\n", encoding="utf-8", newline="\n"
         )
     if modules_txt is not None:
-        (build_dir / "zephyr_modules.txt").write_text(modules_txt, encoding="utf-8")
+        (build_dir / "zephyr_modules.txt").write_text(modules_txt, encoding="utf-8", newline="\n")
 
 
 def _module(root, source):
     """An alp-sdk module checkout carrying `source` as its alif_flash runner."""
     runners = root / "scripts" / "west_commands" / "runners"
     runners.mkdir(parents=True)
-    (runners / "alif_flash.py").write_text(source, encoding="utf-8")
+    (runners / "alif_flash.py").write_text(source, encoding="utf-8", newline="\n")
     return f'"alp-sdk":"{root.as_posix()}":"{root.as_posix()}/zephyr"\n'
 
 
@@ -87,14 +87,14 @@ def _project(tmp_path, *, runner_source=GUARDED_RUNNER, flash_runner="alif_flash
     (build_dir / "zephyr" / "zephyr.bin").write_bytes(b"\x00")
     if flash_runner is not None:
         (build_dir / "zephyr" / "runners.yaml").write_text(
-            f"runners:\n- {flash_runner}\n\nflash-runner: {flash_runner}\n", encoding="utf-8"
+            f"runners:\n- {flash_runner}\n\nflash-runner: {flash_runner}\n", encoding="utf-8", newline="\n"
         )
     sdk = tmp_path / "sdk"
     (sdk / "scripts" / "west_commands" / "runners").mkdir(parents=True)
-    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="\n")
     if runner_source is not None:
         (sdk / "scripts" / "west_commands" / "runners" / "alif_flash.py").write_text(
-            runner_source, encoding="utf-8"
+            runner_source, encoding="utf-8", newline="\n"
         )
     (tmp_path / "build" / "system-manifest.yaml").write_text(
         "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
@@ -119,7 +119,7 @@ def _flash(tmp_path, monkeypatch, *, rc=0, verdict=None, raw=None, dry_run=False
     tools.mkdir(exist_ok=True)
     for name in ("west", "JLinkExe"):
         tool = tools / (f"{name}.exe" if os.name == "nt" else name)
-        tool.write_text("", encoding="utf-8")
+        tool.write_text("", encoding="utf-8", newline="\n")
         if os.name != "nt":
             os.chmod(tool, 0o755)
     monkeypatch.setenv("PATH", str(tools))
@@ -145,7 +145,7 @@ def _flash(tmp_path, monkeypatch, *, rc=0, verdict=None, raw=None, dry_run=False
             verdict_file = os.path.join(build_dir, "alif_flash", "atoc-guard.json")
             os.makedirs(os.path.dirname(verdict_file), exist_ok=True)
             text = step_raw if step_raw is not None else json.dumps(step_verdict, indent=2) + "\n"
-            with open(verdict_file, "w", encoding="utf-8") as handle:
+            with open(verdict_file, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
         return flash_cmd._Outcome(
             success=step_rc == 0, returncode=step_rc, captured=True,
@@ -308,7 +308,7 @@ def test_a_stale_verdict_from_an_earlier_run_is_not_this_runs_verdict(tmp_path, 
     build_dir = _project(tmp_path)
     old = build_dir / "alif_flash" / "atoc-guard.json"
     old.parent.mkdir()
-    old.write_text(json.dumps(_verdict("refused-foreign", ["OLD_ENTRY"])), encoding="utf-8")
+    old.write_text(json.dumps(_verdict("refused-foreign", ["OLD_ENTRY"])), encoding="utf-8", newline="\n")
     _exit, _data, issues, _text, _sdk = _flash(tmp_path, monkeypatch, rc=1)
     assert _codes(issues) == ["flash.entry-failed"], issues
     assert "OLD_ENTRY" not in issues[0].message
@@ -440,7 +440,7 @@ def test_a_refusal_in_json_mode_is_one_envelope_and_a_silent_stderr(tmp_path):
         f"printf '%s' '{verdict}' > \"$3/alif_flash/atoc-guard.json\"\n"
         "echo 'FATAL ERROR: refusing to burn' 1>&2\n"
         "exit 1\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     os.chmod(west, 0o755)
     package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -557,7 +557,7 @@ def test_the_runner_checked_is_the_one_the_build_used_not_the_bound_sdk(tmp_path
     not mark it guarded, must not pass the flag, and must name the file."""
     build_dir = _project(tmp_path)  # bound sdk: GUARDED_RUNNER
     modules = _module(tmp_path / "other-sdk", OLD_RUNNER)
-    (build_dir / "zephyr_modules.txt").write_text(modules, encoding="utf-8")
+    (build_dir / "zephyr_modules.txt").write_text(modules, encoding="utf-8", newline="\n")
     spawned = []
     exit_code, _data, issues, _text, _sdk = _flash(
         tmp_path, monkeypatch, replace_atoc=True, spawned=spawned
@@ -575,7 +575,7 @@ def test_the_runner_checked_is_the_one_the_build_used_not_the_bound_sdk(tmp_path
 def test_a_guarded_build_module_is_honoured_when_the_bound_sdk_is_older(tmp_path, monkeypatch):
     build_dir = _project(tmp_path, runner_source=OLD_RUNNER)
     modules = _module(tmp_path / "new-sdk", GUARDED_RUNNER)
-    (build_dir / "zephyr_modules.txt").write_text(modules, encoding="utf-8")
+    (build_dir / "zephyr_modules.txt").write_text(modules, encoding="utf-8", newline="\n")
     spawned = []
     exit_code, _data, issues, _text, _sdk = _flash(
         tmp_path, monkeypatch, replace_atoc=True, spawned=spawned,
@@ -589,7 +589,7 @@ def test_a_guarded_build_module_is_honoured_when_the_bound_sdk_is_older(tmp_path
 def test_a_build_listing_no_alp_sdk_module_is_unguarded(tmp_path, monkeypatch):
     build_dir = _project(tmp_path)
     (build_dir / "zephyr_modules.txt").write_text('"hal_alif":"/h":"/h/zephyr"\n',
-                                                  encoding="utf-8")
+                                                  encoding="utf-8", newline="\n")
     _exit, _data, issues, _text, _sdk = _flash(tmp_path, monkeypatch)
     assert _codes(issues) == ["flash.atoc-guard-unavailable"], issues
     assert "that build lists no alp-sdk module" in issues[0].message
@@ -635,7 +635,7 @@ def test_a_relative_build_dir_names_the_tree_west_writes_to(tmp_path, monkeypatc
     _manifest(tmp_path, [("m55_he", "app/zephyr/zephyr.bin", "{build_dir: out/he}")])
     stale = west_top / "out" / "he" / "alif_flash" / "atoc-guard.json"
     stale.parent.mkdir(parents=True)
-    stale.write_text(json.dumps(_verdict("refused-foreign", ["OLD"])), encoding="utf-8")
+    stale.write_text(json.dumps(_verdict("refused-foreign", ["OLD"])), encoding="utf-8", newline="\n")
     spawned = []
     _exit, _data, issues, _text, _sdk = _flash(
         tmp_path, monkeypatch, rc=1, replace_atoc=True, spawned=spawned,
@@ -660,7 +660,7 @@ def _sysbuild(tmp_path, domains):
     sb.mkdir(parents=True)
     rows = "".join(f"- name: {d}\n  build_dir: {(sb / d).as_posix()}\n" for d in domains)
     (sb / "domains.yaml").write_text(
-        f"default: {domains[-1]}\nbuild_dir: {sb.as_posix()}\ndomains:\n{rows}", encoding="utf-8"
+        f"default: {domains[-1]}\nbuild_dir: {sb.as_posix()}\ndomains:\n{rows}", encoding="utf-8", newline="\n"
     )
     for d in domains:
         _image(sb / d)
@@ -703,7 +703,7 @@ def test_a_success_after_a_failed_stale_removal_says_the_verdict_is_unknown(tmp_
 
     build_dir = tmp_path / "b"
     (build_dir / "alif_flash").mkdir(parents=True)
-    (build_dir / "alif_flash" / "atoc-guard.json").write_text("{}", encoding="utf-8")
+    (build_dir / "alif_flash" / "atoc-guard.json").write_text("{}", encoding="utf-8", newline="\n")
     stale = flash_atoc_guard.clear_stale_verdict(str(build_dir), remove=refuse)
     assert stale is not None and "could not be removed first (denied)" in stale
     message, warning, sections = flash_atoc_guard.guarded_success(

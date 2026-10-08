@@ -71,3 +71,66 @@ How it was captured: identical procedure to the first recording above
 (`fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`, the same
 `args.txt`), re-run against the shipping CLI after `list` landed. Still fully
 deterministic, still no `env.json`.
+
+Re-recorded on : 2026-10-07
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#1286
+Branch         : feat/1286-model-zoo (off dev @ c231b714)
+
+What changed in the golden (re-record)
+---------------------------------------
+Two words added to the message's trailing inventory, nothing else moved,
+`expected.exit` still 1:
+
+    - "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list."
+    + "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list, zoo, add."
+
+Why: `python/tan/commands/model_cmd.py`'s `SUBCOMMANDS` gained `zoo` and `add`
+(tan-cli#1286: browse and adopt the bound alp-sdk's `metadata/model_zoo/`).
+The refusal's trailing inventory is rendered straight from `SUBCOMMANDS`
+(`', '.join(SUBCOMMANDS)`), so the new names ARE the wire change this golden
+exists to catch. `data` is untouched (still `_empty_data(None)`'s `build`-shaped
+fallback).
+
+How it was captured: identical procedure to the first recording above,
+re-run against the shipping CLI after `zoo`/`add` landed. Still fully
+deterministic, still no `env.json`.
+
+Re-recorded on : 2026-10-07
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#1287
+Branch         : feat/1287-model-host-tier (stacked on feat/1286-model-zoo)
+
+What changed in the golden (re-record)
+---------------------------------------
+One word added to the message's trailing inventory, nothing else moved,
+`expected.exit` still 1:
+
+    - "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list, zoo, add."
+    + "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list, zoo, add, prep."
+
+Why: `SUBCOMMANDS` gained `prep` (tan-cli#1287: host-tier INT8 quantize + accuracy report). The refusal's trailing inventory is rendered straight from
+`SUBCOMMANDS`, so the new names ARE the wire change this golden exists to
+catch. `data` is untouched. Capture procedure identical to the first
+recording; still fully deterministic, still no `env.json`.
+
+Re-recorded on : 2026-10-07
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#1287
+Branch         : feat/1287-model-host-tier (stacked on feat/1286-model-zoo)
+
+What changed in the golden (re-record)
+---------------------------------------
+Two words added to the message's trailing inventory, nothing else moved,
+`expected.exit` still 1:
+
+    - "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list, zoo, add, prep."
+    + "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list, zoo, add, prep, run, ab."
+
+Why: `SUBCOMMANDS` gained `run` and `ab` (tan-cli#1287: host reference run and A/B compare). The refusal's trailing inventory is rendered straight from
+`SUBCOMMANDS`, so the new names ARE the wire change this golden exists to
+catch. `data` is untouched. Capture procedure identical to the first
+recording; still fully deterministic, still no `env.json`.

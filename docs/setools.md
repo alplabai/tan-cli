@@ -58,34 +58,110 @@ manifest today typically carries only `jlink_flash_device` and
 `slot0_load_address` — alp-sdk's emit does not sign anything itself),
 `tan flash` drives one `app-gen-toc` sign step for you:
 
-1. copies the build's raw `.bin` into `<SETOOLS_DIR>/build/images/`;
-2. writes an app-only ATOC config to `<SETOOLS_DIR>/build/config/` — no
-   `"DEVICE"` key: the on-module factory device config is already correct for
-   your part, and this step must not overwrite it;
-3. runs `app-gen-toc`, inside `SETOOLS_DIR`, against that config;
-4. reads the resulting ATOC's MRAM placement back out of
-   `<SETOOLS_DIR>/build/app-package-map.txt`. This file is **APPEND-mode** —
-   the accumulated sign record for the whole install, including hand-runs
-   you did outside `tan` — so `tan` never truncates or deletes it
-   (tan-cli#373): it records the file's size and mtime beforehand and
-   refuses if either is unchanged after a zero exit (a soft failure that
-   would otherwise read back a stale, unrelated address as if it were
-   fresh), and separately confirms `<SETOOLS_DIR>/build/AppTocPackage.bin`
-   (which — unlike the map — IS overwritten whole every run, so there is no
-   history in it to protect) was actually rewritten before trusting either.
+1. makes a **private scratch overlay** of your SETOOLS install in the system
+   temp directory (tan-cli#1325) — small directories copied, the large `alif/`
+   firmware directory and the top-level tools symlinked, a fresh `build/` —
+   and never writes into the install itself;
+2. copies the build's raw `.bin` into the scratch `build/images/` and writes
+   the ATOC config to the scratch `build/config/` (the `DEVICE` entry: see
+   below);
+3. runs the scratch copy of `app-gen-toc` inside the scratch tree against that
+   config;
+4. reads the resulting ATOC's MRAM placement, size and entry list back out of
+   the scratch `build/app-package-map.txt`, and hands J-Link the scratch
+   `build/AppTocPackage.bin`.
+
+Your SETOOLS install is **byte-identical** afterwards: `build/AppTocPackage.bin`,
+`build/app-package-map.txt` (which is APPEND-mode, the accumulated sign record
+including your hand-runs), `build/images/`, `build/config/` and the SETOOLS logs
+are all left exactly as they were, and no lock file or copy-out directory is
+created in it. Because nothing shared is written, two `tan flash` runs against
+one install can no longer cross-pair (tan-cli#380) without any lock. The scratch
+tree is removed when the entry finishes; the entry reports it as
+`setools: {dir, source, scratch, scratchRemoved}`.
 
 A successful sign names which SETOOLS install did it (`--setools-dir`,
 `SETOOLS_DIR`, or `flash_args.setools_dir` — see `setools.source` in `tan
 flash`'s own output), not only a failed one.
 
-Under `--dry-run` none of this touches your SETOOLS install or spawns
-`app-gen-toc` at all — `tan flash --dry-run` prints what it *would* sign and
-stops there.
+Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
+`app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
+placement. They still never spawn `JLinkExe`.
+
+### The `DEVICE` entry (tan-cli#1322)
+
+The device configuration is an entry *inside* the ATOC package, and a Flow D
+write replaces the whole table, so an ATOC signed without it **deletes** the
+resident one rather than preserving it (measured on an evk-02: the resident
+package `0x15C40` carried `DEVICE` `0x138` + the app; the app-only replacement
+was `0xA50`). `tan flash` therefore signs a `DEVICE` entry by default, in the
+exact shape alp-sdk's bench recipe uses (`binary`, `version "0.5.00"`,
+`signed: true`), ahead of the app entry. Its source is, in order:
+
+1. `flash_args.setools_device_config` — a path (relative paths resolve against
+   the build root like every other manifest path); a path that does not exist is
+   refused, never swapped for the stock file;
+2. SETOOLS' own `<SETOOLS_DIR>/build/config/app-device-config.json`.
+
+With neither, the run refuses with `flash.device-config-missing` (also under
+`--dry-run`, before `app-gen-toc` is spawned). `--no-device-config` opts out and
+signs an app-only ATOC; the envelope then says
+`setools.deviceConfig.included: false` and the replacement note states that the
+resident `DEVICE` entry is deleted. The stock file carries firewall regions
+opened to `any_master`, HFXO trims and `SE_BOOT_INFO`; a CPU-only Zephyr app
+boots without it (proven), bus masters writing to SRAM0 are not.
+
+The whole-ATOC acknowledgement (`--atoc-unqueryable`) names the entries the new
+ATOC carries (`This ATOC names: DEVICE, m55_he.`). Flow D cannot enumerate what
+is resident, so the resident entries that will not be rewritten are listed only
+when you supply them as `flash_args.resident_atoc_entries: [DEVICE, ALP-HE, ...]`
+(read them off the SE-UART first with `maintenance -opt gettoc`); otherwise the
+text says the resident table is unknown.
 
 If you already resolved a signature yourself — an explicit `flash_args.atoc`
 + `flash_args.atoc_address`, or `flash_args.atoc_map` pointing at your own
 `app-package-map.txt` — none of the above runs; `tan` uses what you gave it
 verbatim.
+
+## Reviewing a Flow D write before arming it (tan-cli#1318)
+
+`tan flash --dry-run --format json` puts a `plan` block on every Flow D entry:
+`jlinkScript` (the exact Commander script, `exec DisableAutoUpdateFW` first),
+`argv`, `writes[]` as `{name, address, size, path, sectorSpan}`, and `atoc`
+`{address, size, entries, signedByTan}`. `sectorSpan` counts 16 KiB sectors
+(`first`, `end` exclusive, `count`, `bytes`) because the loader rewrites whole
+sectors and fills the remainder with 0xFF -- an ATOC of 2640 B at `0x8057F5B0`
+still rewrites the sector `0x8057C000`-`0x80580000`. For an ATOC tan signs, the
+placement and entry list come from `app-gen-toc` run in the scratch overlay, so
+they are what a real run will write; a dry run still never spawns the J-Link tool.
+
+### Interrupted runs and Windows
+
+The scratch tree is removed when the entry ends, including on an interrupt (it is
+registered before `app-gen-toc` starts). `SIGKILL` cannot run cleanup, so a killed
+`tan flash` leaves a `tan-setools-*` directory in the system temp directory; delete
+it by hand. On POSIX the signing keys inside it are a symlink into your install; on
+Windows without symlink privilege tan falls back to COPYING them, so there the
+leftover holds a copy of the keys -- remove it.
+
+## What a Flow D write reports, and what it proves (tan-cli#1321)
+
+`verifybin` compares the image against J-Link's flash **cache**, not the chip, so
+tan says `cache-verified`, never a bare "verified". The entry's `jlink` block
+carries the evidence: `dpidr` (the SW-DP ID the write transcript read, else the
+read-only preflight's, with `dpidrSource`), `transcriptPath` (a file under
+`<build>/flash-logs/` with the Commander script and both streams) and
+`transcriptTail`, `verification`, and `reset` / `resetFailures`. A transcript
+containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU may
+have not been reset` downgrades the message to `PIN-reset NOT confirmed` and
+raises `flash.jlink-reset-unconfirmed` (warning).
+
+`--readback` re-reads every written region in a **fresh** J-Link session
+(`savebin`), through the same probe-selection guard as the write, and compares
+sha256: `readback-verified` on a match, `flash.readback-mismatch` on a
+difference. A fresh session is stronger than the cache but still weaker than
+reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
+on the bench.
 
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
@@ -147,11 +223,10 @@ Its scope is the same table as the advisory (tan-cli#609): Flow D today. It was
 tan-cli#732), which left the AEN MRAM path — the genuine *customer* flash path
 of the two, the GD32 bridge being factory-programmed by Alp Lab — outside both
 halves of the guard. On Flow D the refusal fires ahead of the SETOOLS
-auto-sign, not merely ahead of the write:
-`app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
-`build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
-that correctly left slot0 byte-identical and still left the SETOOLS install
-mutated.
+auto-sign, not merely ahead of the write (tan-cli#512 measured a wrong-board
+abort that correctly left slot0 byte-identical but had already mutated the
+SETOOLS install; since tan-cli#1325 the sign no longer touches the install at
+all, and the ordering is kept as defence in depth).
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
 bench machine, where a wrong-board write is expensive and nobody is watching;
@@ -373,3 +448,93 @@ programming the GD32 will still need.
   refusal on the AEN bench scripts.
 - tan-cli#1267 — `--replace-atoc`: Flow A's half, reading the `alif_flash`
   runner's own pre-burn verdict (alp-sdk#2262, PR alp-sdk#2275).
+
+## `tan flash --ram`: is the probe on the HE core? (tan-cli#1354)
+
+A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds, and its
+`Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
+anything, `--ram` runs one read-only session (`connect`, then three `mem32` reads --
+no halt, no write) and decides from two independent facts:
+
+* **Primary -- the AP that reports `AP[n]: Core found`.** Its `APAddr` identifies the
+  core: HE `0x00300000`, HP `0x00200000` (alp-sdk `scripts/bench/aen/openocd-ram-run.sh:16-17`,
+  `changelog.d/2037-openocd-m55he-bench-core-selection.md:4`, `changelog.d/2025.md:31`).
+  The AP, its address, the `CPUID register` and the `Found Cortex-M55` line are reported
+  as `jlink.attachedCore` and `ram.coreCheck.ap`.
+* **Corroboration -- the ITCM alias.** A core's local ITCM at `0x0` is its own global
+  window (HE `0x58000000`: alp-sdk `metadata/socs/alif/ensemble/e8.json` `itcm_global_base`
+  at line 106; `docs/aen-bench-bringup.md:20`), so the 4 words read at `0x0` must equal the
+  4 words at the HE window. **The check reads only the local ITCM `0x0` and the HE window
+  `0x58000000` -- never the HP window `0x50000000`:** bench round 8 (2026-10-07, evk-02)
+  measured that reading it from the HE attach returns words without an error yet leaves the
+  M55-HE unhaltable until a PIN reset.
+
+Only an HE access port proceeds, and an HE access port whose local ITCM does not equal the
+HE window is a conflict that refuses. An HP access port refuses with
+`flash.ram-core-mismatch`; no placeable access port, or an unreadable check, refuses with
+`flash.ram-core-unconfirmed`. `--assume-he` overrides only that last, evidence-missing case
+(never HP evidence, never a conflict), at your own risk. After the load, the load session's
+own Core-found AP is compared with the check's: a different AP, or HP, fails the entry with
+`flash.ram-core-mismatch` and reports both (`jlink.attachedCore`, `jlink.attachedCoreAtLoad`).
+
+Halt/reset trouble in the load transcript (`CPU could not be halted`, `Could not find
+core`, `SYSRESETREQ has confused core`, `Reset: Failed`, `CPU may have not been reset`) is
+reported as `jlink.resetFailures` plus the `flash.jlink-reset-unconfirmed` warning, and the
+message says the load only worked through a J-Link fallback. The words read and the verdicts are in
+`ram.coreCheck`.
+
+A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
+(`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever
+tan cannot read SoC metadata: the `--ram` aperture refusal and the `tan debug-config`
+metadata notes (`tan size` keeps its own `size.som-schema-version-skipped`).
+
+## `tan probe`: read-only J-Link identity and memory read (tan-cli#1406)
+
+Two read-only questions that used to need raw `JLinkExe`. Neither verb halts, writes,
+erases, resets or runs anything: every generated Commander script is `connect` plus
+`mem32` reads and `exit` (a test scans for `w1`/`w2`/`w4`, `erase`, `loadbin`, `setpc`,
+`go`, `reset` and `halt`). Probe selection, the trusted J-Link binary and the
+`ShowEmuList` verification before each spawn are the ones `tan flash` uses, so a
+probe-selection refusal reuses `flash.probe-ambiguous` / `-not-found` /
+`-selector-conflict` / `-verify-failed` verbatim.
+
+```sh
+tan probe identify [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH] [--build-root DIR]
+tan probe read <addr> [<words>] [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH]
+```
+
+* `identify` runs the DPIDR preflight script first and reports `identity.{dpidr,
+  expectedDpidr, dpidrMatch, apAddr, cpuid, core, itcmVerdict, apVerdict, isolation}`. With a
+  built project it compares the SW-DP ID with the selected slice's `expect_dpidr`; a
+  difference (`probe.dpidr-mismatch`) or no ID (`probe.dpidr-unread`) exits 1 and **no further
+  session runs**. Only when the target is the M55-HE (`--core m55_he`, or the manifest's
+  selected slice is the HE) does it then run the `--ram` attach check (`mem32 0x0` and
+  `mem32 0x58000000`, bench-proven only from an HE attach). For an HP or unknown target the
+  verdict comes from the DPIDR banner's Core-found APAddr alone and `itcmVerdict` is
+  `not-checked`. An attach that contradicts `--core` is `probe.core-mismatch` (exit 1).
+  With no manifest, or no `expect_dpidr`, an info issue `probe.no-manifest` says the match was
+  skipped; an existing but unparsable manifest is the `probe.manifest-unusable` warning.
+* `read` returns `read.data` as hex words. `addr` is plain hex (`0x...`) or decimal, 4-byte
+  aligned; `words` defaults to 4 and is at most 256 (`probe.read-too-large`). Anything else
+  (including a range past 0xFFFFFFFF) is `probe.bad-argument`. It is one `mem32` session, and
+  its own banner is checked: the SW-DP ID must match an armed `expect_dpidr`, and the
+  Core-found AP (`read.attached`) must not contradict `--core`; otherwise the words are not
+  returned.
+* `read` refuses ANY overlap with `0x50000000`-`0x5FFFFFFF` on EVERY core
+  (`probe.read-unsafe-region`), before a J-Link is spawned: from the HE that window is the HP ITCM
+  alias (reading it leaves the core unhaltable until a PIN reset), and tan does not read it
+  from any attach.
+* `identify` skips the ITCM corroboration (`itcmVerdict: "not-checked"`) unless the target is
+  the HE AND session 1's banner placed the attach on the HE access port; it then emits the
+  info issue `probe.itcm-not-checked` naming the reason and the fix (`--core m55_he`). An AP
+  that contradicts the claimed core (`--core`, else the manifest's selected slice) is
+  `probe.core-mismatch`.
+* The manifest's selected slice supplies `jlink_serial` / `jlink_speed` / `jlink_device`
+  whether or not `expect_dpidr` is armed. Several slices that pin different serials need
+  `--core`. A part-number `jlink_device` is replaced by `Cortex-M55` and the report says so
+  (`jlink.device`, `jlink.deviceSubstitutedFrom`).
+* The envelope's `scripts` hold the exact text sent for each probe session, including the
+  `exec DisableAutoUpdateFW` first line; `guard.script` is the `ShowEmuList` verification
+  that runs before each of them. The full transcript is written to
+  `<build_root>/flash-logs/probe-<verb>-<ts>.log` (`$XDG_CACHE_HOME/tan/probe-logs`, else
+  `~/.cache/tan/probe-logs`, when there is no build root; the oldest are pruned) and reported as `transcriptPath`. Temp scripts are `tan-probe-*.jlink`.
