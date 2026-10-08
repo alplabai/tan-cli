@@ -309,7 +309,10 @@ What those commands do:
    This is deliberate, not a bug: a fresh checkout must not silently
    reprogram an attached module. On an Alif Flow D slice (`alif_mram_jlink`,
    the AEN MRAM path) the write also needs `--atoc-unqueryable`, a separate
-   acknowledgement that it replaces the board's entire ATOC -- see
+   acknowledgement that it replaces the board's entire ATOC. A Flow A slice
+   (`zephyr_west_flash` on the `alif_flash` runner, over the SE-UART) is
+   checked by the runner itself, which refuses to delist a resident entry;
+   `--replace-atoc` overrides that check, and is never the same flag -- see
    [SETOOLS setup](docs/setools.md).
 
 Run `tan doctor` if setup or toolchain discovery fails; its `toolchain` check
@@ -347,7 +350,7 @@ move.
 | Check a project | `tan validate` |
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
-| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write — see [SETOOLS setup](docs/setools.md)) |
+| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write; a Flow A slice refused by the `alif_flash` runner's ATOC guard takes `--replace-atoc` instead — see [SETOOLS setup](docs/setools.md)) |
 | RAM-run an AEN image over J-Link (no MRAM write) | `tan flash --ram --core m55_he --confirm` (see the note below on `DEMCR.TRCENA`) |
 | Read the attached SW-DP / core, or a few words of memory (read-only J-Link) | `tan probe identify`, `tan probe read 0x80010000 4` (see [`tan probe`](docs/setools.md#tan-probe-read-only-j-link-identity-and-memory-read-tan-cli1406)) |
 | Inspect firmware size | `tan size` |

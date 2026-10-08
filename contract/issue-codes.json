@@ -2172,6 +2172,54 @@
       "note": "Added closing tan-cli#1354 (a follow-up from the tan-cli#1313 review). EMISSION CONDITION: `tan flash --ram` could not confirm that the probe's generic Cortex-M55 attach landed on the M55-HE core. Before loading, tan reads 4 words at the local ITCM 0x0 and at both cores' global ITCM windows (HE 0x58000000, HP 0x50000000 -- alp-sdk metadata/socs/alif/ensemble/e8.json itcm_global_base, docs/aen-bench-bringup.md:20) with three read-only mem32 commands (no halt, no write); a core's local ITCM is its own global window, so the local view must equal EXACTLY one. This code fires when it equals both (an erased or identical ITCM proves nothing), neither, or the local read is unreadable; the verdict and the words read are in data.entries[].ram.coreCheck. A confirmed HP attach is flash.ram-core-mismatch instead. Refused before the load, so nothing was written and no core was reset. Answered by selecting the HE core's debug port, or -- AT THE OPERATOR'S OWN RISK -- by --assume-he, which overrides only this unconfirmed case and never a confirmed HP. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.atoc-guard-refused",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1267, tan's half of alp-sdk#2262 (PR alp-sdk#2275). EMISSION CONDITION: a zephyr_west_flash entry whose west runner is alif_flash (flash_args.runner, else the flash-runner in the build's zephyr/runners.yaml -- for a single-domain sysbuild, the domain's), whose runner source has the guard (the alif_flash.py of the alp-sdk module the build used per its zephyr_modules.txt, the bound SDK's only when the build has no module list; it must carry both the '--replace-atoc' argument and the alp-sdk.alif-flash-atoc-guard.v1 schema), where `west flash` exited non-zero AND <build dir>/alif_flash/atoc-guard.json -- removed by tan before the spawn, so it is this attempt's -- parses as a consistent v1 verdict whose status is refused-foreign or refused-unverified. refused-foreign names every resident entry verbatim; when one of them is a section an EARLIER entry of the same run wrote, the message says the manifest cannot be Flow A-flashed one core after another and points at alp-sdk's flash-run-dualcore.sh, never at --replace-atoc; when one is the factory MCUBOOT- entry it points at the SDK's J-Link Option B. refused-unverified asks for the resident ATOC to be confirmed by hand first. Deliberately DISTINCT from flash.atoc-replacement-unacknowledged (Flow D, --atoc-unqueryable) and from flash.entry-failed; the two ATOC flags are never merged or aliased. A missing, malformed, unknown or inconsistent verdict never emits this code -- that stays flash.entry-failed with a note that the verdict could not be read. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.atoc-guard-unavailable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1267. EMISSION CONDITION, either of: (1) a zephyr_west_flash entry whose west runner resolves to alif_flash where the runner tan checks -- the alif_flash.py of the alp-sdk module the build used per its zephyr_modules.txt, the bound SDK's only when the build has no readable module list -- is missing, lacks the alp-sdk#2262 guard ('--replace-atoc' argument and v1 schema), or the build lists no alp-sdk module at all; emitted with or without --replace-atoc and on previews, the message names the file checked and where its path came from, and with the flag adds that it was NOT passed; (2) an entry tan treated as guarded where `west flash` SUCCEEDED but left no usable verdict -- the guard did not run for that write, most likely because west loaded a different runner than the one checked, so the write is reported as unguarded rather than silently as checked. A warning, not an error: the write itself behaves as it always has with that runner. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.replace-atoc-not-applicable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1267. EMISSION CONDITION: --replace-atoc was passed and this entry is not a zephyr_west_flash slice whose west runner is alif_flash -- a Flow D (alif_mram_jlink) entry (the message names --atoc-unqueryable as Flow D's own acknowledgement, which --replace-atoc never stands in for), any other backend, a west slice on another runner, a west slice whose runner tan could not learn (no flash_args.runner and no readable flash-runner in zephyr/runners.yaml), or a multi-domain sysbuild (the runner refuses those before its guard runs, alp-sdk#2274). The flag is not passed to that entry; the warning exists so it is never silently ignored. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.replace-atoc-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added by the tan-cli#1267 review. EMISSION CONDITION: --replace-atoc was passed and more than one entry of the run would carry it (more than one guarded alif_flash west entry after --core/--helper narrowing). The whole run is refused before anything is written, previews included. Each alif_flash write replaces the whole ATOC with only its own entry, so one override given to accept losing what is on the board now would also override every later write's guard into delisting what an earlier write of the same run had just put there. The message names every entry, --core CORE_ID / --helper NAME, and alp-sdk's flash-run-dualcore.sh for putting both M55 cores in one ATOC. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.replace-atoc-ignored",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added by the tan-cli#1267 review. EMISSION CONDITION: --replace-atoc was passed together with --ram. A RAM-run loads the image into RAM and never writes the ATOC, so the flag has nothing to act on; the warning exists so it is never silently dropped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "run.flash-flags-ignored",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "note": "Added by the tan-cli#1267 review. EMISSION CONDITION: `tan run` was given --replace-atoc and/or --atoc-unqueryable and did not flash (no --flash, a failed build, a stale manifest, or a native_sim/host target). Both flags only act on a write; without this warning an operator could believe an override or acknowledgement took effect. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",

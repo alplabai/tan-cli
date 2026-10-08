@@ -1164,18 +1164,29 @@ def zephyr_build_dir(artefact: str) -> str:
     return parent
 
 
+def zephyr_west_build_dir(flash_args: Any, artefact: str) -> str:
+    """The `--build-dir` `plan_zephyr_west_flash` hands `west flash`:
+    `flash_args.build_dir`, else derived from the artefact. One definition,
+    shared with `tan.commands.flash_atoc_guard`, which reads the runner's
+    verdict out of this same directory (tan-cli#1267)."""
+    return _default(fa_str(flash_args, "build_dir"), zephyr_build_dir(artefact))
+
+
 def plan_zephyr_west_flash(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     """`zephyr_west_flash`: `west flash --build-dir <d> [--runner <r>] [--erase]
     [--hex-file <h>]`.
 
     `runner` is OPTIONAL -- when absent, `--runner` is omitted and `west flash`
     falls back to the board.cmake default runner (on an AEN board that is
-    `alif_flash`, i.e. Flow A over the SE-UART).
+    `alif_flash`, i.e. Flow A over the SE-UART). `--replace-atoc` is NOT added
+    here: whether it applies depends on the build's runner and the bound SDK's
+    runner source, both IO, so the caller appends it (tan-cli#1267,
+    `tan.core.atoc_guard`).
     """
     del which  # this backend probes nothing
     fa = inp.flash_args
     runner = fa_str(fa, "runner")
-    build_dir = _default(fa_str(fa, "build_dir"), zephyr_build_dir(inp.artefact))
+    build_dir = zephyr_west_build_dir(fa, inp.artefact)
     argv = ["west", "flash", "--build-dir", build_dir]
     if runner is not None:
         argv += ["--runner", runner]
@@ -1510,8 +1521,8 @@ def select_flash_method(target: FlashTarget) -> str | None:
     carries `expect_dpidr` -- a fact about what's published today, not an invariant of the emitter
     itself. It is also the fact that sizes the gap `docs/setools.md` records under tan-cli#1252:
     a planner-emitted AEN manifest dispatches Flow D and is covered by the whole-ATOC
-    acknowledgement, so what still reaches an ATOC unguarded, over Flow A, is a hand-written or
-    legacy manifest -- not the published catalogue.
+    acknowledgement, so what reaches an ATOC over Flow A is a hand-written or legacy manifest --
+    not the published catalogue, and guarded by the runner's own check (`tan.core.atoc_guard`).
     """
     method = target.flash_method or None
     if method == "zephyr_west_flash" and flow_d_available(target.flash_args):

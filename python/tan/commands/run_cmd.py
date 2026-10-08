@@ -265,6 +265,8 @@ def _run(
     # tests that call `_run` directly predate it and reach paths it never
     # touches.
     atoc_unqueryable: bool = False,
+    # tan-cli#1267: defaulted for the same reason.
+    replace_atoc: bool = False,
 ) -> tuple[ExitCode, dict[str, Any] | None, list[Issue], list[str]]:
     """Everything between the resolved paths and the envelope. Returns
     `(exit_code, data, issues, text_lines)`."""
@@ -299,22 +301,24 @@ def _run(
     manifest_written, native_sim_target = execute.last_manifest_write()
 
     action = decide_run_action(build_ok, native_sim_target, flash, manifest_written)
+    # tan-cli#1267 review: the two ATOC flags only mean something to a write.
+    ignored = _ignored_flash_flags(action, replace_atoc, atoc_unqueryable)
 
     if action in (RunAction.BUILD_FAILED, RunAction.BUILD_ONLY):
         text = _build_text_lines(build_data, build_issues)
         if action is RunAction.BUILD_ONLY and not json_mode:
             text.append("run: built; pass --flash to program the board.")
-        return build_exit, build_data, build_issues, text
+        return _with_ignored(ignored, (build_exit, build_data, build_issues, text))
 
     if action is RunAction.MANIFEST_STALE:
         issues = [*build_issues, Issue("run.manifest-stale", "error", _MANIFEST_STALE_MESSAGE)]
         text = _build_text_lines(build_data, build_issues) + [_MANIFEST_STALE_MESSAGE]
-        return ExitCode.RUNTIME_FAILURE, build_data, issues, text
+        return _with_ignored(ignored, (ExitCode.RUNTIME_FAILURE, build_data, issues, text))
 
     if action is RunAction.EXECUTE_NATIVE:
-        return _execute_native_arm(
+        return _with_ignored(ignored, _execute_native_arm(
             build_root, sdk_root, manifest_written, build_exit, build_data, build_issues, json_mode
-        )
+        ))
 
     # RunAction.FLASH: hardware target, `--flash`, this run's manifest write
     # confirmed -- reuse the native flash path, targeting the SAME project
@@ -341,8 +345,46 @@ def _run(
         # straight to the whole-ATOC guard. Without this line that command
         # would hit a refusal naming a flag `run` does not accept.
         atoc_unqueryable=atoc_unqueryable,
+        # tan-cli#1267: same reasoning -- with `dry_run=False` hardcoded, a
+        # Flow A slice whose runner refuses would name a flag `run` lacked.
+        replace_atoc=replace_atoc,
     )
     return flash_exit, flash_data, flash_issues, flash_text
+
+
+def _ignored_flash_flags(
+    action: RunAction, replace_atoc: bool, atoc_unqueryable: bool
+) -> str | None:
+    """The warning for `--replace-atoc`/`--atoc-unqueryable` on a `run` that
+    will not flash, or `None`. Both only act on a write; dropping them with
+    no word would let an operator believe an override or acknowledgement
+    took effect (tan-cli#1267 review)."""
+    flags = [
+        flag
+        for flag, given in (("--replace-atoc", replace_atoc), ("--atoc-unqueryable", atoc_unqueryable))
+        if given
+    ]
+    if action is RunAction.FLASH or not flags:
+        return None
+    return (
+        f"run: {' and '.join(flags)} had no effect -- this run did not flash "
+        "anything (they only act on a write, which needs --flash on a hardware "
+        "target whose build succeeded)."
+    )
+
+
+def _with_ignored(ignored: str | None, result):
+    """`result` (`_run`'s 4-tuple) with the ignored-flag warning appended
+    to its issues and text, when there is one."""
+    if ignored is None:
+        return result
+    exit_code, data, issues, text = result
+    return (
+        exit_code,
+        data,
+        [*issues, Issue("run.flash-flags-ignored", "warning", ignored)],
+        [*text, ignored],
+    )
 
 
 def run(
@@ -401,6 +443,18 @@ def run(
         "first and a hand-added key does not survive it. This acknowledges the "
         "replacement only -- arming the write itself still needs --confirm "
         "(tan-cli#1252).",
+    ),
+    replace_atoc: bool = typer.Option(
+        False,
+        "--replace-atoc",
+        help="With --flash on a zephyr_west_flash slice whose west runner is "
+        "alif_flash (Flow A, over the SE-UART), override that runner's pre-burn "
+        "ATOC guard, which otherwise refuses a write that would silently delist a "
+        "resident entry it does not name, or whose read of the resident ATOC could "
+        "not be verified (tan-cli#1267). Reaches at most one write per run (narrow "
+        "with --core). Flag only: there is no manifest spelling. "
+        "Not the same as --atoc-unqueryable (Flow D), and never accepted in its "
+        "place; on any other slice tan warns instead of passing it.",
     ),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -485,6 +539,7 @@ def run(
             core=core,
             confirm=confirm,
             atoc_unqueryable=atoc_unqueryable,
+            replace_atoc=replace_atoc,
             json_mode=json_mode,
         )
     except Exception as err:  # noqa: BLE001 -- see build_cmd.build's identical guard
