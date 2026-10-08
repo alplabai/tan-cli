@@ -77,7 +77,7 @@ time). The frozen 97ad481b oracle predates that and stays absolute --
 `normalize_plan` reconciles the two shapes onto the same normalized form;
 see its docstring for the mapping.
 
-Three hand-reviewed deltas are allowed to pass without failing the gate.
+Four hand-reviewed deltas are allowed to pass without failing the gate.
 
 The first is ``slices[*].debug.probe`` going from ``"openocd"`` (the oracle,
 at 97ad481b)
@@ -105,6 +105,17 @@ slice's ``command`` runs with cwd=``buildDir`` and no ``-d``, so west
 appends its own default ``build`` level. Allowed ONLY for the six named
 fields and ONLY for that exact one-segment insertion -- see
 ``_NESTED_ARTIFACT_TAILS``.
+
+The fourth is a slice's ``configArtefacts`` list gaining the plan's rendered
+reference artefacts AFTER the oracle's own entries -- ``alp.overlay`` and
+``cmake-args.txt``, in that order (alp-sdk #2771, tan-cli #1216/#1394). The
+oracle predates them. Allowed ONLY when the live list is the oracle's list
+unchanged followed by exactly ``[alp.overlay, cmake-args.txt]``,
+``[cmake-args.txt]`` (a board with no header, which also warns) or
+``[alp.overlay]``, matched by basename -- see ``_RENDERED_TAILS``. Any change
+to the oracle's own entries, any other extra entry, and a different order of
+these two still FAIL. The ``diagnostics.link: itcm`` halves are NOT in the
+allowance (no oracle board uses itcm).
 
 Any OTHER diff -- a changed command, a changed env value, a changed slice
 count, a probe change to anything other than that exact openocd->null
@@ -395,6 +406,29 @@ def normalize_plan(plan: dict) -> dict:
     return normalized
 
 
+#: Basename sequences a slice's ``configArtefacts`` may GAIN, after the oracle's
+#: own entries (tan-cli #1216/#1394, alp-sdk #2771). Exact and ordered; the
+#: itcm halves are deliberately absent.
+_RENDERED_TAILS = (
+    ("alp.overlay", "cmake-args.txt"),
+    ("cmake-args.txt",),
+    ("alp.overlay",),
+)
+
+#: Synthetic path suffix `_walk_diff` yields for an allowed rendered tail.
+_RENDERED_SUFFIX = "[+rendered]"
+
+
+def _is_rendered_append(path: str, old: list, new: list) -> bool:
+    """True when `new` is `old` unchanged plus one `_RENDERED_TAILS` entry."""
+    if not path.endswith(".configArtefacts") or len(new) <= len(old):
+        return False
+    if new[:len(old)] != old:
+        return False
+    tail = tuple(str(a.get("path", "")).rsplit("/", 1)[-1] for a in new[len(old):])
+    return tail in _RENDERED_TAILS
+
+
 def _walk_diff(path: str, old: Any, new: Any) -> Iterator[tuple[str, Any, Any]]:
     """Yield (path, old_value, new_value) for every leaf mismatch."""
     if isinstance(old, dict) and isinstance(new, dict):
@@ -410,6 +444,10 @@ def _walk_diff(path: str, old: Any, new: Any) -> Iterator[tuple[str, Any, Any]]:
         return
     if isinstance(old, list) and isinstance(new, list):
         if len(old) != len(new):
+            if _is_rendered_append(path, old, new):
+                yield (path + _RENDERED_SUFFIX, [],
+                       [a["path"].rsplit("/", 1)[-1] for a in new[len(old):]])
+                return
             yield (f"{path}[len]", len(old), len(new))
             return
         for i, (old_item, new_item) in enumerate(zip(old, new)):
@@ -473,6 +511,8 @@ def diff_plans(oracle: dict, live: dict) -> tuple[list[tuple[str, Any, Any]], li
         elif _is_allowed_additive(path, old, new):
             allowed.append((path, old, new))
         elif _is_allowed_west_nesting(path, old, new):
+            allowed.append((path, old, new))
+        elif path.endswith(_RENDERED_SUFFIX):
             allowed.append((path, old, new))
         else:
             failing.append((path, old, new))

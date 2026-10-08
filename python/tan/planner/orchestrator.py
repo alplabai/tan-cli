@@ -18,6 +18,14 @@ from typing import Any, Optional
 
 import yaml
 
+from tan.core.link_refusal import RAM_RUN_ONLY_METHOD
+from .link_target import (
+    CONF_NAME as ITCM_CONF_NAME,
+    OVERLAY_NAME as ITCM_OVERLAY_NAME,
+    UNSUPPORTED_CODE,
+    LinkTargetError,
+    applies_to as link_applies_to,
+)
 from .models import BoardProject, OrchestratorError, Slice
 from .paths import REPO
 from .secure import (emit_sysbuild_conf, emit_tfm_sysbuild_conf,
@@ -53,6 +61,20 @@ def _slice_flash_recipe(
     if slice_.os == "yocto":
         return ("yocto_wic_to_sd_or_emmc",
                 {"target": slice_.machine or ""})
+    if slice_.os == "zephyr" and slice_.link_target == "itcm":
+        # `diagnostics.link: itcm` (tan-cli#1350): this image is linked at 0x0
+        # for a J-Link RAM-run. The MRAM recipe below would sign it and write
+        # it to slot0 -- a broken, unbootable image -- so the slice carries NO
+        # MRAM flash recipe: `flash_method` is the unregistered
+        # `ram_run_only` (plain `tan flash` refuses it and points at
+        # `tan flash --ram`), and `flash_args` keeps ONLY the wrong-board
+        # identity pair `--ram`'s probe guard reads. No `jlink_flash_device`
+        # / `slot0_load_address`, so Flow D is never offered.
+        ram_args: dict[str, Any] = {}
+        if slice_.expect_dpidr and slice_.jlink_device:
+            ram_args["expect_dpidr"] = slice_.expect_dpidr
+            ram_args["jlink_device"] = slice_.jlink_device
+        return (RAM_RUN_ONLY_METHOD, ram_args)
     if slice_.os == "zephyr":
         # No runner is forced here: not every in-tree board registers
         # an openocd runner (e.g. AEN's board.cmake sets
@@ -498,8 +520,24 @@ def _slice_command(
         if is_sysbuild:
             image = _zephyr_app_dir(slice_.app, base_dir).name
             extra_var = f"{image}_EXTRA_CONF_FILE"
-        defines.append(
-            f"-D{extra_var}={_tokenize(alp_conf, base_dir, REPO)}")
+        conf_files = [_tokenize(alp_conf, base_dir, REPO)]
+        if link_applies_to(project.diagnostics, slice_):
+            # `diagnostics.link: itcm` (tan-cli#1350): layer the Flow C ITCM
+            # retarget AFTER alp.conf (a later fragment wins) and hand Zephyr
+            # the devicetree half.  Both are `_slice_config_artefact`
+            # siblings in the same build dir, materialised from the plan.
+            if is_sysbuild:
+                raise LinkTargetError(
+                    UNSUPPORTED_CODE,
+                    "diagnostics.link: itcm cannot be combined with a "
+                    "sysbuild project (`boot:` / `ota:` / TF-M).")
+            itcm_conf_path = alp_conf.with_name(ITCM_CONF_NAME)
+            itcm_overlay_path = alp_conf.with_name(ITCM_OVERLAY_NAME)
+            conf_files.append(_tokenize(itcm_conf_path, base_dir, REPO))
+            defines.append(
+                "-DEXTRA_DTC_OVERLAY_FILE="
+                f"{_tokenize(itcm_overlay_path, base_dir, REPO)}")
+        defines.append(f"-D{extra_var}={';'.join(conf_files)}")
         cmd += ["--", *defines]
         return cmd
     if slice_.os == "yocto":

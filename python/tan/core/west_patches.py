@@ -7,6 +7,11 @@ results through these functions, so the exit-code contract of alp-sdk's
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import re
+from dataclasses import dataclass
+
 #: The verifier's exit codes (its module docstring is the authority).
 VERIFY_APPLIED = 0
 #: Everything this workspace carries is patched, but a module `patches.yml`
@@ -60,3 +65,79 @@ def output_tail(text: str) -> str:
     lines = [line.rstrip() for line in text.strip().splitlines() if line.strip()]
     tail = "\n".join(lines[-_TAIL_LINES:])
     return tail[-_TAIL_CHARS:]
+
+
+# ---------------------------------------------------------------------------
+# Workspace patch CHECK (tan-cli#1376): `tan doctor` / `tan build` ask the SAME
+# verifier "is `zephyr/patches.yml` applied" without applying anything.
+# ---------------------------------------------------------------------------
+
+#: One failing line of the verifier's stderr: `  ABSENT      <patch rel path>`.
+_FAILURE_LINE = re.compile(r"^\s+(ABSENT|DRIFTED|UNRESOLVED)\s+(\S+)\s*$")
+
+
+@dataclass(frozen=True)
+class UnappliedPatch:
+    """One patch the verifier reports as not applied. `verdict` is the
+    verifier's own word (`ABSENT`/`DRIFTED`/`UNRESOLVED`); `patch` is the path
+    under `zephyr/patches/` it prints (e.g. `hal_alif/0001-....patch`)."""
+
+    verdict: str
+    patch: str
+
+
+def parse_unapplied_patches(stderr: str) -> list[UnappliedPatch]:
+    """The patches named by the verifier's failure report, in report order."""
+    found: list[UnappliedPatch] = []
+    for line in stderr.splitlines():
+        m = _FAILURE_LINE.match(line)
+        if m is not None:
+            found.append(UnappliedPatch(m.group(1), m.group(2)))
+    return found
+
+
+def describe_unapplied(patches: list[UnappliedPatch], modules: list[str]) -> str:
+    """`hal_alif/0001-x.patch (ABSENT), ...` plus the modules to patch."""
+    names = ", ".join(f"{p.patch} ({p.verdict})" for p in patches) or "unnamed patches"
+    where = f" in module(s) {', '.join(modules)}" if modules else ""
+    return f"{names}{where}"
+
+
+def patch_fix_text(modules: list[str], workspace_dir: str) -> str:
+    """The exact remedy: `tan bootstrap` applies exactly the unapplied modules
+    (verify, `west patch --dst-module <m> apply`, re-verify). The per-module
+    west form is the manual equivalent; a bare `west patch apply` is NOT
+    offered because it re-applies already-patched modules and fails."""
+    manual = (
+        "; ".join(f"west patch --dst-module {m} apply" for m in modules)
+        or "west patch --dst-module <module> apply"
+    )
+    return f"run `tan bootstrap` (or, from {workspace_dir}: {manual})"
+
+
+def cache_key(patches_yml: bytes, heads: dict[str, str]) -> str:
+    """Stable digest of (`patches.yml` bytes, every workspace module's HEAD)."""
+    h = hashlib.sha256()
+    h.update(hashlib.sha256(patches_yml).digest())
+    for path in sorted(heads):
+        h.update(f"\0{path}\0{heads[path]}".encode())
+    return h.hexdigest()
+
+
+def zephyr_base_note(env_value: str | None, workspace_zephyr: str | None) -> str | None:
+    """Message when `$ZEPHYR_BASE` is set and names a different tree than the
+    resolved workspace's `zephyr/`; `None` otherwise. tan never honours the
+    override, so the user must hear it is being ignored."""
+    if not env_value or workspace_zephyr is None:
+        return None
+
+    def norm(p: str) -> str:
+        return os.path.normcase(os.path.realpath(p))
+
+    if norm(env_value) == norm(workspace_zephyr):
+        return None
+    return (
+        f"$ZEPHYR_BASE={env_value} is ignored: tan always builds with the resolved west "
+        f"workspace's zephyr ({workspace_zephyr}). To build against another tree, run "
+        "tan from that workspace or bootstrap it."
+    )

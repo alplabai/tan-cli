@@ -181,7 +181,7 @@ _COMMAND_NAMES = (
     "validate generate init scaffold examples doctor completion diff presets "
     "pinmux explain inspect trace debug-config support-bundle sdk bootstrap "
     "build kconfig image flash run clean size migrate lock quality "
-    "model monitor new-som faultdecode"
+    "model monitor new-som faultdecode probe"
 )
 
 
@@ -218,7 +218,7 @@ _tan_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cword=${COMP_CWORD}
 
-  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean size migrate lock quality model monitor new-som faultdecode"
+  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean size migrate lock quality model monitor new-som faultdecode probe"
   # `--version` is deliberately NOT in `global_flags` but IS in `root_flags`
   # (tan-cli#503): it is root-only, and no subcommand prints a version for it
   # -- see the module docstring's fifth exception for the measurement on all
@@ -329,6 +329,9 @@ _tan_complete() {
     scaffold)
       COMPREPLY=( $(compgen -W "$global_flags --template --name --destination --preview --force" -- "$cur") )
       ;;
+    probe)
+      COMPREPLY=( $(compgen -W "identify read $global_flags --core --project --build-root --probe-serial --probe-usb-path --jlink" -- "$cur") )
+      ;;
     diff|presets)
       COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )
       ;;
@@ -407,6 +410,7 @@ _tan() {
     'completion:Generate shell completion script'
     'diff:Show board normalization diff'
     'presets:List SDK presets'
+    'probe:Read-only J-Link identity and memory read'
     'pinmux:Show pinmux capability table'
     'explain:Explain templates and targets'
     'inspect:Inspect effective resolved values'

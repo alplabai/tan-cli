@@ -161,7 +161,7 @@ def resolve_metadata_sdk_root(
 
 def read_sdk_som_and_soc(
     metadata_root: str, sku: str, *, warnings: list[str] | None = None,
-    skipped: list[str] | None = None,
+    skipped: list[str] | None = None, explain_unsupported: bool = False,
 ) -> tuple[str, str | None, list[dict], float | None, list[tuple[str, float | None]]] | None:
     """`(silicon, silicon_variant, variants, soc_flash_mb, soc_cores)` for
     `sku`'s SoM preset + SoC JSON under `<sdk>/metadata` -- port of the ONE
@@ -201,6 +201,14 @@ def read_sdk_som_and_soc(
         preset_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
     )
     if preset is None:
+        # Say WHY (tan-cli#1354 bench round 7: a stale alp-sdk checkout whose presets are
+        # schema_version 1 made every caller report a bare "unreadable"): a caller that
+        # passed a `skipped` collector AND `explain_unsupported` gets the real cause as a note
+        # (`tan size` keeps its own, richer `size.som-schema-version-skipped` instead).
+        if skipped is not None and explain_unsupported:
+            note = _unsupported_preset_note(preset_path)
+            if note is not None:
+                skipped.append(note)
         return None
     silicon, silicon_variant = preset
     if not silicon:
@@ -213,6 +221,32 @@ def read_sdk_som_and_soc(
         soc_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
     )
     return silicon, silicon_variant, variants, soc_flash_mb, soc_cores
+
+
+def _unsupported_preset_note(path: str) -> str | None:
+    """`<path>: not read -- unsupported SoM preset schema_version 1 (tan needs 2) --
+    update alp-sdk` when the preset parses but declares a version tan does not read;
+    `None` for any other reason it could not be used (missing, unparseable)."""
+    from tan.commands.size_cmd import _read_text  # noqa: PLC0415
+    from tan.core.som_schema_version import SOM_SCHEMA_VERSION, is_supported_som_schema_version
+    from tan.core.system_manifest import load_yaml_document  # noqa: PLC0415
+
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        root = load_yaml_document(text)
+    except Exception:  # noqa: BLE001 -- unparseable is `unreadable`, not this
+        return None
+    if not isinstance(root, dict):
+        return None
+    version = root.get("schema_version")
+    if is_supported_som_schema_version(version):
+        return None
+    return (
+        f"{path.replace(chr(92), '/')}: not read -- unsupported SoM preset schema_version "
+        f"{version} (tan needs {SOM_SCHEMA_VERSION}) -- update alp-sdk"
+    )
 
 
 def resolve_app_base(app_path: str | None, workspace_root: str) -> str:
