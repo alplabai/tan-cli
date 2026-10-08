@@ -2,7 +2,7 @@
 
 The **connected device** starting point: bring up Wi-Fi, open an
 `mqtts://` (TLS) MQTT client, and publish a telemetry reading on a
-cadence -- the whole path on the portable [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/iot.h)
+cadence -- the whole path on the portable [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/iot.h)
 surface.
 
 ```
@@ -16,7 +16,7 @@ alp_mqtt_close()                                # clean disconnect
 
 This template ships for **E1M-AEN801 only**. Its transport is the
 **CC3501E Wi-Fi6+BLE coprocessor bridge**
-([`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cc3501e-bridge.md)),
+([`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cc3501e-bridge.md)),
 silicon-validated 2026-06-24. The app never names the bridge -- the
 AEN board emit wires it as the `<alp/iot.h>` Wi-Fi backend from
 `iot.wifi: true` in `board.yaml`.
@@ -36,7 +36,7 @@ library's own `ssl_misc.h` does not compile (`unknown type name
 'mbedtls_error_pair_t'`), so the app turned mbedTLS off rather than fail. The
 SDK now turns that PSA core on wherever it builds mbedTLS without TF-M
 (`ALP_SDK_MBEDTLS_PSA_CRYPTO`, issue #2173), so this app carries no mbedTLS
-knobs at all any more (see [`prj.conf`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/connectivity/mqtt-telemetry/prj.conf), which is
+knobs at all any more (see [`prj.conf`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/connectivity/mqtt-telemetry/prj.conf), which is
 empty by design) and the `native_sim.conf` that used to hold the workaround is
 deleted.
 
@@ -51,7 +51,7 @@ real entropy source, still sets `CONFIG_ALP_SDK_ALLOW_TEST_ENTROPY=y`.
 To keep the focus on the transport, this template publishes a
 **synthetic metric** (device uptime). Swap
 `read_telemetry_value()` for a real sensor read -- e.g. compose it
-with the [`sensor` template](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-master) (BMP581
+with the [`sensor` template](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-master) (BMP581
 over `<alp/chips/bmp581.h>`) -- and the publish path is unchanged.
 
 ## Build
@@ -98,6 +98,6 @@ Real hardware (E1M-AEN801, associated + broker reachable):
 
 ## Reference
 
-- [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/iot.h) -- Wi-Fi station + MQTT client surface.
-- [`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cc3501e-bridge.md) -- the AEN Wi-Fi transport.
-- [`examples/peripheral-io/i2c-master/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-master) -- the `sensor` template, for a real reading to publish.
+- [`<alp/iot.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/iot.h) -- Wi-Fi station + MQTT client surface.
+- [`docs/cc3501e-bridge.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cc3501e-bridge.md) -- the AEN Wi-Fi transport.
+- [`examples/peripheral-io/i2c-master/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-master) -- the `sensor` template, for a real reading to publish.

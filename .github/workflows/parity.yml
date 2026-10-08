@@ -930,7 +930,25 @@ env:
   #   - scaffold: NO re-vendor needed -- `scaffold_byte_parity.py --sdk
   #     <2d2a85333>` is 10/10 PASS against the tree unchanged; only the
   #     vendor point in `python/tan/templates/vendored/MANIFEST.md` moves.
-  PINNED_SDK_TAG: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
+  #
+  # `2d2a85333` -> `030de105d` (tan-cli#1401): the SAME seven lockstep sites
+  # move together, and the hand-port pin with them (NO hand-port source changed
+  # in range, so its hashes are unchanged). `STRICT_LOADERS_PINNED_SDK_COMMIT`
+  # stays at `34c11c9de`. Behavioural upstream commit in range: #2774
+  # (`diagnostics.console: ram` emits max(2048, the app `prj.conf` size) instead
+  # of shrinking an app-set `CONFIG_RAM_CONSOLE_BUFFER_SIZE`; `BoardProject.
+  # source_dir` carries the board.yaml directory), ported into `models.py`,
+  # `loader.py` and `kconfig.py`; plus tan's own follow-up that gives the itcm
+  # conf the same floor (max(16384, app)). #2763 (the v0.17.0 release merge)
+  # cut the `v0.17.0-rc1` tag, so the plan's `sdkVersion` and the scaffold's
+  # doc-link ref are now `0.17.0-rc1` / `v0.17.0-rc1`. #2772 and #2776 touch no
+  # planner file. Re-measured against `030de105d`:
+  #   - planner oracle: re-captured (see `PINNED_PLANNER_ORACLE_SDK_REF` below).
+  #   - scaffold: RE-VENDORED, links only -- `scaffold_byte_parity.py --sdk
+  #     <030de105d>` was 0/10 against the old tree, solely because the emit now
+  #     renders `blob|tree/v0.17.0-rc1/` where it rendered `v0.16.0`; 20 files,
+  #     10/10 PASS after.
+  PINNED_SDK_TAG: 030de105d3a106b3c10202854cf57d4e81e78c0f
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1238,7 +1256,16 @@ env:
   #   - no other modified file: the V2N board-tree changes (#2747, #2685) are
   #     not an oracle mode, and `loader.py`'s itcm refusal is not exercised by
   #     any example.
-  PINNED_PLANNER_ORACLE_SDK_REF: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
+  #
+  # `2d2a85333` -> `030de105d` (tan-cli#1401; see `PINNED_SDK_TAG`'s matching
+  # paragraph above). Re-captured with `python scripts/capture_planner_oracle.py
+  # --sdk <checkout> --sdk-ref 030de105d3a106b3c10202854cf57d4e81e78c0f`:
+  # **104 boards, 728 emits** (7 error-contract), 2,540,037 B (was 2,539,625;
+  # same board and emit counts). Every changed byte attributed, none left over:
+  # the plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
+  # goldens (the `v0.17.0-rc1` cut, #2763). #2774's console floor is not visible
+  # here: the re-captured goldens show no other change, so no example plan is moved by it
+  PINNED_PLANNER_ORACLE_SDK_REF: 030de105d3a106b3c10202854cf57d4e81e78c0f
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

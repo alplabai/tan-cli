@@ -1314,6 +1314,12 @@ from tests.conftest import sdk_root
 #: set -- one NEW board, `multicore/microros-ros2-v2n` (`042527fd0`, #2721; 7
 #: added files). The V2N board-tree changes (#2747, #2685) are not an oracle
 #: mode, and `loader.py`'s itcm refusal is exercised by no example.
+#:
+#: RE-MEASURED again at `030de105d` (tan-cli#1401) -- 104 boards, 728 emits
+#: (7 error-contract), 2,540,037 B (was 2,539,625). The only changed bytes are the
+#: plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
+#: goldens (the `v0.17.0-rc1` cut, #2763); #2774's console floor is exercised
+#: by no example plan: the re-capture shows no other changed byte.
 #: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
 #: supersedes the bot's #1310 proposal for the same range, which could not
 #: apply the hand-ports and would have broken two things -- see below).
@@ -1332,7 +1338,26 @@ from tests.conftest import sdk_root
 #:     ITCM-linked image. tan's planner implements it, so the refusal is NOT
 #:     taken (#1310 took it, which would make `tan build` refuse the knob tan
 #:     itself implements); only the pinned hash moves.
-PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2771 (build-plan alp.overlay/cmake-args.txt) + #2762/#2747 resync (tan-cli#1216)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `2d2a8533` -> `030de105` (tan-cli#1401).
+#: Three mirrored files changed in range, all from alp-sdk#2774 ("diagnostics.
+#: console: ram no longer shrinks an app-set RAM console size"); the rest of the
+#: range (#2763 v0.17.0 release merge, #2772 Riverdi panel, #2776 seam1
+#: allowance, the version bump) touches no planner file:
+#:
+#:   * `models.py` -- `BoardProject.source_dir` (the board.yaml's directory).
+#:     Ported verbatim (the resync tool merged it cleanly).
+#:   * `loader.py` -- `source_dir=Path(path).resolve().parent` on the project.
+#:     Ported by hand (the tool reported a conflict: tan's loader carries the
+#:     `link_target.apply_link_target` call upstream does not).
+#:   * `kconfig.py` -- `_RAM_CONSOLE_MIN_SIZE`, `_app_ram_console_size` (reads the
+#:     slice's own `prj.conf`), and `_emit_console`/`_emit_zephyr_console` emitting
+#:     max(2048, app value). Ported by hand around tan's own `link_applies_to`
+#:     console arm; `import re` was already present.
+#:   * tan-native follow-up (no upstream counterpart): `link_target.itcm_conf`
+#:     now emits max(16384, the same `_app_ram_console_size`) instead of a bare
+#:     16384, because `alp-link-itcm.conf` is layered AFTER `prj.conf` and
+#:     would shrink a larger app buffer. `tests/planner/test_ram_console_floor.py`.
+PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-sdk origin/dev -- #2774 (RAM-console size floor) resync (tan-cli#1401)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1378,7 +1403,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "c63326306c89b0f6320ff1771cb3db46562693460bd669120169aaf993cbf108",
+    "kconfig.py": "04affebf548b60eebdfbe92aeab2ff0c10dc46a266e76cbc615c3d3eeffc8cfa",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
@@ -1386,11 +1411,11 @@ PINNED_HASHES: dict[str, str] = {
     # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
     # that refusal: tan's `link_target.apply_link_target` (called at the end of
     # tan's `load_board_yaml`) replaces it with the real HE-only feature.
-    "loader.py": "e31e53dbebbb4c7095a87a19cc5c46b572efd4c043adee04d8003bacaa36723e",
+    "loader.py": "25e3ebd1a0e2d10135bd57e28496d1996f0f0a03d41169b59128e9abdf7d0052",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
-    "models.py": "0f47b346daa008eebd07c03fd640df76318757843e10bcd2b9f5ba2966cc5a9d",
+    "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
     "orchestrator.py": "a322bba505b4f3c35b30f4988343dd061460d48e901665e05cdfa60780b1fcaa",
     "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
     "partition.py": "9ef943ce8f2c9651067b4e58c2e878e4f87eac2ff495de7342a57cd276b9b711",
@@ -2342,7 +2367,13 @@ PINNED_HASHES: dict[str, str] = {
 #:     `--emit dts-overlay --core` now calls `_slice_dts_overlay`, which is
 #:     what `planner_emit._render_dts_overlay` does for `--core`, and the
 #:     shared `_v1_shaped_project` is the one `planner_emit` now reuses.
-HAND_PORT_PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2747/#2685/#2771 audit (tan-cli#1216)
+#: AUDIT `2d2a8533` -> `030de105` (tan-cli#1401): NO hand-port source changed in
+#: range (`git diff --stat 2d2a8533 030de105 -- scripts/gen_zephyr_board.py
+#: scripts/alp_project.py scripts/alp_project_emit scripts/alp_template.py
+#: scripts/alp_project_loader.py scripts/sentinels.py scripts/whole_device_alias.py
+#: scripts/alp_cli` is empty), and every `HAND_PORT_HASHES` entry re-hashes
+#: unchanged at `030de105`, so only the pin moves.
+HAND_PORT_PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-sdk origin/dev -- no hand-port change in range (tan-cli#1401)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

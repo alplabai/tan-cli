@@ -4,7 +4,7 @@ Discrete I2C master that reads a known device at a known
 address.  Pattern: open the bus, init the chip driver, loop
 reading the sensor every second, close cleanly.
 
-Contrasts with [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) -- the
+Contrasts with [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner) -- the
 scanner *probes* every 7-bit address for ACKs without knowing
 what's behind them; this example *reads* a known sensor.
 
@@ -23,8 +23,8 @@ what's behind them; this example *reads* a known sensor.
 
 The BMP581 barometer is the on-board sensor on `BOARD_I2C_SENSORS`
 on both the E1M EVK (U14) and the E1M-X EVK, per
-[`metadata/boards/e1m-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/metadata/boards/e1m-evk.yaml) and
-[`metadata/boards/e1m-x-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/metadata/boards/e1m-x-evk.yaml)
+[`metadata/boards/e1m-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/metadata/boards/e1m-evk.yaml) and
+[`metadata/boards/e1m-x-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/metadata/boards/e1m-x-evk.yaml)
 `i2c_devices:`.
 
 7-bit address depends on the SDO strap:
@@ -36,9 +36,9 @@ on both the E1M EVK (U14) and the E1M-X EVK, per
 
 Both supported EVKs strap SDO to VDDIO, so `BMP581_ADDR_7BIT`
 works unchanged across them (see
-[`metadata/boards/e1m-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/metadata/boards/e1m-evk.yaml),
+[`metadata/boards/e1m-evk.yaml`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/metadata/boards/e1m-evk.yaml),
 BMP581 datasheet BST-BMP581-DS004 s5.6, or
-[`include/alp/chips/bmp581.h`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/chips/bmp581.h)).
+[`include/alp/chips/bmp581.h`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/chips/bmp581.h)).
 
 > **#1269:** this example used to target the TMP112 temperature sensor,
 > but TMP112 lives on **BRD_I2C**, not on `BOARD_I2C_SENSORS` -- opening
@@ -46,7 +46,7 @@ BMP581 datasheet BST-BMP581-DS004 s5.6, or
 > BRD_I2C is a separate controller instance regardless (on the E1M-AEN
 > family it is SoC I2C0, function C -- #1848), so simply repointing the bus_id
 > would still not reach a TMP112 there. See
-> [`examples/v2n/v2n-temp-sensor`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/v2n/v2n-temp-sensor) for the
+> [`examples/v2n/v2n-temp-sensor`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/v2n/v2n-temp-sensor) for the
 > V2N-only BRD_I2C/TMP112 pattern instead.
 
 ## Build
@@ -93,7 +93,7 @@ native_sim (emul I2C, no BMP581 registered):
 * **`bmp581_init -> -5`** (ALP_ERR_IO / NACK).  Either the chip
   isn't populated on your board, the address is wrong (see
   table above), or the bus is held low (missing pull-ups, stuck
-  slave).  Run [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) to confirm what
+  slave).  Run [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner) to confirm what
   ACKs.
 * **`alp_i2c_open failed`** (NULL return).  The `alp-i2c0` DT
   alias isn't set -- check your board overlay or, for
@@ -104,9 +104,9 @@ native_sim (emul I2C, no BMP581 registered):
 
 ## Reference
 
-- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/peripheral.h) I2C surface.
-- [`<alp/chips/bmp581.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/chips/bmp581.h) -- driver API.
-- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) -- discovery companion.
-- [`examples/peripheral-io/i2c-slave/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-slave) -- slave-mode companion, built on the `alp_i2c_target_*` surface.
-- [`examples/v2n/v2n-temp-sensor/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/v2n/v2n-temp-sensor) -- TMP112-on-BRD_I2C companion, V2N-only.
+- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/peripheral.h) I2C surface.
+- [`<alp/chips/bmp581.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/chips/bmp581.h) -- driver API.
+- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner) -- discovery companion.
+- [`examples/peripheral-io/i2c-slave/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-slave) -- slave-mode companion, built on the `alp_i2c_target_*` surface.
+- [`examples/v2n/v2n-temp-sensor/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/v2n/v2n-temp-sensor) -- TMP112-on-BRD_I2C companion, V2N-only.
 - BMP581 datasheet (BST-BMP581-DS004, rev 1.13).
