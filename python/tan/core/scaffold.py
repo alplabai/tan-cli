@@ -153,7 +153,7 @@ _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 _SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
     ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
     ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
-    ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
+    ("E1M-NX9", "m33", None),                  # test-fixture family; retire: tan-cli#1425
 )
 
 #: SKU prefixes `_SOM_FAMILIES` declares NO vendored tree for -- the exact

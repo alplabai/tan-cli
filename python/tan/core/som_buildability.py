@@ -66,7 +66,7 @@ from typing import Optional
 #: alp-sdk#2782 dropped the `NX9` arm, but tan's `init` still carries NX9 as
 #: its fixture family for the "default hw_rev is not buildable" warning and
 #: for `scaffold._SOM_FAMILIES`' no-vendored-tree refusal, whose tests are
-#: written against it. Retiring both together is a separate change.
+#: written against it. Retiring both together is tan-cli#1425.
 _SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
 _FAMILY_DIR = {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}
 
