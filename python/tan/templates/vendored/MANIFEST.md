@@ -479,7 +479,7 @@ from an un-revendored SDK change.
   alp-sdk's tag list holds `v0.14.0`, `v0.15.0`, `v0.15.0-rc1` and
   `v0.16.0-rc1` — no `v0.16.0`. Before alp-sdk#1535 that combination made
   `_docs_ref()` pin every scaffolded README to
-  `https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/...`, which 404s;
+  `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...`, which 404s;
   #1535 adds `_tag_resolves()` so a declared-but-unresolvable tag degrades to
   `main` instead. tan-cli#846 ports the same guard into
   `tan/planner/template.py`, so tan's own emit agrees. The vendored bytes here

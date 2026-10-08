@@ -1264,7 +1264,7 @@ env:
   # same board and emit counts). Every changed byte attributed, none left over:
   # the plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
   # goldens (the `v0.17.0-rc1` cut, #2763). #2774's console floor is not visible
-  # here: the re-captured goldens show no other change, so no example plan is moved by it
+  # here: the re-captured goldens show no other change, so no example plan is moved by it.
   PINNED_PLANNER_ORACLE_SDK_REF: 030de105d3a106b3c10202854cf57d4e81e78c0f
 
 permissions:
