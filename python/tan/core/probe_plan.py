@@ -21,8 +21,6 @@ CODE_READ_TOO_LARGE = "probe.read-too-large"
 CODE_READ_UNSAFE_REGION = "probe.read-unsafe-region"
 CODE_READ_FAILED = "probe.read-failed"
 CODE_FAILED = "probe.failed"
-CODE_DPIDR_MISMATCH = "probe.dpidr-mismatch"
-CODE_DPIDR_UNREAD = "probe.dpidr-unread"
 
 #: Most words one `probe read` returns.
 MAX_WORDS = 256
@@ -100,13 +98,84 @@ def touches_unsafe_window(address: int, words: int) -> bool:
     return address <= hi and address + 4 * words - 1 >= lo
 
 
-def unsafe_region_message(address: int, words: int, why: str) -> str:
+def window_refusal(address: int, words: int) -> str | None:
+    """The refusal for ANY overlap with 0x50000000-0x5FFFFFFF, on every core -- there is
+    no HP exception: a bench-proven-safe HP read is not something an attach check can
+    establish (a multiple-AP banner or `conflict-hp` still looks HP-ish), so the window
+    is simply not readable through `tan probe`."""
+    if not touches_unsafe_window(address, words):
+        return None
     return (
         f"refusing to read 0x{address:08X}..0x{address + 4 * words - 1:08X}: it overlaps "
-        "0x50000000-0x5FFFFFFF, and an M55-HE session must not touch that window (reading the "
-        "HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset). "
-        f"{why}"
+        "0x50000000-0x5FFFFFFF, and an M55-HE session must not touch that window (reading "
+        "the HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset). "
+        "`tan probe read` refuses the window on every core."
     )
+
+
+def _slice_ambiguity(distinct: dict[str, set[str]]) -> str | None:
+    for key, values in distinct.items():
+        if len(values) > 1:
+            return (
+                f"the manifest's slices pin different {key} values ({', '.join(sorted(values))}); "
+                "pass --core to pick one, as `tan flash` requires"
+            )
+    return None
+
+
+def select_slice(
+    slices: Sequence[tuple[str, dict]], core: str | None
+) -> tuple[dict, str | None, str | None]:
+    """`(flash_args, selected core id, ambiguity message)` from `(core_id, flash_args)` pairs.
+
+    The args are taken whether or not `expect_dpidr` is armed (`jlink_serial`,
+    `jlink_speed`, `jlink_device` apply either way). With `--core` the matching slice
+    wins; without it one slice is used as is, and several are acceptable only when they
+    do not disagree on `jlink_serial` / `expect_dpidr` (then the selected id is unknown)."""
+    pool = [(c, a) for c, a in slices if isinstance(a, dict)]
+    if core is not None:
+        pool = [(c, a) for c, a in pool if c.lower() == core]
+    if not pool:
+        return {}, None, None
+    if len(pool) == 1:
+        return dict(pool[0][1]), pool[0][0].lower(), None
+    distinct = {
+        key: {str(a[key]) for _c, a in pool if a.get(key) is not None}
+        for key in ("jlink_serial", "expect_dpidr")
+    }
+    problem = _slice_ambiguity(distinct)
+    if problem:
+        return {}, None, problem
+    armed = [a for _c, a in pool if a.get("expect_dpidr")]
+    return dict((armed or [a for _c, a in pool])[0]), None, None
+
+
+def is_he_target(core: str | None, selected_id: str | None) -> bool:
+    """The target is the M55-HE: `--core m55_he`, or no `--core` and the manifest's
+    selected slice is the HE."""
+    return core == "m55_he" or (core is None and selected_id == "m55_he")
+
+
+def core_contradiction(core: str | None, verdict: str) -> str | None:
+    """A message when the attach `verdict` (`ram_run` vocabulary, or the bare AP verdict)
+    contradicts the claimed `--core`; `None` when it agrees or says nothing."""
+    if core == "m55_he" and verdict in ("hp", "conflict-hp"):
+        return f"--core m55_he, but the probe attached to the M55-HP ({verdict})"
+    if core == "m55_hp" and verdict in ("he", "conflict"):
+        return f"--core m55_hp, but the probe attached to the M55-HE ({verdict})"
+    return None
+
+
+def dpidr_state(expected: str | None, actual: str | None) -> str | None:
+    """`None` when no `expect_dpidr` is armed or it matches; `"unread"` / `"mismatch"` else."""
+    if not expected:
+        return None
+    if actual is None:
+        return "unread"
+    try:
+        return None if int(actual, 16) == int(expected, 16) else "mismatch"
+    except ValueError:
+        return "mismatch"
 
 
 def identity_script(pre: Sequence[str]) -> str:

@@ -3455,7 +3455,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/probe_cmd.py",
-      "note": "tan-cli#1406: `tan probe`. `tan probe read` overlaps 0x50000000-0x5FFFFFFF while the selected (--core m55_he) or attached core is the M55-HE, or the attach cannot be confirmed to be the M55-HP. An HE session must not touch that window: reading the HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset (bench round 8, tan-cli#1354). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "tan-cli#1406: `tan probe`. `tan probe read` overlaps 0x50000000-0x5FFFFFFF. Refused on EVERY core, before any J-Link spawn: an M55-HE session must not touch that window (reading the HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset, bench round 8, tan-cli#1354), and an attach check cannot prove a bench-safe HP read. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "probe.bad-argument",
@@ -3512,6 +3512,30 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/probe_cmd.py",
       "note": "tan-cli#1406: `tan probe`. `tan probe` hit an unexpected tan error; reported with an envelope. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.core-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. The attach contradicts `--core` (`--core m55_he` on an HP attach, or `--core m55_hp` on an HE attach), judged from the Core-found access port (and the ITCM corroboration on an HE target). identify exits 1; read returns no words. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.manifest-unusable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `build/system-manifest.yaml` exists but could not be parsed; the expect_dpidr comparison and the manifest's probe settings were skipped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.no-manifest",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. No manifest, or no `expect_dpidr` armed for the selected core: identify reports the SW-DP ID but the DPIDR match was skipped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }
