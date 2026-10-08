@@ -430,6 +430,11 @@ class BoardProject:
     # `storage[].flash_device` the resolver then blocks.
     # `None` means "the bound root" -- see `effective_metadata_root()`.
     metadata_root: Optional[Path] = None
+    # Directory of the board.yaml this project was loaded from; anchors a
+    # slice's relative `app:` so the emitters can read the app's own
+    # `prj.conf` (e.g. to avoid shrinking an app-set RAM console size,
+    # tan-cli#1401).  `None` for a project built without a file.
+    source_dir: Optional[Path] = None
 
     def effective_metadata_root(self) -> Path:
         """The metadata tree to read SoM/SoC facts from for THIS project.

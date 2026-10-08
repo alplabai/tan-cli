@@ -285,8 +285,11 @@ def test_uart_console_keeps_the_itcm_retarget_without_ram_console_bits(
                                          _HE_ONLY + "  console: uart\n")),
                 "m55_he")
     arts = _artefacts(sl)
-    assert list(arts) == ["alp.conf", "alp-link-itcm.conf",
-                          "alp-link-itcm.overlay"]
+    # The plan may carry other artefacts (cmake-args.txt, alp.overlay on header
+    # boards); only the two itcm halves and their order after alp.conf matter.
+    names = list(arts)
+    assert names[0] == "alp.conf"
+    assert names.index("alp-link-itcm.conf") < names.index("alp-link-itcm.overlay")
     assert arts["alp-link-itcm.conf"] == EXPECTED_CONF_UART
     assert arts["alp-link-itcm.overlay"] == EXPECTED_OVERLAY
     conf = arts["alp-link-itcm.conf"]

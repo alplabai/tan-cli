@@ -95,19 +95,26 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`2d2a85333`**
-  (`2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`, alp-sdk `dev`) — the
-  `ac0e2a5e0` -> `2d2a85333` planner re-sync (tan-cli#1216; alp-sdk#2771/
-  #2762/#2747/#2685), the same change that moves `parity.yml`'s
-  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
-  `ref:` and `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
-  `HAND_PORT_PINNED_SDK_COMMIT`. **No re-vendoring needed:** no scaffold
-  template or catalog entry changed in range, verified rather than assumed —
-  `scaffold_byte_parity.py --sdk <2d2a85333>` is rc 0, **10/10** (template,
-  sku) pairs PASS against this tree unchanged. Still untagged, so `- Ref:`
-  below stays `v0.16.0`.
+- **Current vendor point (all templates):** **`030de105d`**
+  (`030de105d3a106b3c10202854cf57d4e81e78c0f`, alp-sdk `dev`) — the
+  `2d2a85333` -> `030de105d` planner re-sync (tan-cli#1401; alp-sdk#2774, with
+  the v0.17.0 release merge #2763 in range), the same change that moves
+  `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
+  `sdk_parity` `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, links
+  only:** alp-sdk cut `v0.17.0-rc1` inside the range, so the emit's doc-link
+  renderer (which pins a link to a ref only once that tag resolves) now
+  renders `blob|tree/v0.17.0-rc1/` instead of `v0.16.0` — 20 files, every
+  difference a `github.com/alplabai/alp-sdk/(blob|tree)/<ref>/` ref, nothing
+  else (the catalog examples did not change). `scaffold_byte_parity.py --sdk
+  <030de105d>` is rc 0, **10/10** (template, sku) pairs PASS. The matching
+  `DELIBERATE_EDITS` literals in that script moved with it. `- Ref:` below
+  is now `v0.17.0-rc1`.
 
-- **Prior vendor point (all templates):** **`ac0e2a5e0`**
+- **Prior vendor point (all templates):** **`2d2a85333`**
+  (`2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`), tan-cli#1216, no re-vendoring.
+
+- **Earlier vendor point (all templates):** **`ac0e2a5e0`**
   (`ac0e2a5e096a1c8c102818650a688d0f7e709066`, alp-sdk `dev`) — the
   `34c11c9de` -> `ac0e2a5e0` planner re-sync (tan-cli#1309), no re-vendoring.
 
@@ -601,7 +608,7 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.16.0` — the ref every shipped doc link in this tree pins, and the
+- Ref: `v0.17.0-rc1` — the ref every shipped doc link in this tree pins, and the
   one `tests/core/test_template_integrity.py` reads off THIS line to check
   them against. It is the emit's OWN rendered ref rather than a hand-edit:
   the emit renders the link ref from the SDK's `VERSION` (dropping any
@@ -615,14 +622,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`2d2a85333`** (alp-sdk `dev`, full sha
-  `2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`) — the checkout the emit was RUN
+- Commit: **`030de105d`** (alp-sdk `dev`, full sha
+  `030de105d3a106b3c10202854cf57d4e81e78c0f`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `ac0e2a5e0` (tan-cli#1309), and before that
+  This line used to say `2d2a85333` (tan-cli#1216), and before that
+  `ac0e2a5e0` (tan-cli#1309), and before that
   `34c11c9de` (tan-cli#1278), and before that
   `79c834e65` (the alp-sdk#2311/#2312 re-sync), and
   before that `c81cb5db` (review of tan-cli#1291, this pin's own

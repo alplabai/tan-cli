@@ -1509,6 +1509,7 @@ def load_board_yaml(path: Path, *,
         ownership=ownership,
         raw=project,
         metadata_root=metadata_root,   # tan-cli#573: the tree THIS load read
+        source_dir=Path(path).resolve().parent,
     )
 
     # Cross-field consistency pass (v0.6 P2.3).  Runs last so it can

@@ -6,7 +6,7 @@
 # <alp/iot.h> surface, and publish a telemetry reading on a
 # cadence.  All app code stays on <alp/iot.h> -- the transport
 # underneath is the CC3501E Wi-Fi6+BLE coprocessor bridge on the
-# E1M-AEN801 (see https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cc3501e-bridge.md), selected automatically
+# E1M-AEN801 (see https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cc3501e-bridge.md), selected automatically
 # by the AEN board emit; no app change is needed to target it.
 #
 # AEN-only by design: the E1M-V2N101's Murata Wi-Fi
@@ -50,7 +50,7 @@ cores:
     # Portable peripheral subsystems this app opens to bring the CC3501E
     # bridge up (cc3501e_bridge_bringup(), #2112): SPI1 (inter-chip link)
     # + the WIFI_EN/nRESET LP-GPIO control pins. Same as the
-    # https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/aen/aen-cc3501e-* board.yaml. The loader translates these
+    # https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/aen/aen-cc3501e-* board.yaml. The loader translates these
     # to CONFIG_SPI=y / CONFIG_GPIO=y in alp.conf.
     peripherals:
       - spi
@@ -60,7 +60,7 @@ cores:
 # includes <alp/chips/cc3501e.h> directly, so the chip has to be declared
 # here for check_example_portability.py's family-compatibility check and
 # the portability ring to account for it -- same as
-# https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/aen/aen-cc3501e-bringup/board.yaml.  Wi-Fi itself still reaches
+# https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/aen/aen-cc3501e-bringup/board.yaml.  Wi-Fi itself still reaches
 # the app through the portable <alp/iot.h> surface, not this entry.
 chips:
   - cc3501e

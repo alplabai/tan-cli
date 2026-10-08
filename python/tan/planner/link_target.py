@@ -23,7 +23,7 @@ AEN803, 2026-10-07) ran a UART5 shell RAM-run with ONLY `zephyr,flash = &itcm;`,
 the code-partition delete, `CONFIG_USE_DT_CODE_PARTITION=n` and
 `CONFIG_FLASH_LOAD_OFFSET=0x0` hand-added -- no `CONFIG_DCACHE=n`, so the
 D-cache stayed at its board default.  A `uart` image therefore gets exactly
-that retarget.  The D-cache hang recorded by #1360 concerns the RAM-console
+that retarget.  The D-cache hang recorded by #1350 concerns the RAM-console
 path, which still gets `CONFIG_DCACHE=n` and the 16 KiB buffer (`ram`/`auto`).
 """
 
@@ -156,13 +156,24 @@ def apply_link_target(project: BoardProject) -> None:
             sl.link_target = "itcm"
 
 
-def itcm_conf(ram_console: bool = True) -> str:
-    """Kconfig half of the retarget.
+#: Floor for the Flow C RAM-console buffer (bytes).
+ITCM_RAM_CONSOLE_MIN_SIZE = 16384
+
+
+def itcm_conf(ram_console: bool = True, *, app_ram_console_size: int = 0) -> str:
+    """Kconfig half of the retarget (+ the bench-proven RAM-run settings).
 
     The retarget lines are always emitted.  The bench-proven RAM-console
-    settings (`CONFIG_DCACHE=n`, the 16 KiB buffer) only when `ram_console`;
-    a `console: uart` image leaves both as the board defaults them.
+    settings (`CONFIG_DCACHE=n`, the buffer size) only when `ram_console`
+    (`console: ram`/`auto`); a `console: uart` image leaves both as the board
+    defaults them.
+
+    `app_ram_console_size` is the `CONFIG_RAM_CONSOLE_BUFFER_SIZE` the app's own
+    `prj.conf` sets (0 when none): this conf is layered AFTER it, so a bare
+    16384 would shrink a larger app-set buffer and wrap its console
+    (tan-cli#1401). The size is max(16384, app value).
     """
+    size = max(ITCM_RAM_CONSOLE_MIN_SIZE, app_ram_console_size)
     retarget = (
         "# Flow C (AEN M55-HE ITCM RAM-run) link retarget -- board.yaml\n"
         "# `diagnostics.link: itcm`.  NOT for an image you will flash to MRAM:\n"
@@ -182,7 +193,7 @@ def itcm_conf(ram_console: bool = True) -> str:
         "CONFIG_DCACHE=n\n"
         "# ram_console_out() WRAPS: a buffer smaller than the app's output\n"
         "# reads back as two interleaved points in the run.\n"
-        "CONFIG_RAM_CONSOLE_BUFFER_SIZE=16384\n"
+        f"CONFIG_RAM_CONSOLE_BUFFER_SIZE={size}\n"
     )
 
 
@@ -215,5 +226,10 @@ def extra_config_artefacts(project: BoardProject,
     """
     if not applies_to(project.diagnostics, slice_):
         return []
-    return [(CONF_NAME, itcm_conf(uses_ram_console(project.diagnostics))),
+    # Lazy: kconfig imports this module (the shared reader of the app's prj.conf).
+    from .kconfig import _app_ram_console_size  # noqa: PLC0415
+
+    ram_console = uses_ram_console(project.diagnostics)
+    app_size = _app_ram_console_size(project, slice_) if ram_console else 0
+    return [(CONF_NAME, itcm_conf(ram_console, app_ram_console_size=app_size)),
             (OVERLAY_NAME, itcm_overlay())]
