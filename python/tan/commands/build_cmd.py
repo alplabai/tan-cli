@@ -108,7 +108,6 @@ from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_
 from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
 from tan.core.board_files import all_topology_boards, unmatched_board_file_messages
 from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
-from tan.core.board_files import unmatched_board_file_messages
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
 from tan.core.link_refusal import refusal_code
@@ -844,19 +843,19 @@ def _dispatch(
                 for sl in plan.slices
             ],
             build_root,
-            _known_boards(sdk_root, build_root),
+            _known_boards(sdk_root_for_stamp),
         )
     )
     return outcomes, issues
 
 
-def _known_boards(sdk_root: str | None, build_root: Path) -> list[str]:
-    """Every board target the SDK's SoM presets declare (tan-cli#1403)."""
-    if not sdk_root:
+def _known_boards(sdk_root_for_stamp: str | None) -> list[str]:
+    """Every board target the SDK's SoM presets declare (tan-cli#1403).
+    Takes the workspace-anchored, normalized SDK root (a relative `--sdk-root`
+    is anchored on the workspace, not the build root)."""
+    if not sdk_root_for_stamp:
         return []
-    root = Path(sdk_root)
-    root = root if root.is_absolute() else build_root / root
-    return all_topology_boards(root / "metadata")
+    return all_topology_boards(Path(sdk_root_for_stamp) / "metadata")
 
 
 #: `os` values the schema requires `cores.<id>.app` to resolve to a real

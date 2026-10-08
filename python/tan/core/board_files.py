@@ -104,6 +104,16 @@ def _stem_matches(stem: str, flat: str) -> bool:
     return stem == flat or flat.startswith(stem + "_") or stem.startswith(flat + "_")
 
 
+def _silicon(board: str) -> tuple[str, str, str]:
+    """`(core, soc, cluster)` of a qualified board target, SKU dropped:
+    `alp_e1m_aen803_m55_he/ae822fa0e5597ls0/rtss_he` -> `(m55_he, ae822fa0e5597ls0,
+    rtss_he)`. Two boards with the same triple are siblings (same SoC + core)."""
+    head, _, rest = board.partition("/")
+    soc, _, cluster = rest.partition("/")
+    tokens = head.removeprefix(ALP_BOARD_PREFIX).split("_", 1)
+    return (tokens[1] if len(tokens) > 1 else "", soc, cluster)
+
+
 def unmatched_board_files(
     project_dirs: Sequence[Path],
     slice_boards: Iterable[str],
@@ -111,14 +121,17 @@ def unmatched_board_files(
 ) -> list[tuple[Path, str]]:
     """`(file, reason)` for each `boards/alp_e1m_*.{conf,overlay}` under
     `project_dirs` that matches none of `slice_boards`. Empty when no slice
-    names a board (nothing to compare against). A file that matches another
-    real board in `known_boards` (another SKU / SoC family / core) belongs to
-    that board, not a misnamed one for this build (tan-cli#1403)."""
-    flats = [flat_board(b) for b in slice_boards]
-    others = [flat_board(b) for b in known_boards]
+    names a board (nothing to compare against). A file naming another real
+    board in `known_boards` is skipped only when it is plausibly intentional
+    (tan-cli#1403): no slice shares that board's SoC + core (a V2N CM33 shim
+    on an AEN M55 build), or a file for a same-silicon slice's own board is
+    also present (an intentional twin). Otherwise it is the sibling-SKU
+    leftover tan-cli#1351 exists to flag."""
+    boards = list(slice_boards)
+    flats = [flat_board(b) for b in boards]
     if not flats:
         return []
-    found: list[tuple[Path, str]] = []
+    candidates: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for directory in project_dirs:
         try:
@@ -130,9 +143,25 @@ def unmatched_board_files(
             if not m or not m["stem"].startswith(ALP_BOARD_PREFIX) or entry in seen:
                 continue
             seen.add(entry)
-            if any(_stem_matches(m["stem"], f) for f in flats + others):
+            candidates.append((entry, m["stem"]))
+    own_present = {
+        i
+        for i, f in enumerate(flats)
+        if any(_stem_matches(stem, f) for _, stem in candidates)
+    }
+    slice_silicon = [_silicon(b) for b in boards]
+    found: list[tuple[Path, str]] = []
+    for entry, stem in candidates:
+        if any(_stem_matches(stem, f) for f in flats):
+            continue
+        real = [b for b in known_boards if _stem_matches(stem, flat_board(b))]
+        if real:
+            siblings = {
+                i for i, sil in enumerate(slice_silicon) if any(sil == _silicon(b) for b in real)
+            }
+            if not siblings or siblings & own_present:
                 continue
-            found.append((entry, m["stem"]))
+        found.append((entry, stem))
     return found
 
 
