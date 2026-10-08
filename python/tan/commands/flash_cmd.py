@@ -1379,6 +1379,7 @@ def _spawn_jlink(
     executable: str | None = None,
     extra_env: dict[str, str] | None = None,
     no_stdin: bool = False,
+    script_prefix: str = "tan-flash-",
 ) -> _Outcome:
     """Materialise the Commander script to a temp file, append its path as the
     final `-CommanderScript` argument, spawn, and remove the temp file.
@@ -1392,7 +1393,7 @@ def _spawn_jlink(
     it carries the flash addresses, and a leaked one in the system temp dir is
     both a mess and a small information leak.
     """
-    handle, path = tempfile.mkstemp(prefix="tan-flash-", suffix=".jlink")
+    handle, path = tempfile.mkstemp(prefix=script_prefix, suffix=".jlink")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as fh:
             # tan-cli#1312: these probes are clones, and a SEGGER firmware
@@ -1547,6 +1548,7 @@ def _execute(
     workspace: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
     jlink_exe: str | None = None,
+    script_prefix: str | None = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1619,6 +1621,8 @@ def _execute(
                 return _Outcome(success=False, stderr=refusal, captured=capture)
             extra_env = probe_guard.env()
         extra = {"extra_env": extra_env} if extra_env else {}
+        if script_prefix:
+            extra["script_prefix"] = script_prefix
         return _spawn_jlink(
             argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S, None, workspace, exe, **extra,
         )
@@ -2248,6 +2252,8 @@ class _ProbeGuard:
     #: A verification just passed and nothing has run since -- the DPIDR
     #: preflight may reuse it instead of listing the emulators a second time.
     fresh: bool = False
+    #: Temp-file prefix for the guard's own `ShowEmuList` script (`tan probe`: `tan-probe-`).
+    script_prefix: str | None = None
 
     def env(self) -> dict[str, str] | None:
         """`TAN_PROBE_USB_PATH`, for a wrapper to cross-check its mask."""
@@ -2306,6 +2312,8 @@ def _guard_verdict(
             None,
         )
     extra = {"extra_env": guard.env()} if guard.env() else {}
+    if guard.script_prefix:
+        extra["script_prefix"] = guard.script_prefix
     outcome = _spawn_jlink(
         [spawned[0], "-NoGui", "1", "-CommanderScript"], "ShowEmuList\nexit\n", True,
         _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], no_stdin=True, **extra,
