@@ -142,7 +142,7 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
 #  * It tests for the PRESENCE of the artefact, never for "would this
 #    assertion fail". So it CANNOT fire once the pin moves onto a tree that
 #    carries it. A tree carrying it only PARTIALLY (say `npu_toolchain.vela`
-#    on i.MX 93 but not on the Alif parts) makes these RUN and FAIL, which is
+#    on some Alif parts but not others) makes these RUN and FAIL, which is
 #    the correct direction: a loud failure names the gap, a silent skip buries
 #    it.
 #  * It fires only when a root IS bound. With nothing bound, the module's own
@@ -161,7 +161,7 @@ _SDK_PR = "alplabai/alp-sdk#1470"
 def sdk_publishes_vela_profile(sdk: Path) -> bool:
     """True when ANY SoC spec under ``<sdk>/metadata/socs/`` carries an
     ``npu_toolchain.vela`` block -- alp-sdk `fff41087`, which landed it on all
-    six Alif Ensemble parts and on i.MX 93 in one commit.
+    six Alif Ensemble parts in one commit.
 
     ANY, not "the part this test is about", and that is the safe direction on
     purpose: `fff41087` is atomic, so there is no real tree in which some
@@ -1454,7 +1454,7 @@ def pytest_runtest_teardown(item, nextitem):
 # That is not a theoretical hazard. It made `tests/parity/seam1_field_diff.py`
 # report
 #
-#     FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+#     FAIL <board>: alp-sdk refuses but tan does not
 #
 # for a `status: tbd` hw_rev the tan under test refuses correctly in every
 # emit mode -- a FALSE parity divergence, filed as a real one before the cause

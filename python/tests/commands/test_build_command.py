@@ -9,11 +9,11 @@ exit code, and the guarantee that no failure escapes as a traceback. An
 in-process call exercises none of those.
 
 The plan fixtures are the REAL ones the Rust parity harness uses
-(``tests/parity/oracle/*.build-plan.json`` and
-``tests/parity/consumer_fixtures/*.build-plan.json`` at the repo root,
-captured from a live ``alp_orchestrate --emit build-plan``), not hand-written stand-ins --
-``multicore_rpmsg-imx93`` already IS the shape the ordering/skip cases need: two
-slices, one with ``command: null``, and a matching ``warnings[]`` entry. Only
+(``tests/parity/oracle/*.build-plan.json`` at the repo root, captured from a
+live ``alp_orchestrate --emit build-plan``), not hand-written stand-ins --
+``multicore_rpmsg-v2n``, with its Zephyr slice's command nulled and a matching
+``warnings[]`` entry added (``board_tree_missing_plan``), is the shape the
+ordering/skip cases need: two slices, one with ``command: null``. Only
 the case that must actually SPAWN something uses a synthetic plan, because it
 needs a tool that exists on every host (``sys.executable``).
 
@@ -55,20 +55,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE_ROOT.parent
 ORACLE_PLANS = REPO_ROOT / "tests" / "parity" / "oracle"
 
-#: Captured plans that are CONSUMER fixtures only -- no seam-1 oracle case
-#: (alp-sdk deleted the board they were captured from, so a live comparison
-#: has no counterparty). `multicore_rpmsg-imx93` lives here: it is the shape
-#: the ordering/skip cases need (two slices, one `command: null`, a matching
-#: `board-tree-missing` warning).
-CONSUMER_PLANS = REPO_ROOT / "tests" / "parity" / "consumer_fixtures"
-
 
 def real_plan(name: str) -> dict:
     """Load a captured real build plan by name. A missing fixture RAISES --
     a silently skipped case would let this suite certify nothing."""
     path = ORACLE_PLANS / f"{name}.build-plan.json"
-    if not path.is_file():
-        path = CONSUMER_PLANS / f"{name}.build-plan.json"
     if not path.is_file():
         raise RuntimeError(
             f"missing oracle plan {path}; this suite is grounded in the real "
@@ -408,8 +399,30 @@ def test_slice_output_goes_to_stderr_and_stdout_stays_one_envelope(project):
 # --- the real captured plans ------------------------------------------------
 
 
+def board_tree_missing_plan() -> dict:
+    """The real ``multicore_rpmsg-v2n`` plan with its Zephyr slice (`m33_sm`)
+    in the state the planner reports for a core whose board tree is absent:
+    ``command: null`` plus a ``board-tree-missing`` warning naming why."""
+    plan = real_plan("multicore_rpmsg-v2n")
+    m33 = next(s for s in plan["slices"] if s["coreId"] == "m33_sm")
+    m33["command"] = None
+    plan["warnings"] = [
+        {
+            "code": "board-tree-missing",
+            "coreId": "m33_sm",
+            "message": (
+                "SoM 'E1M-V2N101' core 'm33_sm' wants Zephyr board "
+                "'alp_e1m_v2n101_m33_sm', which has no tree under "
+                "zephyr/boards/alp/ -- board bring-up for this target has not "
+                "happened yet."
+            ),
+        }
+    ]
+    return plan
+
+
 def test_a_null_command_slice_survives_with_its_warning(project):
-    # I-11, on the real plan that has this shape: `m33` carries `command:
+    # I-11, on the real plan that has this shape: `m33_sm` carries `command:
     # null` plus a `board-tree-missing` warning naming why. Neither the slice
     # nor the warning may be dropped. `a55_cluster` carries a REAL `bitbake`
     # command, which also skips under `scrub_path`, so the envelope is a
@@ -417,15 +430,15 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     # reports_success` for the dedicated coverage of that half; this test
     # stays about I-11 alone.
     #
-    # tan-cli#483: `m33` ALSO carries an `appDir` that does not exist on
-    # this machine (`/srv/alp-sdk/examples/multicore/rpmsg-imx93/m33`,
+    # tan-cli#483: `m33_sm` ALSO carries an `appDir` that does not exist on
+    # this machine (`/srv/alp-sdk/examples/multicore/rpmsg-v2n/m33_sm`,
     # captured on the machine that produced this fixture) -- but
     # `_missing_app_dirs` is guarded on `command is not None` (review round:
     # nothing was ever going to dispatch for a slice the planner already
     # refused a command for, so its unread `app:` must not become the
-    # reported reason instead of `board-tree-missing`), and `m33`'s command
+    # reported reason instead of `board-tree-missing`), and `m33_sm`'s command
     # IS null -- so this stays exactly the pre-#483 shape, unaffected.
-    plan_doc = real_plan("multicore_rpmsg-imx93")
+    plan_doc = board_tree_missing_plan()
     plan = write_plan(project, plan_doc)
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json",
@@ -437,14 +450,14 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     assert env["ok"] is False
 
     slices = env["data"]["slices"]
-    assert [s["coreId"] for s in slices] == ["a55_cluster", "m33"]
-    m33 = next(s for s in slices if s["coreId"] == "m33")
+    assert [s["coreId"] for s in slices] == ["a55_cluster", "m33_sm"]
+    m33 = next(s for s in slices if s["coreId"] == "m33_sm")
     assert m33["status"] == "skipped"
     assert not any(i["code"] == "build.app-dir-missing" for i in env["issues"])
 
     warnings = env["data"]["warnings"]
     assert [w["code"] for w in warnings] == ["board-tree-missing"]
-    assert warnings[0]["coreId"] == "m33"
+    assert warnings[0]["coreId"] == "m33_sm"
 
 
 def test_a_plan_warning_reaches_issues_and_text_not_only_data_warnings(project):
@@ -458,7 +471,7 @@ def test_a_plan_warning_reaches_issues_and_text_not_only_data_warnings(project):
     issue chain -- delete the `issues.extend(_plan_warning_issues(...))` line
     and those unit tests stay green while this one goes red.
     """
-    plan = write_plan(project, real_plan("multicore_rpmsg-imx93"))
+    plan = write_plan(project, board_tree_missing_plan())
 
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json",
@@ -469,7 +482,7 @@ def test_a_plan_warning_reaches_issues_and_text_not_only_data_warnings(project):
     assert len(promoted) == 1, env["issues"]
     assert promoted[0]["severity"] == "warning"
     assert "board-tree-missing" in promoted[0]["message"]
-    assert "m33" in promoted[0]["message"]
+    assert "m33_sm" in promoted[0]["message"]
 
     text_proc = run_tan(
         "build", "--plan-from", str(plan), "--execute",

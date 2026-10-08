@@ -104,7 +104,6 @@ SCHEMA_VERSION = "pinmux-capability-v1"
 #: -- there is no separate `v2n-m1.yaml` table, so it maps to `"v2n"` too.
 _FAMILY_PREFIX_TABLE = (
     ("E1M-AEN", "aen"),
-    ("E1M-NX9", "imx93"),
     ("E1M-V2N", "v2n"),
     ("E1M-V2M", "v2n"),
 )
@@ -136,7 +135,7 @@ def _is_safe_family_stem(family: str) -> bool:
     POSIX it also accepts `C:\\x` and `..\\..\\x` as ordinary filenames.
 
     No dot is admitted because no `metadata/pinmux/*.yaml` stem has ever
-    contained one (`aen`, `imx93`, `v2n`); admitting one to be liberal would
+    contained one (`aen`, `v2n`); admitting one to be liberal would
     buy nothing and hand back the `.`/`..` component this rejects outright.
     """
     return bool(family) and all(c.isascii() and (c.isalnum() or c in "-_") for c in family)

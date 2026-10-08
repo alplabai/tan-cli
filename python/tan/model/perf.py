@@ -527,8 +527,8 @@ def read_perf_point(path: Path) -> PerfPoint | None:
 # (`tan.model.perf_apply._topology_core_ids`): a point's core must exist in
 # @sku's OWN `topology:` map at all, UNCONDITIONALLY, for EVERY backend on
 # EVERY SKU, whether or not the accelerator being screened pairs to a core --
-# this is what refuses `m55_hp` on E1M-NX9101/imx93 (a real Ensemble core, not
-# an imx93 one) or `cortex_potato` anywhere. `core` narrows to @target's own
+# this is what refuses `m55_hp` on a V2N SKU (a real Ensemble core, not
+# a V2N one) or `cortex_potato` anywhere. `core` narrows to @target's own
 # `paired_core` ONLY through this function's QUERY parameter (above) -- a
 # declared fact about the SAME accelerator being screened -- and nothing
 # wider; where @target declares no pairing of its own, `core` stays unnarrowed

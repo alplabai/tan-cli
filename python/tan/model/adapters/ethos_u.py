@@ -57,9 +57,8 @@ maps those ports to MEMORY AREAS (`axi0_port=`/`axi1_port=`, `vela.ini:60-117`).
 Under `Sram_Only` all three sit on `Axi0` and all 11 `System_Config` sections
 vela 5.1.0 ships set `axi0_port=Sram`, so no system config can move anything --
 which is the only reason those two measurements matched. `Shared_Sram` sets
-`const_mem_area=Axi1` (`vela.ini:242-245`), and that is the mode tan passes for
-`E1M-NX9101`; there the system config decides the const region's memory area
-outright. Measured, `person_detect_int8.tflite` at `ethos-u65-256 --memory-mode
+`const_mem_area=Axi1` (`vela.ini:242-245`); under it the system config decides
+the const region's memory area outright. Measured, `person_detect_int8.tflite` at `ethos-u65-256 --memory-mode
 Shared_Sram`, changing ONLY `--system-config` (KiB, from vela's own summary):
 
   * `Ethos_U65_Embedded` (`axi1_port=OffChipFlash`) -- `sram 72.734375`,
@@ -99,14 +98,12 @@ nothing, which is the only correct thing it can do: passing `--config` alone is
 rc=1 and naming a profile nobody published would be an invention.
 
 WHO THE OLD DEFAULT HIT (tan-cli#789 review), i.e. what the memory mode fixes:
-the DRAM-backed built-in default was NOT a U85/Alif-only fact. Measured, real
-`ethos-u-vela` 5.1.0 over the committed fixture, both of these refused with no
-memory mode:
+the DRAM-backed built-in default hit every U85 part. Measured, real
+`ethos-u-vela` 5.1.0 over the committed fixture, this refused with no memory
+mode:
 
   * `ethos-u85-256` -> `Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`
     (E1M-AEN401 / E1M-AEN601 / E1M-AEN801, Alif Ensemble E4/E6/E8)
-  * `ethos-u65-256` -> `Ethos_U65_Client_Server` / `Dedicated_Sram_384KB`
-    (a non-Alif part, E1M-NX9101, since removed from alp-sdk)
 
 while every `ethos-u55-*` config (E1M-AEN301/501/701 and the U55 targets of the
 three AEN SKUs above) resolved to the SRAM-backed
@@ -115,28 +112,24 @@ kept, not deleted: a part whose spec carries no profile, or a compile that
 reports no SRAM even under its module's own memory mode, must still be refused
 rather than shipped as a zero. `_refuse_zero_sram_footprint` names the profile
 the run ITSELF reported (`_parse_vela_profile`), never a hardcoded Alif one --
-an NXP user must not read an error blaming `Ethos_U85_SYS_DRAM_Mid`.
+a user of another vendor's part must not read an error blaming
+`Ethos_U85_SYS_DRAM_Mid`.
 
 ...AND NEITHER IS THE REMEDY (tan-cli#789 review (g)). Naming the profile per
 run only half-closed that: the REMEDY sentence still told every reader the
 profile "lives in the proprietary ensemble_vela.ini", which is an Alif fact.
-alp-sdk's own i.MX 93 vela invocation carries no proprietary `.ini` at all --
-verbatim from `vendors/nxp-imx93/README.md`: `vela --accelerator-config
-ethos-u65-256 --output-dir build/vela-imx93 --memory-mode Shared_Sram
-mobilenet_v2_quantised.tflite`. So on an NXP part that clause sent the reader
-after another vendor's file, which is not what their silicon needs and not
-where their profile comes from. That i.MX 93 line was not restated as advice
-for a different reason: `--memory-mode Shared_Sram` was what tan PASSED for
-that part, straight from `imx93.json`'s own `npu_toolchain.vela` block (the
-part has since been removed from alp-sdk), so nothing was left to advise a
-reader to do by hand.
+A part whose vela invocation carries no proprietary `.ini` would have been sent
+after another vendor's file, which is not what its silicon needs and not where
+its profile comes from. The memory mode tan passes comes straight from the SoC
+spec's own `npu_toolchain.vela` block, so there is nothing to advise a reader
+to do by hand.
 
 BOTH HALVES OF THE REFUSAL'S EVIDENCE NOW COME FROM METADATA, not from prose in
 this file: WHICH vendor file (if any) to name is the SoC spec's own
 `npu_toolchain.vela.vendor_config_filename` (`@vela_vendor_config_filename`),
 and WHY a DRAM placement is wrong here is `@soc_declares_dram`, resolved from
 its `external_memory_interfaces[]` -- `alif:ensemble:e8` lists exactly `HexSPI`
-and `SD/eMMC`, `nxp:imx9:imx93` listed `LPDDR4/4X`. Each is then right for every
+and `SD/eMMC`, `renesas:rzv2n:n44` lists `LPDDR4/4X`. Each is then right for every
 part automatically, including one nobody has looked at yet.
 
 Neither is read from `metadata/` HERE: `resolve_targets` already has the SoC
@@ -235,7 +228,7 @@ _DRAM_AREA = "dram"
 # names no DDR/DRAM kind at all (`tan.model.targets._soc_declares_dram`; on
 # `alif:ensemble:e8` it lists exactly `HexSPI` and `SD/eMMC`). Machine-checked
 # per part rather than asserted in prose, so it is silent for a part that
-# declares DRAM (`nxp:imx9:imx93` -- LPDDR4/4X) or declares nothing.
+# declares DRAM (`renesas:rzv2n:n44` -- LPDDR4/4X) or declares nothing.
 #
 # Kept SHORT deliberately: it lands inside a one-line note bounded by
 # `tan.model.check._VELA_REFUSAL_NOTE_BUDGET` (700), against which the maximal
@@ -477,8 +470,8 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
                     defaulted: frozenset[str]) -> str:
     """The profile THIS run resolved, named as the run itself reported it
     (`_parse_vela_profile`) -- never a hardcoded `Ethos_U85_*`, which would
-    blame an Alif memory model for an `ethos-u65-256` refusal on the (since
-    removed) NXP E1M-NX9101 (tan-cli#789 review MAJOR 3).
+    blame an Alif memory model for a refusal on a non-Alif part
+    (tan-cli#789 review MAJOR 3).
 
     @defaulted is vela's OWN verdict (`_defaulted_flags` over its stdout), not
     an assumption, and it is per-flag: the blanket "vela's BUILT-IN default
@@ -524,7 +517,7 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
 # declares `npu_toolchain.vela.vendor_config_filename`, and names exactly that.
 # So "a non-Alif refusal never names an Alif file" holds for the stronger
 # reason that no part is ever handed another part's file at all
-# (`nxp:imx9:imx93` declares none). `silicon_ref` was the gate's only reader
+# (a part whose spec declares none gets none). `silicon_ref` was the gate's only reader
 # and is therefore gone from this adapter's interface.
 #
 # `System_Config` and NOT `--system-config`: that is vela's own INI section name
@@ -556,9 +549,8 @@ def _refusal_remedy(defaulted: frozenset[str], vendor_config_filename: str | Non
     the real position instead of promising a flag that does not exist.
 
     The vendor-file pointer is likewise stated only where it is TRUE
-    (tan-cli#789 review (g)). It was unconditional, so the `ethos-u65-256`
-    refusal on `E1M-NX9101` -- an NXP i.MX 93, whose alp-sdk-documented vela
-    invocation involves no proprietary `.ini` whatsoever -- sent that reader
+    (tan-cli#789 review (g)). It was unconditional, so a refusal on a
+    part whose vela invocation involves no proprietary `.ini` sent that reader
     hunting an Alif file. Gated now on @vendor_config_filename, this part's own
     SoC-spec declaration, so `None` (the part declares none, or the caller
     resolved no spec) gets the two clauses that hold for ALL parts and no
@@ -690,8 +682,8 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
 #     `sram_memory_used`/`on_chip_flash_memory_used`. So this caveat does NOT
 #     repeat the "figures describe the wrong memory model" sentence, which would
 #     be false.
-#   * MEMORY MODE SUPPLIED WITH `Axi1` CONST (`Shared_Sram`, the mode tan passes
-#     for `E1M-NX9101`; also every `Dedicated_Sram*`), SYSTEM CONFIG DEFAULTED --
+#   * MEMORY MODE SUPPLIED WITH `Axi1` CONST (`Shared_Sram`; also every
+#     `Dedicated_Sram*`), SYSTEM CONFIG DEFAULTED --
 #     calling THAT bandwidth-only would be false, which is why it is its own
 #     shape (tan-cli#789 review MAJOR 2). The const/weights region is on the
 #     other port, and it is the system config that maps ports to memory areas,
@@ -854,8 +846,8 @@ class VelaAdapter(CompilerAdapter):
         # Ethos_U85_SYS_Flash_High` alongside `--memory-mode Sram_Only` on
         # `tiny_int8.tflite` and on `person_detect_int8.tflite` at
         # `ethos-u85-256` changes no memory figure. That is a `Sram_Only` fact,
-        # NOT a general one: under `Shared_Sram` (`const_mem_area=Axi1`, the
-        # mode tan passes for `E1M-NX9101`) the system config alone moves
+        # NOT a general one: under `Shared_Sram` (`const_mem_area=Axi1`) the
+        # system config alone moves
         # 228 KiB of weights between areas -- see the module docstring's
         # measured `ethos-u65-256` sweep. Every memory-mode value that reaches
         # here is an Arm built-in, so this works with no vendor .ini.

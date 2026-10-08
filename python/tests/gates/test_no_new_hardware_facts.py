@@ -95,7 +95,7 @@ ALLOWED: dict[str, str] = {
         "LOUD (`default board 'E1M-EVK' does not match any name: in "
         "metadata/boards/`) instead of silently shipping a wrong one -- unlike an "
         "address or pin name, this one cannot drift into a silently-wrong "
-        "artifact. The remaining five hits (E1M-AEN801/E1M-V2N102/E1M-NX9101) are "
+        "artifact. The remaining hits (E1M-AEN801/E1M-V2N102) are "
         "OK: teaching prose embedded in the GENERATED skeleton's comments, "
         "pointing a vendor at real committed example presets for 'the two core "
         "shapes' / pad_routes / helper_firmware conventions -- inherited "

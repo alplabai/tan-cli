@@ -147,7 +147,7 @@ class BackendReport:
     """One backend's static-screen partition report for a model."""
 
     backend: str              # cpu | ethos_u | drpai | deepx_dxm1
-    variant: str | None       # u85 | u55 | u65 | None
+    variant: str | None       # u85 | u55 | None
     table: str | None         # the table file that answered, or None
     # WHICH words are legitimate here is NOT restated in this comment -- read
     # `LEGITIMATE_COVERAGE_BY_BASIS` above, keyed by this report's own `basis`.

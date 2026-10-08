@@ -75,8 +75,7 @@ class _VelaProfile(NamedTuple):
 
 #: Substrings that make an `external_memory_interfaces[].kind` a DRAM
 #: interface, matched case-insensitively against the declared kind. Covers
-#: every DRAM spelling in metadata today -- `LPDDR4/4X` (nxp:imx9:imx93,
-#: renesas:rzv2n:n44), `LPDDR4X / LPDDR5` (deepx:dx:m1) -- and nothing else:
+#: every DRAM spelling in metadata today -- `LPDDR4/4X` (renesas:rzv2n:n44), `LPDDR4X / LPDDR5` (deepx:dx:m1) -- and nothing else:
 #: `HexSPI`, `OctalSPI`, `FlexSPI`, `xSPI` and `SD/eMMC` (the ONLY kinds the
 #: six Alif Ensemble parts declare) are not DRAM.
 #:
@@ -142,7 +141,7 @@ def _vela_profile(soc: dict) -> _VelaProfile:
     cannot make it by omission.
 
     An ABSENT `system_config` is likewise "nothing to pass", never "no vendor
-    config needed": no Alif or NXP spec names one today (an Alif System_Config
+    config needed": no Alif spec names one today (an Alif System_Config
     describes one CORE SUBSYSTEM, not a die), so this branch yields None for
     every part currently shipped -- correct, and the mechanism is here for the
     spec that eventually does carry a built-in one.

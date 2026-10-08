@@ -663,6 +663,10 @@ artefacts), which tan's own in-process planner renders itself, so no tan code
 path requires an SDK that carries it; the rest is the E1M-NX9101 removal
 (alp-sdk#2782). The decision below is unchanged.
 
+**Addendum (2026-10-08, tan-cli#1427).** The planner mirror moved to alp-sdk
+`dev` `c4eb2764542cfaaaaaa637113af56af5cd3b2edd` (docs-only for `scripts/**` and
+`metadata/**` over `6159a7b1a`). The floor does NOT move: it stays `b04bb0f7a`.
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
 contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision

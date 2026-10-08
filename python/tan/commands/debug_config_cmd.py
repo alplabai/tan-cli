@@ -539,9 +539,9 @@ def _sdk_published_cores(
 
     `cores[].id` is the authority; the `jlink_device` union only widens it for
     a SoC JSON that omits `cores` entirely. Measured across every SoC JSON in
-    alp-sdk `metadata/socs/**` (alif e3-e8, deepx dx/m1, nxp imx9/imx93,
+    alp-sdk `metadata/socs/**` (alif e3-e8, deepx dx/m1,
     renesas rzv2n/n44): the `jlink_device` keys are a SUBSET of `cores[].id`
-    in all nine, so on real metadata the union IS `cores[].id`. It is kept
+    in all of them, so on real metadata the union IS `cores[].id`. It is kept
     because the frozen contract fixture
     `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity/sdk` --
     which cannot be edited -- publishes `jlink_device` and no `cores` at all,

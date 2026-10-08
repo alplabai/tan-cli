@@ -7,9 +7,8 @@ without a bound `ALP_SDK_ROOT`, because its assertions are about the real
 committed SoM presets and SoC JSON. These are about the MECHANISM, and the
 mechanism has a branch no shipped SoC spec exercises today -- every Alif
 Ensemble part sets `system_config_requires_vendor_config: true` (its tuned
-sections live only in the proprietary `ensemble_vela.ini`) and the NXP i.MX 93
-names no `system_config` at all, so `vela_system_config` resolves to None for
-every part currently in metadata. Pinned here against a spec written for the
+sections live only in the proprietary `ensemble_vela.ini`), so
+`vela_system_config` resolves to None for every part currently in metadata. Pinned here against a spec written for the
 test, so the pass-it-through branch is proved rather than left as dead code
 that will be discovered broken by the first SoC spec that needs it. Building
 the tree here also means these run in the bare CI install, with no SDK bound.
@@ -111,11 +110,11 @@ def test_an_undeclared_vendor_requirement_withholds_the_system_config(tmp_path):
 
 def test_an_absent_system_config_is_nothing_to_pass(tmp_path):
     """Missing means "this part names none", NEVER "no vendor config needed"
-    -- the shape every shipped Alif and NXP spec is in today."""
+    -- the shape every shipped Alif spec is in today."""
     spec = _ethos_u(tmp_path, {
         "memory_mode": "Shared_Sram",
         "system_config_requires_vendor_config": False,
-        "source": "vendors/nxp-imx93/README.md:103-108",
+        "source": "vendors/fake/README.md:103-108",
     })
     assert spec.vela_memory_mode == "Shared_Sram"
     assert spec.vela_system_config is None
@@ -177,13 +176,13 @@ def test_a_part_needing_no_vendor_config_names_no_vendor_file(tmp_path):
     """A spec that says it needs no vendor config has no vendor file to point a
     customer at, even if it contradicts itself by naming one -- the refusal
     clause that consumes this calls the file proprietary and undistributed, and
-    that must never be said about a download nobody has to make. The i.MX 93's
-    real shape (`false`, no filename) lands here too."""
+    that must never be said about a download nobody has to make. A spec of shape
+    (`false`, no filename) lands here too."""
     spec = _ethos_u(tmp_path, {
         "memory_mode": "Shared_Sram",
         "system_config_requires_vendor_config": False,
         "vendor_config_filename": "should_not_be_quoted.ini",
-        "source": "vendors/nxp-imx93/README.md:106",
+        "source": "vendors/fake/README.md:106",
     })
     assert spec.vela_vendor_config_filename is None
     assert spec.vela_vendor_system_config is None
@@ -200,15 +199,12 @@ def test_a_part_needing_no_vendor_config_names_no_vendor_file(tmp_path):
     pytest.param([{"kind": "HexSPI"}, {"kind": "SD/eMMC"}], False, id="e8-HexSPI-SD-eMMC"),
     # e3/e4/e5/e6/e7.
     pytest.param([{"kind": "OctalSPI"}, {"kind": "SD/eMMC"}], False, id="e3-e7-OctalSPI"),
-    # metadata/socs/nxp/imx9/imx93.json.
-    pytest.param([{"kind": "LPDDR4/4X"}, {"kind": "FlexSPI"}, {"kind": "SD/eMMC"}], True,
-                 id="imx93-LPDDR4-4X"),
     # metadata/socs/deepx/dx/m1.json.
     pytest.param([{"kind": "LPDDR4X / LPDDR5"}], True, id="dx-m1-LPDDR4X-LPDDR5"),
     # metadata/socs/renesas/rzv2n/n44.json.
     pytest.param([{"kind": "LPDDR4/4X"}, {"kind": "xSPI"}, {"kind": "SD/eMMC"}], True,
                  id="n44-LPDDR4-4X-xSPI"),
-    # A spelling none of the five uses, to prove the match is on the token and
+    # A spelling none of the four uses, to prove the match is on the token and
     # not on a list of the kinds that happen to be in metadata today.
     pytest.param([{"kind": "DDR3L"}], True, id="a-DDR-spelling-metadata-does-not-use-yet"),
     # The unknowns: no key at all, and an empty list. Neither is a declaration

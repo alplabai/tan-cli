@@ -1108,7 +1108,7 @@ def test_inference_backends_and_ethos_u_variants_match_the_oracle():
     reorder or typo here would desync every `--inference-backend`/
     `--ethos-u-variant` choice list from the oracle's."""
     assert INFERENCE_BACKENDS == ("ethos_u", "drpai", "deepx_dxm1", "tbd")
-    assert ETHOS_U_VARIANTS == ("u55", "u65", "u85")
+    assert ETHOS_U_VARIANTS == ("u55", "u85")
 
 
 # ---------------------------------------------------------------------------

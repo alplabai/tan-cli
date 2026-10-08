@@ -124,6 +124,11 @@ FROZEN_LOCATIONS: dict[str, list[str]] = {
     # left `reserved`. Emitted from the JSON re-invoke in `cli.py`, which
     # rebuilds the click result and turns a non-zero exit into one Issue.
     "cli.parse-error": ["cli.py"],
+    # tan-cli#1425: alp-sdk-vscode's `classifyInitRefusal` (`initRefusal.ts`,
+    # `KINDS`) binds this spelling to `no-scaffold-for-som`, so it left
+    # `reserved`. The whole dotted code is the literal at `init_cmd`'s
+    # `UnsupportedSomError` handler.
+    "init.som-unsupported": ["commands/init_cmd.py"],
 }
 
 

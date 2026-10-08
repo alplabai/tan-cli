@@ -57,12 +57,6 @@
 #     leg tan-cli#639 reddened when it was open, and does still redden if you
 #     force a pre-fix tan onto it -- see "how to prove this gate can fail"
 #     below for the current, dispatch-based proof.
-#   * E1M-NX9101  (NXP i.MX 93)    -- genuinely a placeholder right now
-#     (`silicon_variant: TBD`, `hw_revisions.r1.status: tbd`) and CORRECTLY
-#     refuses at `tan generate` (`SdkRevisionNotBuildable`, alp-sdk#1025).
-#     Matrixed as `expect-refuse`, not excluded: an unexpected `ok:true` here
-#     is itself a signal (the SoM went live and this gate's matrix is stale),
-#     and so is a crash where a controlled refusal belongs.
 #
 # THE THIRD HOLE (tan-cli#1050): "the consumer's pin" is not one version
 # either, it is TWO -- one per alp-sdk-vscode branch. #767 read only `dev`,
@@ -526,22 +520,8 @@ jobs:
               )
 
           skus = [
-              {"sku": "E1M-AEN801", "template": "zephyr-app", "core": "m55_hp", "expect_refuse": False},
-              {"sku": "E1M-V2N101", "template": "zephyr-app", "core": "m33_sm", "expect_refuse": False},
-              {
-                  "sku": "E1M-NX9101",
-                  # `zephyr-app`'s vendored scaffold only has AEN and V2N/V2M
-                  # trees; at a released tan under test here an unrecognised
-                  # family such as E1M-NX9* can silently fall back to the
-                  # Alif tree instead of refusing (`scaffold._family_bucket`)
-                  # -- a mismatched scaffold, not the hw_rev refusal this leg
-                  # exists to prove. `minimal-app` is vendor-neutral and
-                  # scaffolds any SoM, which is what actually reaches
-                  # `tan generate` far enough to hit `SdkRevisionNotBuildable`.
-                  "template": "minimal-app",
-                  "core": "m33",
-                  "expect_refuse": True,
-              },
+              {"sku": "E1M-AEN801", "template": "zephyr-app", "core": "m55_hp"},
+              {"sku": "E1M-V2N101", "template": "zephyr-app", "core": "m33_sm"},
           ]
 
           combinations = [
@@ -597,7 +577,7 @@ jobs:
       matrix: ${{ fromJSON(needs.build-matrix.outputs.matrix) }}
     # The full legs pay for a real `tan bootstrap` + `west sdk install` +
     # ARM Zephyr build (getting-started.yml's own budget is 60 minutes for
-    # one SKU); the expect-refuse leg never reaches a toolchain at all.
+    # one SKU).
     timeout-minutes: 60
     env:
       SKU: ${{ matrix.sku }}
@@ -608,12 +588,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Skipped for the expect-refuse leg: `tan generate`'s in-process
-      # planner needs no system toolchain at all (tan.planner_emit runs
-      # in-process inside the frozen tan binary), and NX9101 never reaches
-      # `tan build`.
       - name: host prerequisites (ninja/dtc/gperf for the Zephyr configure+build)
-        if: ${{ !matrix.expect_refuse }}
         run: |
           set -euo pipefail
           bash scripts/ci/apt-bounded.sh update
@@ -621,7 +596,6 @@ jobs:
               ninja-build device-tree-compiler gperf xz-utils
 
       - name: python (west needs it; the released tan binary does not)
-        if: ${{ !matrix.expect_refuse }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -666,7 +640,6 @@ jobs:
       # ---- tan bootstrap + the Zephyr SDK (full legs only) -----------------
 
       - name: tan bootstrap (venv + west workspace + SDK python deps)
-        if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace
         env:
           # tan-cli#1163, the third site. Same asymmetry the other two had, and
@@ -727,7 +700,6 @@ jobs:
       # hardcoded fallback is measured against elsewhere (parity.yml) -- not
       # a second hand-typed pin here.
       - name: install the Zephyr SDK (west sdk install, arm-zephyr-eabi)
-        if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace
         env:
           # Read by the `run:` block below, which stages it into a private
@@ -828,11 +800,9 @@ jobs:
       # invocation aimed at one target. It renders the default target set
       # (zephyr-conf among them), which is exactly where tan-cli#639's bad
       # `CONFIG_ALP_SDK_CHIP_NONE=y` line lands, and exactly where
-      # E1M-NX9101's `SdkRevisionNotBuildable` refusal fires.
+      # a `SdkRevisionNotBuildable` refusal would fire.
       - name: "tan generate"
         working-directory: release-workspace/my-app
-        env:
-          MATRIX_EXPECT_REFUSE: ${{ matrix.expect_refuse }}
         run: |
           set -euo pipefail
           set +e
@@ -844,9 +814,9 @@ jobs:
             echo "::error::[${SKU}] 'tan generate' exited ${rc} without writing an envelope at all (nothing on stdout)."
             exit "$(( rc == 0 ? 1 : rc ))"
           fi
-          python3 - "$SKU" "$rc" "${MATRIX_EXPECT_REFUSE}" <<'PY'
+          python3 - "$SKU" "$rc" <<'PY'
           import json, sys
-          sku, rc, expect_refuse = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "true"
+          sku, rc = sys.argv[1], int(sys.argv[2])
           path = f"/tmp/rc-generate-{sku}.json"
           try:
               e = json.load(open(path))
@@ -862,32 +832,13 @@ jobs:
           ok = e.get("ok")
           issues = e.get("issues") or []
 
-          if expect_refuse:
-              # E1M-NX9101 is a genuine placeholder (silicon_variant: TBD) --
-              # a CONTROLLED refusal is the pass condition here, and an
-              # unexpected `ok:true` is itself news: either the SoM went
-              # live and this matrix entry is stale, or the refusal broke.
-              if ok:
-                  print(f"::error::[{sku}] expected a controlled refusal (this SKU's hw_rev is `status: tbd`) but 'tan generate' reported ok:true -- either the SoM shipped for real (update this matrix's `expect_refuse`) or the SdkRevisionNotBuildable refusal regressed.")
-                  sys.exit(1)
-              messages = " ".join(i.get("message", "") for i in issues)
-              if "not buildable" not in messages or "tbd" not in messages.lower():
-                  print(f"::error::[{sku}] 'tan generate' refused, but not with the expected SdkRevisionNotBuildable reason (hw_rev exists but is not buildable / status tbd). Got:", json.dumps(issues, indent=2))
-                  sys.exit(1)
-              print(f"[{sku}] expected refusal confirmed:", json.dumps(issues, indent=2))
-              sys.exit(0)
-
           if not ok:
               print(f"::error::[{sku}] 'tan generate' exited {rc}:", json.dumps(issues, indent=2))
               sys.exit(rc or 1)
           print(f"[{sku}] generate ok -- targets:", e.get("data", {}).get("targets"))
           PY
 
-      # NX9101 stops here (matches the docs contract: buildable SKUs get the
-      # full journey, this genuine placeholder is exercised only up to its
-      # own documented refusal).
       - name: "tan build"
-        if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace/my-app
         run: |
           set -euo pipefail
@@ -917,7 +868,6 @@ jobs:
       # copy of (getting-started.yml's own hardcoded m55_hp path is the
       # thing to keep in sync if this ever needs tightening, not duplicate).
       - name: the built ELF exists and is ARM
-        if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace/my-app
         run: |
           set -euo pipefail

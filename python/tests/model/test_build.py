@@ -67,8 +67,8 @@ def _meta_without_a_vela_memory_mode(tmp_path: Path, sku: str) -> Path:
     flagless, vela fell back to its DRAM-backed built-in profile, and the
     three refusal guards below fired against the REAL shipped SKUs. They no
     longer do: `E1M-AEN401`/`E1M-AEN601`/`E1M-AEN801` now resolve
-    `--memory-mode Sram_Only`
-    straight out of `metadata/socs/**`'s `npu_toolchain.vela`, so nothing in
+    `--memory-mode Sram_Only` straight out of `metadata/socs/**`'s
+    `npu_toolchain.vela`, so nothing in
     the shipped catalogue reports 0 KiB SRAM on a real NPU placement any more
     (measured, `ethos-u-vela` 5.1.0 over both committed fixtures -- see
     `test_the_soms_memory_mode_makes_the_refused_target_ship_at_all`).
@@ -328,8 +328,8 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     in `build_model`, that ONE refusal propagated out of the loop and aborted
     the whole build: `BUILD FAILED RuntimeError`, **no package written at
     all**, with the other three targets compiling perfectly (`arena 32, SRAM
-    1 KiB` on both u55 configs). The same held for `E1M-AEN401`,
-    `E1M-AEN601`.
+    1 KiB` on both u55 configs). The same held for `E1M-AEN401`
+    and `E1M-AEN601`.
 
     Both halves matter: the survivors must be PRESENT, and the refused target
     must be legibly ABSENT with its reason -- never silently present carrying
@@ -399,7 +399,8 @@ def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_pa
     ensemble_vela.ini`, and that -- not a vendor prefix on the SoM preset's
     `silicon:` ref, and not a literal in tan -- is what puts the pointer in a
     real `tan model build`'s coverage reason (tan-cli#789 review (g),
-    re-sourced).
+    re-sourced). The counterpart for a part that declares none is pinned by
+    `test_adapters.py::test_a_refusal_never_names_a_vendor_file_for_a_part_that_declares_none`.
 
     Runs the same real vela build as the test above rather than sharing it: a
     single test carrying both assertions would have to skip WHOLESALE at the
@@ -414,6 +415,40 @@ def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_pa
     assert len(refused) == 1
     assert ("its System_Config lives in the proprietary ensemble_vela.ini "
             "alp-sdk does not redistribute") in refused[0].reason
+
+
+def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
+    """The deliberate decision for "what if they ALL refuse".
+
+    A `.alpmodel` with no runnable blob is worse than an error: nothing fails
+    until the device tries to load it. So the existing zero-blob guard stands
+    -- per-target skipping is about not losing the targets that WORKED, never
+    about shipping a package with none.
+
+    A registry holding only an adapter that refuses every accelerator target
+    leaves nothing at all, and the refusal's own text must survive into the
+    failure so the reader learns WHY rather than just "no blob compiled"."""
+    class _Refuses(CompilerAdapter):
+        backend = "ethos_u"
+        def is_available(self): return True
+        def accepts(self, src_format): return src_format == "tflite"
+        def compile(self, source, *, accel_config, out_dir, opts=None,
+                    vela_memory_mode=None, vela_system_config=None,
+                    vela_vendor_system_config=None,
+                    vela_vendor_config_filename=None, soc_declares_dram=None):
+            raise VelaFootprintRefused(
+                f"vela compiled cleanly for {accel_config} but reported 0 KiB SRAM "
+                f"under Ethos_U85_SYS_DRAM_Mid")
+
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-DUMMY")
+    with pytest.raises(ValueError) as exc:
+        build_model(sku="E1M-AEN801", name="tiny", source=src, out_dir=tmp_path,
+                    metadata_root=_META, adapters=[_Refuses()])
+    msg = str(exc.value)
+    assert "no blob compiled" in msg
+    assert "ethos-u85-256" in msg and "Ethos_U85_SYS_DRAM_Mid" in msg
+    assert not list(tmp_path.glob("*.alpmodel"))         # nothing half-written
 
 
 # --------------------------------------------------------------------------
@@ -431,7 +466,7 @@ def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
         tmp_path, sku, accel_config, memory_mode):
     """THE ACCEPTANCE for the whole slice, through a REAL vela process.
 
-    These are precisely the SKUs tan-cli#789 had to refuse, and the
+    These are precisely the three SKUs tan-cli#789 had to refuse, and the
     reason was never the model: vela was compiling them against its own
     DRAM-backed built-in profile on parts that have no DRAM, so the SRAM
     figure alp-sdk sizes an arena from came back zero and the target became a
@@ -448,7 +483,8 @@ def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
 
     with vela's own columns moving `sram 0.0 / dram 0.265625` ->
     `sram 0.03125 / dram 0.0 / on_chip_flash 0.234375` on the Alif u85.
-    Parametrized over all three rather than spot-checked on one."""
+    Parametrized over all three rather than spot-checked on one, so a
+    regression that hardcoded a single SKU's profile cannot pass."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     # The profile really did come from metadata, and the vendor-gated system

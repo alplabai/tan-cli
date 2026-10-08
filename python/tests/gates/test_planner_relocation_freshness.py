@@ -1384,7 +1384,12 @@ from tests.conftest import sdk_root
 #:     `memory.py`, `orchestrator.py`, `partition.py`, `sdk_compat.py`,
 #:     `validate.py` -- NX9101-removal and doc-wording edits; merged cleanly.
 #:     `libraries.py`'s relocated `_SOC_FAMILY_TOKEN` drops `imx93`.
-PINNED_SDK_COMMIT = "6159a7b1a50c3267b98fed17c0e17d084143d22b"  # alp-sdk origin/dev -- #2778 (hw-info-h + west-libs configArtefacts) resync (tan-cli#1216)
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `6159a7b1` -> `c4eb27645` (tan-cli#1427).
+#: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
+#: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
+#: at `c4eb27645` and is unchanged, so nothing is ported.
+PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- #2782 merge + docs; no planner change in range (tan-cli#1427)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2411,7 +2416,10 @@ PINNED_HASHES: dict[str, str] = {
 #: ported in `planner_emit.py` (see the mirror note above). The rest
 #: (`alp_cli/*`, `alp_template.py`, `native_sim.py`, `alp_project_loader.py`
 #: comments) are doc-wording only.
-HAND_PORT_PINNED_SDK_COMMIT = "6159a7b1a50c3267b98fed17c0e17d084143d22b"  # alp-sdk origin/dev -- #2778/#2782 audit (tan-cli#1216)
+#:
+#: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
+#: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
+HAND_PORT_PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- no hand-port change in range (tan-cli#1427)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

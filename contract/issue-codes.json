@@ -2389,11 +2389,12 @@
     },
     {
       "code": "init.som-unsupported",
-      "status": "reserved",
+      "status": "frozen",
       "severity": "error",
-      "consumer": "none",
+      "consumer": "alp-sdk-vscode packages/alp-core/src/project/initRefusal.ts :: KINDS",
+      "consumerEffect": "Classified as `no-scaffold-for-som`: the New Project flow tells the customer to pick a different template or an example, not another SoM. Renamed, the refusal falls through to tan's raw message with no route forward.",
       "emittedBy": "python/tan/commands/init_cmd.py",
-      "note": "tan-cli#579. `--som` names a SoM family tan vendors no scaffold tree for (E1M-NX9* today), so a family-split template cannot be rendered for it. Before this code existed, `_family_bucket`'s `else` arm sent every such SKU onto the ALIF tree and `tan init --som E1M-NX9101 --template sensor-starter` wrote Alif content -- `preset: e1m-evk`, `chips: [tmp112]`, an `alp_e1m_aen801_m55_hp/...` README build line, and a CMakeLists.txt pinned to `--core m55_hp` next to a board.yaml declaring `m33` -- at ok:true/exit 0/issues:[]. Distinct from `init.invalid-som`, which means \"this TEMPLATE supports one SKU\" (iot-starter); this one means \"tan has no scaffold for this SoM family in ANY family-split template\". Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it. RETIRES when alp-sdk's scaffold catalog gains an NXP entry and the tree is vendored: fill in the `None` in `tan/core/scaffold.py`'s `_SOM_FAMILIES` and this stops firing."
+      "note": "tan-cli#579. `--som` names a SoM family tan vendors no scaffold tree for, so a family-split template cannot be rendered for it. Fires for a `_SOM_FAMILIES` row in `tan/core/scaffold.py` whose tree is `None`; the table has no such row today (the only one, E1M-NX9*, left with alp-sdk#2781), so no real SKU reaches it now, and it stays so a future unvendored family is refused rather than rendered against another vendor's tree. Before this code existed, `_family_bucket`'s `else` arm sent every such SKU onto the ALIF tree, writing Alif content at ok:true/exit 0/issues:[]. Distinct from `init.invalid-som`, which means \"this TEMPLATE supports one SKU\" (iot-starter); this one means \"tan has no scaffold for this SoM family in ANY family-split template\". Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Promoted from `reserved` to `frozen` because alp-sdk-vscode binds it in `KINDS`: renaming or removing it is a breaking wire change."
     },
     {
       "code": "init.som-flow-style-unsupported",

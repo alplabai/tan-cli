@@ -308,12 +308,12 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     BLOCKER fix (the profile tiebreak, `_part_declares_a_profile`) left
     undone, and it does not depend on any accelerator declaring a pairing at
     all -- unlike the query's own narrowing, which only ever fires for an
-    accelerator that names one. Measured on E1M-NX9101 through `tan model
-    check` (the production path): a point claiming `core: "m55_hp"` -- a
-    core the i.MX 93 does not have; its topology is `a55_cluster` and `m33`
-    only -- was consumed at `basis: "bench", confidence: "certain"` with no
-    check ever having looked at `core` at all, because imx93's lone
-    `ethos-u65` declares no `paired_core` for the query to narrow on either.
+    accelerator that names one. Measured through `tan model check` (the
+    production path) on a part whose accelerator declares no `paired_core`: a
+    point claiming `core: "m55_hp"` -- a core that part does not have -- was
+    consumed at `basis: "bench", confidence: "certain"` with no check ever
+    having looked at `core` at all, because there was no `paired_core` for the
+    query to narrow on either.
     This function is what makes that check possible for EVERY backend and
     EVERY SKU, not only the ones that happen to pair an NPU to a core: a
     die's `topology:` is required and always populated (all eleven shipped
@@ -392,7 +392,7 @@ def _perf_identity(point: PerfPoint) -> str:
 
     The CORE is the one the match rule may leave unnarrowed -- where the
     SPECIFIC accelerator being screened declares no `paired_core` of its own
-    (every drpai/deepx_dxm1 SoM; E1M-NX9101/imx93's lone `ethos-u65`; and the
+    (every drpai/deepx_dxm1 SoM; and the
     E8's Ethos-U85, genuinely shared silicon rather than core-private -- see
     `_resolve_perf_point`) -- so stating it here is the only way the customer
     learns which one this point actually describes. `compiler_version` is
@@ -602,8 +602,8 @@ def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
     (`_topology_core_ids`), applied UNCONDITIONALLY for every backend
     regardless of what @target declares: a point's core must exist in @sku's
     OWN `topology:` map at all, full stop -- this is what catches a point
-    claiming `core: "m55_hp"` on E1M-NX9101 (imx93 has no such core; its
-    topology is `a55_cluster`/`m33`) or any other core nothing on the module
+    claiming `core: "m55_hp"` on a SoM whose topology has no such core
+    or any other core nothing on the module
     has ever had.
 
     WHERE @target DECLARES NO `paired_core` OF ITS OWN, core narrowing STOPS
@@ -631,8 +631,7 @@ def _resolve_perf_point(*, backend: str, sku: str, model_sha256: str,
     there is no A32 SVD view and no A32 board devicetree NPU node to check
     either way, so refusing the core would have been an equally unsourced
     assertion in the OTHER direction. Only where @target declares no pairing
-    at all -- e.g. E1M-NX9101/imx93, whose lone `ethos-u65` declares no
-    pairing, or every drpai/deepx_dxm1 SoM today -- does level 1 alone
+    at all -- e.g. every drpai/deepx_dxm1 SoM today -- does level 1 alone
     decide, exactly as it always did.
 
     THE PROFILE TIEBREAK NARROWS BEFORE THE SINGLE-POINT SHORTCUT, not after

@@ -95,7 +95,18 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`6159a7b1a`**
+- **Current vendor point (all templates):** **`c4eb27645`**
+  (`c4eb2764542cfaaaaaa637113af56af5cd3b2edd`, alp-sdk `dev`) — the
+  `6159a7b1a` -> `c4eb27645` planner re-sync (tan-cli#1427). The range holds no
+  change to `scripts/**` or `metadata/**` (alp-sdk#2782's merge and the #2783
+  docs commit), so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <c4eb27645>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+  unchanged. The pin moves in the same change as `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Prior vendor point (all templates):** **`6159a7b1a`**
   (`6159a7b1a50c3267b98fed17c0e17d084143d22b`, alp-sdk `dev`) — the
   `030de105d` -> `6159a7b1a` planner re-sync (tan-cli#1216; alp-sdk#2778, with
   the E1M-NX9101 removal #2782 in range), the same change that moves
@@ -108,23 +119,29 @@ from an un-revendored SDK change.
   <6159a7b1a>` was 8/10 against the old tree and is rc 0, **10/10** (template,
   sku) pairs PASS after.
 
-- **Prior vendor point (all templates):** **`030de105d`**
+- **Earlier vendor point (all templates):** **`030de105d`**
   (`030de105d3a106b3c10202854cf57d4e81e78c0f`, alp-sdk `dev`) — the
   `2d2a85333` -> `030de105d` planner re-sync (tan-cli#1401; alp-sdk#2774, with
   the v0.17.0 release merge #2763 in range), the same change that moves
   `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
   `sdk_parity` `ref:` and `test_planner_relocation_freshness.py`'s
-  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, links
-  only:** alp-sdk cut `v0.17.0-rc1` inside the range, so the emit's doc-link
-  renderer (which pins a link to a ref only once that tag resolves) now
-  renders `blob|tree/v0.17.0-rc1/` instead of `v0.16.0` — 20 files, every
-  difference a `github.com/alplabai/alp-sdk/(blob|tree)/<ref>/` ref, nothing
-  else (the catalog examples did not change). `scaffold_byte_parity.py --sdk
-  <030de105d>` is rc 0, **10/10** (template, sku) pairs PASS. The matching
-  `DELIBERATE_EDITS` literals in that script moved with it. `- Ref:` below
-  is now `v0.17.0-rc1`.
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, two
+  files:** `edge-ai/E1M-AEN801/src/cold_chain.c` and
+  `edge-ai/E1M-V2N101/src/cold_chain.c` — alp-sdk reworded two comments that
+  named a training script the example does not ship; nothing else in the emit
+  moved. `scaffold_byte_parity.py --sdk <c4eb27645>` is rc 0, **10/10**
+  (template, sku) pairs PASS.
 
-- **Prior vendor point (all templates):** **`2d2a85333`**
+- **Prior vendor point (all templates):** **`030de105d`**
+  (`030de105d3a106b3c10202854cf57d4e81e78c0f`, tan-cli#1401): the `2d2a85333` ->
+  `030de105d` planner re-sync (alp-sdk#2774, with the v0.17.0 release merge
+  #2763 in range). Re-vendored links only: alp-sdk cut `v0.17.0-rc1` inside the
+  range, so the emit's doc-link renderer now rendered `blob|tree/v0.17.0-rc1/`
+  instead of `v0.16.0` — 20 files, every difference a
+  `github.com/alplabai/alp-sdk/(blob|tree)/<ref>/` ref. `- Ref:` is
+  `v0.17.0-rc1` since this point.
+
+- **Earlier vendor point (all templates):** **`2d2a85333`**
   (`2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`), tan-cli#1216, no re-vendoring.
 
 - **Earlier vendor point (all templates):** **`ac0e2a5e0`**
@@ -635,14 +652,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`6159a7b1a`** (alp-sdk `dev`, full sha
-  `6159a7b1a50c3267b98fed17c0e17d084143d22b`) — the checkout the emit was RUN
+- Commit: **`c4eb27645`** (alp-sdk `dev`, full sha
+  `c4eb2764542cfaaaaaa637113af56af5cd3b2edd`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `2d2a85333` (tan-cli#1216), and before that
+  This line used to say `030de105d` (tan-cli#1401), and before that
+  `2d2a85333` (tan-cli#1216), and before that
   `ac0e2a5e0` (tan-cli#1309), and before that
   `34c11c9de` (tan-cli#1278), and before that
   `79c834e65` (the alp-sdk#2311/#2312 re-sync), and
@@ -1004,7 +1022,7 @@ strictness exists to catch.
    sibling (V2N101/V2M101 share one PCB, so every other field the flip
    leaves untouched already matches), but wrong here: `E1M-AEN801`'s
    `board.yaml` pins `preset: e1m-evk` (which `metadata/boards/e1m-evk.yaml`
-   hosts only `alif-ensemble`/`nxp-imx9`, not V2M101's
+   hosts only `alif-ensemble`, not V2M101's
    `renesas-rzv2n-deepx`), plus Alif-shaped `cores:`/`pins:`. MEASURED against
    `v0.16.0-rc1` and re-measured against the GA `v0.16.0` tag (identical
    result): performing exactly the documented edit and nothing else,
@@ -1025,7 +1043,7 @@ strictness exists to catch.
    mention of a target SKU at all, but the underlying defect is unchanged:
    `tan init --template edge-ai-starter --som E1M-AEN801`, flip `som.sku` to
    `E1M-V2M101`, `tan validate` still refuses with the identical ALP-B007
-   (`board preset 'e1m-evk' hosts SoM families ['alif-ensemble', 'nxp-imx9'],
+   (`board preset 'e1m-evk' hosts SoM families ['alif-ensemble'],
    but E1M-V2M101 is family 'renesas-rzv2n-deepx'`) -- re-measured at
    `722320a1` in the tan-cli#1001 review round. Worse, retiring only the
    README half left `board.yaml`'s own comment (entry 6 below, untouched by
@@ -1714,41 +1732,6 @@ stands. Its catalog `files.user_owned` omits a root `CMakeLists.txt` and
 `linux/CMakeLists.txt:24` builds `src/main.c`, which the envelope never emits;
 and `linux/CMakeLists.txt:21` points its generated dir at the project's PARENT.
 Filed upstream as alplabai/alp-sdk#1712; vendoring it is blocked on that.
-
-## SKU-family gap: NXP is not in the SDK catalog
-
-The SDK catalog's `supported.som_skus` for every mapped template EXCEPT `iot`
-is exactly `["E1M-AEN801", "E1M-V2N101"]` — no `E1M-NX9*` SKU is covered by
-anything in the catalog (`iot` narrows further still, to `["E1M-AEN801"]`
-only — see "`iot-starter` is AEN-only" above). `app_core_for_sku` gives NX9
-its own core id (`m33`, distinct from both vendored trees' `m55_hp`).
-
-**tan-cli#579 settled the maintainer call this section used to leave open:
-an NX9 `--som` is now REFUSED, not defaulted onto the Alif tree.** The
-vendored lookup used to fall through to `E1M-AEN801` on the theory that
-init-time output is best-effort and `tan validate` re-checks it. Measured,
-that theory did not survive contact: `tan init --som E1M-NX9101 --template
-sensor-starter` exited 0 with `issues: []` and wrote **five of six files
-byte-identical to the Alif render** — a `CMakeLists.txt` still pinned to
-`--emit zephyr-conf --core m55_hp` (contradicting the `m33` that
-tan-cli#494's `retarget_board_yaml_cores` had just written into the
-`board.yaml` beside it), a README telling an NXP customer to run `west build
--b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and `preset:
-e1m-evk` / `chips: [tmp112]` describing another module's BOM. `tan validate`
-cannot re-check content it has no opinion about, and the artefact is
-committed by then.
-
-So `tan/core/scaffold.py`'s `_SOM_FAMILIES` now carries `("E1M-NX9", "m33",
-None)` and `_vendored_family` raises `UnsupportedSomError` →
-`init.som-unsupported` (exit 2). `--template minimal-app` — tan's own
-hand-generated, vendor-neutral tree, which reads nothing from here — still
-scaffolds every SKU, and `--from-example` still copies a real SDK example, so
-the refusal is not a dead end. **This retires the moment the SDK catalog
-grows NX9 coverage: re-vendor the tree here and replace that `None` with its
-directory name.** Vendoring one by hand instead is not an option —
-everything under this directory is `--emit scaffold` output captured
-byte-for-byte, and `tests/parity/scaffold_byte_parity.py` re-runs the live
-emit against a reachable checkout and fails on drift.
 
 ## Per-SKU substitution (alp-sdk#864/#877) — not a two-line patch
 

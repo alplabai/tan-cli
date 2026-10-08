@@ -6,8 +6,7 @@ buildable, read directly off the alp-sdk metadata tree, without importing
 into `init_cmd` before an SDK is even resolved raises `PlannerRootError`).
 
 tan-cli#743. `tan init --template minimal-app --som <sku>` for a SoM whose
-default hw_rev is not buildable (it was E1M-NX9101, since removed from
-alp-sdk) exits 0 and scaffolds a project whose FIRST `tan validate`
+default hw_rev is not buildable (a `reserved`/`tbd` revision) exits 0 and scaffolds a project whose FIRST `tan validate`
 hard-errors::
 
     sdk-compat: SoM <sku> hw_rev '<rev>' exists but is not buildable
@@ -49,7 +48,7 @@ than the original defect".
 
 Deliberately duplicates the tiny SKU -> family-directory map
 `scripts/alp_project_loader._sku_family` also carries (`AEN`/`V2N`/`V2M`
--> `aen`/`v2n`/`v2n-m1`; tan still adds `NX9` -> `imx93`, see below) and the buildable-status set
+-> `aen`/`v2n`/`v2n-m1`) and the buildable-status set
 `scripts/alp_orchestrate/sdk_compat._NOT_BUILDABLE_STATUSES` (`reserved`,
 `tbd`, or a missing `status:` key) rather than importing either: neither
 module is on `sys.path` for a `tan init --template` invocation, which reads
@@ -62,13 +61,9 @@ import re
 from pathlib import Path
 from typing import Optional
 
-#: A SUPERSET of `scripts/alp_project_loader._SKU_FAMILY` / `_sku_family`:
-#: alp-sdk#2782 dropped the `NX9` arm, but tan's `init` still carries NX9 as
-#: its fixture family for the "default hw_rev is not buildable" warning and
-#: for `scaffold._SOM_FAMILIES`' no-vendored-tree refusal, whose tests are
-#: written against it. Retiring both together is tan-cli#1425.
-_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
-_FAMILY_DIR = {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}
+#: Mirrors `scripts/alp_project_loader._SKU_FAMILY` / `_sku_family` verbatim.
+_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M)")
+_FAMILY_DIR = {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1"}
 
 #: Mirrors `scripts/alp_orchestrate/sdk_compat._NOT_BUILDABLE_STATUSES`
 #: verbatim (alp-sdk #1025): `reserved`, `tbd`, and a missing `status:` key

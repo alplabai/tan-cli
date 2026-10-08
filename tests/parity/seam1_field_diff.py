@@ -578,7 +578,7 @@ def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str]
     # `<another tan-cli worktree>/python/tan`, whose planner answered without
     # refusing, and the comparator reported
     #
-    #   FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+    #   FAIL <board>: alp-sdk refuses but tan does not
     #
     # -- a FALSE parity divergence, for a `status: tbd` hw_rev the tan under
     # test refuses correctly in every emit mode. With `python/` on the path

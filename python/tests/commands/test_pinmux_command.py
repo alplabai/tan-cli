@@ -605,7 +605,7 @@ def test_sku_to_family_prefix_map():
     assert pinmux_family_for_sku("E1M-V2N44") == "v2n"
     # E1M-V2M reuses the base V2N pinout in full; no separate table.
     assert pinmux_family_for_sku("E1M-V2M01") == "v2n"
-    assert pinmux_family_for_sku("E1M-NX93") == "imx93"
+    assert pinmux_family_for_sku("E1M-NX93") is None
     assert pinmux_family_for_sku("E1M-UNKNOWN") is None
 
 

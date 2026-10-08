@@ -52,9 +52,9 @@ scaffold catalog actually validates a template against. Measured: for every
 template here except `iot-starter`/`multicore-mailbox`, alp-sdk's catalog
 `supported.som_skus` is the narrow `["E1M-AEN801", "E1M-V2N101"]`
 (`tan/templates/vendored/MANIFEST.md`), while `initRefusesSkuPrefixes` here
-publishes only `["E1M-NX9"]` for those same four -- i.e. "every SoM except
-NXP", 10 of 11 catalogued SKUs, not 2. That is not a bug in this field: tan
-is SDK-free by design (I-32 above) and `_family_bucket`
+publishes `[]` for those same four (no family is unvendored today) -- i.e.
+`tan init` refuses none of them, where the catalog validates 2. That is not a
+bug in this field: tan is SDK-free by design (I-32 above) and `_family_bucket`
 (`tan.core.scaffold`) deliberately falls an unrecognised SKU prefix onto the
 default (Alif) tree rather than refusing it, so `tan init --template
 sensor-starter --som E1M-AEN301` really does exit 0 today. A field NAMED
