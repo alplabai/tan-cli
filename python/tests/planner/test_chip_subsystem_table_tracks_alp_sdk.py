@@ -55,7 +55,6 @@ _SOM_INTRINSIC = {
     "act8760": ("I2C",),
     "tps628640": ("I2C",),
     "pi3dbs12212": ("GPIO",),
-    "pca9451a": ("I2C",),
     "da9292": ("I2C",),
     "clk_5l35023b": ("I2C",),
     "murata_lbee5hy2fy": ("GPIO",),

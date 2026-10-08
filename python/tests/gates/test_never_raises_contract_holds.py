@@ -398,7 +398,7 @@ import pytest
 from tan.commands import new_som_cmd
 from tan.commands.build import configure_inputs, toolchain
 from tan.core import document_guards, error_catalog, example_catalog, example_facets
-from tan.core import metadata_schema, scaffold, sdk_discovery, shapes, som_buildability
+from tan.core import metadata_schema, scaffold, sdk_discovery, shapes
 from tan.core import toolchain_provision as tp
 from tan.model import analyze, perf, perf_apply
 from tan.model.adapters import drpai
@@ -467,14 +467,6 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "named by PR #1096's review as a prior instance (scaffold.py:2034); "
         "a curated-raise contract (ExampleReadError); had the EACCES-"
         "through-is_dir() pre-flight trap, fixed in the same change"
-    ),
-    "som_buildability.hw_rev_not_buildable": (
-        "found in the round-2 re-triage after review round 2 (tan-cli#1116): "
-        "its own docstring says 'Never raises: a scaffold must not fail "
-        "because a metadata file could not be read', and its private "
-        "_safe_load_mapping caught OSError alone, missing UnicodeDecodeError "
-        "-- measured escaping through this real caller; fixed in the same "
-        "change"
     ),
     "new_som_cmd._known_board_names": (
         "found in the round-2 re-triage: 'None when the directory is "
@@ -1430,59 +1422,6 @@ class TestReadExampleTree:
         # (copied verbatim) or it is the non_utf8 shape above. Nothing
         # further to malform.
         pytest.skip("read_example_tree has no parse step of its own to malform")
-
-
-# ---------------------------------------------------------------------------
-# som_buildability.hw_rev_not_buildable -- quiet-return, None on every
-# failure ("Never raises: a scaffold must not fail because a metadata file
-# could not be read", its own docstring). Found in the tan-cli#1116 review
-# round 2 re-triage, not in the original 12: the private `_safe_load_mapping`
-# it calls caught `OSError` alone, missing `UnicodeDecodeError`.
-# ---------------------------------------------------------------------------
-
-
-def _hw_rev_preset_path(sdk_root: Path, sku: str = "E1M-AEN301") -> Path:
-    return sdk_root / "metadata" / "e1m_modules" / f"{sku}.yaml"
-
-
-@_covers("som_buildability.hw_rev_not_buildable")
-class TestHwRevNotBuildable:
-    _SKU = "E1M-AEN301"
-
-    def test_absent(self, tmp_path):
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    def test_non_utf8(self, tmp_path):
-        path = _hw_rev_preset_path(tmp_path, self._SKU)
-        path.parent.mkdir(parents=True)
-        _non_utf8(path)
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    def test_directory_where_file_expected(self, tmp_path):
-        _as_directory(_hw_rev_preset_path(tmp_path, self._SKU))
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    def test_parent_is_a_file(self, tmp_path):
-        _parent_is_a_file(_hw_rev_preset_path(tmp_path, self._SKU))
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    def test_symlink_loop(self, tmp_path):
-        _symlink_loop(_hw_rev_preset_path(tmp_path, self._SKU))
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    @_skip_as_root
-    def test_permission_denied(self, tmp_path):
-        path = _hw_rev_preset_path(tmp_path, self._SKU)
-        path.parent.mkdir(parents=True)
-        path.write_text("default_hw_rev: r2\n")
-        with _permission_denied(path.parent):
-            assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
-
-    def test_malformed_document(self, tmp_path):
-        path = _hw_rev_preset_path(tmp_path, self._SKU)
-        path.parent.mkdir(parents=True)
-        _malformed(path, "a: [1, 2")
-        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
 
 
 # ---------------------------------------------------------------------------

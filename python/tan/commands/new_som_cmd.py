@@ -788,7 +788,7 @@ def _render_preset(
     a("# schematic is available, either (a) list every E1M pad that routes")
     a("# through an on-module mediator chip (see E1M-V2N102.yaml), (b)")
     a("# declare an explicit empty list to assert \"no mediator, everything")
-    a("# is SoC-direct\" (see E1M-NX9101.yaml), or (c) list pads with")
+    a("# is SoC-direct\", or (c) list pads with")
     a("# `dispatch: TBD` while routing is pending.  Omitted, the loader")
     a("# treats every pad as SoC-direct -- resolve this before clearing")
     a("# status.partial_hw_config.")

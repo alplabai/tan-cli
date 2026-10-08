@@ -35,7 +35,7 @@ def test_returns_none_when_tan_is_not_importable(monkeypatch):
 def test_tan_also_refusing_is_reconciled_true(monkeypatch, tmp_path):
     """tan raising anything for the same board counts as "also refuses"."""
     def _boom(mode, *, root, board_yaml, **kw):
-        raise RuntimeError("SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable")
+        raise RuntimeError("SoM E1M-AEN801 hw_rev 'r9' exists but is not buildable")
 
     fake_root_mod = types.SimpleNamespace(emit=_boom)
     monkeypatch.setitem(sys.modules, "tan", types.SimpleNamespace(planner_root=fake_root_mod))

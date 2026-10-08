@@ -468,16 +468,26 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
         # hw-info-h is a project-level emit even under v2 -- consumers
         # `#include` it from any slice. --core picks which slice's OS lands in
         # ALP_HW_BUILD_OS; absent --core, primary-core rules apply.
+        if core is not None:
+            # Single source shared with the build plan's
+            # `alp_hw_info_build.h` configArtefact (ADR-0026 §D).
+            from tan.planner.buildplan import _slice_hw_info_h  # noqa: PLC0415
+
+            return _slice_hw_info_h(project, project.cores[core])
         return _emit_hw_info_h(
             shaped, project.som_preset, project.board_preset,
             v2_cores={cid: s.os for cid, s in project.cores.items()},
-            v2_selected_core=core,
+            v2_selected_core=None,
             metadata_root=project.effective_metadata_root(),
         )
 
     # west-libraries
     if core is not None:
-        v2_libraries = sorted(set(project.cores[core].libraries))
+        # Single source shared with the build plan's `alp-west-libs.yml`
+        # configArtefact (ADR-0026 §D).
+        from tan.planner.buildplan import _slice_west_libraries  # noqa: PLC0415
+
+        return _slice_west_libraries(project, project.cores[core])
     else:
         union_l: set[str] = set()
         for slice_ in project.cores.values():

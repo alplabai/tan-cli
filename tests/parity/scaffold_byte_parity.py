@@ -321,7 +321,7 @@ def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
 #: deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:` all pinned to
 #: the Alif module -- measured: `tan validate` refuses with ALP-B007 (board/
 #: family mismatch: `board preset 'e1m-evk' hosts SoM families
-#: ['alif-ensemble', 'nxp-imx9'], but E1M-V2M101 is family
+#: ['alif-ensemble'], but E1M-V2M101 is family
 #: 'renesas-rzv2n-deepx'`). alp-sdk#1749's rewording at the 722320a1 re-vendor
 #: made the V2N101 sibling's sentence correct but reintroduced the identical
 #: AEN801 defect in new words -- the anchor below matches the NEW wording, not

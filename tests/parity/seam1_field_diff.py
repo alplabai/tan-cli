@@ -13,8 +13,8 @@ in `.github/workflows/parity.yml`.
 tan-cli#320 addendum: a live `--emit build-plan` can legitimately REFUSE a
 board the frozen oracle captured as buildable -- alp-sdk#1025 taught the
 loader to refuse an `hw_rev` that exists but is `status: reserved`/
-`status: tbd`/status-less, and `multicore_rpmsg-imx93`'s only `hw_rev`
-(imx93 r1, `status: tbd`) is exactly that case. A live-emit failure used to
+`status: tbd`/status-less (a board whose only `hw_rev` is `status: tbd`
+is exactly that case). A live-emit failure used to
 be an unconditional `ComparatorError` -> FAIL, which could never tell "the
 SDK started correctly refusing this board" apart from "the SDK is broken".
 `_tan_reconciled_refusal` closes that gap FOR TAN-CLI'S OWN COPY ONLY: on a
@@ -572,7 +572,7 @@ def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str]
     # `<another tan-cli worktree>/python/tan`, whose planner answered without
     # refusing, and the comparator reported
     #
-    #   FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+    #   FAIL <board>: alp-sdk refuses but tan does not
     #
     # -- a FALSE parity divergence, for a `status: tbd` hw_rev the tan under
     # test refuses correctly in every emit mode. With `python/` on the path

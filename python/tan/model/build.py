@@ -16,8 +16,7 @@ scoped to ONE target's coverage entry instead of killing the package:
     `ethos-u-vela` 5.1.0 over `tests/fixtures/models/tiny_int8.tflite`: with no
     guard here, `E1M-AEN801`'s `ethos-u85-256` refusal aborted the whole build
     -- `ethos-u55-256`, `ethos-u55-128` and `cpu` all compiled fine and NONE of
-    them shipped, and the same held for `E1M-AEN401`, `E1M-AEN601` and (at
-    `ethos-u65-256`) `E1M-NX9101`.
+    them shipped, and the same held for `E1M-AEN401` and `E1M-AEN601`.
   * A ZERO-placement accelerator compile -- see `_placed_nothing_on_accelerator`.
 
 Every OTHER `adapter.compile()` exception still fails the whole build loudly.
@@ -79,8 +78,7 @@ def _placed_nothing_on_accelerator(backend: str, blob: Blob) -> bool:
     the honest `cpu` target sits beside it in the same package. Measured with
     real `ethos-u-vela` 5.1.0 on `tests/fixtures/models/float32_fc.tflite`:
     `E1M-AEN801` shipped THREE such `ethos_u` targets (`ethos-u85-256`,
-    `ethos-u55-256`, `ethos-u55-128`), and `E1M-NX9101` one
-    (`ethos-u65-256`). Dropped to a coverage skip instead -- legibly absent,
+    `ethos-u55-256`, `ethos-u55-128`). Dropped to a coverage skip instead -- legibly absent,
     with the reason, rather than silently present as a zero (tan-cli#789
     review MINOR 7).
 
@@ -207,8 +205,8 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             # passed for the adapter's DIAGNOSTICS, not its output -- see
             # `CompilerAdapter.compile`. They are what let a vela footprint
             # refusal name the proprietary profile file a part's own SoC spec
-            # declares -- and stay silent for one that declares none, e.g. the
-            # NXP i.MX 93 (tan-cli#789 review (g)) -- and say that a DRAM
+            # declares -- and stay silent for one that declares none
+            # (tan-cli#789 review (g)) -- and say that a DRAM
             # placement went to memory this part declares no interface to.
             #
             # `spec.vela_memory_mode` / `.vela_system_config` /

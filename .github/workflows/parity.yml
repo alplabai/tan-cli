@@ -332,11 +332,11 @@ env:
   #
   # #425's body is STALE and is corrected here rather than inherited: it
   # reports the pin as `f4d87a1f` (tan-cli#485 moved it to `53557a60` since),
-  # and reports `seam1_field_diff.py` failing with `FAIL multicore_rpmsg-imx93:
-  # alp-sdk refuses but tan does not`. RE-MEASURED against alp-sdk `f30f4d4b`
-  # with this change's tree: that case now reports `PASS multicore_rpmsg-imx93
-  # (alp-sdk and tan both refuse this board)`, both sides quoting the same
-  # `SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable (status: 'tbd').`
+  # and reports `seam1_field_diff.py` failing on a `status: tbd` SoM board that
+  # alp-sdk refuses but tan did not (that SoM, and its board, were removed with
+  # alp-sdk#2781). RE-MEASURED against alp-sdk `f30f4d4b` with this change's
+  # tree: that case reported PASS, both sides quoting the same `hw_rev ... exists
+  # but is not buildable (status: 'tbd')` refusal.
   # tan-cli#485 had already forward-ported alp-sdk#1025's status half into
   # `project_loader.py:196`, which is what closed it; the whole script is rc 0,
   # every other case PASS (several with the already-allowed `debug.probe`
@@ -449,8 +449,7 @@ env:
   #     the three drifted commits touch `examples/**`, `metadata/catalog*` or
   #     the scaffold templates, so `python/tan/templates/vendored/` stays at
   #     its `f30f4d4b` vendor point.
-  #   - seam1_field_diff PASS, rc 0 -- all 6 boards, including
-  #     `multicore_rpmsg-imx93` (alp-sdk and tan both still refuse it)
+  #   - seam1_field_diff PASS, rc 0 -- all 6 boards
   #
   # `a317330595f744d35f4d785869517110f3678f70` -> `d00dbdc124491c89f68f404c
   # d7ac9d26127f038f` (tan-cli#560): moves in lockstep with `ci.yml`'s
@@ -948,7 +947,20 @@ env:
   #     <030de105d>` was 0/10 against the old tree, solely because the emit now
   #     renders `blob|tree/v0.17.0-rc1/` where it rendered `v0.16.0`; 20 files,
   #     10/10 PASS after.
-  PINNED_SDK_TAG: 030de105d3a106b3c10202854cf57d4e81e78c0f
+  # `030de105d` -> `c4eb27645` (alp-sdk `dev`; #2782 / alp-sdk#2781 removes
+  # E1M-NX9101 / i.MX 93, a module never produced, and #2778 adds the
+  # `alp_hw_info_build.h` + `alp-west-libs.yml` slice configArtefacts, ported
+  # into `buildplan.py`/`planner_emit.py`):
+  # the same seven lockstep sites move together, and the hand-port pin with
+  # them (its eight changed sources are NX9 removal plus comment rewording, all
+  # ported or no-ops -- see the gate file). `STRICT_LOADERS_PINNED_SDK_COMMIT`
+  # stays at `34c11c9de`.
+  # Re-measured against `c4eb27645`:
+  #   - planner oracle: re-captured (see `PINNED_PLANNER_ORACLE_SDK_REF` below).
+  #   - scaffold: RE-VENDORED, two files -- `scaffold_byte_parity.py --sdk
+  #     <c4eb27645>` was 8/10 against the old tree (`edge-ai/*/src/
+  #     cold_chain.c`, two reworded comments); 10/10 PASS after.
+  PINNED_SDK_TAG: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1265,7 +1277,16 @@ env:
   # the plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
   # goldens (the `v0.17.0-rc1` cut, #2763). #2774's console floor is not visible
   # here: the re-captured goldens show no other change, so no example plan is moved by it.
-  PINNED_PLANNER_ORACLE_SDK_REF: 030de105d3a106b3c10202854cf57d4e81e78c0f
+  # `030de105d` -> `c4eb27645` (alp-sdk#2781/#2782/#2778; see `PINNED_SDK_TAG`'s
+  # matching paragraph above). Re-captured with `python
+  # scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # c4eb2764542cfaaaaaa637113af56af5cd3b2edd`: **103 boards, 721 emits** (0
+  # error-contract), 3,046,444 B (was 104 / 728 / 2,540,037). Two attributed
+  # changes: the removal of `multicore/rpmsg-imx93` (7 emits, all
+  # error-contract), and #2778's two additional `configArtefacts` entries
+  # (`alp_hw_info_build.h`, `alp-west-libs.yml`) on every zephyr/baremetal
+  # slice in the `build-plan.json` goldens. No other golden moved.
+  PINNED_PLANNER_ORACLE_SDK_REF: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

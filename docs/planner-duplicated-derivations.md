@@ -381,8 +381,8 @@ Four copies, two per repo. All four carry the same regex and the same
 mapping, verbatim:
 
 ```
-_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
-{"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}[m.group(1)]
+_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M)")
+{"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1"}[m.group(1)]
 ```
 
 The one behavioural difference is the exception type -- `_sku_family`
@@ -409,12 +409,12 @@ than excusing it. `metadata/schemas/board.schema.json:84` pins the
 prefixes, verbatim and unwrapped:
 
 ```
-"pattern": "^E1M-(AEN[3-8][0-9]{2}|V2N[0-9]{3}|V2M[0-9]{3}|NX9[0-9]{3})$",
+"pattern": "^E1M-(AEN[3-8][0-9]{2}|V2N[0-9]{3}|V2M[0-9]{3})$",
 ```
 
 What no file carries is the right-hand side -- that
-`V2M` resolves to the directory `v2n-m1` and `NX9` to `imx93`, neither of
-which is derivable from the prefix. Retiring this needs the registry AND
+`V2M` resolves to the directory `v2n-m1`, which is not derivable from the
+prefix. Retiring this needs the registry AND
 that schema pattern to move together, in alp-sdk, before tan can become a
 reader.
 
@@ -433,15 +433,14 @@ tan-cli#270 is that it runs in-process without spawning the SDK.
 | --- | --- |
 | alp-sdk | `scripts/alp_project_emit/west_libs.py:35-40` |
 | tan | `python/tan/planner/libraries.py:55-60` |
-| Verdict | **IDENTICAL** -- `diff` clean over both six-line spans, including the trailing comment |
+| Verdict | **IDENTICAL** -- `diff` clean over both five-line spans, including the trailing comment |
 
-Four entries, and the same `§D.lib.loader` comment introduces both:
+Three entries, and the same `§D.lib.loader` comment introduces both:
 
 ```
 "aen":    "alif_ensemble",
 "v2n":    "renesas_rzv2n",
 "v2n-m1": "renesas_rzv2n",     # DEEPX add-on; HW-acc tokens still resolve via host family.
-"imx93":  "nxp_imx9",
 ```
 
 Both sides consume it three lines later in the same shape -- alp-sdk

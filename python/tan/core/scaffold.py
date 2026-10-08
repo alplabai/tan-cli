@@ -31,8 +31,8 @@ both exist because a scaffold has to name a core before any SDK is reachable --
 `tan validate` re-checks the guess once one is. They now read ONE table
 (`_SOM_FAMILIES`), which is what makes "the two derivations can never disagree"
 true rather than aspirational: tan-cli#579 is exactly the bug where they did,
-`app_core_for_sku` having grown an `E1M-NX9` arm that `_family_bucket` never
-got, so an NXP `--som` silently rendered the ALIF tree's content. A family the
+`app_core_for_sku` having grown an arm that `_family_bucket` never got, so a
+`--som` of that family silently rendered the ALIF tree's content. A family the
 table knows has no vendored tree is now REFUSED (`UnsupportedSomError` ->
 `init.som-unsupported`), never rendered against another vendor's. Do not grow
 this: no SKU list, no addresses, no pin names. Note what is NOT here as a result: the
@@ -142,18 +142,18 @@ TEMPLATE_SUPPORTED_SKUS: dict[str, tuple[str, ...]] = {
 _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 
 #: SoM family table: `(SKU prefix, app-core id, vendored tree)`, consulted in
-#: order. A `None` tree means tan vendors NO scaffold for that family.
+#: order. A `None` tree means tan vendors NO scaffold for that family (no row
+#: is `None` today).
 #:
 #: ONE table, read by BOTH `app_core_for_sku` and `_family_bucket`, which is
 #: what makes this module's docstring claim -- "the two derivations can never
 #: disagree" -- true by construction instead of by two hand-synced prefix
-#: tests. tan-cli#579: they DID disagree. `app_core_for_sku` grew an
-#: `E1M-NX9` -> `m33` arm and `_family_bucket` did not, so every NXP SKU took
-#: the latter's `else` arm onto the Alif tree.
+#: tests. tan-cli#579: they DID disagree. `app_core_for_sku` grew an arm
+#: `_family_bucket` did not, so every SKU of that family took the latter's
+#: `else` arm onto the Alif tree.
 _SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
     ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
     ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
-    ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
 )
 
 #: SKU prefixes `_SOM_FAMILIES` declares NO vendored tree for -- the exact
@@ -257,11 +257,11 @@ class UnsupportedSomError(Exception):
     entry for that family. `init_cmd` reports it as `init.som-unsupported`.
 
     Refusing is the whole point, and it is a DELIBERATE divergence from the
-    frozen v0.4.1 oracle -- measured, `target/debug/tan init --som E1M-NX9101
-    --template sensor-starter` exits 0 with `issues: []` and writes the Alif
-    tree. The two alternatives were weighed and rejected:
+    frozen v0.4.1 oracle, which exits 0 with `issues: []` and writes the Alif
+    tree for a family it has no tree for. The two alternatives were weighed and
+    rejected:
 
-    * **Vendor an NXP tree.** Not tan's to write. `templates/vendored/` is a
+    * **Vendor a tree for it.** Not tan's to write. `templates/vendored/` is a
       byte-for-byte capture of alp-sdk's `--emit scaffold` output (see its
       `MANIFEST.md`), and `tests/parity/scaffold_byte_parity.py` re-runs the
       live emit against a reachable checkout and fails on drift. A tree
@@ -532,8 +532,8 @@ def _family_bucket(sku: str) -> str | None:
 
     tan-cli#579: this used to be
     `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else
-    _FAMILY_TREES[0]`, so E1M-NX9* -- a family `app_core_for_sku` right above
-    already knows -- fell down the `else` arm and got the ALIF tree's content,
+    _FAMILY_TREES[0]`, so a family `app_core_for_sku` right above
+    already knew (with no tree) fell down the `else` arm and got the ALIF tree's content,
     at `ok: true` / exit 0 / `issues: []`. An unrecognised prefix still takes
     the Alif default, in both derivations at once (see `_DEFAULT_FAMILY`);
     only a family tan positively knows it has no tree for is refused."""
@@ -795,14 +795,13 @@ def _som_flow_style_body(body: str) -> str | None:
     return stripped
 
 
-#: Mirrors `tan.core.som_buildability._SKU_FAMILY` -- deliberately
-#: duplicated rather than imported, the same call that module's own
-#: docstring already makes for its family-directory map: this file plans
+#: Mirrors `scripts/alp_project_loader._SKU_FAMILY` -- deliberately
+#: duplicated rather than imported: this file plans
 #: board.yaml content with no SDK checkout to consult (it is SDK-free by
 #: design -- see `test_init_command.py`'s "`tan init` is SDK-free and
 #: cannot tell a ..." precedent), so this needs only the family CODE
 #: encoded in the SKU string itself, never a metadata lookup.
-_SKU_FAMILY_PREFIX = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
+_SKU_FAMILY_PREFIX = re.compile(r"^E1M-(AEN|V2N|V2M)")
 
 
 def _same_som_family(a: str, b: str) -> bool:
@@ -819,7 +818,7 @@ def _same_som_family(a: str, b: str) -> bool:
     init` reporting no issue, since both revisions are legitimately known
     and buildable. That is strictly worse than tan-cli#743's original bug: a
     loud refusal became a silent substitution. A CROSS-family retarget (the
-    tan-cli#743/#1008 round-3 case: `E1M-AEN801` -> `E1M-NX9101`) still
+    tan-cli#743/#1008 round-3 case: `E1M-AEN801` -> `E1M-V2N101`) still
     drops it -- the value is from a table that has nothing to do with the
     new SKU at all, not merely a different declared revision of the same
     hardware family. Returns `False` (the conservative, already-shipped
@@ -882,11 +881,8 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     of an absent one. Dropping the sibling `hw_rev:` on a CROSS-family
     retarget lets the scaffold fall back to the NEW SoM's own
     `default_hw_rev:` -- the same resolution rule a board.yaml with no
-    explicit `hw_rev:` at all already follows, and the one `init`'s own
-    `init.hw-rev-not-buildable` check (tan-cli#743) already watches, so a
-    not-buildable default is caught and warned about there rather than
-    surfacing as a DIFFERENT, unexplained `tan validate` refusal three
-    commands later.
+    explicit `hw_rev:` at all already follows, and the one `tan validate`
+    resolves against.
 
     tan-cli#1008 review round 4 minor: an INTRA-family retarget keeps the
     sibling `hw_rev:` instead -- see `_same_som_family`'s own docstring for
@@ -991,9 +987,8 @@ def retarget_board_yaml_cores(content: str, sku: str, source_sku: str) -> str:
     core ids verbatim. `tan init --template edge-ai-starter --som E1M-AEN301`
     wrote `cores: a32_cluster:` for an Ensemble E3, which has no Cortex-A32 --
     reported `ok:true` / `exitCode 0` / `issues:[]`, and `tan validate` then
-    hard-errored (exit 2) on the very next command. `--som E1M-NX9101` landed
-    on the Alif tree and got `m55_hp` against a topology of
-    `a55_cluster`/`m33`, contradicting this same module's `app_core_for_sku`.
+    hard-errored (exit 2) on the very next command. An unvendored family landed
+    on the Alif tree and got `m55_hp`, contradicting this same module's `app_core_for_sku`.
 
     Two edits, both of which can only REMOVE wrong facts, never invent new
     ones -- `tan init` is SDK-free and has no SoM topology to consult:
@@ -1004,7 +999,7 @@ def retarget_board_yaml_cores(content: str, sku: str, source_sku: str) -> str:
       real catalogue;
     * every OTHER entry is DROPPED. Those are the `os: "off"` secondary
       cluster declarations (`a32_cluster` on the E8, `a55_cluster` on the
-      V2N/i.MX 93) which exist only on the tree's own representative SKU. A
+      V2N) which exist only on the tree's own representative SKU. A
       core absent from `cores:` is simply not built, so dropping is always
       sound; keeping a made-up id, or guessing the target's cluster id from a
       table tan cannot verify, is not.
@@ -1201,13 +1196,10 @@ def _yaml_scalar_value(after_colon: str) -> str | None:
     `.strip().strip("'\"")` rule for this identical scalar.
 
     tan-cli#1008 review round 5: this function used to keep the quotes,
-    which silently evaded the checks reading its result. A quoted `sku:
-    "E1M-NX9101"` made `_SKU_FAMILY.match('"E1M-NX9101"')`
-    (`som_buildability.py`) fail, so `hw_rev_not_buildable` returned `None`
-    (nothing to judge) -- `tan init` rc 0, `issues: []`, then `tan validate`
-    rc 2 with tan-cli#743's own verbatim message: exactly the contradiction
-    this whole PR closes, reachable again through an unstripped quote. A
-    quoted `hw_rev: "r1"` was worse: `changing_sku` (a bare string compare)
+    which silently evaded the checks reading its result. A quoted
+    `sku: "E1M-AEN801"` made `_SKU_FAMILY.match('"E1M-AEN801"')` fail, so the
+    family check saw nothing to judge, reachable through an unstripped
+    quote. A quoted `hw_rev: "r1"` was worse: `changing_sku` (a bare string compare)
     read `'"E1M-AEN801"' != "E1M-AEN801"` as TRUE even for a byte-for-byte
     intra-SKU no-op, so both round three's no-op guard and round four's
     intra-family guard were defeated at once -- a real `hw_rev:` silently
@@ -1235,8 +1227,7 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
     keeping its own copy of the rule) and strips surrounding quote
     characters from the value (round 5, `_yaml_scalar_value`).
 
-    tan-cli#743 majors 1+2: this is what `init`'s hw-rev-not-buildable check
-    reads to name the SoM/hw_rev pair a scaffolded board.yaml ACTUALLY
+    tan-cli#743 majors 1+2: this is what reads the SoM/hw_rev pair a scaffolded board.yaml ACTUALLY
     carries, rather than `--som` (silently absent on a bare
     `--from-example`/`--topology`, even though the copied board.yaml already
     names a SKU on disk) or an assumed-absent `hw_rev:` (`retarget_board_yaml_som`

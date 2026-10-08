@@ -29,3 +29,8 @@ fixture was re-vendored whole from alp-sdk's own copy at `PINNED_SDK_TAG`
 byte diff against alp-sdk's copy is empty. These two fields are the only ones
 touched by this correction; every other value in this fixture, and every
 other oracle fixture, is untouched, still frozen at 97ad481b.
+
+Fixture removed with alp-sdk#2781: `multicore_rpmsg-imx93.build-plan.json` was
+deleted when E1M-NX9101 / i.MX 93 support was removed from alp-sdk (the module
+was never produced). The audit notes above describe that fixture as it was and
+are kept as the record of the corrections it carried.

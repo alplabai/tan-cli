@@ -70,10 +70,10 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to
 _RESOLVE_JOB = "resolve-consumer-pin"
 _MATRIX_JOB = "build-matrix"
 
-#: The three SKUs `build-matrix` fans every combination across. Named here so
+#: The two SKUs `build-matrix` fans every combination across. Named here so
 #: a SKU silently vanishing from the catalogue reds this gate too, rather than
 #: shrinking the matrix invisibly.
-_SKUS = ("E1M-AEN801", "E1M-V2N101", "E1M-NX9101")
+_SKUS = ("E1M-AEN801", "E1M-V2N101")
 
 
 @functools.cache

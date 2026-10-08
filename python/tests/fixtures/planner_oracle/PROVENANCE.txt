@@ -1,10 +1,10 @@
 THE FROZEN alp-sdk PLANNER ORACLE (tan-cli#509)
 ===============================================
 
-alp-sdk ref   030de105d3a106b3c10202854cf57d4e81e78c0f
-boards        104
-emits         728  (7 of them error-contract, captured as .error)
-bytes         2,540,037
+alp-sdk ref   c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+boards        103
+emits         721  (0 of them error-contract, captured as .error)
+bytes         3,046,444
 modes         build-plan system-manifest ipc-contract-h dts-reservations dts-partitions storage-mounts-c tfm-sysbuild-conf
 
 WHAT THESE BYTES ARE. The output of alp-sdk's `scripts/alp_orchestrate/` at the

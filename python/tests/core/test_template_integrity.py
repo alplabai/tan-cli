@@ -464,13 +464,12 @@ def _skus_for(template_id: str) -> tuple[str, ...]:
     Every other template reads the full catalogued SKU set (falling back to
     `_FAMILY_TREES` when no SDK is bound). `minimal-app` is tan's one
     vendor-neutral template (`tan.core.scaffold`'s own docstring: "scaffolds
-    every SKU") and gets all of them, `E1M-NX9101` included. Every vendored
+    every SKU") and gets all of them. Every vendored
     template is filtered through `_family_bucket`, the SAME lookup
     `plan_template_files` itself refuses an unsupported family through
-    (`UnsupportedSomError`) -- `E1M-NX9101` has no vendored tree
-    (`_SOM_FAMILIES`'s `("E1M-NX9", "m33", None)` row) and asking a
-    vendored template to plan it is not a defect this file is testing for,
-    it is the refusal `test_scaffold.py` covers directly."""
+    (`UnsupportedSomError`) -- a family with no vendored tree (a `None` row in
+    `_SOM_FAMILIES`; none today) is not a defect this file is testing for, it
+    is the refusal `test_scaffold.py` covers directly."""
     restricted = TEMPLATE_SUPPORTED_SKUS.get(template_id)
     if restricted is not None:
         return restricted
@@ -581,7 +580,7 @@ def test_a_generated_conf_is_accepted_only_at_the_path_tan_generate_writes():
 #: Measured against the pre-fix (membership-only) guard: appending `/* Note:
 #: E1M-V2M101 also works here. */` to `edge-ai/E1M-V2N101/src/main.c` left it
 #: at 53 passed; the count form below reds on exactly that plant, and still
-#: reds on a wholly un-allowlisted token (e.g. `E1M-NX9101`).
+#: reds on a wholly un-allowlisted token (e.g. `E1M-AEN301`).
 #:
 #: The other twelve entries (tan-cli#946 review round, widening
 #: `_foreign_sku_hits` off `CATALOGUED_SKUS` instead of the bare

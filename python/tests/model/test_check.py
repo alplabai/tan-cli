@@ -1279,8 +1279,7 @@ def test_a_point_measured_on_another_core_of_the_same_die_is_not_a_match(tmp_pat
 
 def test_a_part_that_pairs_no_core_narrows_on_none_and_infers_nothing(tmp_path):
     """A die with a SINGLE Ethos-U NPU that itself declares no `paired_core`
-    -- the E1M-NX9101/imx93 shape (its lone `ethos-u65` names no
-    `paired_core`) as well as, since tan-cli#791 round-3's evidence-driven
+    -- the shape of a die whose lone NPU names no `paired_core` -- as well as, since tan-cli#791 round-3's evidence-driven
     narrowing, the E8's own Ethos-U85 (`test_an_unpaired_variant_accepts_
     any_topology_core_the_die_admits`, below): whenever the SPECIFIC
     accelerator being screened declares no pairing of its own, tan no longer
@@ -1292,7 +1291,7 @@ def test_a_part_that_pairs_no_core_narrows_on_none_and_infers_nothing(tmp_path):
     requires the core to be a REAL one this fixture's own `topology:`
     declares (`m55_hp`/`m55_he`, part of `_DEFAULT_TEST_TOPOLOGY`) -- the
     shape where even level 1 has nothing to catch is covered separately, by
-    the imx93-shaped tests below."""
+    the unpaired-NPU tests below."""
     _u55_tree(tmp_path, paired_core=None)
     _write_perf_point(tmp_path, core="m55_he")
     assert _check(tmp_path).basis == "bench"
@@ -1418,36 +1417,34 @@ def test_an_unpaired_variant_accepts_a_core_a_sibling_npu_does_pair_to(tmp_path)
 
 # ---------------------------------------------------------------------------
 # THE MAJOR FIX, round 2 (tan-cli#791 round-2 review item 1): a die where NO
-# npu of a backend declares ANY `paired_core` -- the E1M-NX9101/imx93 shape --
+# npu of a backend declares ANY `paired_core` -- the unpaired-NPU shape --
 # used to leave `_paired_cores_for_backend` answering `{}`, and the old
 # `if allowed_cores:` guard then skipped the core check ENTIRELY: a point
-# claiming `core: "m55_hp"` (a core the i.MX 93 does not physically have) or
+# claiming `core: "m55_hp"` (a core that die does not physically have) or
 # even `core: "cortex_potato"` (a core NOTHING has) was consumed outright at
 # `basis: "bench", confidence: "certain"`. LEVEL 1 (`_topology_core_ids`)
 # closes this: a point's core must exist in the SKU's own `topology:` map,
 # unconditionally, whether or not anything pairs an NPU to a core at all.
 # ---------------------------------------------------------------------------
 
-def _imx93_shaped_tree(meta: Path, *, topology: tuple[str, ...] = ("a55_cluster", "m33")) -> None:
-    """The REAL E1M-NX9101/imx93 shape, reproduced synthetically: ONE
-    `ethos-u65` NPU that names no `paired_core` at all (imx93.json carries no
+def _unpaired_npu_tree(meta: Path, *, topology: tuple[str, ...] = ("a55_cluster", "m33")) -> None:
+    """A die with ONE `ethos-u55` NPU that names no `paired_core` at all (no
     `npus[].paired_core` and no `npu_toolchain` block either, matched here by
     leaving both out), on a SoM preset whose `topology:` is `a55_cluster` +
-    `m33` -- the real E1M-NX9101.yaml's own two entries, not `m55_hp` or
-    anything Ensemble-shaped. The lone `ethos-u65` target's own `paired_core`
+    `m33` -- not `m55_hp` or anything Ensemble-shaped. The lone NPU target's own `paired_core`
     is `None`, so the exact-match query has nothing to narrow `core` on for
     this die, which is what makes this shape the one where level 1
     (`_topology_core_ids`) is the ONLY thing that can ever refuse a bad
     core -- a test against this fixture is a proof of level 1 in isolation,
     not a proof that happens to pass either way."""
-    _write_som(meta, "E1M-FAKE", "fake:soc:u65", ethos_u_variant="u65",
+    _write_som(meta, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55",
                default_hw_rev="r1", topology=topology)
-    _write_soc(meta, "fake:soc:u65", [{"type": "ethos-u65", "subtype": "x", "mac_per_cycle": 256}])
-    _write_table(meta, "ethos_u", "u65@vela-1.0.0.json", variant="u65",
+    _write_soc(meta, "fake:soc:u55", [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256}])
+    _write_table(meta, "ethos_u", "u55@vela-1.0.0.json", variant="u55",
                  supported=["FULLY_CONNECTED"])
 
 
-def _check_imx93(meta: Path) -> BackendReport:
+def _check_unpaired(meta: Path) -> BackendReport:
     return check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
                                  metadata_root=meta, exact=False, hw_rev="r1")[0]
 
@@ -1456,35 +1453,35 @@ def _check_imx93(meta: Path) -> BackendReport:
 def test_a_core_absent_from_the_soms_topology_is_refused_even_when_the_die_pairs_nothing(
         tmp_path, bogus_core):
     """The exact production-path bug the round-2 review verified through `tan
-    model check` on real E1M-NX9101 metadata: `m55_hp` is a real Ensemble core
-    name, not an i.MX 93 one (the i.MX 93's topology is `a55_cluster`/`m33`
-    only) -- and `cortex_potato` names no core anywhere, on any SoC. Both must
-    be refused, and BEFORE this fix neither was: the exact-match query has
-    nothing to narrow `core` on for imx93's lone, unpaired `ethos-u65`
+    model check` on real metadata: `m55_hp` is a real Ensemble core name, not
+    one of this die's (topology `a55_cluster`/`m33` only) -- and `cortex_potato`
+    names no core anywhere, on any SoC. Both must be refused, and BEFORE this
+    fix neither was: the exact-match query has nothing to narrow `core` on for
+    a lone, unpaired NPU
     (`target.paired_core` is `None`), and the OLD `if allowed_cores:` guard
     skipped the core check entirely the moment that narrowing came up
     empty."""
-    _imx93_shaped_tree(tmp_path)
-    baseline = _check_imx93(tmp_path)
+    _unpaired_npu_tree(tmp_path)
+    baseline = _check_unpaired(tmp_path)
     assert baseline.basis == "static-screen"
     _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core=bogus_core,
-                      backend="ethos_u", accel_config="ethos-u65-256",
+                      backend="ethos_u", accel_config="ethos-u55-256",
                       filename=f"tiny-int8-aaaa@vela-5.1.0+r1+{bogus_core}+aaaaaaaaaaaa.json")
-    assert _check_imx93(tmp_path) == baseline           # refused, not consumed
+    assert _check_unpaired(tmp_path) == baseline           # refused, not consumed
 
 
 def test_a_core_the_soms_topology_does_declare_still_answers_on_an_unpaired_die(tmp_path):
-    """The ordinary case must not regress: E1M-NX9101's own `a55_cluster` (a
+    """The ordinary case must not regress: this SKU's own `a55_cluster` (a
     REAL core in the SKU's `topology:`) still answers, even though the lone
-    `ethos-u65` on this die pairs to no core at all -- core stays unnarrowed
+    NPU on this die pairs to no core at all -- core stays unnarrowed
     past the exact-match query here (as alp-sdk's own docs say it must: "do
     not invent the pairing... record the core you actually ran on"), and
     level 1 has nothing to refuse about a core that genuinely exists."""
-    _imx93_shaped_tree(tmp_path)
+    _unpaired_npu_tree(tmp_path)
     _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
-                      backend="ethos_u", accel_config="ethos-u65-256",
+                      backend="ethos_u", accel_config="ethos-u55-256",
                       filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
-    assert _check_imx93(tmp_path).basis == "bench"
+    assert _check_unpaired(tmp_path).basis == "bench"
 
 
 def test_a_som_preset_missing_topology_entirely_refuses_every_point(tmp_path):
@@ -1502,13 +1499,13 @@ def test_a_som_preset_missing_topology_entirely_refuses_every_point(tmp_path):
     at what used to be level 2 -- turns this test RED, because an empty
     `topology_cores` would then skip the filter instead of refusing
     everything through it."""
-    _imx93_shaped_tree(tmp_path, topology=None)
-    baseline = _check_imx93(tmp_path)
+    _unpaired_npu_tree(tmp_path, topology=None)
+    baseline = _check_unpaired(tmp_path)
     assert baseline.basis == "static-screen"
     _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
-                      backend="ethos_u", accel_config="ethos-u65-256",
+                      backend="ethos_u", accel_config="ethos-u55-256",
                       filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
-    result = _check_imx93(tmp_path)
+    result = _check_unpaired(tmp_path)
     assert result == baseline                     # refused, not consumed
     assert not any("refused" in n for n in result.notes)  # silent, per the
     # "absent means refuse" contract `_topology_core_ids`'s own docstring
@@ -1525,17 +1522,17 @@ def test_a_som_preset_with_an_empty_topology_block_refuses_every_point(tmp_path)
     entirely OR left it malformed"). `_write_som`'s `topology=` truthiness
     check (`if topology:`) cannot express this shape on its own -- an empty
     tuple is exactly as falsy as `None` -- so this test appends the block by
-    hand onto the preset `_imx93_shaped_tree` already wrote with `topology=
+    hand onto the preset `_unpaired_npu_tree` already wrote with `topology=
     None`."""
-    _imx93_shaped_tree(tmp_path, topology=None)
+    _unpaired_npu_tree(tmp_path, topology=None)
     som_path = tmp_path / "e1m_modules" / "E1M-FAKE.yaml"
     som_path.write_text(som_path.read_text() + "topology: {}\n", encoding="utf-8")
-    baseline = _check_imx93(tmp_path)
+    baseline = _check_unpaired(tmp_path)
     assert baseline.basis == "static-screen"
     _write_perf_point(tmp_path, sku="E1M-FAKE", hw_rev="r1", core="a55_cluster",
-                      backend="ethos_u", accel_config="ethos-u65-256",
+                      backend="ethos_u", accel_config="ethos-u55-256",
                       filename="tiny-int8-aaaa@vela-5.1.0+r1+a55_cluster+aaaaaaaaaaaa.json")
-    result = _check_imx93(tmp_path)
+    result = _check_unpaired(tmp_path)
     assert result == baseline                     # refused, not consumed
     assert not any("refused" in n for n in result.notes)
 
@@ -2129,44 +2126,44 @@ def test_a_tflite_model_against_a_real_v2n_v2m_sku_reports_onnx_backends_undeter
 
 
 @pytestmark_real_sdk
-def test_real_imx93_topology_is_a55_cluster_and_m33_only():
+def test_real_aen801_topology_names_its_own_cores_only():
     """tan-cli#791 round-2 review item 1 / item 6 NIT (b): item 1's own fix
-    grounded against the REAL E1M-NX9101/imx93 metadata, not only the
-    synthetic `_imx93_shaped_tree` fixture above. Binds to the LIVE parsed
-    set, never a hand-copied literal (the standing mutation-proof bar this
-    branch has already been bitten by twice) -- read straight off the real,
-    committed `metadata/e1m_modules/E1M-NX9101.yaml` `topology:` block."""
-    topology = perf_apply_mod._topology_core_ids("E1M-NX9101", metadata_root=_META)
-    assert topology == {"a55_cluster", "m33"}
-    assert "m55_hp" not in topology              # a real Ensemble core, not an imx93 one
+    grounded against the REAL E1M-AEN801 metadata, not only the synthetic
+    `_unpaired_npu_tree` fixture above. Binds to the LIVE parsed set, never a
+    hand-copied literal (the standing mutation-proof bar this branch has
+    already been bitten by twice) -- read straight off the real, committed
+    `metadata/e1m_modules/E1M-AEN801.yaml` `topology:` block."""
+    topology = perf_apply_mod._topology_core_ids("E1M-AEN801", metadata_root=_META)
+    assert {"m55_hp", "m55_he"} <= topology
+    assert "m33_sm" not in topology              # a real V2N core, not an Ensemble one
     assert "cortex_potato" not in topology        # names no core anywhere
 
 
 @pytestmark_real_sdk
-def test_real_imx93_declares_no_paired_core_for_its_lone_ethos_u65():
-    """The other half of the real-metadata proof: imx93.json's `ethos-u65`
-    entry really does state no `paired_core` -- confirming the exact-match
-    query has nothing to narrow `core` on for this SKU, which is what makes
-    E1M-NX9101 the shape where LEVEL 1 (`_topology_core_ids`) is the ONLY
-    thing standing between a bogus core and a `basis: "bench"` report."""
-    target = _headline_ethos_u_target("E1M-NX9101", _META)
+def test_real_aen801_declares_no_paired_core_for_its_ethos_u85():
+    """The other half of the real-metadata proof: e8.json's `ethos-u85`
+    entry really does state no `paired_core` (it is shared silicon, not
+    core-private) -- confirming the exact-match query has nothing to narrow
+    `core` on for this SKU's headline target, which is what makes E1M-AEN801
+    the shape where LEVEL 1 (`_topology_core_ids`) is the ONLY thing standing
+    between a bogus core and a `basis: "bench"` report."""
+    target = _headline_ethos_u_target("E1M-AEN801", _META)
     assert target is not None
     assert target.paired_core is None
 
 
 @pytestmark_real_sdk
-def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_path):
+def test_real_aen801_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_path):
     """The reviewer's OWN verification method (tan model check, the
     production path, not a unit test), reproduced here against a tmp copy of
-    the REAL committed E1M-NX9101/imx93 metadata plus a synthetic perf point
-    -- alp-sdk publishes no `metadata/model_perf/` tree yet, so this is the
+    the REAL committed E1M-AEN801 metadata plus a synthetic perf point --
+    alp-sdk publishes no `metadata/model_perf/` tree yet, so this is the
     only way to run the full `check_model_backends` path against real
-    SoM/SoC content end to end. Before this fix, a point claiming `core:
-    "m55_hp"` -- verified in the review's own words, "a core the i.MX 93
-    does NOT physically have" -- was consumed outright at `basis: "bench",
-    confidence: "certain"` with `arenaBytes 999999`/`reqSramKib 777`; this
-    proves it no longer is, against the real files rather than a hand-typed
-    stand-in for their shape.
+    SoM/SoC content end to end. A point claiming `core: "m33_sm"` -- a core
+    the Ensemble E8 does NOT physically have -- must not be consumed at
+    `basis: "bench", confidence: "certain"` with `arenaBytes 999999`/
+    `reqSramKib 777`; this proves it is not, against the real files rather
+    than a hand-typed stand-in for their shape.
 
     Deliberately does NOT copy a real `npu_ops/ethos_u/*.json` table -- that
     filename is SDK-version-sensitive (it has moved since `PINNED_SDK_
@@ -2175,23 +2172,23 @@ def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_
     to `_no_table_report` (still `basis: "static-screen"`) with no table at
     all, which is exactly the baseline this test needs."""
     (tmp_path / "e1m_modules").mkdir()
-    shutil.copy(_META / "e1m_modules" / "E1M-NX9101.yaml",
-                tmp_path / "e1m_modules" / "E1M-NX9101.yaml")
-    (tmp_path / "socs" / "nxp" / "imx9").mkdir(parents=True)
-    shutil.copy(_META / "socs" / "nxp" / "imx9" / "imx93.json",
-                tmp_path / "socs" / "nxp" / "imx9" / "imx93.json")
-    backends = resolve_check_backends("E1M-NX9101", metadata_root=tmp_path)
+    shutil.copy(_META / "e1m_modules" / "E1M-AEN801.yaml",
+                tmp_path / "e1m_modules" / "E1M-AEN801.yaml")
+    (tmp_path / "socs" / "alif" / "ensemble").mkdir(parents=True)
+    shutil.copy(_META / "socs" / "alif" / "ensemble" / "e8.json",
+                tmp_path / "socs" / "alif" / "ensemble" / "e8.json")
+    backends = resolve_check_backends("E1M-AEN801", metadata_root=tmp_path)
     assert backends == ["ethos_u"]
 
     def _screen():
-        return check_model_backends(backends=backends, sku="E1M-NX9101", source=_FIXTURE,
-                                    metadata_root=tmp_path, exact=False, hw_rev="r1")[0]
+        return check_model_backends(backends=backends, sku="E1M-AEN801", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=False, hw_rev="r2")[0]
 
     baseline = _screen()
-    _write_perf_point(tmp_path, sku="E1M-NX9101", hw_rev="r1", core="m55_hp",
-                      backend="ethos_u", accel_config="ethos-u65-256",
+    _write_perf_point(tmp_path, sku="E1M-AEN801", hw_rev="r2", core="m33_sm",
+                      backend="ethos_u", accel_config="ethos-u85-256",
                       perf={"arena_bytes": 999999, "req_sram_kib": 777},
-                      filename="tiny-int8-aaaa@vela-5.1.0+r1+m55_hp+aaaaaaaaaaaa.json")
+                      filename="tiny-int8-aaaa@vela-5.1.0+r2+m33_sm+aaaaaaaaaaaa.json")
     assert _screen() == baseline                  # refused, not the bogus 999999/777
 
 

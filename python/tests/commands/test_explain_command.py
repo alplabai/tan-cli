@@ -149,16 +149,30 @@ def test_explicitly_gated_templates_report_the_real_sku_allowlist(template_id):
 def test_family_gated_templates_report_the_real_unsupported_prefix_list(template_id):
     """No explicit SKU allowlist for these four -- their restriction is the
     family-tree exclusion `tan init` refuses `init.som-unsupported` against.
-    Pinned to the real current value (NXP: alp-sdk's scaffold catalog ships
-    no vendored tree for it) so a regression to an empty exclusion list REDs
-    here, not just a missing key. This is `tan init`'s ACCEPT/REFUSE policy,
-    not what alp-sdk's own catalog validates -- `initRefusesSkuPrefixes` is
-    wider than `["E1M-AEN301".."E1M-AEN801"] + ["E1M-V2N101"]`-only support
-    on purpose (`_family_bucket`'s unrecognised-prefix fallback), see
-    `explain_cmd.py`'s module docstring."""
-    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ("E1M-NX9",)
+    Pinned to the real current value: every family tan knows has a vendored
+    tree, so the exclusion list is empty and the field says `[]`, not a
+    missing key. This is `tan init`'s ACCEPT/REFUSE policy, not what
+    alp-sdk's own catalog validates -- see `explain_cmd.py`'s module
+    docstring."""
+    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ()
     som = resolve(template_id, None).extra_data["som"]
-    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": ["E1M-NX9"]}
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_publish_a_non_empty_exclusion_when_one_exists(
+    template_id, monkeypatch
+):
+    """The mechanism is table-driven: a family row with no vendored tree
+    shows up in `data.som` and in text mode with no further change."""
+    import tan.commands.explain_cmd as explain_cmd
+
+    monkeypatch.setattr(explain_cmd, "UNSUPPORTED_SOM_FAMILY_PREFIXES", ("E1M-ZZ9",))
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": ["E1M-ZZ9"]}
+    assert "Refuses --som for these SoM families: E1M-ZZ9." in details(template=template_id)
 
 
 def test_som_is_absent_not_null_for_module_templates_and_generation_targets():
@@ -236,20 +250,6 @@ def test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data()
             f"TEMPLATE_SUPPORTED_SKUS ({sorted(supported) if supported else supported!r}) "
             f"does not allow and no _CONTRAST_MENTIONS entry exempts"
         )
-
-
-@pytest.mark.parametrize(
-    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
-)
-def test_family_gated_templates_report_their_exclusion_in_text_mode_too(template_id):
-    """PR #985 review, minor 5: text mode used to say nothing at all about
-    the family exclusion for these four templates, even though JSON already
-    carried `data.som.initRefusesSkuPrefixes` -- a human running `tan explain
-    --template <id>` with no `--format json` only discovered the restriction
-    as `init.som-unsupported`, at `tan init` time. Derived from the SAME
-    table `data.som` reads, not a second hand-typed sentence."""
-    lines = details(template=template_id)
-    assert "Refuses --som for these SoM families: E1M-NX9." in lines
 
 
 def test_exact_sku_gated_templates_get_no_redundant_family_exclusion_line():

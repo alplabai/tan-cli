@@ -139,8 +139,8 @@ def _board(tmp_path: Path, tail: str) -> Path:
     path.write_text(
         "som:\n"
         f"  sku: {_SKU}\n"
-        # E1M-X-EVK, not e1m-evk: the latter hosts only the alif-ensemble and
-        # nxp-imx9 families and refuses a renesas-rzv2n SoM outright.
+        # E1M-X-EVK, not e1m-evk: the latter hosts only the alif-ensemble
+        # family and refuses a renesas-rzv2n SoM outright.
         f"preset: {_BOARD}\n"
         "cores:\n"
         f"  {_CORE}:\n"

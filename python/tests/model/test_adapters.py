@@ -367,12 +367,11 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
 
 def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one(
         tmp_path, monkeypatch):
-    """tan-cli#789 review MAJOR 3: `ethos-u65-256` on E1M-NX9101 (NXP i.MX 93)
-    refuses identically -- measured, real vela 5.1.0 over the committed
-    `tiny_int8.tflite`: "vela ... 1/1 operators on the NPU for ethos-u65-256
-    ... 0 KiB SRAM ... dram 0.11 KiB ... Ethos_U65_Client_Server". An NXP user
-    must never read an error blaming `Ethos_U85_SYS_DRAM_Mid`, so the profile
-    is read from the run's own summary block, never hardcoded.
+    """tan-cli#789 review MAJOR 3: a zero-SRAM refusal on a config that is not
+    the Alif U85 one must never blame `Ethos_U85_SYS_DRAM_Mid`, so the profile
+    is read from the run's own summary block, never hardcoded. (Faked vela
+    output: "vela ... 1/1 operators on the NPU for ethos-u55-256 ... 0 KiB
+    SRAM ... dram 0.11 KiB ... Ethos_U55_High_End_Embedded".)
 
     ALSO the only test that reaches `_refusal_remedy`'s short branch, so it
     carries that branch's binding (tan-cli#789 review MAJOR 3). vela printed no
@@ -389,24 +388,24 @@ def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one
     def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
-        (out / "m_summary_Ethos_U65_Client_Server.csv").write_text(
+        (out / "m_summary_Ethos_U55_High_End_Embedded.csv").write_text(
             "sram_memory_used,dram_memory_used\n0.0,0.109375\n", encoding="utf-8")
         return _FakeProc(stdout=(
             "Warning: No system configuration specified. Using a default of "
-            "Ethos_U65_Client_Server. Compilation may be invalid or non-optimal.\n"
-            "System configuration             Ethos_U65_Client_Server\n"
+            "Ethos_U55_High_End_Embedded. Compilation may be invalid or non-optimal.\n"
+            "System configuration             Ethos_U55_High_End_Embedded\n"
             "Memory mode                      Dedicated_Sram_384KB\n"
             "CPU operators = 0 (0.0%)\n"
             "NPU operators = 1 (100.0%)\n"))
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     with pytest.raises(VelaFootprintRefused) as exc:
-        VelaAdapter().compile(src, accel_config="ethos-u65-256", out_dir=tmp_path,
+        VelaAdapter().compile(src, accel_config="ethos-u55-256", out_dir=tmp_path,
                               soc_declares_dram=True)
     msg = str(exc.value)
-    assert "ethos-u65-256" in msg
-    assert "Ethos_U65_Client_Server" in msg
-    assert "Ethos_U85" not in msg               # the SKU that refuses here is not Alif's
+    assert "ethos-u55-256" in msg
+    assert "Ethos_U55_High_End_Embedded" in msg
+    assert "Ethos_U85" not in msg               # the config that refuses here is not the U85 one
     # ... and the remedy is the SHORT one: this run had its memory mode, so the
     # missing-profile sentence must be absent and the whole remedy must be the
     # one clause that is still true.
@@ -461,21 +460,20 @@ def test_a_refusal_never_names_a_vendor_file_for_a_part_that_declares_none(
     `_profile_clause` was fixed per-run in an earlier round (MAJOR 3), but
     `_refusal_remedy` still returned, unconditionally, "for Alif Ensemble
     parts it lives in the proprietary ensemble_vela.ini alp-sdk does not
-    redistribute" -- so an `ethos-u65-256` refusal on `E1M-NX9101` correctly
-    derived `Ethos_U65_Client_Server / Dedicated_Sram_384KB` and then still
-    sent an NXP customer after an Alif file. alp-sdk's own i.MX 93 vela
-    invocation involves no proprietary `.ini` at all (`vendors/nxp-imx93/
-    README.md`), so that pointer is not merely unhelpful there, it is wrong.
+    redistribute" -- so a refusal on a non-Alif part correctly derived its own
+    profile and then still sent that customer after an Alif file. A part whose
+    vela invocation involves no proprietary `.ini` at all makes that pointer
+    not merely unhelpful, but wrong.
 
     The first fix gated it on `silicon_ref.startswith("alif:ensemble:")`, which
     was correct for the two parts anyone had looked at and a standing claim
     about every part nobody had. The gate is now the part's OWN declaration
     (`npu_toolchain.vela.vendor_config_filename`), so this one case covers what
-    used to need two: `E1M-NX9101`, whose spec declares no such file, and "the
+    used to need two: a part whose spec declares no such file, and "the
     caller resolved no spec at all" are the same input -- `None` -- and the
     answer to both is silence about vendor files, never a guess.
 
-    `declares_dram=True` is the i.MX 93's own answer (its
+    `declares_dram=True` is a DRAM-bearing part's answer (e.g. its
     `external_memory_interfaces` lists `LPDDR4/4X`), which is why the no-DRAM
     marker must be absent here too: the placement vela chose is a bad fit for
     the arena, not an impossible one on that part.
@@ -483,7 +481,7 @@ def test_a_refusal_never_names_a_vendor_file_for_a_part_that_declares_none(
     What must SURVIVE for every part is the pair of clauses that are true for
     all of them -- no profile was resolved for this part, so vela chose the
     placement, and the rest of the SKU still builds."""
-    msg = _refuse_on("ethos-u65-256", "Ethos_U65_Client_Server", tmp_path, monkeypatch,
+    msg = _refuse_on("ethos-u55-256", "Ethos_U55_High_End_Embedded", tmp_path, monkeypatch,
                      vendor_ini=None, declares_dram=True)
     assert "ensemble_vela.ini" not in msg                    # THE regression (g)
     assert ".ini" not in msg                                 # ... nor any other vendor file
@@ -493,7 +491,7 @@ def test_a_refusal_never_names_a_vendor_file_for_a_part_that_declares_none(
     # ... while the part-independent half of the remedy is untouched:
     assert "No module vela profile was resolved for this part, so vela chose its own." in msg
     assert "`tan model build` skips this target and still builds the SKU's others." in msg
-    assert "Ethos_U65_Client_Server" in msg                  # still the run's own profile
+    assert "Ethos_U55_High_End_Embedded" in msg              # still the run's own profile
     assert "\n" not in msg
 
 
@@ -772,25 +770,18 @@ def test_vela_real_compile_for_e8_accel_configs(tmp_path, accel_config):
     # whose SoC specs declare `vendor_config_filename: ensemble_vela.ini`.
     ("ethos-u85-256", "Ethos_U85_SYS_DRAM_Mid / Dedicated_Sram_384KB",
      "ensemble_vela.ini"),
-    # E1M-NX9101 -- NXP i.MX 93, whose spec declares NO vendor config file, and
-    # a DIFFERENT default profile: hardcoding the U85 one would blame an Alif
-    # memory model for an NXP refusal (tan-cli#789 review MAJOR 3), and naming
-    # Alif's proprietary profile file in the remedy does the same thing one
-    # sentence later (review (g)).
-    ("ethos-u65-256", "Ethos_U65_Client_Server / Dedicated_Sram_384KB", None),
 ])
 def test_vela_real_dram_default_profile_compile_refuses_a_zero_footprint(
         tmp_path, accel_config, profile, vendor_ini):
-    """The two accel configs whose BUILT-IN default profile is DRAM-backed,
+    """The accel config whose BUILT-IN default profile is DRAM-backed,
     through a REAL vela process.
 
     Measured, `ethos-u-vela` 5.1.0 over the committed fixture: vela accepts
     each config string, compiles cleanly, places 1/1 operators on the NPU and
     exits 0 -- yet reports `sram_memory_used = 0.0`, because its default
     profile puts both feature maps and weights in DRAM (`ethos-u85-256` ->
-    `Ethos_U85_SYS_DRAM_Mid`, `dram 0.27 KiB`; `ethos-u65-256` ->
-    `Ethos_U65_Client_Server`, `dram 0.11 KiB`), and neither an Alif Ensemble
-    module nor an i.MX 93 SoM exposes that memory to the NPU arena. There is
+    `Ethos_U85_SYS_DRAM_Mid`, `dram 0.27 KiB`), and an Alif Ensemble
+    module does not expose that memory to the NPU arena. There is
     no SoM-authoritative profile to compile against instead (Alif's
     `ensemble_vela.ini` is proprietary and not redistributed; a licensed
     customer can supply it through `ALP_VELA_CONFIG`, but no SoC spec names a
@@ -1094,8 +1085,9 @@ def test_a_defaulted_system_config_is_not_called_harmless_under_shared_sram(
     maps those ports to memory AREAS. `[Memory_Mode.Sram_Only]` puts all three
     on `Axi0` and all 11 `System_Config` sections vela 5.1.0 ships set
     `axi0_port=Sram`, so there the default really is bandwidth-only.
-    `[Memory_Mode.Shared_Sram]` sets `const_mem_area=Axi1` -- and that is the
-    mode tan passes for `E1M-NX9101`. Measured on `person_detect_int8.tflite`
+    `[Memory_Mode.Shared_Sram]` sets `const_mem_area=Axi1`, the
+    shape under which the system config decides placement. Measured (vela, not
+    an alp-sdk part) on `person_detect_int8.tflite`
     at `ethos-u65-256 --memory-mode Shared_Sram`, changing ONLY
     `--system-config`: `Ethos_U65_Embedded` files 228.265625 KiB under
     `off_chip_flash`, `Ethos_U65_Mid_End` 228.3125 KiB under `dram`,

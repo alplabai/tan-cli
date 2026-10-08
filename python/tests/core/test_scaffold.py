@@ -22,7 +22,6 @@ from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
-    UNSUPPORTED_SOM_FAMILY_PREFIXES,
     CoresError,
     ExampleReadError,
     FlowStyleSomError,
@@ -241,7 +240,6 @@ def test_minimal_app_board_yaml_app_resolves_to_the_directory_the_planner_actual
 def test_app_core_follows_the_som_family():
     assert app_core_for_sku("E1M-V2N101") == "m33_sm"
     assert app_core_for_sku("E1M-V2M101") == "m33_sm"
-    assert app_core_for_sku("E1M-NX9101") == "m33"
     assert app_core_for_sku("E1M-AEN801") == "m55_hp"
 
 
@@ -303,28 +301,28 @@ def test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes():
     `test_retarget_keeps_an_intra_family_hw_rev_when_the_sku_changes`,
     review round 4.)"""
     out = retarget_board_yaml_som(
-        "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_drops_a_sibling_hw_rev_declared_before_the_sku_line():
     out = retarget_board_yaml_som(
-        "som:\n  hw_rev: r2\n  sku: E1M-AEN801\ncores:\n", "E1M-NX9101"
+        "som:\n  hw_rev: r2\n  sku: E1M-AEN801\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_drops_a_sibling_hw_revs_own_wrapped_comment():
     out = retarget_board_yaml_som(
         "som:\n  sku: E1M-AEN801\n  hw_rev: r2  # Alif-only revision\n"
         "    # continued\ncores:\n",
-        "E1M-NX9101",
+        "E1M-V2N101",
     )
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_keeps_the_sibling_hw_rev_for_a_no_op_sku():
@@ -365,9 +363,9 @@ def test_retarget_drops_the_hw_rev_for_an_unrecognized_sku_shape():
 
 
 def test_retarget_is_a_no_op_with_no_hw_rev_to_drop():
-    out = retarget_board_yaml_som("som:\n  sku: E1M-AEN801\ncores:\n", "E1M-NX9101")
+    out = retarget_board_yaml_som("som:\n  sku: E1M-AEN801\ncores:\n", "E1M-V2N101")
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_a_trailing_comment():
@@ -382,18 +380,18 @@ def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_a_trailing_comm
     One shared predicate (`_is_som_key_line`) now backs both."""
     out = retarget_board_yaml_som(
         "som:  # top-level SoM block\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n",
-        "E1M-NX9101",
+        "E1M-V2N101",
     )
 
-    assert out == "som:  # top-level SoM block\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:  # top-level SoM block\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_trailing_whitespace():
     out = retarget_board_yaml_som(
-        "som: \n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+        "som: \n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som: \n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som: \n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_vendored_som_reads_a_sku_line_under_a_som_key_with_a_trailing_comment():
@@ -412,13 +410,13 @@ def test_vendored_som_reads_a_sku_line_under_a_som_key_with_a_trailing_comment()
 
 def test_vendored_som_strips_quotes_from_both_scalars():
     """tan-cli#1008 review round 5 major: an unstripped quote defeated
-    `hw_rev_not_buildable` outright (`_SKU_FAMILY.match('"E1M-NX9101"')`
+    the family check outright (`_SKU_FAMILY.match('"E1M-V2N101"')`
     fails) -- the same `.strip("'\"")` rule
     `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice` already
     apply to this identical scalar."""
-    content = 'som:\n  sku: "E1M-NX9101"\n  hw_rev: \'r1\'\ncores:\n'
+    content = 'som:\n  sku: "E1M-V2N101"\n  hw_rev: \'r1\'\ncores:\n'
 
-    assert vendored_som(content) == ("E1M-NX9101", "r1")
+    assert vendored_som(content) == ("E1M-V2N101", "r1")
 
 
 def test_vendored_som_reads_a_som_key_line_with_a_space_before_the_colon():
@@ -441,10 +439,10 @@ def test_retarget_drops_a_cross_family_hw_rev_with_a_space_before_the_soms_colon
     file that opens with a spaced `som :` line -- the drop is anchored to
     `in_som`, which flips on exactly this predicate."""
     out = retarget_board_yaml_som(
-        "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-NX9101"
+        "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som :\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som :\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_treats_a_quoted_existing_sku_as_a_true_no_op():
@@ -485,9 +483,9 @@ def test_vendored_som_reads_a_hw_rev_child_key_with_a_space_before_the_colon():
     `partition(":")` rule tolerates the space); pinned here so a future
     change to the shared `_split_child_key` helper cannot silently regress
     it back."""
-    content = "som:\n  sku: E1M-NX9101\n  hw_rev : r2\ncores:\n"
+    content = "som:\n  sku: E1M-V2N101\n  hw_rev : r2\ncores:\n"
 
-    assert vendored_som(content) == ("E1M-NX9101", "r2")
+    assert vendored_som(content) == ("E1M-V2N101", "r2")
 
 
 def test_retarget_drops_a_spaced_hw_rev_child_key_on_a_cross_family_retarget():
@@ -499,14 +497,14 @@ def test_retarget_drops_a_spaced_hw_rev_child_key_on_a_cross_family_retarget():
     the exact tan-cli#743 contradiction (`tan validate` refusing a
     `sku:`/`hw_rev:` pair no family table declares) that round 3 closed.
     Measured live: `tan init --from-example multicore/spacedhw-probe --som
-    E1M-NX9101` exited 0 with `hw_rev : r2` still in the scaffolded
+    E1M-V2N101` exited 0 with `hw_rev : r2` still in the scaffolded
     board.yaml, then `tan validate` hard-errored `sdk-compat: SoM
-    E1M-NX9101 hw_rev 'r2' is not a known hardware revision`."""
+    E1M-V2N101 hw_rev 'r2' is not a known hardware revision`."""
     out = retarget_board_yaml_som(
-        "som:\n  sku: E1M-AEN801\n  hw_rev : r2\ncores:\n", "E1M-NX9101"
+        "som:\n  sku: E1M-AEN801\n  hw_rev : r2\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_rewrites_a_spaced_sku_child_key_on_a_cross_family_retarget():
@@ -518,15 +516,15 @@ def test_retarget_rewrites_a_spaced_sku_child_key_on_a_cross_family_retarget():
     SKU, `changing_sku` came out `True`, `drop_hw_rev` armed -- but the
     WRITER's own `trimmed.startswith("sku:")` still never matched `sku :`,
     so the loop dropped the sibling `hw_rev:` while leaving `sku :
-    E1M-AEN801` completely unretargeted: `--som E1M-NX9101` silently
+    E1M-AEN801` completely unretargeted: `--som E1M-V2N101` silently
     ignored, `issues: []`, `tan validate` rc 0 against the WRONG SoM. That
     is the silent revision substitution `_same_som_family` was added in
     round 4 to prevent, reached via a different door."""
     out = retarget_board_yaml_som(
-        "som:\n  sku : E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+        "som:\n  sku : E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_keeps_a_spaced_hw_rev_child_key_on_an_intra_family_retarget():
@@ -567,13 +565,13 @@ def test_vendored_som_refuses_a_flow_style_som_block():
 
 def test_retarget_refuses_a_flow_style_som_block_instead_of_discarding_som():
     """tan-cli#1029's own repro: at the parent commit this call returned the
-    INPUT unchanged, byte-for-byte -- `--som E1M-NX9101` silently discarded,
+    INPUT unchanged, byte-for-byte -- `--som E1M-V2N101` silently discarded,
     the scaffolded board.yaml still naming `E1M-AEN801`. It must now refuse
     instead of writing the wrong SKU with no issue."""
     content = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(FlowStyleSomError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_flow_style_som_block_with_a_space_before_the_colon():
@@ -617,9 +615,9 @@ def test_retarget_still_retargets_a_som_line_carrying_a_yaml_anchor():
     the equivalent plain `som:\\n  sku: ...` block -- not refuse."""
     content = "som: &s\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
 
-    result = retarget_board_yaml_som(content, "E1M-NX9101")
+    result = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert result == "som: &s\n  sku: E1M-NX9101\ncores:\n"
+    assert result == "som: &s\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_tag():
@@ -634,9 +632,9 @@ def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_tag():
 def test_retarget_still_retargets_a_som_line_carrying_a_yaml_tag():
     content = "som: !!map\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
 
-    result = retarget_board_yaml_som(content, "E1M-NX9101")
+    result = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert result == "som: !!map\n  sku: E1M-NX9101\ncores:\n"
+    assert result == "som: !!map\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
@@ -663,7 +661,7 @@ def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
     content = "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(FlowStyleSomError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
@@ -682,7 +680,7 @@ def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
     content = "som: !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(FlowStyleSomError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_flow_style_som_block_carrying_an_anchor_and_a_tag():
@@ -763,9 +761,9 @@ def test_retarget_retargets_a_double_quoted_som_key():
     entry point needed to widen."""
     content = '"som":\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n'
 
-    out = retarget_board_yaml_som(content, "E1M-NX9101")
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert out == '"som":\n  sku: E1M-NX9101\ncores:\n'
+    assert out == '"som":\n  sku: E1M-V2N101\ncores:\n'
 
 
 def test_retarget_retargets_a_single_quoted_som_key():
@@ -826,9 +824,9 @@ def test_retarget_retargets_a_double_quoted_sku_child_key():
     quoted top-level `som:` key already does above."""
     content = 'som:\n  "sku": E1M-AEN801\ncores:\n'
 
-    out = retarget_board_yaml_som(content, "E1M-NX9101")
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_drops_a_quoted_hw_rev_child_key_on_a_cross_family_retarget():
@@ -838,9 +836,9 @@ def test_retarget_drops_a_quoted_hw_rev_child_key_on_a_cross_family_retarget():
     on_a_cross_family_retarget`'s round-6 sibling)."""
     content = "som:\n  sku: E1M-AEN801\n  'hw_rev': r2\ncores:\n"
 
-    out = retarget_board_yaml_som(content, "E1M-NX9101")
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_vendored_som_refuses_an_alias_som_value():
@@ -858,11 +856,11 @@ def test_vendored_som_refuses_an_alias_som_value():
 def test_retarget_refuses_an_alias_som_value_instead_of_discarding_som():
     """tan-cli#1041's own repro for the alias shape: at the parent commit
     this call returned the INPUT unchanged, byte-for-byte -- `--som
-    E1M-NX9101` silently discarded."""
+    E1M-V2N101` silently discarded."""
     content = "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\ncores:\n"
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_merge_key_with_no_explicit_sku_override():
@@ -880,7 +878,7 @@ def test_retarget_refuses_a_merge_key_with_no_explicit_sku_override():
     content = "base: &b\n  sku: E1M-AEN801\n  hw_rev: r1\nsom:\n  <<: *b\ncores:\n"
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_retarget_retargets_through_a_merge_key_with_an_explicit_sku_override():
@@ -893,9 +891,9 @@ def test_retarget_retargets_through_a_merge_key_with_an_explicit_sku_override():
     content = "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-AEN801\ncores:\n"
     assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
 
-    out = retarget_board_yaml_som(content, "E1M-NX9101")
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
 
-    assert out == "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-NX9101\ncores:\n"
+    assert out == "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_vendored_som_refuses_a_document_root_merge_key_that_produces_som():
@@ -922,7 +920,7 @@ def test_retarget_refuses_a_document_root_merge_key_that_produces_som():
     )
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_next_line_flow_som_block():
@@ -942,7 +940,7 @@ def test_retarget_refuses_a_next_line_flow_som_block():
     content = "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_next_line_flow_som_block_with_a_comment_first():
@@ -957,7 +955,7 @@ def test_retarget_refuses_a_next_line_flow_som_block_with_a_comment_first():
     content = "som: # c\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_vendored_som_refuses_a_next_line_flow_som_block_behind_an_anchor():
@@ -972,7 +970,7 @@ def test_retarget_refuses_a_next_line_flow_som_block_behind_an_anchor():
     content = "som:\n  &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
 
     with pytest.raises(UnreadableSomBlockError):
-        retarget_board_yaml_som(content, "E1M-NX9101")
+        retarget_board_yaml_som(content, "E1M-V2N101")
 
 
 def test_unreadable_som_block_error_is_a_som_block_unsupported_error():
@@ -1219,11 +1217,10 @@ def test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first():
 
 
 def test_vendored_som_reads_sku_and_an_explicit_hw_rev():
-    """tan-cli#1008 review majors 1+2: `init`'s hw-rev-not-buildable check
-    reads the SKU/hw_rev this function returns off the PLANNED board.yaml,
-    not `--som`."""
-    content = "som:\n  sku: E1M-NX9101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n"
-    assert vendored_som(content) == ("E1M-NX9101", "r1")
+    """tan-cli#1008 review majors 1+2: the SKU/hw_rev this function returns
+    is read off the PLANNED board.yaml, not `--som`."""
+    content = "som:\n  sku: E1M-V2N101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n"
+    assert vendored_som(content) == ("E1M-V2N101", "r1")
 
 
 def test_vendored_som_hw_rev_is_none_when_absent():
@@ -1243,8 +1240,8 @@ def test_vendored_som_reads_a_retargeted_skus_dropped_hw_rev_as_none():
     value (see `test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes`
     for the retarget side of this)."""
     original = "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n  m55_hp:\n    app: .\n"
-    retargeted = retarget_board_yaml_som(original, "E1M-NX9101")
-    assert vendored_som(retargeted) == ("E1M-NX9101", None)
+    retargeted = retarget_board_yaml_som(original, "E1M-V2N101")
+    assert vendored_som(retargeted) == ("E1M-V2N101", None)
 
 
 def test_vendored_som_returns_none_none_with_no_som_block():
@@ -1839,13 +1836,6 @@ def test_a_vendored_tree_keeps_its_own_sku_s_cores_byte_for_byte():
     ("sku", "app_core", "dropped"),
     [
         ("E1M-AEN301", "m55_hp", "a32_cluster"),
-        # `E1M-NX9101` used to be a second row here. tan-cli#579 refuses it at
-        # `_vendored_files` -- an NXP SoM no longer reaches the Alif tree at all
-        # -- so this end-to-end shape cannot cover it any more. The transform
-        # itself is still exercised for that SKU, directly, in
-        # `test_cores_retargeting_still_handles_a_family_with_no_tree` below;
-        # dropping the row without moving the coverage would have quietly
-        # retired half of tan-cli#494 defect 2's regression guard.
     ],
 )
 def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
@@ -1858,11 +1848,11 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     `--template edge-ai-starter --som E1M-AEN301` wrote `a32_cluster` for an
     Ensemble E3 that has no Cortex-A32 -- `ok:true`, `exitCode 0`, `issues:[]`
     -- and `tan validate` then hard-errored `unknown core id ['a32_cluster']`
-    on the very next command. `--som E1M-NX9101` landed on the Alif tree and
-    kept `m55_hp` against a topology of `a55_cluster`/`m33`, contradicting
-    `app_core_for_sku` in this same module. (That second SKU is now refused
-    outright -- tan-cli#579 -- because fixing its CORE id left the rest of the
-    Alif tree in place and only made the artefact look more plausible.)
+    on the very next command. An unvendored family landed on the Alif tree and
+    kept `m55_hp`, contradicting `app_core_for_sku` in this same module.
+    (Such a family is now refused outright -- tan-cli#579 -- because fixing its
+    CORE id left the rest of the Alif tree in place and only made the artefact
+    look more plausible.)
 
     Both edits only ever REMOVE wrong facts: the app entry is renamed to tan's
     own `app_core_for_sku`, and the companion cluster -- true only of the
@@ -1881,17 +1871,16 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     assert f"sku: {sku}" in content
 
 
-def test_cores_retargeting_still_handles_a_family_with_no_tree():
-    """tan-cli#494 defect 2's NXP coverage, moved off the `_vendored_files`
-    path that tan-cli#579 now refuses. The TRANSFORM is unchanged and still
-    correct for an NXP SKU -- it is reached through `--board-yaml` and
-    `--from-example`, neither of which goes near `_family_bucket` -- so the
-    refusal must not be read as retiring it."""
+def test_cores_retargeting_handles_a_cross_family_retarget():
+    """tan-cli#494 defect 2's cross-family coverage: the TRANSFORM, called
+    directly (it is also reached through `--board-yaml` and `--from-example`,
+    neither of which goes near `_family_bucket`), retargets the Alif tree's
+    app core onto the V2N family's."""
     content = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
 
-    retargeted = retarget_board_yaml_cores(content, "E1M-NX9101", "E1M-AEN801")
+    retargeted = retarget_board_yaml_cores(content, "E1M-V2N101", "E1M-AEN801")
 
-    assert "  m33:" in retargeted
+    assert "  m33_sm:" in retargeted
     assert "  m55_hp:" not in retargeted
     assert "  a32_cluster:" not in retargeted
     assert "app: ./src" in retargeted
@@ -1910,10 +1899,10 @@ def test_cores_retargeting_leaves_an_unrecognised_block_alone():
     than half-rewritten -- the transform never guesses. Same rule as
     `retarget_board_yaml_som`'s own untouched-on-no-match behaviour."""
     two_apps = "cores:\n  m55_hp:\n    app: ./a\n  m33:\n    app: ./b\n\nsom:\n  sku: X\n"
-    assert retarget_board_yaml_cores(two_apps, "E1M-NX9101", "E1M-AEN801") == two_apps
+    assert retarget_board_yaml_cores(two_apps, "E1M-V2N101", "E1M-AEN801") == two_apps
 
     no_block = "som:\n  sku: E1M-AEN801\n"
-    assert retarget_board_yaml_cores(no_block, "E1M-NX9101", "E1M-AEN801") == no_block
+    assert retarget_board_yaml_cores(no_block, "E1M-V2N101", "E1M-AEN801") == no_block
 
 
 def test_a_partially_delivered_vendored_tree_is_refused_not_half_written(tmp_path, monkeypatch):
@@ -2005,52 +1994,70 @@ def _board_yaml_of(tree: str, template_id: str, sku: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# tan-cli#579 -- an NXP SKU used to render the Alif tree's content
+# tan-cli#579 -- a family with no vendored tree used to render the Alif tree
 # ---------------------------------------------------------------------------
 
+#: A hypothetical family row with no vendored tree. `_SOM_FAMILIES` carries no
+#: such row today (every family tan knows has a tree), so the refusal path is
+#: exercised by injecting one -- the mechanism is table-driven, and this is the
+#: only way to keep it covered.
+_UNVENDORED_SKU = "E1M-ZZ9101"
 
-def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered():
+
+@pytest.fixture
+def unvendored_family(monkeypatch):
+    families = scaffold_module._SOM_FAMILIES + (("E1M-ZZ9", "m33", None),)
+    monkeypatch.setattr(scaffold_module, "_SOM_FAMILIES", families)
+    monkeypatch.setattr(
+        scaffold_module,
+        "UNSUPPORTED_SOM_FAMILY_PREFIXES",
+        tuple(prefix for prefix, _core, tree in families if tree is None),
+    )
+
+
+def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered(unvendored_family):
     """**tan-cli#579.** `_family_bucket` was
     `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else _FAMILY_TREES[0]`,
-    so E1M-NX9* -- a family `app_core_for_sku` in this same module already
-    knows (`E1M-NX9` -> `m33`) -- fell down the `else` arm onto the Alif tree.
-    Measured on `dev` before this fix: `plan_template_files("sensor-starter",
-    "E1M-NX9101")` returned the E1M-AEN801 tree with every file except
+    so a family `app_core_for_sku` in this same module already knew fell down
+    the `else` arm onto the Alif tree: `plan_template_files("sensor-starter",
+    <that SKU>)` returned the E1M-AEN801 tree with every file except
     `board.yaml` BYTE-IDENTICAL to the Alif render -- `preset: e1m-evk`,
     `chips: [tmp112]`, a README whose build line is `west build -b
     alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and a `CMakeLists.txt`
     that asks the SDK loader for `--emit zephyr-conf --core m55_hp` while
     tan-cli#494's own `retarget_board_yaml_cores` had already rewritten the
-    same scaffold's `cores:` key to `m33`. `tan init` reported `ok: true` /
-    exit 0 / `issues: []` for all of it.
+    same scaffold's `cores:` key. `tan init` reported `ok: true` / exit 0 /
+    `issues: []` for all of it.
     """
     for template_id in ("zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"):
         with pytest.raises(UnsupportedSomError) as excinfo:
-            plan_template_files(template_id, "E1M-NX9101")
-        assert "E1M-NX9101" in str(excinfo.value)
+            plan_template_files(template_id, _UNVENDORED_SKU)
+        assert _UNVENDORED_SKU in str(excinfo.value)
         assert template_id in str(excinfo.value)
 
 
-def test_the_refusal_names_the_two_paths_that_still_work():
+def test_the_refusal_names_the_two_paths_that_still_work(unvendored_family):
     """A refusal that leaves the customer with nothing is a worse defect than
     the one it fixes. `minimal-app` is tan's OWN hand-generated, vendor-neutral
     template (no vendored tree, so `_family_bucket` never runs for it) and
     `--from-example` copies a real SDK example -- both are named."""
     with pytest.raises(UnsupportedSomError) as excinfo:
-        plan_template_files("sensor-starter", "E1M-NX9101")
+        plan_template_files("sensor-starter", _UNVENDORED_SKU)
 
     message = str(excinfo.value)
     assert "minimal-app" in message
     assert "--from-example" in message
 
 
-def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree():
+def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree(unvendored_family):
     """The refusal is scoped to the VENDORED trees. `minimal-app` is
     hand-generated here and carries no vendor content at all, so it is correct
-    for an NXP SoM -- and it is the escape hatch the refusal names."""
-    files = {f.relative_path: f.content for f in plan_template_files("minimal-app", "E1M-NX9101")}
+    for such a SoM -- and it is the escape hatch the refusal names."""
+    files = {
+        f.relative_path: f.content for f in plan_template_files("minimal-app", _UNVENDORED_SKU)
+    }
 
-    assert "sku: E1M-NX9101" in files["board.yaml"]
+    assert f"sku: {_UNVENDORED_SKU}" in files["board.yaml"]
     assert "  m33:\n" in files["board.yaml"]
     assert "m55_hp" not in files["board.yaml"]
 
@@ -2067,21 +2074,25 @@ def test_the_two_family_derivations_read_one_table():
         ("E1M-V2N101", "m33_sm", "E1M-V2N101"),
         ("E1M-V2N102", "m33_sm", "E1M-V2N101"),
         ("E1M-V2M101", "m33_sm", "E1M-V2N101"),
-        ("E1M-NX9101", "m33", None),
     ):
         assert app_core_for_sku(sku) == core, sku
         assert scaffold_module._family_bucket(sku) == tree, sku
 
 
-def test_unsupported_som_family_prefixes_is_derived_not_retyped():
+def test_unsupported_som_family_prefixes_is_derived_not_retyped(unvendored_family):
     """tan-cli#866: `UNSUPPORTED_SOM_FAMILY_PREFIXES` is a list comprehension
     over `_SOM_FAMILIES`, so it always names exactly the prefixes whose tree
-    is `None` there -- currently NXP alone. Pinned to the real current value,
-    not merely "is non-empty": a stale hand-typed copy of this list could
-    pass a weaker check while still disagreeing with `_SOM_FAMILIES`."""
-    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ("E1M-NX9",)
-    for prefix in UNSUPPORTED_SOM_FAMILY_PREFIXES:
+    is `None` there. Empty for the real table (every known family has a tree);
+    the injected row shows up in the derivation, so a stale hand-typed copy
+    could not pass."""
+    prefixes = scaffold_module.UNSUPPORTED_SOM_FAMILY_PREFIXES
+    assert prefixes == ("E1M-ZZ9",)
+    for prefix in prefixes:
         assert scaffold_module._family_bucket(prefix + "101") is None, prefix
+
+
+def test_no_real_som_family_is_unvendored():
+    assert [p for p, _core, tree in scaffold_module._SOM_FAMILIES if tree is None] == []
 
 
 def test_is_family_gated_matches_plan_template_files_own_special_case():
