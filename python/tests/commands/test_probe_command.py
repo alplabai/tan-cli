@@ -161,7 +161,8 @@ def test_identify_unread_dpidr_stops_after_session_one(env, monkeypatch):
 def test_identify_without_a_manifest_says_the_match_was_skipped(env, monkeypatch):
     FakeJlink(monkeypatch)
     rc, data, issues, _ = _run(env, "identify")
-    assert rc == 0 and codes(issues) == ["probe.no-manifest"] and issues[0].severity == "info"
+    assert rc == 0 and codes(issues) == ["probe.itcm-not-checked", "probe.no-manifest"]
+    assert all(i.severity == "info" for i in issues)
     assert data["identity"]["expectedDpidr"] is None and data["identity"]["dpidrMatch"] is None
 
 
@@ -173,6 +174,39 @@ def test_identify_reads_the_he_window_only_for_an_he_target(env, monkeypatch, co
     assert rc == 0, issues
     assert data["identity"]["itcmVerdict"] == "not-checked" and data["identity"]["core"] == "hp"
     assert not any("mem32" in sc for sc in jl.probe_scripts())
+
+
+@pytest.mark.parametrize("ap,expect_codes,rc", [
+    ("hp", ["probe.itcm-not-checked", "probe.core-mismatch"], 1),
+    ("multiple", ["probe.itcm-not-checked", "probe.core-mismatch"], 1),  # includes the HP AP
+    ("unidentified", ["probe.itcm-not-checked"], 0),
+])
+@pytest.mark.parametrize("claim", ["core", "slice"])
+def test_the_itcm_session_follows_the_actual_attach_not_the_claim(env, monkeypatch, ap, expect_codes, rc, claim):
+    jl = FakeJlink(monkeypatch, ap=ap)
+    root = _manifest(env)  # one armed HE slice
+    got_rc, data, issues, _ = _run(env, "identify", build_root=root,
+                                   core="m55_he" if claim == "core" else None)
+    assert not any("mem32" in sc for sc in jl.scripts), jl.scripts
+    assert data["identity"]["itcmVerdict"] == "not-checked"
+    assert got_rc == rc and codes(issues) == expect_codes
+
+
+def test_the_skipped_itcm_check_is_explained(env, monkeypatch):
+    FakeJlink(monkeypatch, ap="hp")
+    slices = [("m55_he", "{jlink_serial: '1'}"), ("m55_hp", "{jlink_serial: '1'}")]
+    _rc, _d, issues, _ = _run(env, "identify", build_root=_manifest(env, slices=slices))
+    note = [i for i in issues if i.code == "probe.itcm-not-checked"][0]
+    assert note.severity == "info" and "--core m55_he" in note.message
+    _rc, _d, issues, _ = _run(env, "identify", core="m55_hp")
+    assert "m55_hp" in [i for i in issues if i.code == "probe.itcm-not-checked"][0].message
+
+
+def test_the_window_message_is_core_neutral(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    _rc, _d, issues, _ = _run(env, "read", "0x50000000", "1", core="m55_hp")
+    assert "every core" in issues[0].message and "unhaltable" in issues[0].message
+    assert "HE session must not" not in issues[0].message
 
 
 def test_identify_he_target_from_the_manifest_slice_runs_the_core_check(env, monkeypatch):
@@ -218,6 +252,8 @@ def test_read_too_large_is_refused_before_any_spawn(env, monkeypatch):
     assert rc == 0 and data["read"]["words"] == 256
 
 
+# The `ap` dimension adds no branch coverage (the refusal precedes any spawn); it is here to
+# pin that no attach, however it looks, can unlock the window or reach the J-Link.
 @pytest.mark.parametrize("ap", ["hp", "multiple", "unidentified", "he", "conflict-hp"])
 @pytest.mark.parametrize("core", [None, "m55_he", "m55_hp"])
 @pytest.mark.parametrize("addr,words", [("0x50000000", "4"), ("0x58000000", "1"),
@@ -355,10 +391,12 @@ def test_the_envelope_records_the_exact_text_sent_and_a_transcript(env, monkeypa
     assert "exec DisableAutoUpdateFW" in open(log, encoding="utf-8").read()
 
 
-def test_without_a_build_root_the_transcript_goes_to_a_temp_dir(env, monkeypatch):
+def test_without_a_build_root_the_transcript_goes_to_the_stable_cache_dir(env, monkeypatch):
     FakeJlink(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(env / "xdg"))
     _rc, data, _i, _l = _run(env, "read", "0x80010000", "1", build_root=str(env / "nope"))
-    assert os.path.isfile(data["transcriptPath"]) and "tan-probe-" in data["transcriptPath"]
+    assert os.path.isfile(data["transcriptPath"])
+    assert data["transcriptPath"].startswith(str(env / "xdg" / "tan" / "probe-logs"))
 
 
 def test_the_cli_emits_the_envelope_shape(env, monkeypatch):
@@ -392,13 +430,30 @@ def test_window_rule(addr, words, refused):
 
 def test_select_slice():
     he, hp = ("m55_he", {"jlink_serial": "1", "expect_dpidr": "0xA"}), ("m55_hp", {"jlink_serial": "2"})
-    assert pp.select_slice([he], None) == ({"jlink_serial": "1", "expect_dpidr": "0xA"}, "m55_he", None)
-    assert pp.select_slice([he, hp], "m55_hp")[1:] == ("m55_hp", None)
+    assert pp.select_slice([he], None) == (
+        {"jlink_serial": "1", "expect_dpidr": "0xA"}, "m55_he", None, None)
+    assert pp.select_slice([he, hp], "m55_hp")[1:] == ("m55_hp", None, None)
     assert pp.select_slice([he, hp], None)[2] is not None
     same = [("m55_he", {"jlink_serial": "1"}), ("m55_hp", {"jlink_serial": "1", "expect_dpidr": "0xA"})]
-    args, selected, problem = pp.select_slice(same, None)
+    args, selected, problem, _note = pp.select_slice(same, None)
     assert args["expect_dpidr"] == "0xA" and selected is None and problem is None
-    assert pp.select_slice([("m55_he", None)], None) == ({}, None, None)
+    assert pp.select_slice([("m55_he", None)], None) == ({}, None, None, None)
+    # a serial pinned by exactly one slice is carried onto the chosen (armed) args
+    pinned = [("m55_he", {"expect_dpidr": "0xA"}), ("m55_hp", {"jlink_serial": "7"})]
+    assert pp.select_slice(pinned, None)[0] == {"expect_dpidr": "0xA", "jlink_serial": "7"}
+    # --core naming a core with no slice is reported, not silently {}
+    args, selected, problem, note = pp.select_slice([he], "m55_hp")
+    assert args == {} and selected is None and problem is None and "m55_hp" in note
+    assert pp.select_slice([], "m55_hp") == ({}, None, None, None)
+
+
+def test_itcm_session_and_claimed_core_rules():
+    assert pp.itcm_check_allowed(True, "he")
+    for verdict in ("hp", "multiple", "unidentified", "conflict-hp"):
+        assert not pp.itcm_check_allowed(True, verdict)
+    assert not pp.itcm_check_allowed(False, "he")
+    assert pp.claimed_core("m55_hp", "m55_he") == "m55_hp"
+    assert pp.claimed_core(None, "m55_he") == "m55_he" and pp.claimed_core(None, "weird") is None
 
 
 def test_target_and_contradiction_and_dpidr_rules():
@@ -410,3 +465,9 @@ def test_target_and_contradiction_and_dpidr_rules():
     assert pp.dpidr_state(None, "0x1") is None and pp.dpidr_state("0x4C013477", None) == "unread"
     assert pp.dpidr_state("0x4c013477", "0x4C013477") is None
     assert pp.dpidr_state("0x4C013477", "0x0BE12477") == "mismatch"
+
+
+def test_a_core_with_no_slice_is_reported_in_the_envelope(env, monkeypatch):
+    FakeJlink(monkeypatch, ap="hp")
+    rc, _d, issues, _ = _run(env, "read", "0x80010000", "1", core="m55_hp", build_root=_manifest(env))
+    assert rc == 0 and codes(issues) == ["probe.no-manifest"] and "no slice" in issues[0].message

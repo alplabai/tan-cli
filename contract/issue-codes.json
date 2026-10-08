@@ -3536,6 +3536,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/probe_cmd.py",
       "note": "tan-cli#1406: `tan probe`. No manifest, or no `expect_dpidr` armed for the selected core: identify reports the SW-DP ID but the DPIDR match was skipped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.itcm-not-checked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe identify` skipped the ITCM corroboration (`mem32 0x0` + `mem32 0x58000000`, bench-proven only from an HE attach) because the target is ambiguous, is not the M55-HE, or the connect banner did not place the attach on the HE access port; `itcmVerdict` is `not-checked`. The message names the reason and the fix (`--core m55_he`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

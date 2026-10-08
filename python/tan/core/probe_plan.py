@@ -106,10 +106,10 @@ def window_refusal(address: int, words: int) -> str | None:
     if not touches_unsafe_window(address, words):
         return None
     return (
-        f"refusing to read 0x{address:08X}..0x{address + 4 * words - 1:08X}: it overlaps "
-        "0x50000000-0x5FFFFFFF, and an M55-HE session must not touch that window (reading "
-        "the HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset). "
-        "`tan probe read` refuses the window on every core."
+        f"refusing to read 0x{address:08X}..0x{address + 4 * words - 1:08X}: `tan probe read` "
+        "refuses 0x50000000-0x5FFFFFFF on every core. From the HE that window is the HP ITCM "
+        "alias (reading it leaves the core unhaltable until a PIN reset), and tan does not "
+        "read it from any attach."
     )
 
 
@@ -125,35 +125,67 @@ def _slice_ambiguity(distinct: dict[str, set[str]]) -> str | None:
 
 def select_slice(
     slices: Sequence[tuple[str, dict]], core: str | None
-) -> tuple[dict, str | None, str | None]:
-    """`(flash_args, selected core id, ambiguity message)` from `(core_id, flash_args)` pairs.
+) -> tuple[dict, str | None, str | None, str | None]:
+    """`(flash_args, selected core id, ambiguity message, note)` from `(core_id, flash_args)` pairs.
 
     The args are taken whether or not `expect_dpidr` is armed (`jlink_serial`,
     `jlink_speed`, `jlink_device` apply either way). With `--core` the matching slice
-    wins; without it one slice is used as is, and several are acceptable only when they
-    do not disagree on `jlink_serial` / `expect_dpidr` (then the selected id is unknown)."""
+    wins (no match: `{}` plus a `note`); without it one slice is used as is, and several
+    are acceptable only when they do not disagree on `jlink_serial` / `expect_dpidr`
+    (then the selected id is unknown). A `jlink_serial` pinned by exactly one of them is
+    carried onto the chosen args."""
     pool = [(c, a) for c, a in slices if isinstance(a, dict)]
     if core is not None:
-        pool = [(c, a) for c, a in pool if c.lower() == core]
+        matched = [(c, a) for c, a in pool if c.lower() == core]
+        if pool and not matched:
+            return {}, None, None, f"the manifest has no slice for --core {core}; its settings were not used"
+        pool = matched
     if not pool:
-        return {}, None, None
+        return {}, None, None, None
     if len(pool) == 1:
-        return dict(pool[0][1]), pool[0][0].lower(), None
+        return dict(pool[0][1]), pool[0][0].lower(), None, None
     distinct = {
         key: {str(a[key]) for _c, a in pool if a.get(key) is not None}
         for key in ("jlink_serial", "expect_dpidr")
     }
     problem = _slice_ambiguity(distinct)
     if problem:
-        return {}, None, problem
+        return {}, None, problem, None
     armed = [a for _c, a in pool if a.get("expect_dpidr")]
-    return dict((armed or [a for _c, a in pool])[0]), None, None
+    chosen = dict((armed or [a for _c, a in pool])[0])
+    if chosen.get("jlink_serial") is None and distinct["jlink_serial"]:
+        chosen["jlink_serial"] = next(iter(distinct["jlink_serial"]))
+    return chosen, None, None, None
 
 
 def is_he_target(core: str | None, selected_id: str | None) -> bool:
     """The target is the M55-HE: `--core m55_he`, or no `--core` and the manifest's
     selected slice is the HE."""
     return core == "m55_he" or (core is None and selected_id == "m55_he")
+
+
+def itcm_check_allowed(target_he: bool, attach_verdict: str) -> bool:
+    """The `mem32 0x0` / `mem32 0x58000000` session is bench-proven only from an HE attach:
+    send it only when the target is the HE AND session 1's banner placed the attach on
+    the HE access port (exactly `he`), never on the claim alone."""
+    return target_he and attach_verdict == "he"
+
+
+def itcm_skip_reason(core: str | None, selected_id: str | None, verdict: str) -> str:
+    """Why the ITCM corroboration was not run, and the fix, for the info issue."""
+    if core is None and selected_id is None:
+        return ("the target core is ambiguous (several manifest slices, or none, and no --core); "
+                "pass --core m55_he to corroborate an HE attach")
+    if not is_he_target(core, selected_id):
+        return (f"the target is {core or selected_id}, and the ITCM read is bench-proven only "
+                "from an HE attach; pass --core m55_he to corroborate an HE attach")
+    return (f"the connect banner placed the attach on '{verdict}', not the M55-HE access port, "
+            "so the HE-window read was not sent")
+
+
+def claimed_core(core: str | None, selected_id: str | None) -> str | None:
+    """`--core`, else the manifest's selected slice when that is one of the known cores."""
+    return core or (selected_id if selected_id in CORES else None)
 
 
 def core_contradiction(core: str | None, verdict: str) -> str | None:

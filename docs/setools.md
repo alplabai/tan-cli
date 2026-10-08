@@ -424,8 +424,14 @@ tan probe read <addr> [<words>] [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] 
   Core-found AP (`read.attached`) must not contradict `--core`; otherwise the words are not
   returned.
 * `read` refuses ANY overlap with `0x50000000`-`0x5FFFFFFF` on EVERY core
-  (`probe.read-unsafe-region`), before a J-Link is spawned: an M55-HE session must not touch
-  that window, and an attach check cannot prove a read of it is safe on the HP.
+  (`probe.read-unsafe-region`), before a J-Link is spawned: from the HE that window is the HP ITCM
+  alias (reading it leaves the core unhaltable until a PIN reset), and tan does not read it
+  from any attach.
+* `identify` skips the ITCM corroboration (`itcmVerdict: "not-checked"`) unless the target is
+  the HE AND session 1's banner placed the attach on the HE access port; it then emits the
+  info issue `probe.itcm-not-checked` naming the reason and the fix (`--core m55_he`). An AP
+  that contradicts the claimed core (`--core`, else the manifest's selected slice) is
+  `probe.core-mismatch`.
 * The manifest's selected slice supplies `jlink_serial` / `jlink_speed` / `jlink_device`
   whether or not `expect_dpidr` is armed. Several slices that pin different serials need
   `--core`. A part-number `jlink_device` is replaced by `Cortex-M55` and the report says so
@@ -433,5 +439,5 @@ tan probe read <addr> [<words>] [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] 
 * The envelope's `scripts` hold the exact text sent for each probe session, including the
   `exec DisableAutoUpdateFW` first line; `guard.script` is the `ShowEmuList` verification
   that runs before each of them. The full transcript is written to
-  `<build_root>/flash-logs/probe-<verb>-<ts>.log` (a temp directory when there is no build
-  root) and reported as `transcriptPath`. Temp scripts are `tan-probe-*.jlink`.
+  `<build_root>/flash-logs/probe-<verb>-<ts>.log` (`$XDG_CACHE_HOME/tan/probe-logs`, else
+  `~/.cache/tan/probe-logs`, when there is no build root; the oldest are pruned) and reported as `transcriptPath`. Temp scripts are `tan-probe-*.jlink`.

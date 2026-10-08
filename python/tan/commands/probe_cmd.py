@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -129,11 +128,13 @@ def _prepare(
     verb, core, build_root, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes
 ) -> _Run | _Result:
     slices, present, warning = _load_slices(build_root)
-    flash_args, selected_id, ambiguity = pp.select_slice(slices, core)
+    flash_args, selected_id, ambiguity, note = pp.select_slice(slices, core)
     report: dict[str, Any] = {
         "core": core, "buildRoot": build_root, "writes": False, "manifestPresent": present,
     }
     warn = [warning] if warning else []
+    if note:
+        warn.append(Issue("probe.no-manifest", "info", note))
     if ambiguity:
         return _refuse(verb, Issue("probe.failed", "error", ambiguity), report)
     found = resolve_jlink(jlink_path, project_dir=project_dir)
@@ -191,12 +192,20 @@ def _session(run: _Run, label: str, script: str) -> tuple[str, str | None]:
     return text, problem or check_session(text, loadbin=False)
 
 
+def _cache_log_dir() -> str:
+    """One stable directory for transcripts when there is no build root, so nothing
+    accumulates in fresh temp dirs: `$XDG_CACHE_HOME/tan/probe-logs`, else
+    `~/.cache/tan/probe-logs` (`_write_transcript` prunes the oldest)."""
+    root = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(root, "tan", "probe-logs")
+
+
 def _save_log(run: _Run) -> None:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     name = re.sub(r"[^A-Za-z0-9._-]", "_", f"probe-{run.verb}-{stamp}.log")
     base = os.path.join(run.build_root, "flash-logs") if os.path.isdir(run.build_root) else None
     try:
-        directory = base or tempfile.mkdtemp(prefix="tan-probe-")
+        directory = base or _cache_log_dir()
         run.report["transcriptPath"] = fc._write_transcript(
             os.path.join(directory, name), f"# tan probe {run.verb}\n" + "".join(run.log)
         )
@@ -254,7 +263,7 @@ def _identify(run: _Run) -> _Result:
     if state:  # C: nothing else runs against a board that is not the expected one
         issue = _dpidr_issue(state, run.expected, dpidr)
         return _finish(run, ExitCode.RUNTIME_FAILURE, [f"probe identify: {issue.message}"], issue)
-    if pp.is_he_target(run.core, run.selected_id):
+    if pp.itcm_check_allowed(pp.is_he_target(run.core, run.selected_id), verdict):
         text2, problem = _session(run, "coreCheck", pp.core_script(run.pre))
         if problem:
             return _fail(run, f"the core check failed: {problem}")
@@ -264,10 +273,14 @@ def _identify(run: _Run) -> _Result:
         ident["apAddr"] = (evidence.get("ap") or att or {}).get("apAddr")
         ident["cpuid"] = (evidence.get("ap") or att or {}).get("cpuid")
     extra: list[Issue] = []
-    clash = pp.core_contradiction(run.core, verdict)
+    if ident["itcmVerdict"] == "not-checked":
+        extra.append(Issue("probe.itcm-not-checked", "info",
+                           "ITCM corroboration skipped: "
+                           + pp.itcm_skip_reason(run.core, run.selected_id, verdict)))
+    clash = pp.core_contradiction(pp.claimed_core(run.core, run.selected_id), verdict)
     if clash:
         extra.append(_core_issue(clash))
-    if not run.expected:
+    if not run.expected and not any(i.code == "probe.no-manifest" for i in run.issues):
         why = "no system-manifest.yaml" if not run.report["manifestPresent"] else "no expect_dpidr armed"
         extra.append(Issue("probe.no-manifest", "info",
                            f"{why} for the selected core; the DPIDR match was skipped"))
@@ -284,7 +297,7 @@ def _read(run: _Run, addr: int, words: int) -> _Result:
     dpidr, att = _dp_id_value(text), attached_core(text)
     run.report["attached"] = {"dpidr": dpidr, "ap": att}
     state = pp.dpidr_state(run.expected, dpidr)
-    clash = pp.core_contradiction(run.core, ap_verdict(att))
+    clash = pp.core_contradiction(pp.claimed_core(run.core, run.selected_id), ap_verdict(att))
     bad = _dpidr_issue(state, run.expected, dpidr) if state else (_core_issue(clash) if clash else None)
     if bad:  # the words may belong to another board or core: not returned
         return _finish(run, ExitCode.RUNTIME_FAILURE, [f"probe read: {bad.message}"], bad)
