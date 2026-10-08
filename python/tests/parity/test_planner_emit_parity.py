@@ -1446,6 +1446,93 @@ def test_any_other_overlay_failure_still_fails_the_plan(planners, monkeypatch):
             project, board_yaml=board, build_root=Path("build"))
 
 
+def test_an_unrecognised_sku_downgrades_hw_info_to_a_warning(planners, monkeypatch):
+    """tan-cli#1216 / alp-sdk#2778: a SKU outside the production families has
+    no family for `ALP_HW_BUILD_SOM_FAMILY`, so the plan warns
+    (`hw-info-unavailable`) and omits `alp_hw_info_build.h`; the west fragment
+    is unaffected and the plan is still a valid build-plan-v1."""
+    import jsonschema
+
+    _, relocated = planners
+    import tan.planner.som_metadata as som_metadata
+
+    def no_family(sku):
+        raise ValueError(f"unrecognised SoM SKU pattern: {sku}")
+
+    monkeypatch.setattr(som_metadata, "_sku_family", no_family)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    schema = json.loads((SDK / "metadata" / "schemas"
+                         / "build-plan-v1.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(plan)
+
+    carriers = {sl["coreId"] for sl in plan["slices"]
+                if sl["backend"] in ("zephyr", "baremetal")}
+    warned = {w["coreId"] for w in plan["warnings"]
+              if w["code"] == "hw-info-unavailable"}
+    assert carriers and warned == carriers
+    for sl in plan["slices"]:
+        names = {a["path"].rsplit("/", 1)[-1] for a in sl["configArtefacts"]}
+        assert "alp_hw_info_build.h" not in names
+        if sl["coreId"] in carriers:
+            assert "alp-west-libs.yml" in names
+
+
+def test_a_non_sku_value_error_in_hw_info_still_fails_the_plan(planners, monkeypatch):
+    """Only the SKU->family lookup is downgraded. A ValueError from anywhere
+    else in the render (a damaged hw-revisions table, say) must fail the plan,
+    not silently drop the artefact. Patched at the emitter, not at
+    `load_family_table`: alp.conf reads the same table and would fail the plan
+    first, hiding whether hw-info downgrades it."""
+    _, relocated = planners
+    import tan.planner.project_emit.hw_info as hw_info
+
+    def damaged(*args, **kwargs):
+        raise ValueError("hw-revisions.yaml is damaged")
+
+    monkeypatch.setattr(hw_info, "_emit_hw_info_h", damaged)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(ValueError, match="hw-revisions.yaml is damaged"):
+        relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build"))
+
+
+@pytest.mark.parametrize("mode,artefact", [
+    ("hw-info-h", "alp_hw_info_build.h"),
+    ("west-libraries", "alp-west-libs.yml"),
+])
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_hw_info_and_west_libs_match_the_build_plans_own_config_artefact(
+        planners, board, mode, artefact):
+    """tan-cli#1216 / alp-sdk#2778 (ADR-0026 §D): `tan generate --target
+    hw-info-h|west-libraries --core <id>` and the plan's matching
+    `configArtefacts[]` entry are one function, so the bytes cannot diverge."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get(artefact)
+        if want is None:
+            continue  # yocto/off slice
+        got = planner_emit.render(
+            mode, sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target {mode}` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries an {artefact} to compare")
+
+
 @pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
 def test_cmake_args_matches_the_build_plans_own_config_artefact(planners, board):
     """tan-cli#1216 (ADR-0026 §D): `tan generate --target cmake-args --core

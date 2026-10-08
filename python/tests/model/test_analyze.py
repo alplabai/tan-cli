@@ -31,7 +31,7 @@ from tan.model import analyze as analyze_mod
 from tan.model.perf import PerfPoint
 from tan.model.perf_apply import _perf_point_report
 from tan.model.tensorio import OpDesc
-from tests.conftest import needs_nx9101, needs_sdk_npu_op_tables, sdk_root
+from tests.conftest import needs_sdk_npu_op_tables, sdk_root
 
 SDK = sdk_root()
 
@@ -238,12 +238,6 @@ def test_u85_skus_resolve_the_u85_variant(sku):
 @pytest.mark.parametrize("sku", ["E1M-AEN301", "E1M-AEN501", "E1M-AEN701"])
 def test_u55_skus_resolve_the_u55_variant(sku):
     assert resolve_ethos_u_variant(sku, metadata_root=_META) == "u55"
-
-
-@needs_nx9101
-@pytestmark_real_sdk
-def test_nx9101_resolves_the_u65_variant():
-    assert resolve_ethos_u_variant("E1M-NX9101", metadata_root=_META) == "u65"
 
 
 @pytestmark_real_sdk

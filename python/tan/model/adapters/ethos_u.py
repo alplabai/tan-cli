@@ -23,7 +23,7 @@ mere absence of an exception -- see `tan.model.check`'s
 THE MEMORY PROFILE (alp-sdk #1470): this adapter passes `--memory-mode` when
 its caller resolved one, and today every caller does -- it is a SILICON fact,
 published per part in the SoC spec's `npu_toolchain.vela.memory_mode`
-(`Sram_Only` on the Alif Ensemble parts, `Shared_Sram` on the NXP i.MX 93) and
+(`Sram_Only` on the Alif Ensemble parts) and
 carried here as `TargetSpec.vela_memory_mode`. It is never guessed: a caller
 that resolved none gets the flagless invocation, byte for byte.
 
@@ -106,7 +106,7 @@ memory mode:
   * `ethos-u85-256` -> `Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`
     (E1M-AEN401 / E1M-AEN601 / E1M-AEN801, Alif Ensemble E4/E6/E8)
   * `ethos-u65-256` -> `Ethos_U65_Client_Server` / `Dedicated_Sram_384KB`
-    (E1M-NX9101, NXP i.MX 93 -- NOT an Alif part)
+    (a non-Alif part, E1M-NX9101, since removed from alp-sdk)
 
 while every `ethos-u55-*` config (E1M-AEN301/501/701 and the U55 targets of the
 three AEN SKUs above) resolved to the SRAM-backed

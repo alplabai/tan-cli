@@ -5,10 +5,12 @@ buildable, read directly off the alp-sdk metadata tree, without importing
 `tan.planner.paths` binds `REPO = sdk_root()` at import time, so pulling it
 into `init_cmd` before an SDK is even resolved raises `PlannerRootError`).
 
-tan-cli#743. `tan init --template minimal-app --som E1M-NX9101` exits 0 and
-scaffolds a project whose FIRST `tan validate` hard-errors::
+tan-cli#743. `tan init --template minimal-app --som <sku>` for a SoM whose
+default hw_rev is not buildable (it was E1M-NX9101, since removed from
+alp-sdk) exits 0 and scaffolds a project whose FIRST `tan validate`
+hard-errors::
 
-    sdk-compat: SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable
+    sdk-compat: SoM <sku> hw_rev '<rev>' exists but is not buildable
     (status: 'tbd').
 
 `init` never writes an explicit `hw_rev:` into a scaffolded `minimal-app`/
@@ -16,10 +18,8 @@ vendored-template board.yaml, so the value `validate` refuses there is the
 one the SDK loader falls back to -- `hw_rev or
 som_preset.get("default_hw_rev")` (`scripts/alp_orchestrate/loader.py:1241`
 and siblings) -- i.e. the SoM preset's OWN `default_hw_rev:`. `validate` is
-not wrong here: the fact is real and correctly published
-(`metadata/e1m_modules/E1M-NX9101.yaml`'s `status: {preliminary: true,
-partial_hw_config: true}`, and its family's
-`metadata/e1m_modules/imx93/hw-revisions.yaml`'s `r1: {status: tbd}`). The
+not wrong here: the fact is real and correctly published (the family's
+`metadata/e1m_modules/<family>/hw-revisions.yaml` `<rev>: {status: tbd}`). The
 defect is that `init` stays silent about a fact it could have read from the
 exact same preset it already resolved -- so this module reads that one fact
 (the SKU's effective hw_rev + the family's declared status for it) so `init`
@@ -48,8 +48,8 @@ write) for the identical reason: refusing there "made `tan init
 than the original defect".
 
 Deliberately duplicates the tiny SKU -> family-directory map
-`scripts/alp_project_loader._sku_family` also carries (`AEN`/`V2N`/`V2M`/
-`NX9` -> `aen`/`v2n`/`v2n-m1`/`imx93`) and the buildable-status set
+`scripts/alp_project_loader._sku_family` also carries (`AEN`/`V2N`/`V2M`
+-> `aen`/`v2n`/`v2n-m1`; tan still adds `NX9` -> `imx93`, see below) and the buildable-status set
 `scripts/alp_orchestrate/sdk_compat._NOT_BUILDABLE_STATUSES` (`reserved`,
 `tbd`, or a missing `status:` key) rather than importing either: neither
 module is on `sys.path` for a `tan init --template` invocation, which reads
@@ -62,7 +62,11 @@ import re
 from pathlib import Path
 from typing import Optional
 
-#: Mirrors `scripts/alp_project_loader._SKU_FAMILY` / `_sku_family` verbatim.
+#: A SUPERSET of `scripts/alp_project_loader._SKU_FAMILY` / `_sku_family`:
+#: alp-sdk#2782 dropped the `NX9` arm, but tan's `init` still carries NX9 as
+#: its fixture family for the "default hw_rev is not buildable" warning and
+#: for `scaffold._SOM_FAMILIES`' no-vendored-tree refusal, whose tests are
+#: written against it. Retiring both together is a separate change.
 _SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
 _FAMILY_DIR = {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}
 
@@ -80,11 +84,9 @@ class HwRevNotBuildable:
     `has_buildable_alternative` -- tan-cli#1008 review minor -- is whether
     the SAME family table declares at least one OTHER hw_rev whose status
     permits a build: the "or until board.yaml names a buildable `hw_rev:`
-    explicitly" remedy is only real advice when this is true. imx93 today
-    publishes exactly one hw_rev for E1M-NX9101 (`r1`, `status: tbd`), so
-    that clause was unconditionally offered on the one SKU it currently
-    fires for, and following it (adding `hw_rev: r1` -- the only revision
-    the family HAS) reproduces the identical refusal, rc 2, every time."""
+    explicitly" remedy is only real advice when this is true. A family that
+    publishes exactly one hw_rev, and that one not buildable, would make the
+    clause advice that reproduces the identical refusal, rc 2, every time."""
 
     __slots__ = ("sku", "hw_rev", "status", "has_buildable_alternative")
 

@@ -29,3 +29,12 @@ fixture was re-vendored whole from alp-sdk's own copy at `PINNED_SDK_TAG`
 byte diff against alp-sdk's copy is empty. These two fields are the only ones
 touched by this correction; every other value in this fixture, and every
 other oracle fixture, is untouched, still frozen at 97ad481b.
+
+Note (tan-cli#1216): the `multicore_rpmsg-imx93` fixture described above left
+this directory when alp-sdk removed E1M-NX9101 and the rpmsg-imx93 example
+(alp-sdk#2782, #2781). With the board gone the seam-1 case could only pass
+vacuously ("both refuse"), so it is no longer an oracle case. The captured
+bytes survive unchanged as a consumer-only fixture,
+`tests/parity/consumer_fixtures/multicore_rpmsg-imx93.build-plan.json`, for the
+`tan build` ordering/skip cases (two slices, one `command: null`, a matching
+`board-tree-missing` warning) in `python/tests/commands/test_build_command.py`.

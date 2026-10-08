@@ -13,8 +13,9 @@ in `.github/workflows/parity.yml`.
 tan-cli#320 addendum: a live `--emit build-plan` can legitimately REFUSE a
 board the frozen oracle captured as buildable -- alp-sdk#1025 taught the
 loader to refuse an `hw_rev` that exists but is `status: reserved`/
-`status: tbd`/status-less, and `multicore_rpmsg-imx93`'s only `hw_rev`
-(imx93 r1, `status: tbd`) is exactly that case. A live-emit failure used to
+`status: tbd`/status-less (the retired `multicore_rpmsg-imx93` case, whose
+only `hw_rev` was `status: tbd`; the board and its fixture are gone, and no
+oracle case exercises this path today). A live-emit failure used to
 be an unconditional `ComparatorError` -> FAIL, which could never tell "the
 SDK started correctly refusing this board" apart from "the SDK is broken".
 `_tan_reconciled_refusal` closes that gap FOR TAN-CLI'S OWN COPY ONLY: on a

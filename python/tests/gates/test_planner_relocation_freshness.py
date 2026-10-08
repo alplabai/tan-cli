@@ -1320,6 +1320,13 @@ from tests.conftest import sdk_root
 #: plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
 #: goldens (the `v0.17.0-rc1` cut, #2763); #2774's console floor is exercised
 #: by no example plan: the re-capture shows no other changed byte.
+#:
+#: RE-MEASURED again at `6159a7b1a` (tan-cli#1216) -- 103 boards, 721 emits
+#: (0 error-contract), 3,046,444 B (was 104 / 728 / 7 / 2,540,037). Every changed
+#: byte is attributed: +171 pairs of `alp_hw_info_build.h` / `alp-west-libs.yml`
+#: `configArtefacts` entries across 100 `build-plan.json` goldens (#2778), and
+#: the 7 `.error` goldens of `rpmsg-imx93` deleted with the example (#2782).
+#: The plan's `sdkVersion` did not move.
 #: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
 #: supersedes the bot's #1310 proposal for the same range, which could not
 #: apply the hand-ports and would have broken two things -- see below).
