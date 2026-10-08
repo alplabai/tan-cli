@@ -51,7 +51,9 @@ _PROVEN_SKUS = ("E1M-AEN801", "E1M-AEN803")
 _LINK_VALUES = ("auto", "itcm")
 #: `diagnostics.console:` values a Flow C image accepts: the RAM console (the
 #: default; read over SWD) or the board UART (a RAM-run shell, tan-cli#1374).
-_CONSOLE_VALUES = ("auto", "ram", "uart")
+#: `alp` is kconfig's own alias of `uart` (`kconfig._CONSOLE_ALIASES`), so it is
+#: the UART console here too and emits exactly the `uart` bytes (tan-cli#1419).
+_CONSOLE_VALUES = ("auto", "ram", "uart", "alp")
 
 
 class LinkTargetError(OrchestratorError):
@@ -68,7 +70,7 @@ def _console(diagnostics: dict[str, Any] | None) -> str:
 
 def uses_ram_console(diagnostics: dict[str, Any] | None) -> bool:
     """Whether an ITCM image uses the RAM console (`auto` is promoted to it):
-    True for `auto`/`ram`, False for `uart` and anything else."""
+    True for `auto`/`ram`, False for `uart`, its alias `alp`, and anything else."""
     return _console(diagnostics) in ("auto", "ram")
 
 

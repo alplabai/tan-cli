@@ -336,7 +336,7 @@ def test_explicit_ram_console_keeps_the_ram_console_bits(tmp_path, meta) -> None
     assert _artefacts(sl)["alp-link-itcm.conf"] == EXPECTED_CONF
 
 
-@pytest.mark.parametrize("console", ["alp", "linux", "none"])
+@pytest.mark.parametrize("console", ["linux", "none"])
 def test_other_explicit_consoles_are_still_refused(tmp_path, meta, console) -> None:
     from tan.planner.link_target import CONSOLE_CONFLICT_CODE, LinkTargetError
 
@@ -459,3 +459,21 @@ def test_itcm_he_slice_on_a_preset_board_has_the_five_artefacts_in_order(
                           "cmake-args.txt"]
     assert arts["alp-link-itcm.conf"] == EXPECTED_CONF
     assert arts["alp-link-itcm.overlay"] == EXPECTED_OVERLAY
+
+
+def test_alp_console_is_the_uart_console_byte_for_byte(tmp_path, meta) -> None:
+    """tan-cli#1419: `console: alp` is kconfig's alias of `uart`; with
+    `link: itcm` it is accepted and every emitted artefact equals the uart one."""
+    def arts_for(console: str) -> dict[str, str]:
+        sl = _slice(_plan(tmp_path, _project(
+            tmp_path, meta, _HE_ONLY + f"  console: {console}\n")), "m55_he")
+        return dict(_artefacts(sl))
+
+    alp, uart = arts_for("alp"), arts_for("uart")
+    assert alp == uart
+    assert alp["alp-link-itcm.conf"] == EXPECTED_CONF_UART
+    assert "CONFIG_UART_CONSOLE=y" in alp["alp.conf"]
+    assert "CONFIG_RAM_CONSOLE=y" not in alp["alp.conf"]
+    # the RAM-console default is untouched
+    assert arts_for("ram")["alp-link-itcm.conf"] == EXPECTED_CONF
+    assert arts_for("auto")["alp-link-itcm.conf"] == EXPECTED_CONF
