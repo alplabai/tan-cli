@@ -118,6 +118,7 @@ from tan.core.plan_exec import (
     normalize_path,
     resolve_action,
 )
+from tan.core.west_workspace_refusal import WORKSPACE_UNRESOLVED_MSG
 from tan.commands.build.host_python import refusal_message, resolve_build_python
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT, DeferredPlaceholder
 from tan.core.sdk_discovery import (
@@ -1107,6 +1108,16 @@ def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
     return issues
 
 
+def _workspace_unresolved_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
+    """tan-cli#1429: `_cross_drive_issues`' promotion for the refusal in
+    `tan.core.west_workspace_refusal`, matched on its own marker."""
+    return [
+        Issue("build.workspace-unresolved", "error", o.message)
+        for o in outcomes
+        if o.message is not None and WORKSPACE_UNRESOLVED_MSG in o.message
+    ]
+
+
 def _plan_warning_issues(warnings: list[dict]) -> list[Issue]:
     """tan-cli#1000: promote the PLAN's own warnings into `issues[]`.
 
@@ -1484,6 +1495,7 @@ def _build(
     # only `issues[]` must see the specific cause, not just the generic
     # `build.slice-failed` header this promotion sits alongside.
     issues.extend(_cross_drive_issues(outcomes))
+    issues.extend(_workspace_unresolved_issues(outcomes))
     # tan-cli#1000: the PLAN's own warnings, same reasoning again -- these
     # are the only place the planner explains a `command: null` slice, and
     # they reached `data.warnings` alone until now.
