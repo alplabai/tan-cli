@@ -1383,8 +1383,8 @@ PINNED_HASHES: dict[str, str] = {
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
     # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The next planner re-sync must NOT port that
-    # refusal: tan's `link_target.apply_link_target` (called at the end of
+    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
+    # that refusal: tan's `link_target.apply_link_target` (called at the end of
     # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "e31e53dbebbb4c7095a87a19cc5c46b572efd4c043adee04d8003bacaa36723e",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
