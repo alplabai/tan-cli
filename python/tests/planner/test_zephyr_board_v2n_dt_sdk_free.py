@@ -46,6 +46,7 @@ def test_ram_console_node_and_kconfig():
     files = _files()
     dts = _one(files, ".dts")
     assert "ram_console: memory@9f710000 {" in dts
+    assert "\t\treg = <0x9f710000 0x4000>;\n" in dts
     assert 'compatible = "zephyr,memory-region";' in dts
     assert 'zephyr,memory-region = "RAM_CONSOLE";' in dts
     assert "zephyr,ram-console = &ram_console;" in dts
@@ -64,7 +65,13 @@ def test_attn_is_routed_to_icu_tint_slot_31():
 def test_cm33_ns_to_a55_offset_is_carried_from_the_soc_spec():
     dts = _one(_files(), ".dts")
     assert "zephyr,user {" in dts
-    assert "alp,cm33-ns-to-a55-offset = <" in dts
+    assert "\t\talp,cm33-ns-to-a55-offset = <0x50000000>;\n" in dts
+
+
+def test_openamp_window_node_and_reg_are_pinned_in_full():
+    dts = _one(_files(), ".dts")
+    node = dts.split("\t\topenamp_shm: memory@9f700000 {\n", 1)[1]
+    assert "\t\t\treg = <0x9f700000 0x900000>;\n" in node.split("};", 1)[0]
 
 
 def test_twister_supported_lists_only_what_the_dts_enables():
