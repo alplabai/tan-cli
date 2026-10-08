@@ -399,17 +399,17 @@ run (and its `--dry-run`) carries the info issue
 `--watch <addr>[:<words>][@<period-ms>]` (repeatable, `--ram` only) samples target
 memory in the same J-Link session that starts the image, for the `--wait` window,
 for example `tan flash --ram --core m55_he --confirm --wait 5 --watch 0x42002000@50`.
-Reads are `mem32` only, spaced by J-Link `Sleep <ms>`; `words` defaults to 1 (max 64)
+Reads are `mem32` only, spaced by J-Link `Sleep <ms>` (read-only on memory, but a register read -- FIFO, clear-on-read status, clock-gated block -- may have side effects); `words` defaults to 1 (max 64)
 and the period to 100 ms (10..60000). The samples land in `data.watch[]` as
 `{address, words, index, elapsedMs, values}`. J-Link prints no timestamps, so
 `elapsedMs` is the scheduled offset after `go`, not a measurement (each read adds SWD
 latency). A watched run does not sleep again before `--ram-console`. Refused before
 any spawn, `--dry-run` included: an unaligned address, zero or more than 64 words, a
 period outside 10..60000 ms, more than 8 watches or 2000 samples
-(`flash.ram-watch-invalid`), and the HP core's ITCM window `0x50000000..0x57FFFFFF`,
+(`flash.ram-watch-invalid`), and the HP TCM windows `0x50000000..0x57FFFFFF` (ITCM + DTCM),
 whose read from an HE attach leaves the core unhaltable until a PIN reset
 (`flash.ram-watch-unsafe-address`). Samples missing from the transcript come back
-with `values: null` and a `flash.ram-watch-incomplete` warning.
+with `values: null` and a `flash.ram-watch-incomplete` warning (a distinct message when NO sample returned data). `ram.watch.sessionMs` is the host wall-clock length of the load session, next to the scheduled `durationMs`, so drift is visible; the load session's timeout grows with `--wait` and the sample count.
 
 For Alif Ensemble MRAM flashing with SETOOLS, see
 [`docs/setools.md`](docs/setools.md).

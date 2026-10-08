@@ -393,7 +393,15 @@ def _run_ram_entry(
 
     # ── load + go ──
     plan = FlashPlan(argv=argv, ok_message="", jlink_script=load)
-    outcome = fc._execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe)
+    started = time.monotonic()
+    outcome = fc._execute(
+        plan, ctx.capture, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
+        timeout_s=(
+            max(fc._FLASH_TIMEOUT_S, ram_watch.session_timeout_s(watches, watch_ms))
+            if watches else None
+        ),
+    )
+    session_ms = int(round((time.monotonic() - started) * 1000))
     transcript = f"{outcome.stdout}\n{outcome.stderr}"
     _save_transcript(ctx, entry_id, report, load, outcome)
     if guard is not None and guard.tripped:
@@ -442,8 +450,15 @@ def _run_ram_entry(
     if watches:
         samples = ram_watch.parse_samples(transcript, watches, watch_ms)
         report["watch"] = samples
+        report["ram"]["watch"]["sessionMs"] = session_ms
         missing = sum(1 for s in samples if s["values"] is None)
-        if missing:
+        if missing == len(samples):
+            watch_note = (
+                f"{entry_id}: --watch returned NO data: none of the {len(samples)} samples has a "
+                "mem32 dump in the J-Link transcript (all values: null); the watched addresses "
+                "were not read -- see the transcript"
+            )
+        elif missing:
             watch_note = (
                 f"{entry_id}: {missing} of {len(samples)} --watch samples have no mem32 dump in "
                 "the J-Link transcript (values: null); the rest are in data.watch[]"

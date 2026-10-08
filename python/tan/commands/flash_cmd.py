@@ -1588,6 +1588,7 @@ def _execute(
     probe_guard: "_ProbeGuard | None" = None,
     jlink_exe: str | None = None,
     script_prefix: str | None = None,
+    timeout_s: float | None = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1663,7 +1664,8 @@ def _execute(
         if script_prefix:
             extra["script_prefix"] = script_prefix
         return _spawn_jlink(
-            argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S, None, workspace, exe, **extra,
+            argv, plan.jlink_script, capture, timeout_s or _FLASH_TIMEOUT_S, None, workspace, exe,
+            **extra,
         )
     # `spawned` is what the child's own `argv` will be -- the oracle's argv,
     # venv rewrite included. `resolved` is the same list with each PROGRAM
@@ -4885,13 +4887,14 @@ def flash(
         "--watch",
         metavar="ADDR[:WORDS][@PERIOD-MS]",
         help="With --ram (tan-cli#1436; repeatable): sample target memory in the SAME "
-        "J-Link session that starts the image, with read-only mem32 reads every PERIOD-MS "
+        "J-Link session that starts the image, with read-only mem32 reads (read-only on memory; a register read -- FIFO, clear-on-read, "
+        "clock-gated block -- may have side effects) every PERIOD-MS "
         "(default 100, 10..60000) of WORDS 32-bit words (default 1, max 64) until --wait "
         "expires. The samples are data.watch[] (address, words, index, elapsedMs, values); "
         "elapsedMs is the SCHEDULED offset after `go`, not a measurement. Refused before any "
         "spawn: an unaligned address, a zero or excessive word count, an out-of-range "
-        "period, and the HP core's ITCM window 0x50000000..0x57FFFFFF, whose read from an HE "
-        "attach leaves the core unhaltable (flash.ram-watch-invalid / "
+        "period, and the HP TCM windows 0x50000000..0x57FFFFFF (ITCM + DTCM), whose read from an "
+        "HE attach leaves the core unhaltable (flash.ram-watch-invalid / "
         "flash.ram-watch-unsafe-address).",
     ),
     assume_he: bool = typer.Option(
@@ -4915,7 +4918,8 @@ def flash(
         min=0.0,
         max=3600.0,
         help="With --ram --ram-console: how long the image runs before the console is read "
-        "(default 1.5). With --watch: how long the watch samples (tan-cli#1436).",
+        "(default 1.5). With --watch: how long the watch samples (tan-cli#1436); the "
+        "load session's timeout grows to cover it.",
     ),
     jlink: str = typer.Option(
         None,

@@ -2153,7 +2153,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch` read overlaps the HP core's ITCM global window 0x50000000..0x57FFFFFF. A RAM-run attaches to the M55 HE only, and reading the HP window from an HE attach is the bench's known-bad read (round 8, 2026-10-07): the read itself succeeds but the core then cannot be halted until a PIN reset. Refused before any J-Link spawn, under --dry-run too. Deliberately DISTINCT from flash.ram-watch-invalid: this one is not answered by fixing a typo, the address must not be read from this attach at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch` read overlaps the HP TCM windows (ITCM + DTCM globals) 0x50000000..0x57FFFFFF. A RAM-run attaches to the M55 HE only, and reading the HP window from an HE attach is the bench's known-bad read (round 8, 2026-10-07): the read itself succeeds but the core then cannot be halted until a PIN reset. Refused before any J-Link spawn, under --dry-run too. Deliberately DISTINCT from flash.ram-watch-invalid: this one is not answered by fixing a typo, the address must not be read from this attach at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.ram-watch-incomplete",
@@ -2161,7 +2161,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "Added closing tan-cli#1436. EMISSION CONDITION: `tan flash --ram --watch` ran, but the J-Link transcript carries no mem32 dump for some scheduled samples, so those data.watch[] entries have `values: null`. A WARNING: the image is running and the remaining samples are valid. Sample times are the scheduled Sleep offsets, not measurements. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: `tan flash --ram --watch` ran, but the J-Link transcript carries no mem32 dump for some scheduled samples, so those data.watch[] entries have `values: null`. A WARNING: the image is running and the remaining samples are valid; when NO sample returned data the message says so. Note --watch reads are read-only on memory, but a register read (FIFO, clear-on-read, clock-gated block) may have side effects. Sample times are the scheduled Sleep offsets, not measurements. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.ram-failed",

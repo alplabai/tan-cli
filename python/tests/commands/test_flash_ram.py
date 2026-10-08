@@ -1090,7 +1090,7 @@ def test_unsafe_or_invalid_watches_are_refused_before_any_spawn(tmp_path, monkey
     assert jl.scripts == []
 
 
-def test_the_he_window_and_neighbours_are_not_refused(tmp_path, monkeypatch):
+def test_the_he_window_and_neighbours_are_not_refused():
     from tan.core import ram_watch
 
     for ok in ("0x58000000", "0x4FFFFFFC", "0x0:4", "0x42002000:64@10"):
@@ -1103,3 +1103,61 @@ def test_watch_refusals_hold_under_dry_run(tmp_path, monkeypatch):
     rc, _d, issues, _l, _s = _run(tmp_path, dry_run=True, ram_watch=("0x50000000",))
     assert rc != 0 and "flash.ram-watch-unsafe-address" in _codes(issues)
     assert jl.scripts == []
+
+
+def test_a_missing_mid_sequence_dump_is_null_at_its_own_index_only():
+    from tan.core import ram_watch as rw
+
+    specs = rw.parse_watches(["0x42002000@100"])
+    text = (
+        "J-Link>mem32 0x42002000, 0x1\n42002000 = 00000001\n"
+        "J-Link>Sleep 100\n"
+        "J-Link>mem32 0x42002000, 0x1\n"
+        "J-Link>Sleep 100\n"
+        "J-Link>mem32 0x42002000, 0x1\n42002000 = 00000003\n"
+    )
+    out = rw.parse_samples(text, specs, 200)
+    assert [o["values"] for o in out] == [["0x00000001"], None, ["0x00000003"]]
+
+
+def test_the_load_timeout_scales_with_a_long_watch(tmp_path, monkeypatch):
+    from tan.core import ram_watch as rw
+
+    specs = rw.parse_watches(["0x42002000@100"])
+    assert rw.session_timeout_s(rw.parse_watches(["0x42002000@2000"]), 3_000_000) > 3000 + 1000
+    _setup(tmp_path, monkeypatch)
+    seen = []
+    jl = FakeJlink(monkeypatch)
+    orig = jl._spawn
+
+    def spy(argv, script, capture, timeout, *a, **kw):
+        seen.append((jl.kind(script), timeout))
+        return orig(argv, script, capture, timeout, *a, **kw)
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", spy)
+    _run(tmp_path, ram_wait=1000.0, ram_watch=("0x42002000@1000",))
+    load_timeout = next(t for k, t in seen if k == "load")
+    assert load_timeout > 1000 + 1000 * 2.0
+
+
+def test_no_data_at_all_has_its_own_message_and_session_ms(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_wait=0.0, ram_watch=("0x42002000",))
+    msg = next(i.message for i in issues if i.code == "flash.ram-watch-incomplete")
+    assert "NO data" in msg
+    assert isinstance(data["entries"][0]["ram"]["watch"]["sessionMs"], int)
+
+
+def test_watch_with_ram_console_skips_the_pre_sleep_but_still_reads(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch, load_out=CLEAN_LOAD + WATCH_DUMP)
+    slept = []
+    monkeypatch.setattr(flash_ram.time, "sleep", lambda s: slept.append(s))
+    rc, data, issues, _l, _s = _run(
+        tmp_path, ram_console=True, ram_wait=0.1, ram_watch=("0x42002000@100",)
+    )
+    assert rc == 0, (data, issues)
+    assert slept == []
+    assert [jl.kind(s) for s in jl.scripts] == ["check", "load", "read"]
+    assert data["entries"][0]["ramConsole"]["text"]
