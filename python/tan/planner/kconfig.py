@@ -593,9 +593,11 @@ def _emit_console(diagnostics: dict[str, Any], slice_: Slice,
         and not slice_.hw_console and console == "none"
     if sim:
         console = "ram"
-    # `diagnostics.link: itcm` (tan-cli#1350): a Flow C RAM-run's only
-    # observable is the RAM console, so an AUTO console is promoted to it
-    # (an explicit non-RAM console is refused by the loader).
+    # `diagnostics.link: itcm` (tan-cli#1350): a Flow C RAM-run's default
+    # observable is the RAM console, so an AUTO console is promoted to it.  An
+    # explicit `console: uart` is NOT promoted: it keeps the board UART console
+    # and `link_target.itcm_conf` emits no RAM-console bits for it
+    # (tan-cli#1374).  alp/linux/none are refused by the loader.
     if auto and link_applies_to(diagnostics, slice_):
         console = "ram"
     ram_size = _RAM_CONSOLE_MIN_SIZE
