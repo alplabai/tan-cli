@@ -1,7 +1,7 @@
 THE FROZEN alp-sdk PLANNER ORACLE (tan-cli#509)
 ===============================================
 
-alp-sdk ref   c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+alp-sdk ref   0dee99fb519b511e0a7fe4da63b333b9246040b4
 boards        103
 emits         721  (0 of them error-contract, captured as .error)
 bytes         3,046,444

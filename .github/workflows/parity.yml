@@ -974,7 +974,11 @@ env:
   # together. The range holds no change to `scripts/**` or `metadata/**` (the
   # mirror and hand-port hashes were re-computed and are unchanged), so nothing
   # is re-vendored or re-captured beyond the oracle's `alp-sdk ref` line.
-  PINNED_SDK_TAG: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+  # `c4eb27645` -> `0dee99fb5` (alp-sdk `dev`, #2791 `cameras:` + #2784): the
+  # same lockstep sites move together. `cameras.py`/`camera_owner.py` are new
+  # mirror modules; the planner oracle was re-captured and is byte-identical
+  # (no shipped example sets `cameras:`); scaffold parity is 10/10 unchanged.
+  PINNED_SDK_TAG: 0dee99fb519b511e0a7fe4da63b333b9246040b4
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1301,7 +1305,7 @@ env:
   # `configArtefacts` entries across 100 `build-plan.json` goldens (#2778);
   # (b) the 7 `.error` goldens of `rpmsg-imx93` deleted with the example
   # (E1M-NX9101 removal, #2781/#2782); the plan's `sdkVersion` is unchanged.
-  PINNED_PLANNER_ORACLE_SDK_REF: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+  PINNED_PLANNER_ORACLE_SDK_REF: 0dee99fb519b511e0a7fe4da63b333b9246040b4
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

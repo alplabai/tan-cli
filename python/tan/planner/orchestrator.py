@@ -26,6 +26,7 @@ from .link_target import (
     LinkTargetError,
     applies_to as link_applies_to,
 )
+from . import cameras as _cameras
 from .models import BoardProject, OrchestratorError, Slice
 from .paths import REPO
 from .secure import (emit_sysbuild_conf, emit_tfm_sysbuild_conf,
@@ -367,6 +368,9 @@ def _slice_command(
     matter where the emitting process happens to be invoked from
     (issue #596).
     """
+    # `cameras:` unbuildable for this core (none/ambiguous owner, missing
+    # shield or overlay): block the command, whatever the OS.
+    _cameras.check(project, slice_)
     if slice_.os == "zephyr":
         if not slice_.app or not slice_.board:
             return None
@@ -538,6 +542,12 @@ def _slice_command(
                 "-DEXTRA_DTC_OVERLAY_FILE="
                 f"{_tokenize(itcm_overlay_path, base_dir, REPO)}")
         defines.append(f"-D{extra_var}={';'.join(conf_files)}")
+        # `cameras:` -> ONE -DSHIELD (carrier + module shields), shared with
+        # the cmake-args listing via cameras.zephyr_shield_define.
+        # Sysbuild: `-D<image>_SHIELD` so MCUboot does not get the shields.
+        shield = _cameras.shield_define_for_build(project, slice_, base_dir)
+        if shield:
+            defines.append(f"-D{shield}")
         cmd += ["--", *defines]
         return cmd
     if slice_.os == "yocto":
