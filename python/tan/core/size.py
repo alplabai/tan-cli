@@ -409,6 +409,8 @@ def slot0_bytes_for_core(
     return None
 
 
+# Only SRAM0 (SRAM0_BASE) is excluded from the RAM budget. Limitation: SRAM1
+# (0x08000000) placements are still charged against the DTCM budget.
 def resolve_budget(
     core_id: str,
     mram_mb: float | None,
@@ -464,8 +466,6 @@ def resolve_budget(
                     notes.append("ram=core tcm_kb (ITCM+DTCM)")
                 break
 
-    # Only SRAM0 (SRAM0_BASE) is excluded from the RAM budget. Limitation:
-    # SRAM1 (0x08000000) placements are still charged against the DTCM budget.
     off_budget: tuple[tuple[int, int], ...] = ()
     if ram_total is not None:
         for name, kib in sram_banks_kb:
