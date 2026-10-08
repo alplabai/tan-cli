@@ -143,7 +143,7 @@ def un_edit_doc_link_ref(text: str) -> str:
     pinned `v0.15.0-rc1`, the ref it was actually captured from, and this
     function recovered the emit's own bytes by undoing that pin. Not called
     from `DELIBERATE_EDITS` any more -- the pin has since moved on (the
-    vendored tree pins v0.16.0 at the time of writing; see MANIFEST.md's
+    vendored tree pins v0.17.0-rc1 at the time of writing; see MANIFEST.md's
     "Current vendor point"). Kept only as the record of the transform and
     exercised by `self_check()`'s literal `v0.15.0-rc1`/`v0.15.0` fixture,
     which tests the transform's own mechanics, not the current vendor pin."""
@@ -169,7 +169,7 @@ _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EDITED = (
 )
 _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED = (
     "turns mbedtls off (see\n"
-    "[`native_sim.conf`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/"
+    "[`native_sim.conf`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/"
     "examples/connectivity/mqtt-telemetry/native_sim.conf)) so the\n"
 )
 
@@ -409,7 +409,7 @@ def un_edit_edge_ai_v2n101_readme_deepx_note(text: str) -> str:
 _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED = (
     "* **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM\n"
     "  reads back blank -- the module was never run through alp-sdk's\n"
-    "  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/scripts/program_eeprom.py)\n"
+    "  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/scripts/program_eeprom.py)\n"
     "  at production test -- not part of this scaffolded project; the path\n"
     "  lives only in an alp-sdk checkout, though the link above works\n"
     "  without one. On a factory-fresh board this is expected; on a\n"
@@ -445,7 +445,7 @@ def un_edit_diagnostics_readme_eeprom_script(text: str) -> str:
 #: share this one `un_edit`.
 _SENSOR_README_I2C_SCANNER_BULLET_EDITED = (
     "  slave).  Run alp-sdk's\n"
-    "  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)\n"
+    "  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner)\n"
     "  to confirm what ACKs -- not part of this scaffolded project.\n"
 )
 _SENSOR_README_I2C_SCANNER_BULLET_EMITTED = (
@@ -963,7 +963,7 @@ def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
 #: (a markdown file, so turned into real links rather than named in prose):
 #: both are real alp-sdk directories
 #: (`examples/peripheral-io/gpio-button-led`,
-#: `examples/peripheral-io/i2c-scanner`), pinned at `v0.16.0` per the current
+#: `examples/peripheral-io/i2c-scanner`), pinned at `v0.17.0-rc1` per the current
 #: vendor point's `- Ref:`, same as every other cross-repo link this tree
 #: carries. One substitution (both referents sit in the same sentence, turned
 #: into links together), byte-identical between the two SKUs (the per-SKU
@@ -976,11 +976,11 @@ _MINIMAL_README_EXAMPLE_POINTERS_EMITTED = (
 _MINIMAL_README_EXAMPLE_POINTERS_EDITED = (
     "Pin down which one BEFORE moving on to alp-sdk's\n"
     "[`examples/peripheral-io/gpio-button-led`]"
-    "(https://github.com/alplabai/alp-sdk/tree/v0.16.0/"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/"
     "examples/peripheral-io/gpio-button-led)\n"
     "or\n"
     "[`examples/peripheral-io/i2c-scanner`]"
-    "(https://github.com/alplabai/alp-sdk/tree/v0.16.0/"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/"
     "examples/peripheral-io/i2c-scanner)\n"
     "-- neither is part of this scaffolded project.\n"
 )

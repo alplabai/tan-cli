@@ -119,6 +119,24 @@ def test_measured_slice_reports_a_full_row(tmp_path):
     assert doc["issues"] == []
 
 
+def test_nested_manifest_without_build_dir_measures_under_build(tmp_path):
+    # tan-cli#1405 review: `--build-root br` with the manifest at br/build/ --
+    # the slice's `<core>-<os>` fallback dir is br/build/m55_hp-zephyr, not
+    # br/m55_hp-zephyr.
+    fake_sdk(tmp_path / "sdk", "E1M-TEST", SOC_5M5)
+    write(
+        tmp_path / "br" / "build" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n",
+    )
+    write(tmp_path / "br" / "build" / "m55_hp-zephyr" / "rom.json", '{"symbols":{"size":4096}}')
+    write(tmp_path / "br" / "build" / "m55_hp-zephyr" / "ram.json", '{"symbols":{"size":2048}}')
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    row = envelope(result)["data"]["slices"][0]
+    assert row["status"] == "ok"
+    assert row["flash"]["used"] == 4096
+
+
 #: `soc-spec-v1.schema.json`, narrowed to the one field the whole
 #: #957/#962/#964/#965/#969 crash family is about -- not a byte-for-byte
 #: mirror of the real schema, so this file's coverage does not depend on it

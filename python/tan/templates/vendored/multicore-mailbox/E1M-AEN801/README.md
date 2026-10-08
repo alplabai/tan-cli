@@ -95,9 +95,9 @@ HE -> RTSS-HE slot) and the roundtrip completes:
 
 ## Reference
 
-- [`<alp/mproc.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/mproc.h) -- mailbox + shmem
+- [`<alp/mproc.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/mproc.h) -- mailbox + shmem
   + hwsem API.
-- [`docs/v1.0-readiness.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/v1.0-readiness.md) §4 --
+- [`docs/v1.0-readiness.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/v1.0-readiness.md) §4 --
   this example is one of the v1.0 reference-app flagships; both the
   HP host and the HE peer now build from this one project, with
   HiL verification of the round-trip still ahead.

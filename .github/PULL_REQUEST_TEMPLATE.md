@@ -103,6 +103,9 @@ applicable".
       `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` without a measured diff:
       moving a pin re-freezes every OTHER un-ported source in the same range.
       Porting one source ahead of the pin is fine — record it with a `#:` note.
+- [ ] Touches `python/tan/planner/**` or `test_planner_relocation_freshness.py` →
+      no planner re-sync PR is open, or this PR waits for it and rebases after it
+      lands. See `docs/planner-resync.md`.
 - [ ] New issue code → registered, no duplicates, frozen-set gate green.
 - [ ] Host paths / conflict markers → `test_no_leaked_host_paths.py`,
       `test_no_conflict_markers.py`.

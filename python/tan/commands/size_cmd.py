@@ -53,6 +53,7 @@ from typing import Any
 import typer
 
 from tan.core.shapes import is_file as _is_file
+from tan.core.system_manifest import effective_build_root
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -776,6 +777,7 @@ def _run(
         None if metadata_sdk is None else os.path.join(str(metadata_sdk), "metadata")
     )
 
+    build_root = effective_build_root(build_root)
     try:
         _text, manifest = load_manifest(build_root)
     except ManifestUnavailable as err:

@@ -23,7 +23,8 @@ from pathlib import Path
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, resolve_sdk_tiered
 from tan.core.shapes import SDK_MARKER
 from tan.core.system_manifest import (
-    MANIFEST_FILE,
+    find_manifest,
+    manifest_candidates,
     SystemManifest,
     SystemManifestError,
     parse_system_manifest,
@@ -308,7 +309,7 @@ def load_manifest(build_root: str) -> tuple[str, SystemManifest]:
     Every failure is one of the two exceptions above, so neither command can
     ever let an OSError, a decode error or a YAML error escape as a traceback.
     """
-    path = os.path.join(build_root, MANIFEST_FILE)
+    path = find_manifest(build_root)
     try:
         # `newline=""`: no universal-newline translation, matching Rust's
         # `read_to_string`. Explicit encoding, never the locale default -- a
@@ -317,6 +318,9 @@ def load_manifest(build_root: str) -> tuple[str, SystemManifest]:
         with open(path, encoding="utf-8", newline="") as handle:
             text = handle.read()
     except (OSError, UnicodeDecodeError, ValueError) as err:
+        if isinstance(err, FileNotFoundError):
+            # Neither spelling exists: name both paths tried (tan-cli#1405).
+            path = " or ".join(manifest_candidates(build_root))
         raise ManifestUnavailable(path, str(err)) from err
     try:
         return text, parse_system_manifest(text)
