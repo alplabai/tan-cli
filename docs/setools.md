@@ -390,3 +390,28 @@ A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
 (`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever
 tan cannot read SoC metadata: the `--ram` aperture refusal and the `tan debug-config`
 metadata notes (`tan size` keeps its own `size.som-schema-version-skipped`).
+
+## `tan probe`: read-only J-Link identity and memory read (tan-cli#1406)
+
+Two read-only questions that used to need raw `JLinkExe`. Neither verb halts, writes,
+erases, resets or runs anything: every generated Commander script is `connect` plus
+`mem32` reads and `exit` (a test scans for `w1`/`w2`/`w4`, `erase`, `loadbin`, `setpc`,
+`go`, `reset` and `halt`). Probe selection, the trusted J-Link binary and the
+`ShowEmuList` verification before each spawn are the ones `tan flash` uses.
+
+```sh
+tan probe identify [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH] [--build-root DIR]
+tan probe read <addr> [<words>] [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH]
+```
+
+* `identify` runs the DPIDR preflight script, then the `--ram` attach check, and reports
+  `identity.{dpidr, expectedDpidr, dpidrMatch, apAddr, cpuid, core, itcmVerdict, isolation}`.
+  With a built project (`build/system-manifest.yaml`) it compares the SW-DP ID with the
+  slice's `expect_dpidr`; a difference is `probe.dpidr-mismatch` (exit 1). With no manifest
+  it only reports.
+* `read` returns `read.data` as hex words. `addr` is plain hex (`0x...`) or decimal, 4-byte
+  aligned; `words` defaults to 4 and is at most 256 (`probe.read-too-large`). Anything else
+  is `probe.bad-argument`.
+* `read` refuses `0x50000000`-`0x5FFFFFFF` (`probe.read-unsafe-region`) when `--core m55_he`
+  is selected, when the attached core's access port is the HE's, or when the attach cannot be
+  confirmed to be the M55-HP: an M55-HE session must not touch that window.
