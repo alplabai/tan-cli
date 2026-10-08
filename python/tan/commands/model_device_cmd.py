@@ -40,7 +40,6 @@ from tan.commands.model_host_cmd import (
     run_empty_data,
 )
 from tan.core.model_device import (
-    LATENCY_SCOPE,
     DeviceCaptureError,
     parse_console,
     run_result_from_capture,
@@ -125,10 +124,12 @@ def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
         "model": label or diag.get("model"),
         "backend": result.backend,
         "tier": "device",
-        # The app's own LATENCY-RESULT ms_per_inference when printed, else the median
-        # over active windows of (window span / inferences completed).
+        # The app's own LATENCY-RESULT ms_per_inference when printed (scope
+        # "device-latency-result"), else the median over active windows of
+        # (window span / inferences completed); the latter always stays in
+        # diagnostics.windowLatencyMs.
         "latencyMs": result.latency_ms,
-        "latencyScope": LATENCY_SCOPE,
+        "latencyScope": diag["latencyScope"],
         "outputArgmax": None,
         "peakSramKib": result.peak_sram_kib,
         # Always null on the device tier: energy is reported in `energy`, with

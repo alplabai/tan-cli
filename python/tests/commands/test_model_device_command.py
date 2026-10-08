@@ -283,3 +283,13 @@ def test_k_cycle_get_32_latency_capture_uses_the_configured_clock_and_surfaces_w
     assert any(line.startswith("WARN: DWT CYCCNT detail dropped") for line in diag["warnLines"])
     degraded = [i for i in doc["issues"] if i["code"] == "model.device-capture-degraded"]
     assert degraded and degraded[0]["severity"] == "warning"
+
+
+def test_run_device_scope_is_distinct_when_latency_result_used(tmp_path):
+    lr = 'LATENCY-RESULT {"cycles_per_inference":50000,"ms_per_inference":0.05,"inferences":10}\n'
+    p = proj(tmp_path, **{"cap.txt": capture(extra=lr)})
+    code, doc = invoke("run", "--device", "--capture", "cap.txt", "--project", str(p))
+    assert code == 0, doc
+    r = doc["data"]["result"]
+    assert r["latencyMs"] == 0.05 and r["latencyScope"] == "device-latency-result"
+    assert r["diagnostics"]["windowLatencyMs"] == 100.0

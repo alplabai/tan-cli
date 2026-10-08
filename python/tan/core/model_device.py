@@ -57,6 +57,12 @@ _KERNEL_CLOCK = "k-cycle-get-32"
 #: What `latencyMs` is, carried in every device row.
 LATENCY_SCOPE = "window-span-per-inference"
 
+#: `latencyMs` when the app's own LATENCY-RESULT `ms_per_inference` is used instead.
+#: That value is the app's, computed from the nominal `cycles_per_s`; it does NOT
+#: go through tan's measured-clock reconciliation, and may time a different set of
+#: inferences than the ENERGY-W active windows.
+LATENCY_SCOPE_DEVICE_RESULT = "device-latency-result"
+
 _U32 = 1 << 32
 _WERR_RE = re.compile(r"^ENERGY-WERR (\d+) (active|idle) timed_out=(\d)")
 _WARN_WRAP_RE = re.compile(r"^ENERGY-WARN (active|idle) window (\d+) ms exceeds the cycle-counter wrap")
@@ -379,8 +385,13 @@ def run_result_from_capture(parsed: ParsedCapture) -> tuple[RunResult, EnergyMea
             note = f"energy not derived: {err}"
     diagnostics = capture_diagnostics(parsed, energy)
     diagnostics["energyNote"] = note
+    diagnostics["windowLatencyMs"] = latency_ms
+    diagnostics["latencyScope"] = LATENCY_SCOPE
     if parsed.latency_result is not None and "ms_per_inference" in parsed.latency_result:
+        # Device-reported: nominal cycles_per_s, no measured-clock check (see
+        # LATENCY_SCOPE_DEVICE_RESULT); the window-derived value stays in diagnostics.
         latency_ms = _number(parsed.latency_result["ms_per_inference"], "LATENCY-RESULT ms_per_inference")
+        diagnostics["latencyScope"] = LATENCY_SCOPE_DEVICE_RESULT
     peak_sram_kib = None
     if "sram_peak_bytes" in parsed.cfg:
         peak_sram_kib = _number(parsed.cfg["sram_peak_bytes"], "ENERGY-CFG sram_peak_bytes",

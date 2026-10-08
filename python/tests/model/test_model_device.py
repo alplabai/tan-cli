@@ -414,6 +414,18 @@ def test_cfg_model_and_sram_peak_populate_the_result_and_device_latency_wins():
     assert diag["model"] == "tiny_int8_fixture"
     assert result.peak_sram_kib == pytest.approx(2148 / 1024)
     assert result.latency_ms == 0.037194
+    # Distinct scope; the window-derived value stays in diagnostics.
+    assert diag["latencyScope"] == "device-latency-result"
+    assert diag["windowLatencyMs"] != result.latency_ms and diag["windowLatencyMs"] > 0
+
+
+def test_window_latency_scope_without_latency_result():
+    from tan.core.model_device import parse_console, run_result_from_capture
+
+    capture = "\n".join(l for l in _REAL_LATENCY_CAPTURE.splitlines() if not l.startswith("LATENCY-RESULT"))
+    result, _, diag = run_result_from_capture(parse_console(capture))
+    assert diag["latencyScope"] == "window-span-per-inference"
+    assert diag["windowLatencyMs"] == result.latency_ms
 
 
 def test_latency_result_must_carry_a_positive_ms_per_inference():
