@@ -354,3 +354,31 @@ def test_the_other_proven_sku_is_accepted(tmp_path, meta) -> None:
     body = _HE_ONLY.replace("E1M-AEN801", "E1M-AEN803")
     sl = _slice(_plan(tmp_path, _project(tmp_path, meta, body)), "m55_he")
     assert "alp-link-itcm.conf" in _artefacts(sl)
+
+
+_HE_EVK = """
+som:
+  sku: E1M-AEN801
+preset: e1m-evk
+cores:
+  m55_he:
+    os: zephyr
+    app: ./he
+diagnostics:
+  link: itcm
+"""
+
+
+def test_itcm_he_slice_on_a_preset_board_has_the_five_artefacts_in_order(
+        tmp_path, meta) -> None:
+    """tan-cli#1398: a real `preset: e1m-evk` board has a header under
+    include/alp/boards/, so `alp.overlay` joins the itcm halves. The order is
+    the plan's contract: alp.conf, the itcm conf + overlay, alp.overlay, then
+    the additive cmake-args.txt."""
+    sl = _slice(_plan(tmp_path, _project(tmp_path, meta, _HE_EVK)), "m55_he")
+    arts = _artefacts(sl)
+    assert list(arts) == ["alp.conf", "alp-link-itcm.conf",
+                          "alp-link-itcm.overlay", "alp.overlay",
+                          "cmake-args.txt"]
+    assert arts["alp-link-itcm.conf"] == EXPECTED_CONF
+    assert arts["alp-link-itcm.overlay"] == EXPECTED_OVERLAY

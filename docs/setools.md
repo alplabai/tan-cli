@@ -390,3 +390,54 @@ A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
 (`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever
 tan cannot read SoC metadata: the `--ram` aperture refusal and the `tan debug-config`
 metadata notes (`tan size` keeps its own `size.som-schema-version-skipped`).
+
+## `tan probe`: read-only J-Link identity and memory read (tan-cli#1406)
+
+Two read-only questions that used to need raw `JLinkExe`. Neither verb halts, writes,
+erases, resets or runs anything: every generated Commander script is `connect` plus
+`mem32` reads and `exit` (a test scans for `w1`/`w2`/`w4`, `erase`, `loadbin`, `setpc`,
+`go`, `reset` and `halt`). Probe selection, the trusted J-Link binary and the
+`ShowEmuList` verification before each spawn are the ones `tan flash` uses, so a
+probe-selection refusal reuses `flash.probe-ambiguous` / `-not-found` /
+`-selector-conflict` / `-verify-failed` verbatim.
+
+```sh
+tan probe identify [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH] [--build-root DIR]
+tan probe read <addr> [<words>] [--core m55_he|m55_hp] [--probe-usb-path 3-4.2] [--jlink PATH]
+```
+
+* `identify` runs the DPIDR preflight script first and reports `identity.{dpidr,
+  expectedDpidr, dpidrMatch, apAddr, cpuid, core, itcmVerdict, apVerdict, isolation}`. With a
+  built project it compares the SW-DP ID with the selected slice's `expect_dpidr`; a
+  difference (`probe.dpidr-mismatch`) or no ID (`probe.dpidr-unread`) exits 1 and **no further
+  session runs**. Only when the target is the M55-HE (`--core m55_he`, or the manifest's
+  selected slice is the HE) does it then run the `--ram` attach check (`mem32 0x0` and
+  `mem32 0x58000000`, bench-proven only from an HE attach). For an HP or unknown target the
+  verdict comes from the DPIDR banner's Core-found APAddr alone and `itcmVerdict` is
+  `not-checked`. An attach that contradicts `--core` is `probe.core-mismatch` (exit 1).
+  With no manifest, or no `expect_dpidr`, an info issue `probe.no-manifest` says the match was
+  skipped; an existing but unparsable manifest is the `probe.manifest-unusable` warning.
+* `read` returns `read.data` as hex words. `addr` is plain hex (`0x...`) or decimal, 4-byte
+  aligned; `words` defaults to 4 and is at most 256 (`probe.read-too-large`). Anything else
+  (including a range past 0xFFFFFFFF) is `probe.bad-argument`. It is one `mem32` session, and
+  its own banner is checked: the SW-DP ID must match an armed `expect_dpidr`, and the
+  Core-found AP (`read.attached`) must not contradict `--core`; otherwise the words are not
+  returned.
+* `read` refuses ANY overlap with `0x50000000`-`0x5FFFFFFF` on EVERY core
+  (`probe.read-unsafe-region`), before a J-Link is spawned: from the HE that window is the HP ITCM
+  alias (reading it leaves the core unhaltable until a PIN reset), and tan does not read it
+  from any attach.
+* `identify` skips the ITCM corroboration (`itcmVerdict: "not-checked"`) unless the target is
+  the HE AND session 1's banner placed the attach on the HE access port; it then emits the
+  info issue `probe.itcm-not-checked` naming the reason and the fix (`--core m55_he`). An AP
+  that contradicts the claimed core (`--core`, else the manifest's selected slice) is
+  `probe.core-mismatch`.
+* The manifest's selected slice supplies `jlink_serial` / `jlink_speed` / `jlink_device`
+  whether or not `expect_dpidr` is armed. Several slices that pin different serials need
+  `--core`. A part-number `jlink_device` is replaced by `Cortex-M55` and the report says so
+  (`jlink.device`, `jlink.deviceSubstitutedFrom`).
+* The envelope's `scripts` hold the exact text sent for each probe session, including the
+  `exec DisableAutoUpdateFW` first line; `guard.script` is the `ShowEmuList` verification
+  that runs before each of them. The full transcript is written to
+  `<build_root>/flash-logs/probe-<verb>-<ts>.log` (`$XDG_CACHE_HOME/tan/probe-logs`, else
+  `~/.cache/tan/probe-logs`, when there is no build root; the oldest are pruned) and reported as `transcriptPath`. Temp scripts are `tan-probe-*.jlink`.

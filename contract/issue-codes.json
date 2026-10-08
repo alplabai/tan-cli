@@ -3440,6 +3440,110 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/workspace_patches.py",
       "note": "tan-cli#1376: `$ZEPHYR_BASE` is set to a tree other than the resolved west workspace's zephyr; tan ignores it and builds with the workspace's zephyr. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "probe.read-too-large",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe read` asked for more than 256 words (1 KiB). Refused before any J-Link spawn. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.read-unsafe-region",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe read` overlaps 0x50000000-0x5FFFFFFF. Refused on EVERY core, before any J-Link spawn: an M55-HE session must not touch that window (reading the HP ITCM alias from an HE attach leaves the core unhaltable until a PIN reset, bench round 8, tan-cli#1354), and an attach check cannot prove a bench-safe HP read. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.bad-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. A `tan probe` argument was not plain hex (0x...) or decimal, was not 4-byte aligned, ran past the 32-bit space, or the verb/--core value was malformed. Refused before any J-Link spawn. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.unknown-verb",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe` was given a verb other than `identify` or `read`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.read-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. The read-only `mem32` session failed or returned no complete dump for the requested words. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe` could not run its read-only J-Link session: no trusted J-Link binary, a malformed flash_args value, or the DPIDR/core-check session failed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.dpidr-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe identify`: the SW-DP ID read on connect differs from the manifest slice's `expect_dpidr`; a different board is attached. Exit 1. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.dpidr-unread",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe identify`: the connect banner reported no SW-DP ID at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `tan probe` hit an unexpected tan error; reported with an envelope. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.core-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. The attach contradicts `--core` (`--core m55_he` on an HP attach, or `--core m55_hp` on an HE attach), judged from the Core-found access port (and the ITCM corroboration on an HE target). identify exits 1; read returns no words. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.manifest-unusable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. `build/system-manifest.yaml` exists but could not be parsed; the expect_dpidr comparison and the manifest's probe settings were skipped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.no-manifest",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe`. No manifest, or no `expect_dpidr` armed for the selected core: identify reports the SW-DP ID but the DPIDR match was skipped. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "probe.itcm-not-checked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/probe_cmd.py",
+      "note": "tan-cli#1406: `tan probe identify` skipped the ITCM corroboration (`mem32 0x0` + `mem32 0x58000000`, bench-proven only from an HE attach) because the target is ambiguous, is not the M55-HE, or the connect banner did not place the attach on the HE access port; `itcmVerdict` is `not-checked`. The message names the reason and the fix (`--core m55_he`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

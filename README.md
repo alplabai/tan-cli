@@ -348,6 +348,7 @@ move.
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
 | Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write — see [SETOOLS setup](docs/setools.md)) |
+| Read the attached SW-DP / core, or a few words of memory (read-only J-Link) | `tan probe identify`, `tan probe read 0x80010000 4` (see [`tan probe`](docs/setools.md#tan-probe-read-only-j-link-identity-and-memory-read-tan-cli1406)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |

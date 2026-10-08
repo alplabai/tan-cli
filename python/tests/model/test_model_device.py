@@ -389,3 +389,48 @@ def test_timed_out_window_does_not_poison_the_measured_clock():
     ctl = text.replace("ENERGY-WERR 2 active timed_out=1 i2c_errors=3 last_rc=-5 got=120/250\n", "")
     used, _ = _cycles_per_s(parse_console(ctl))
     assert used == pytest.approx(999_999.0)
+
+
+_REAL_LATENCY_CAPTURE = "\n".join([
+    "*** Booting Zephyr OS build v4.4.1 ***",
+    '=== aen-inference-latency ===',
+    'ENERGY-CFG {"mode":"latency-only","cycles_per_s":160000000,"npu_dispatched":true,'
+    '"model":"tiny_int8_fixture","model_bytes":1568,"arena_used_bytes":580,"arena_bytes":262144,'
+    '"sram_peak_bytes":2148,"windows":5,"inferences_per_window":20,'
+    '"timestamp_source":"k-cycle-get-32","detail_source":"dwt-cyccnt"}',
+    "ENERGY-W 0 active 0 7908487 50 1499",
+    "ENERGY-W 1 active 0 7966719 50 1338",
+    'LATENCY-RESULT {"cycles_per_inference":5951,"ms_per_inference":0.037194,"inferences":6661,'
+    '"good_windows":5,"windows":5,"arena_used_bytes":580}',
+])
+
+
+def test_cfg_model_and_sram_peak_populate_the_result_and_device_latency_wins():
+    # tan-cli#1404: model / peakSramKib came back null and latencyMs was the
+    # window-derived value, not the device's own LATENCY-RESULT.
+    from tan.core.model_device import parse_console, run_result_from_capture
+
+    result, _, diag = run_result_from_capture(parse_console(_REAL_LATENCY_CAPTURE))
+    assert diag["model"] == "tiny_int8_fixture"
+    assert result.peak_sram_kib == pytest.approx(2148 / 1024)
+    assert result.latency_ms == 0.037194
+    # Distinct scope; the window-derived value stays in diagnostics.
+    assert diag["latencyScope"] == "device-latency-result"
+    assert diag["windowLatencyMs"] != result.latency_ms and diag["windowLatencyMs"] > 0
+
+
+def test_window_latency_scope_without_latency_result():
+    from tan.core.model_device import parse_console, run_result_from_capture
+
+    capture = "\n".join(l for l in _REAL_LATENCY_CAPTURE.splitlines() if not l.startswith("LATENCY-RESULT"))
+    result, _, diag = run_result_from_capture(parse_console(capture))
+    assert diag["latencyScope"] == "window-span-per-inference"
+    assert diag["windowLatencyMs"] == result.latency_ms
+
+
+def test_latency_result_must_carry_a_positive_ms_per_inference():
+    from tan.core.model_device import DeviceCaptureError, parse_console, run_result_from_capture
+
+    bad = _REAL_LATENCY_CAPTURE.replace('"ms_per_inference":0.037194', '"ms_per_inference":-1')
+    with pytest.raises(DeviceCaptureError):
+        run_result_from_capture(parse_console(bad))
