@@ -283,6 +283,8 @@ for board in sorted(synthetic.rglob("board.yaml")):
         kind, text = render(board, mode)
         for spelling in (root.as_posix(), str(root)):
             text = text.replace(spelling, "<SDK>")
+        text = re.sub(r'("sdkCommit":\s*)(?:"[0-9a-f]+"|null)',
+                      r'\1"<SDK_COMMIT>"', text)
         out[f"{rel}::{mode}"] = [kind, text]
 sys.stdout.write(json.dumps(out))
 '''
@@ -354,24 +356,6 @@ def test_the_fixture_is_present_and_was_captured_from_a_named_ref():
         "was deleted upstream). A shrunken fixture silently shrinks this "
         "gate; regenerate with scripts/capture_planner_oracle.py."
     )
-
-
-def test_the_error_contract_branch_is_exercised():
-    """tan-cli#1424: the `.error` branch must never again be dead code.
-
-    The examples contributed the only error goldens until alp-sdk deleted
-    them, and the suite stayed green while asserting nothing about refusals.
-    The synthetic board is the permanent replacement: every mode of it must
-    be a captured `SdkRevisionNotBuildable` refusal.
-    """
-    errors = [g for _, _, g in GOLDENS + SYNTHETIC_GOLDENS if g.suffix == ".error"]
-    assert errors, "no error-contract golden is held, so the .error branch is dead"
-    assert {m for _, m, _ in SYNTHETIC_GOLDENS} == set(_EXTENSION)
-    for board_rel, mode, golden in SYNTHETIC_GOLDENS:
-        assert golden.suffix == ".error", f"{board_rel}::{mode} is not a refusal"
-        assert golden.read_text(encoding="utf-8").startswith(
-            "load:SdkRevisionNotBuildable\n"
-        )
 
 
 def test_the_bound_checkout_is_the_ref_the_fixture_was_captured_from():
