@@ -69,26 +69,14 @@ def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vend
     assert u85[0].vela_vendor_system_config is None
 
 
-@needs_sdk_vela_profile
-def test_an_nxp_ethos_u_target_carries_its_own_memory_mode():
-    specs = resolve_targets("E1M-NX9101", metadata_root=_META)
-    u65 = [s for s in specs if s.accel_config == "ethos-u65-256"]
-    assert u65, "E1M-NX9101 must resolve an ethos-u65-256 target"
-    assert u65[0].vela_memory_mode == "Shared_Sram"
-    # imx93.json declares `system_config_requires_vendor_config: false` and no
-    # filename -- so a refusal on this part names no vendor file at all.
-    assert u65[0].vela_vendor_config_filename is None
-
-
 def test_the_real_soc_specs_answer_the_dram_question_per_part():
     """The EVIDENCE behind the zero-SRAM refusal, read off the committed specs
     rather than asserted in prose (alp-sdk #1470 Task 4).
 
     `metadata/socs/alif/ensemble/e8.json`'s `external_memory_interfaces` lists
-    exactly `HexSPI` and `SD/eMMC`; `nxp/imx9/imx93.json` lists `LPDDR4/4X`,
-    `FlexSPI` and `SD/eMMC`; `renesas/rzv2n/n44.json` lists `LPDDR4/4X`. So
-    "vela put the working set in DRAM and this part has no DRAM interface" is
-    true for the Alif parts and FALSE for the other two -- which is exactly why
+    exactly `HexSPI` and `SD/eMMC`; `renesas/rzv2n/n44.json` lists `LPDDR4/4X`.
+    So "vela put the working set in DRAM and this part has no DRAM interface"
+    is true for the Alif parts and FALSE for the Renesas one -- which is exactly why
     it is resolved per part instead of stated once in a comment.
 
     Not `@needs_sdk_vela_profile`-gated: `external_memory_interfaces` long
@@ -97,7 +85,7 @@ def test_the_real_soc_specs_answer_the_dram_question_per_part():
         for spec in resolve_targets(sku, metadata_root=_META):
             if spec.silicon_ref != "*":
                 assert spec.soc_declares_dram is False, f"{sku}/{spec.silicon_ref}"
-    for sku in ("E1M-NX9101", "E1M-V2N101"):
+    for sku in ("E1M-V2N101",):
         for spec in resolve_targets(sku, metadata_root=_META):
             if spec.silicon_ref != "*":
                 assert spec.soc_declares_dram is True, f"{sku}/{spec.silicon_ref}"

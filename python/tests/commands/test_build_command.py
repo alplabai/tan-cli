@@ -9,8 +9,9 @@ exit code, and the guarantee that no failure escapes as a traceback. An
 in-process call exercises none of those.
 
 The plan fixtures are the REAL ones the Rust parity harness uses
-(``tests/parity/oracle/*.build-plan.json`` at the repo root, captured from a
-live ``alp_orchestrate --emit build-plan``), not hand-written stand-ins --
+(``tests/parity/oracle/*.build-plan.json`` and
+``tests/parity/consumer_fixtures/*.build-plan.json`` at the repo root,
+captured from a live ``alp_orchestrate --emit build-plan``), not hand-written stand-ins --
 ``multicore_rpmsg-imx93`` already IS the shape the ordering/skip cases need: two
 slices, one with ``command: null``, and a matching ``warnings[]`` entry. Only
 the case that must actually SPAWN something uses a synthetic plan, because it
@@ -54,11 +55,20 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE_ROOT.parent
 ORACLE_PLANS = REPO_ROOT / "tests" / "parity" / "oracle"
 
+#: Captured plans that are CONSUMER fixtures only -- no seam-1 oracle case
+#: (alp-sdk deleted the board they were captured from, so a live comparison
+#: has no counterparty). `multicore_rpmsg-imx93` lives here: it is the shape
+#: the ordering/skip cases need (two slices, one `command: null`, a matching
+#: `board-tree-missing` warning).
+CONSUMER_PLANS = REPO_ROOT / "tests" / "parity" / "consumer_fixtures"
+
 
 def real_plan(name: str) -> dict:
     """Load a captured real build plan by name. A missing fixture RAISES --
     a silently skipped case would let this suite certify nothing."""
     path = ORACLE_PLANS / f"{name}.build-plan.json"
+    if not path.is_file():
+        path = CONSUMER_PLANS / f"{name}.build-plan.json"
     if not path.is_file():
         raise RuntimeError(
             f"missing oracle plan {path}; this suite is grounded in the real "

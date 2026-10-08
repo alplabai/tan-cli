@@ -1320,6 +1320,13 @@ from tests.conftest import sdk_root
 #: plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
 #: goldens (the `v0.17.0-rc1` cut, #2763); #2774's console floor is exercised
 #: by no example plan: the re-capture shows no other changed byte.
+#:
+#: RE-MEASURED again at `6159a7b1a` (tan-cli#1216) -- 103 boards, 721 emits
+#: (0 error-contract), 3,046,444 B (was 104 / 728 / 7 / 2,540,037). Every changed
+#: byte is attributed: +171 pairs of `alp_hw_info_build.h` / `alp-west-libs.yml`
+#: `configArtefacts` entries across 100 `build-plan.json` goldens (#2778), and
+#: the 7 `.error` goldens of `rpmsg-imx93` deleted with the example (#2782).
+#: The plan's `sdkVersion` did not move.
 #: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
 #: supersedes the bot's #1310 proposal for the same range, which could not
 #: apply the hand-ports and would have broken two things -- see below).
@@ -1357,7 +1364,27 @@ from tests.conftest import sdk_root
 #:     now emits max(16384, the same `_app_ram_console_size`) instead of a bare
 #:     16384, because `alp-link-itcm.conf` is layered AFTER `prj.conf` and
 #:     would shrink a larger app buffer. `tests/planner/test_ram_console_floor.py`.
-PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-sdk origin/dev -- #2774 (RAM-console size floor) resync (tan-cli#1401)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `030de105` -> `6159a7b1` (tan-cli#1216,
+#: alp-sdk#2778). Thirteen mirrored files changed in range:
+#:
+#:   * `buildplan.py` -- #2778: `HW_INFO_ARTEFACT` / `WEST_LIBS_ARTEFACT`,
+#:     `HwInfoUnavailable`, `_slice_hw_info_h`, `_slice_west_libraries`,
+#:     `_slice_hw_info_artefact` / `_slice_west_libs_artefact`, and the two new
+#:     entries appended AFTER `cmake-args.txt` in `emit_build_plan` (a SKU
+#:     outside the production families downgrades to a `hw-info-unavailable`
+#:     warning). Ported by hand (the tool reported a conflict around tan's
+#:     sibling-subpackage import of the emitters); the helpers import
+#:     `tan.planner.project_emit.*` rather than `alp_project_emit`.
+#:     `planner_emit._render_v1_shaped` now calls the same two helpers for
+#:     `--core`, mirroring `alp_project._run_v2_per_core_emit`.
+#:   * `aperture.py`, `secure.py` -- E1M-NX9101 removal (#2782), comments and
+#:     the `nxp-imx9` boot-method default. Ported by hand (tool conflict on
+#:     tan-side comment edits).
+#:   * `__init__.py`, `carveout.py`, `kconfig.py`, `libraries.py`, `loader.py`,
+#:     `memory.py`, `orchestrator.py`, `partition.py`, `sdk_compat.py`,
+#:     `validate.py` -- NX9101-removal and doc-wording edits; merged cleanly.
+#:     `libraries.py`'s relocated `_SOC_FAMILY_TOKEN` drops `imx93`.
+PINNED_SDK_COMMIT = "6159a7b1a50c3267b98fed17c0e17d084143d22b"  # alp-sdk origin/dev -- #2778 (hw-info-h + west-libs configArtefacts) resync (tan-cli#1216)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1397,34 +1424,34 @@ PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-sdk origin
 #: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "85cc05f1fe9f2bd859b8c7eef37f21d7092027031993817fc5fdbe519faf528a",
-    "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
-    "buildplan.py": "592f1b70f214593a34ae63e24cedad49062b4bfffc69caf0c773495ce2427368",
-    "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
+    "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
+    "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
+    "buildplan.py": "77c61608769ae5f07cc10f683096568284b8173fab676ce84bfc09a7220c176e",
+    "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "04affebf548b60eebdfbe92aeab2ff0c10dc46a266e76cbc615c3d3eeffc8cfa",
+    "kconfig.py": "321b320bfb72740188ddbbcb0ed710cefadbbaa383d29eaf97975079c9db32d2",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
-    "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
+    "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
     # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
     # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
     # that refusal: tan's `link_target.apply_link_target` (called at the end of
     # tan's `load_board_yaml`) replaces it with the real HE-only feature.
-    "loader.py": "25e3ebd1a0e2d10135bd57e28496d1996f0f0a03d41169b59128e9abdf7d0052",
+    "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
-    "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
+    "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
-    "orchestrator.py": "a322bba505b4f3c35b30f4988343dd061460d48e901665e05cdfa60780b1fcaa",
+    "orchestrator.py": "80e7202bdf430df392b303a1ca70778bcc73fab47207065da7fb9041133f19b0",
     "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
-    "partition.py": "9ef943ce8f2c9651067b4e58c2e878e4f87eac2ff495de7342a57cd276b9b711",
+    "partition.py": "837fb76f6a7fe288c863541c98ddcbf1af5ca206f051922d12db06a8670025d8",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "ba22c0fc1885f510edec051f934e16654ba3d7a627ba741383d8e2c0a3e4c4b8",
-    "secure.py": "c250782df6bca7b8b6b25e82375044eb87302f1b7cf656931658fe8ef3c37212",
+    "sdk_compat.py": "255494c4397912d800ab695a48ff35b9ab9233bc8c5136893cc39488ee6234c3",
+    "secure.py": "f804a5e7419c761698667449f527a920735a691b3864e97ea87fc3bf74a711ff",
     "slugs.py": "4e914a71468ec41529a970783f29501d1ec387ad748fc792cb6dfb53b9818adb",
     "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
-    "validate.py": "9d66cc7cebfe4bbb355b8d424f784f62ad652a9fa6560280942198c16079a5f2",
+    "validate.py": "0981ca5a07d5dc5845bbcd13c4f00534285490e52ab2ef8fd8022188b8a850e6",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -2373,7 +2400,18 @@ PINNED_HASHES: dict[str, str] = {
 #: scripts/alp_project_loader.py scripts/sentinels.py scripts/whole_device_alias.py
 #: scripts/alp_cli` is empty), and every `HAND_PORT_HASHES` entry re-hashes
 #: unchanged at `030de105`, so only the pin moves.
-HAND_PORT_PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-sdk origin/dev -- no hand-port change in range (tan-cli#1401)
+#: AUDIT `030de105` -> `6159a7b1` (tan-cli#1216): ten hand-port sources changed
+#: in range, all re-hashed in `HAND_PORT_HASHES`. Ported: the E1M-NX9101 removal
+#: (#2782) -- `_SKU_FAMILY` / `_sku_family` lose `NX9` in `som_metadata.py` and
+#: `zephyr_board.py`'s `_sku_family_slug`, `slugs.py`'s `_CHIP_SUBSYSTEMS` loses
+#: `pca9451a`, and the `imx93` west token went with `libraries.py` (above). The
+#: `alp_project_emit/hw_info.py` `metadata_root` parameter was already ported
+#: (alp-sdk#1964; tan's is required, not optional). `alp_project.py`'s
+#: `--core` routing through `_slice_hw_info_h` / `_slice_west_libraries` is
+#: ported in `planner_emit.py` (see the mirror note above). The rest
+#: (`alp_cli/*`, `alp_template.py`, `native_sim.py`, `alp_project_loader.py`
+#: comments) are doc-wording only.
+HAND_PORT_PINNED_SDK_COMMIT = "6159a7b1a50c3267b98fed17c0e17d084143d22b"  # alp-sdk origin/dev -- #2778/#2782 audit (tan-cli#1216)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2437,20 +2475,20 @@ HAND_PORT_PINNED_SDK_COMMIT = "030de105d3a106b3c10202854cf57d4e81e78c0f"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "a93231812432480a432f0600f0e600e889744eaaa5ce516ff639d50524596151",
+    "scripts/gen_zephyr_board.py": "3baa0643ef672573b995e836112851764c4363073439c98d8ec5e3e9e8bbeb66",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
-    "scripts/alp_project_loader.py": "72c1c77696d175c704161241da32b88432f0e55acba2c0f4f7c40dbd7a5a5960",
-    "scripts/alp_template.py": "5394e12b2cce92fac79507603147ed8c7ce18abc2fc76e0d210bb1bc1ca7a728",
-    "scripts/alp_project_emit/__init__.py": "64e7b79839c3e51b5b065a8554c70f02c228e0bff9a07d7bf9e250751abec0f3",
+    "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
+    "scripts/alp_template.py": "d700c9a7a0039f3fa3b2f0a7d2ce410a647301d3261ee6140118f416b6ea2b35",
+    "scripts/alp_project_emit/__init__.py": "e8d8d4ed3ecc3f2fa1b74d4f8f7dd517f2dda3b6739a1c379ed0dfe63a15e16a",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
-    "scripts/alp_project_emit/hw_info.py": "1a9ccd2180f58ee38748ec261da11ea7389ac3f26593c002c73f0fa5cdb53f35",
-    "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
-    "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
-    "scripts/alp_cli/diagnostic_format.py": "9fd45d268b12527b8e93720a380dab57d4bd67e00c0066505e7d587eea19eb18",
-    "scripts/alp_cli/validator.py": "cd97160c7cbef25994d9b03a6a0a4f5e5c18f6525c8f5ba3c6366c7a419f3eec",
-    "scripts/alp_project.py": "2c636015657fbb711002d3bdaeb1ea69013bb7a3e93636183d8499f342d2d576",
+    "scripts/alp_project_emit/hw_info.py": "32704dc96f2e07f1dd4e5d409c14340eb6a8169dbb52f6110cfa6501e1ba6b4f",
+    "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
+    "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
+    "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
+    "scripts/alp_cli/validator.py": "6e9c8f0e8b5c82063b2bc36ee5021781b43374b0403b0a1e16fdce97b7475e47",
+    "scripts/alp_project.py": "cc38d5c4fa1d549e02858179b58cbfb412c6c7295941079718ef82f04bd7237b",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was

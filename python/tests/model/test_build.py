@@ -67,7 +67,7 @@ def _meta_without_a_vela_memory_mode(tmp_path: Path, sku: str) -> Path:
     flagless, vela fell back to its DRAM-backed built-in profile, and the
     three refusal guards below fired against the REAL shipped SKUs. They no
     longer do: `E1M-AEN401`/`E1M-AEN601`/`E1M-AEN801` now resolve
-    `--memory-mode Sram_Only` and `E1M-NX9101` `--memory-mode Shared_Sram`
+    `--memory-mode Sram_Only`
     straight out of `metadata/socs/**`'s `npu_toolchain.vela`, so nothing in
     the shipped catalogue reports 0 KiB SRAM on a real NPU placement any more
     (measured, `ethos-u-vela` 5.1.0 over both committed fixtures -- see
@@ -329,7 +329,7 @@ def test_a_refused_target_does_not_take_the_rest_of_the_package_with_it(tmp_path
     the whole build: `BUILD FAILED RuntimeError`, **no package written at
     all**, with the other three targets compiling perfectly (`arena 32, SRAM
     1 KiB` on both u55 configs). The same held for `E1M-AEN401`,
-    `E1M-AEN601`, and for `E1M-NX9101` at `ethos-u65-256`.
+    `E1M-AEN601`.
 
     Both halves matter: the survivors must be PRESENT, and the refused target
     must be legibly ABSENT with its reason -- never silently present carrying
@@ -399,8 +399,7 @@ def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_pa
     ensemble_vela.ini`, and that -- not a vendor prefix on the SoM preset's
     `silicon:` ref, and not a literal in tan -- is what puts the pointer in a
     real `tan model build`'s coverage reason (tan-cli#789 review (g),
-    re-sourced). The counterpart for a part that declares none is pinned by
-    `test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file`.
+    re-sourced).
 
     Runs the same real vela build as the test above rather than sharing it: a
     single test carrying both assertions would have to skip WHOLESALE at the
@@ -417,75 +416,6 @@ def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_pa
             "alp-sdk does not redistribute") in refused[0].reason
 
 
-@_needs_vela
-def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
-    """THE (g) GUARD, end to end through a REAL vela process.
-
-    `E1M-NX9101` is an NXP i.MX 93. Measured, `ethos-u-vela` 5.1.0 over the
-    committed `tiny_int8.tflite`, its single `ethos-u65-256` target refuses
-    with the profile it really resolved (`Ethos_U65_Client_Server /
-    Dedicated_Sram_384KB`, `dram 0.11 KiB`) -- and then, until this fix, the
-    remedy sentence told that customer the profile "lives in the proprietary
-    ensemble_vela.ini", an Alif Ensemble file that has nothing to do with
-    their silicon (alp-sdk's own i.MX 93 vela invocation involves no
-    proprietary `.ini` at all -- `vendors/nxp-imx93/README.md`). Naming the
-    profile per run (MAJOR 3) fixed only the first half of the sentence.
-
-    The `cpu` target still ships, which is the other half of the per-target
-    contract: one refused accelerator target must never empty the package.
-
-    Driven through `_meta_without_a_vela_memory_mode` since alp-sdk #1470 -- the
-    real `E1M-NX9101` now resolves `--memory-mode Shared_Sram` from
-    `imx93.json` and its `ethos-u65-256` target ships. The SoM preset, the
-    `silicon: nxp:imx9:imx93` ref the vendor clause is gated on, and the
-    accel config are all still the bound tree's real ones, so the claim this
-    makes about NXP customers is unchanged."""
-    src = tmp_path / _TINY_INT8.name
-    shutil.copy(_TINY_INT8, src)
-    out = build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
-                      # default registry: real vela + cpu
-                      metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-NX9101"))
-    mft, _ = read_package(out.read_bytes())
-    assert [t.backend for t in mft.targets] == ["cpu"]
-
-    refused = [c for c in mft.coverage if c.accel_config == "ethos-u65-256"]
-    assert len(refused) == 1 and refused[0].status == "skipped"
-    reason = refused[0].reason
-    assert "Ethos_U65_Client_Server" in reason              # the profile it DID resolve
-    assert "ensemble_vela.ini" not in reason               # ... and no Alif file after it
-    assert "Alif" not in reason and "alif" not in reason
-    # The part-independent remedy is intact for this SKU too.
-    assert "No module vela profile was resolved for this part, so vela chose its own." in reason
-    assert "`tan model build` skips this target and still builds the SKU's others." in reason
-
-
-@_needs_vela
-def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
-    """The deliberate decision for "what if they ALL refuse".
-
-    A `.alpmodel` with no runnable blob is worse than an error: nothing fails
-    until the device tries to load it. So the existing zero-blob guard stands
-    -- per-target skipping is about not losing the targets that WORKED, never
-    about shipping a package with none.
-
-    `E1M-NX9101` declares exactly one NPU (`ethos-u65-256`, which refuses on
-    this fixture when no memory mode is resolvable) so restricting the registry
-    to vela alone leaves nothing at all, and the refusal's own text must
-    survive into the failure so the reader learns WHY rather than just "no blob
-    compiled". `_meta_without_a_vela_memory_mode` for the same reason as its two
-    siblings above."""
-    src = tmp_path / _TINY_INT8.name
-    shutil.copy(_TINY_INT8, src)
-    with pytest.raises(ValueError) as exc:
-        build_model(sku="E1M-NX9101", name="tiny", source=src, out_dir=tmp_path,
-                    metadata_root=_meta_without_a_vela_memory_mode(tmp_path, "E1M-NX9101"),
-                    adapters=[VelaAdapter()])
-    msg = str(exc.value)
-    assert "no blob compiled" in msg
-    assert "ethos-u65-256" in msg and "Ethos_U65_Client_Server" in msg
-    assert not list(tmp_path.glob("*.alpmodel"))         # nothing half-written
-
-
 # --------------------------------------------------------------------------
 # alp-sdk #1470: the SoM's own vela memory profile, end to end.
 # --------------------------------------------------------------------------
@@ -496,13 +426,12 @@ def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
     ("E1M-AEN401", "ethos-u85-256", "Sram_Only"),
     ("E1M-AEN601", "ethos-u85-256", "Sram_Only"),
     ("E1M-AEN801", "ethos-u85-256", "Sram_Only"),
-    ("E1M-NX9101", "ethos-u65-256", "Shared_Sram"),
 ])
 def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
         tmp_path, sku, accel_config, memory_mode):
     """THE ACCEPTANCE for the whole slice, through a REAL vela process.
 
-    These are precisely the four SKUs tan-cli#789 had to refuse, and the
+    These are precisely the SKUs tan-cli#789 had to refuse, and the
     reason was never the model: vela was compiling them against its own
     DRAM-backed built-in profile on parts that have no DRAM, so the SRAM
     figure alp-sdk sizes an arena from came back zero and the target became a
@@ -516,15 +445,10 @@ def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
       | SKU / accel config           | before      | after                     |
       |---|---|---|
       | AEN401/601/801 ethos-u85-256 | skipped     | arena 32, req_sram_kib 1  |
-      | NX9101         ethos-u65-256 | skipped     | arena 32, req_sram_kib 1  |
 
     with vela's own columns moving `sram 0.0 / dram 0.265625` ->
-    `sram 0.03125 / dram 0.0 / on_chip_flash 0.234375` on the Alif u85, and
-    `sram 0.0 / dram 0.109375` -> `sram 0.03125 / dram 0.078125` on the NXP
-    u65. Parametrized over all four rather than spot-checked on one: three
-    resolve `Sram_Only` from an Alif Ensemble spec and one resolves
-    `Shared_Sram` from `imx93.json`, and a regression that hardcoded either
-    would pass a single-SKU test."""
+    `sram 0.03125 / dram 0.0 / on_chip_flash 0.234375` on the Alif u85.
+    Parametrized over all three rather than spot-checked on one."""
     src = tmp_path / _TINY_INT8.name
     shutil.copy(_TINY_INT8, src)
     # The profile really did come from metadata, and the vendor-gated system

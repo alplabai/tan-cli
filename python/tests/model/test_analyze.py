@@ -241,11 +241,6 @@ def test_u55_skus_resolve_the_u55_variant(sku):
 
 
 @pytestmark_real_sdk
-def test_nx9101_resolves_the_u65_variant():
-    assert resolve_ethos_u_variant("E1M-NX9101", metadata_root=_META) == "u65"
-
-
-@pytestmark_real_sdk
 def test_drpai_som_has_no_ethos_u_variant():
     assert resolve_ethos_u_variant("E1M-V2N101", metadata_root=_META) is None
 

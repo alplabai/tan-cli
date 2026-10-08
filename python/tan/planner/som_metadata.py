@@ -49,7 +49,7 @@ from tan.soc_ref import resolve_soc_path  # noqa: F401  (re-export: see below)
 # (The silicon -> Kconfig mapping, by contrast, lives in the versioned
 # registry below -- see silicon_to_kconfig().)
 
-_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
+_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M)")
 
 
 def _sku_family(sku: str) -> str:
@@ -57,7 +57,7 @@ def _sku_family(sku: str) -> str:
     m = _SKU_FAMILY.match(sku)
     if m is None:
         raise ValueError(f"unrecognised SoM SKU pattern: {sku}")
-    return {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}[m.group(1)]
+    return {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1"}[m.group(1)]
 
 
 # Silicon ref -> Zephyr SoC-select Kconfig symbol.
@@ -179,7 +179,7 @@ def resolve_memory_map(
     to use the silicon's defaults).
 
     Returns an empty list when the silicon_variant cannot be resolved
-    (e.g. NX9101's `silicon_variant: TBD`) -- callers should treat
+    (e.g. a preset with `silicon_variant: TBD`) -- callers should treat
     that as "memory layout pending the HW-config writeup".
     """
     declared = sku_preset.get("memory_map")

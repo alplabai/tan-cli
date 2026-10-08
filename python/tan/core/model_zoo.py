@@ -50,7 +50,7 @@ _ID_RE = re.compile(r"[a-z][a-z0-9-]*")
 _BUNDLED_RE = re.compile(r"starters/[A-Za-z0-9._-]+")
 _SHA256_RE = re.compile(r"[a-f0-9]{64}")
 _URL_RE = re.compile(r"https://[^\s/?#@]+/\S+")
-_SKU_RE = re.compile(r"E1M-(AEN[3-8][0-9]{2}|V2N[0-9]{3}|V2M[0-9]{3}|NX9[0-9]{3})")
+_SKU_RE = re.compile(r"E1M-(AEN[3-8][0-9]{2}|V2N[0-9]{3}|V2M[0-9]{3})")
 
 
 class ZooUnavailable(Exception):
