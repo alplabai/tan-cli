@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from tan.commands.build_output import ProjectContext, resolve_project_context
-from tan.commands.model_device_live import LiveOptions, live_console
+from tan.commands.model_device_live import LiveOptions, LiveRefusal, LiveRun, live_console
 from tan.commands.model_host_cmd import (
     ab_empty_data,
     resolve_model_path,
@@ -57,7 +57,7 @@ MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 #: `(context, model_label, options) -> console text | Issue`: RAM-run the project
 #: through Flow C and return its console (`model_device_live.live_console`). A seam
 #: so a test can substitute a deploy that needs no probe.
-LIVE_FLOW: Callable[[ProjectContext, str | None, LiveOptions], str | Issue] = live_console
+LIVE_FLOW: Callable[[ProjectContext, str | None, LiveOptions], LiveRun | LiveRefusal] = live_console
 
 
 def capture_via(
@@ -94,13 +94,16 @@ def _read_capture(context: ProjectContext, raw: str, role: str) -> str | Issue:
 
 def _console_for(
     context: ProjectContext, capture: str | None, label: str | None, role: str, live: LiveOptions
-) -> str | Issue:
+) -> LiveRun | LiveRefusal:
     if capture:
-        return _read_capture(context, capture, role)
+        text = _read_capture(context, capture, role)
+        return LiveRefusal([text]) if isinstance(text, Issue) else LiveRun(text, [], None)
     return LIVE_FLOW(context, label, live)
 
 
-def _row(label: str | None, text: str, live: bool = False) -> tuple[dict, Any] | Issue:
+def _row(
+    label: str | None, text: str, run: LiveRun | None = None, project_path: str | None = None
+) -> tuple[dict, Any] | Issue:
     """The `result` row for one console capture, or the `model.device-capture-invalid` refusal."""
     try:
         result, energy, diag = run_result_from_capture(parse_console(text))
@@ -113,7 +116,8 @@ def _row(label: str | None, text: str, live: bool = False) -> tuple[dict, Any] |
             size = os.stat(label).st_size
         except OSError:
             size = None
-    extra = {"source": "live"} if live else {}
+    live = run is not None and run.flash is not None
+    extra = {"source": "live", "project": project_path, "flash": run.flash} if live else {"source": "capture"}
     return {
         **extra,
         "model": label or diag.get("model"),
@@ -180,16 +184,16 @@ def run_device_run(
     if isinstance(label, Issue):
         return refuse(label)
     live = live or LiveOptions()
-    text = _console_for(context, capture, label, "the run", live)
-    if isinstance(text, Issue):
-        return refuse(text)
-    built = _row(label, text, live=not capture)
+    run = _console_for(context, capture, label, "the run", live)
+    if isinstance(run, LiveRefusal):
+        return project, sdk, data, run.issues, run.exit_code
+    built = _row(label, run.text, run, context.workspace_root)
     if isinstance(built, Issue):
-        return refuse(built)
+        return project, sdk, data, [*run.issues, built], ExitCode.VALIDATION_FAILURE
     row, _ = built
     data["model"] = label
     data["result"] = row
-    return project, sdk, data, _degraded(row, "device run"), ExitCode.SUCCESS
+    return project, sdk, data, [*run.issues, *_degraded(row, "device run")], ExitCode.SUCCESS
 
 
 def run_device_ab(
@@ -206,6 +210,12 @@ def run_device_ab(
     rows: list[tuple[dict, Any]] = []
     issues: list[Issue] = []
     live = live or LiveOptions()
+    if bool(capture) != bool(against_capture):
+        return project, sdk, data, [Issue(
+            "model.device-ab-mixed-sources", "error",
+            "`ab --device` takes both sides live (--against-project, --confirm) or both from "
+            "captures (--capture and --against-capture), not one of each; nothing was run.",
+        )], ExitCode.VALIDATION_FAILURE
     context_b = context
     if not against_capture and live.against_project:
         context_b = resolve_project_context(live.against_project, None, live.sdk_root)
@@ -221,13 +231,14 @@ def run_device_ab(
         label = _device_label(ctx, raw)
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
-        text = _console_for(ctx, cap, label, f"model {role}", live)
-        if isinstance(text, Issue):
-            return project, sdk, data, [text], ExitCode.VALIDATION_FAILURE
-        built = _row(label, text, live=not cap)
+        run = _console_for(ctx, cap, label, f"model {role}", live)
+        if isinstance(run, LiveRefusal):
+            return project, sdk, data, [*issues, *run.issues], run.exit_code
+        built = _row(label, run.text, run, ctx.workspace_root)
         if isinstance(built, Issue):
-            return project, sdk, data, [built], ExitCode.VALIDATION_FAILURE
+            return project, sdk, data, [*issues, *run.issues, built], ExitCode.VALIDATION_FAILURE
         rows.append(built)
+        issues.extend(run.issues)
         issues.extend(_degraded(built[0], f"device run {role}"))
     (a_row, a_res), (b_row, b_res) = rows
     cmp = compare(a_res, b_res)

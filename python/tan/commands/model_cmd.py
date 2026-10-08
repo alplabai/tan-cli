@@ -1138,7 +1138,8 @@ def model(
     ),
     confirm: bool = typer.Option(
         False, "--confirm",
-        help="With live `--device`: arm the RAM-run (resets the whole device; never writes MRAM).",
+        help="With live `--device`: arm the RAM-run (resets the whole device; never writes MRAM). "
+        "Armed by --confirm, ALP_FLASH_FORCE=1 or the manifest's flash_args.confirm: true.",
     ),
     probe_serial: str = typer.Option(None, "--probe-serial", metavar="SN", help="With live `--device`: J-Link serial."),
     probe_usb_path: str = typer.Option(
@@ -1146,7 +1147,7 @@ def model(
     ),
     jlink: str = typer.Option(None, "--jlink", metavar="PATH", help="With live `--device`: J-Link Commander binary."),
     against_project: str = typer.Option(
-        None, "--against-project", metavar="PATH", help="With live `ab --device`: B's project root (A is --project)."
+        None, "--against-project", metavar="PATH", help="With live `ab --device`: B's project root (A is --project); B uses its own board.yaml."
     ),
     capture: str = typer.Option(
         None, "--capture", metavar="FILE", help="With `--device`: the target's console capture."
@@ -1340,6 +1341,7 @@ def model(
             jlink=jlink if isinstance(jlink, str) else None,
             sdk_root=sdk_root,
             against_project=against_project if isinstance(against_project, str) else None,
+            board_yaml=board if isinstance(board, str) and board != "board.yaml" else None,
         )
         _refuse_stray_arguments(
             subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None),

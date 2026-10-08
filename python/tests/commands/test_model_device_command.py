@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from tan.commands import model_device_cmd
 from tan.commands.build_output import resolve_project_context
 from tan.commands.model_cmd import model
+from tan.commands.model_device_live import LiveRun
 from tan.envelope import Issue
 
 app = typer.Typer(add_completion=False)
@@ -105,7 +106,7 @@ def test_a_live_flow_is_used_when_no_capture_is_given(tmp_path, monkeypatch):
 
     def flow(context, label, live):
         seen.append(label)
-        return capture()
+        return LiveRun(capture(), [], {"core": "m55_he"})
 
     monkeypatch.setattr(model_device_cmd, "LIVE_FLOW", flow)
     code, doc = invoke("run", "--device", "--project", str(p))

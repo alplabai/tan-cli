@@ -2737,7 +2737,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_device_live.py",
-      "note": "tan-cli#1287: live `--device`: the RAM-run resets the whole device and needs `--confirm` (or ALP_FLASH_FORCE=1), exactly as `tan flash --ram`; nothing was run. VALIDATION_FAILURE. A plain `Issue(\"model.device-confirm-required\", ...)` construction in `model_device_live.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "tan-cli#1287: live `--device`: the RAM-run resets the whole device and needs `--confirm` (or ALP_FLASH_FORCE=1), exactly as `tan flash --ram` (also armed by `flash_args.confirm`); nothing was run. VALIDATION_FAILURE. A plain `Issue(\"model.device-confirm-required\", ...)` construction in `model_device_live.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "model.device-probe-invalid",
@@ -2770,6 +2770,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_device_cmd.py",
       "note": "tan-cli#1287: live `ab --device`: needs `--against-project` for B (or both captures); nothing was run. VALIDATION_FAILURE. A plain `Issue(\"model.device-live-needs-two-projects\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-ab-mixed-sources",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: `ab --device` with one side live and the other from a capture: both live or both capture, nothing was run. VALIDATION_FAILURE. A plain `Issue(\"model.device-ab-mixed-sources\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "model.device-capture-missing",

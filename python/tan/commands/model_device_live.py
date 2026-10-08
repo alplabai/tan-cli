@@ -24,8 +24,9 @@ from tan.commands import flash_cmd
 from tan.commands.build_output import ProjectContext
 from tan.core.jlink_probe import is_valid_usb_path
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD
-from tan.core.flash_plan import ManifestError, parse_system_manifest
+from tan.core.flash_plan import ManifestError, confirm_gate_note, parse_system_manifest
 from tan.envelope import Issue
+from tan.exit_codes import ExitCode
 
 DEFAULT_CORE = "m55_he"
 DEFAULT_WAIT_S = 1.5
@@ -43,9 +44,36 @@ class LiveOptions:
     jlink: str | None = None
     sdk_root: str | None = None
     against_project: str | None = None
+    #: The user's own `--board-yaml`, forwarded to Flow C; `None` when left at the default.
+    board_yaml: str | None = None
 
     def any_set(self) -> bool:
-        return self != LiveOptions(sdk_root=self.sdk_root)
+        return self != LiveOptions(sdk_root=self.sdk_root, board_yaml=self.board_yaml)
+
+
+@dataclass(frozen=True)
+class LiveRun:
+    """A successful RAM-run: the console, EVERY `flash.*` issue Flow C raised
+    (warnings such as `flash.probe-unverified` included -- they qualify the
+    measurement), and the `flash` provenance block for the result row."""
+
+    text: str
+    issues: list[Issue]
+    flash: dict | None = None
+
+
+@dataclass(frozen=True)
+class LiveRefusal:
+    """A refusal: the issues to report (Flow C's own, verbatim and in order) and
+    the exit code -- Flow C's `ExitCode` is kept, a model-side refusal is a
+    validation failure."""
+
+    issues: list[Issue]
+    exit_code: ExitCode = ExitCode.VALIDATION_FAILURE
+
+
+def _refuse(issue: Issue, *before: Issue) -> LiveRefusal:
+    return LiveRefusal([*before, issue])
 
 
 def _preflight(context: ProjectContext, live: LiveOptions) -> Issue | None:
@@ -81,16 +109,29 @@ def _preflight(context: ProjectContext, live: LiveOptions) -> Issue | None:
     return None
 
 
-def live_console(context: ProjectContext, label: str | None, live: LiveOptions) -> str | Issue:
-    """RAM-run the project and return its RAM-console text, or the refusal."""
+def _provenance(entry: dict, live: LiveOptions) -> dict:
+    jlink = entry.get("jlink") or {}
+    block = {
+        "core": live.core,
+        "wait": live.wait,
+        "transcriptPath": jlink.get("transcriptPath"),
+        "attachedCore": jlink.get("attachedCore"),
+    }
+    if jlink.get("dpidr"):
+        block["dpidr"] = jlink["dpidr"]
+    return block
+
+
+def live_console(context: ProjectContext, label: str | None, live: LiveOptions) -> LiveRun | LiveRefusal:
+    """RAM-run the project and return its console plus Flow C's issues, or the refusal."""
     refused = _preflight(context, live)
     if refused is not None:
-        return refused
+        return _refuse(refused)
     code, data, issues, _lines, _sdk = flash_cmd._run(
         app_path=context.workspace_root,
         build_root_arg=None,
         sdk_root_arg=live.sdk_root,
-        board_yaml=None,
+        board_yaml=live.board_yaml,
         core=live.core,
         helper=None,
         dry_run=False,
@@ -107,20 +148,21 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
     )
     entries = data.get("entries") or []
     entry = entries[0] if entries else {}
+    flash_issues = list(issues)
     if entry.get("status") == "planned":
-        return Issue(
+        return _refuse(Issue(
             "model.device-confirm-required", "error",
             "A live device run RAM-loads the image and resets the whole device (including the Secure "
-            "Enclave); pass --confirm (or set ALP_FLASH_FORCE=1). Nothing was run.",
-        )
-    errors = [i for i in issues if i.severity == "error"]
-    if errors:
-        return errors[0]
-    if int(code) != 0 or entry.get("status") == "failed":
-        return Issue(
-            "model.device-flash-failed", "error",
-            f"The Flow C RAM-run failed: {entry.get('message') or 'no detail reported'}",
-        )
+            f"Enclave); nothing was run: {confirm_gate_note('--confirm was not given')}.",
+        ), *flash_issues)
+    failed = int(code) != 0 or entry.get("status") == "failed"
+    if failed:
+        if not any(i.severity == "error" for i in flash_issues):
+            flash_issues.append(Issue(
+                "model.device-flash-failed", "error",
+                f"The Flow C RAM-run failed: {entry.get('message') or 'no detail reported'}",
+            ))
+        return LiveRefusal(flash_issues, ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE)
     console = entry.get("ramConsole") or {}
     text = console.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -129,8 +171,8 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
             "the build selected the UART console, which a RAM-run cannot read"
             if which == "uart" else f"nothing was printed in the {live.wait:g}s wait"
         )
-        return Issue(
+        return _refuse(Issue(
             "model.device-console-empty", "error",
             f"The RAM console is empty ({why}); raise --wait or check the benchmark app.",
-        )
-    return text
+        ), *flash_issues)
+    return LiveRun(text, flash_issues, _provenance(entry, live))
