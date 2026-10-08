@@ -158,6 +158,21 @@ def _tree_fingerprint(module_dirs: list[str], rels: list[str]) -> dict[str, str]
     return out
 
 
+def _cache_key(west: str, workspace: Path, sdk: Path) -> str | None:
+    """The cache key, or `None` when it cannot be built in full (no cache)."""
+    heads = _workspace_heads(west, workspace)
+    if heads is None:
+        return None
+    try:
+        rels = _patched_files(sdk)
+        if rels is None:
+            return None
+        tree = _tree_fingerprint(list(heads), rels)
+        return cache_key((sdk / _PATCHES_YML).read_bytes(), {**heads, **tree})
+    except OSError:
+        return None
+
+
 def _interpreter(workspace: Path, sdk_root: str) -> str | None:
     # The workspace venv carries west + pyyaml (Zephyr's requirements), which
     # the verifier imports; the resolved host Python is the fallback.
@@ -222,17 +237,8 @@ def _check(
             "(scripts/verify_west_patches.py), so patches cannot be checked",
         )
     west = west_program(str(workspace), sdk_root)
-    key = None
+    key = _cache_key(west, workspace, sdk) if cache_dir is not None else None
     if cache_dir is not None:
-        heads = _workspace_heads(west, workspace)
-        if heads is not None:
-            try:
-                rels = _patched_files(sdk)
-                if rels is not None:
-                    tree = _tree_fingerprint(list(heads), rels)
-                    key = cache_key(patches_yml.read_bytes(), {**heads, **tree})
-            except OSError:
-                key = None
         cached = _read_cache(cache_dir / CACHE_FILE, key) if key is not None else None
         if cached == APPLIED:
             return PatchCheck(APPLIED, note="verified applied (cached)", cached=True)
