@@ -81,3 +81,31 @@ def test_build_is_quiet_when_every_board_file_matches(tmp_path):
     (tmp_path / "boards" / f"{FLAT803}.overlay").write_text("", encoding="utf-8")
     slices = [("zephyr", ["west", "build", "-b", AEN803_HE, "."], str(tmp_path))]
     assert unmatched_board_file_messages(slices, tmp_path) == []
+
+
+V2N_CM33 = "alp_e1m_v2n101_r9a09g056_cm33"
+V2N_BOARD = "alp_e1m_v2n101/r9a09g056/cm33"
+
+
+def test_build_skips_files_for_another_real_board(tmp_path):
+    from tan.core.board_files import all_topology_boards
+
+    sdk = _sdk(tmp_path)
+    som = sdk / "metadata" / "e1m_modules"
+    (som / "E1M-V2N101.yaml").write_text(
+        f"topology:\n  cm33:\n    board: {V2N_BOARD}\n", encoding="utf-8"
+    )
+    known = all_topology_boards(sdk / "metadata")
+    assert {AEN801_HE, AEN803_HE, V2N_BOARD} <= set(known)
+
+    boards = tmp_path / "boards"
+    boards.mkdir()
+    for name in (V2N_CM33, FLAT801, "alp_e1m_aen803_m55_hx_ae822fa0e5597ls0_rtss_he"):
+        (boards / f"{name}.conf").write_text("", encoding="utf-8")
+    slices = [("zephyr", ["west", "build", "-b", AEN803_HE, "."], ".")]
+
+    msgs = unmatched_board_file_messages(slices, tmp_path, known)
+
+    # The V2N and AEN801 files belong to other real boards; only the typo warns.
+    assert len(msgs) == 1, msgs
+    assert "m55_hx" in msgs[0]

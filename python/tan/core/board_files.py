@@ -53,6 +53,16 @@ def topology_boards(metadata_root: Path, sku: str) -> dict[str, str]:
     }
 
 
+def all_topology_boards(metadata_root: Path) -> list[str]:
+    """Every qualified board target any SoM preset declares; `[]` when the
+    metadata is unreadable (the caller then judges by the slices alone)."""
+    try:
+        skus = sorted(p.stem for p in (metadata_root / "e1m_modules").glob("*.yaml"))
+    except OSError:
+        return []
+    return [b for sku in skus for b in topology_boards(metadata_root, sku).values()]
+
+
 def board_file_renames(
     source_boards: Mapping[str, str], target_boards: Mapping[str, str]
 ) -> dict[str, str]:
@@ -95,12 +105,17 @@ def _stem_matches(stem: str, flat: str) -> bool:
 
 
 def unmatched_board_files(
-    project_dirs: Sequence[Path], slice_boards: Iterable[str]
+    project_dirs: Sequence[Path],
+    slice_boards: Iterable[str],
+    known_boards: Iterable[str] = (),
 ) -> list[tuple[Path, str]]:
     """`(file, reason)` for each `boards/alp_e1m_*.{conf,overlay}` under
     `project_dirs` that matches none of `slice_boards`. Empty when no slice
-    names a board (nothing to compare against)."""
+    names a board (nothing to compare against). A file that matches another
+    real board in `known_boards` (another SKU / SoC family / core) belongs to
+    that board, not a misnamed one for this build (tan-cli#1403)."""
     flats = [flat_board(b) for b in slice_boards]
+    others = [flat_board(b) for b in known_boards]
     if not flats:
         return []
     found: list[tuple[Path, str]] = []
@@ -115,8 +130,9 @@ def unmatched_board_files(
             if not m or not m["stem"].startswith(ALP_BOARD_PREFIX) or entry in seen:
                 continue
             seen.add(entry)
-            if not any(_stem_matches(m["stem"], f) for f in flats):
-                found.append((entry, m["stem"]))
+            if any(_stem_matches(m["stem"], f) for f in flats + others):
+                continue
+            found.append((entry, m["stem"]))
     return found
 
 
@@ -149,7 +165,9 @@ def retarget_example_board_files(
 
 
 def unmatched_board_file_messages(
-    slices: Iterable[tuple[str | None, Sequence[str], str | None]], build_root: Path
+    slices: Iterable[tuple[str | None, Sequence[str], str | None]],
+    build_root: Path,
+    known_boards: Iterable[str] = (),
 ) -> list[str]:
     """One advisory per unmatched per-board file across `slices`, each given
     as `(backend, command argv, app_dir)`. Both `app_dir` and its parent are
@@ -170,5 +188,5 @@ def unmatched_board_file_messages(
         f"{path} matches no slice's board ({names}) -- Zephyr will never apply it. "
         f"Rename it to `{flat_board(boards[0])}{path.suffix}` (or the board of the "
         f"slice it belongs to)."
-        for path, _ in unmatched_board_files(dirs, boards)
+        for path, _ in unmatched_board_files(dirs, boards, known_boards)
     ]

@@ -106,7 +106,7 @@ from tan.commands.build.token_substitution import (
 from tan.commands.build.workspace_patches import workspace_patch_issues
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
-from tan.core.board_files import unmatched_board_file_messages
+from tan.core.board_files import all_topology_boards, unmatched_board_file_messages
 from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.board_files import unmatched_board_file_messages
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
@@ -844,9 +844,19 @@ def _dispatch(
                 for sl in plan.slices
             ],
             build_root,
+            _known_boards(sdk_root, build_root),
         )
     )
     return outcomes, issues
+
+
+def _known_boards(sdk_root: str | None, build_root: Path) -> list[str]:
+    """Every board target the SDK's SoM presets declare (tan-cli#1403)."""
+    if not sdk_root:
+        return []
+    root = Path(sdk_root)
+    root = root if root.is_absolute() else build_root / root
+    return all_topology_boards(root / "metadata")
 
 
 #: `os` values the schema requires `cores.<id>.app` to resolve to a real
