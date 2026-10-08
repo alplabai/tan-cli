@@ -35,6 +35,9 @@ CODE_CORE_MISMATCH = "flash.ram-core-mismatch"
 CODE_CORE_UNCONFIRMED = "flash.ram-core-unconfirmed"
 
 #: The RAM console buffer symbol (`CONFIG_RAM_CONSOLE`).
+#: SRAM0's local aperture base on the AEN parts (shared with `core.size`).
+SRAM0_BASE = 0x02000000
+
 CONSOLE_SYMBOL = "ram_console_buf"
 
 #: Largest region one `mem8` command reads (bench-env.sh `bench_mem8_chunks`).
@@ -217,8 +220,8 @@ def apertures_for(core_id: str, banks_kib: Sequence[tuple[str, float]]) -> Apert
     code = [(0x0, itcm), (_ITCM_GLOBAL[token], itcm)]
     data = [(0x20000000, dtcm)]
     if sram0 is not None:
-        code.append((0x02000000, sram0))
-        data.append((0x02000000, sram0))
+        code.append((SRAM0_BASE, sram0))
+        data.append((SRAM0_BASE, sram0))
     return Apertures(tuple(code), tuple(data))
 
 
@@ -227,7 +230,7 @@ def _within(address: int, length: int, spans: Sequence[tuple[int, int]]) -> bool
 
 
 def _plausible_base(base: int) -> bool:
-    return base in (0x0, 0x50000000, 0x58000000) or 0x02000000 <= base < 0x03000000
+    return base in (0x0, 0x50000000, 0x58000000) or SRAM0_BASE <= base < 0x03000000
 
 
 def plan_ram_image(

@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from tan.core.pending import is_pending_placeholder
+from tan.core.ram_run import SRAM0_BASE
 
 #: ELF `sh_flags` bits used to classify a section.
 SHF_WRITE = 0x1
@@ -76,13 +77,6 @@ def parse_berkeley_size(text: str) -> tuple[int, int] | None:
             continue  # header row ("text data bss ...") or noise
         return text_b + data_b, data_b + bss_b
     return None
-
-
-#: SRAM0's local aperture base on the AEN parts -- the same address
-#: `core.ram_run.apertures_for` maps it at. Writable sections linked here (model
-#: arenas staged in SRAM0 under `diagnostics.link: itcm`) are NOT in the core's
-#: DTCM budget (tan-cli#1402).
-SRAM0_BASE = 0x02000000
 
 
 def sizes_from_elf_sections(
@@ -470,6 +464,8 @@ def resolve_budget(
                     notes.append("ram=core tcm_kb (ITCM+DTCM)")
                 break
 
+    # Only SRAM0 (SRAM0_BASE) is excluded from the RAM budget. Limitation:
+    # SRAM1 (0x08000000) placements are still charged against the DTCM budget.
     off_budget: tuple[tuple[int, int], ...] = ()
     if ram_total is not None:
         for name, kib in sram_banks_kb:
