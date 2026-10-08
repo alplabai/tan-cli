@@ -99,6 +99,8 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
+from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
@@ -3009,6 +3011,25 @@ def _flash_entry_body(
                       issue_code="flash.setools-untrusted-source"),
                 lines,
             )
+        # tan-cli#1371: an ELF LOADed below the app's MRAM slot (an ITCM image) is refused
+        # BEFORE anything spawns -- the probe listing, the SETOOLS sign and the write
+        # alike -- whatever the manifest says (stale / hand-edited / direct call). Only the
+        # shapes tan controls are checked (they need `slot0_load_address`); an
+        # operator-supplied ATOC with no slot0 may carry a legitimate ITCM load entry.
+        # Flow A (`west flash`, `alif_flash` runner) is NOT checked: it refuses a bad
+        # reset vector itself and supports images linked at the ITCM global alias.
+        slot0 = slot0_address(flash_args)
+        unlinked = (
+            mram_link_guard(artefact_path, entry_id, slot0=slot0) if slot0 is not None else None
+        )
+        if unlinked is not None:
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+            lines.append(f"  FAIL: {unlinked}")
+            return (
+                1,
+                entry(method, "failed", 1, unlinked, issue_code=CODE_NOT_MRAM_LINKED),
+                lines,
+            )
         # tan-cli#1312: probe selection is the FIRST decision about a Flow D
         # entry -- ahead of the SETOOLS sign, the preflight and the write, and
         # it applies under `--dry-run` too (a preview that would refuse is not
@@ -4297,6 +4318,9 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.mram-image-not-mram-linked":
+                # tan-cli#1371: a literal `Issue(...)` for the static code gate.
+                issues.append(Issue("flash.mram-image-not-mram-linked", "error", entry.message))
             elif entry.issue_code == "flash.ram-image-not-ram-linked":
                 issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-unconfirmed":
