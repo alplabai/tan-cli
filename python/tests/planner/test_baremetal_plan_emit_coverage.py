@@ -370,7 +370,9 @@ def test_a_baremetal_slice_reaches_the_plan_with_configure_then_build(base_dir):
     assert [a["path"] for a in emitted["configArtefacts"]] == [
         f"{build_dir}/alp-baremetal.cmake",
         f"{build_dir}/alp.overlay",
-        f"{build_dir}/cmake-args.txt"]
+        f"{build_dir}/cmake-args.txt",
+        f"{build_dir}/alp_hw_info_build.h",
+        f"{build_dir}/alp-west-libs.yml"]
 
 
 def test_a_baremetal_slice_that_cannot_configure_carries_no_build_step(base_dir):
