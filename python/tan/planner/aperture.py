@@ -129,7 +129,7 @@ def classify_region(
          SoM preset itself (a SoC-level `memory_regions` row, or a row
          `resolve_memory_map`'s derivation branch built from the silicon
          variant). RAM by construction, needs no authority -- these rows
-         are what keep every V2N/V2M/NX9101 derivation byte-identical.
+         are what keep every V2N/V2M derivation byte-identical.
 
       4. `"unclassified"` -- containment did NOT prove flash, and the
          region WAS authored by the SoM preset. Containment is

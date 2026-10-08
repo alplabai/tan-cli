@@ -948,7 +948,29 @@ env:
   #     <030de105d>` was 0/10 against the old tree, solely because the emit now
   #     renders `blob|tree/v0.17.0-rc1/` where it rendered `v0.16.0`; 20 files,
   #     10/10 PASS after.
-  PINNED_SDK_TAG: 030de105d3a106b3c10202854cf57d4e81e78c0f
+  #
+  # `030de105d` -> `6159a7b1a` (tan-cli#1216, alp-sdk#2778): the SAME seven
+  # lockstep sites move together, plus the hand-port pin (its sources changed
+  # this time, see the gate's audit note). `STRICT_LOADERS_PINNED_SDK_COMMIT`
+  # stays at `34c11c9de`. Behavioural upstream commit in range: #2778 (the
+  # build plan's `configArtefacts` tail gains the rendered
+  # `alp_hw_info_build.h` and `alp-west-libs.yml`; `hw-info-unavailable`
+  # warning for a SKU outside the production families), ported into
+  # `buildplan.py`; `planner_emit.py` now routes `--core` hw-info-h /
+  # west-libraries through the same two helpers. #2782/#2781 removed E1M-NX9101
+  # (the `NX9` SKU family, `nxp-imx9` boot default, `imx93` west token,
+  # `pca9451a` chip-subsystem row), mirrored/hand-ported alongside. Re-measured
+  # against `6159a7b1a`:
+  #   - planner oracle: re-captured (see `PINNED_PLANNER_ORACLE_SDK_REF` below).
+  #   - scaffold: RE-VENDORED, one file -- `examples/ai/cold-chain-monitor/src/
+  #     cold_chain.c` (two comment edits) -> `edge-ai/{E1M-AEN801,E1M-V2N101}/
+  #     src/cold_chain.c`; `scaffold_byte_parity.py --sdk <6159a7b1a>` was 8/10
+  #     against the old tree, 10/10 PASS after.
+  #   - seam1: `seam1_field_diff.py --sdk <6159a7b1a>` rc 0, 5/5 PASS with the
+  #     four-tail `_RENDERED_TAILS`. The vacuous `multicore_rpmsg-imx93` case
+  #     (its board was deleted upstream, alp-sdk#2782) left the oracle dir for
+  #     `tests/parity/consumer_fixtures/`.
+  PINNED_SDK_TAG: 6159a7b1a50c3267b98fed17c0e17d084143d22b
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1265,7 +1287,17 @@ env:
   # the plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
   # goldens (the `v0.17.0-rc1` cut, #2763). #2774's console floor is not visible
   # here: the re-captured goldens show no other change, so no example plan is moved by it.
-  PINNED_PLANNER_ORACLE_SDK_REF: 030de105d3a106b3c10202854cf57d4e81e78c0f
+  #
+  # `030de105d` -> `6159a7b1a` (tan-cli#1216; see `PINNED_SDK_TAG`'s matching
+  # paragraph above). Re-captured with `python scripts/capture_planner_oracle.py
+  # --sdk <checkout> --sdk-ref 6159a7b1a50c3267b98fed17c0e17d084143d22b`:
+  # **103 boards, 721 emits** (0 error-contract), 3,046,444 B (was 104 / 728 /
+  # 7 error-contract / 2,540,037). Every changed byte attributed, none left
+  # over: (a) +171 pairs of `alp_hw_info_build.h` / `alp-west-libs.yml`
+  # `configArtefacts` entries across 100 `build-plan.json` goldens (#2778);
+  # (b) the 7 `.error` goldens of `rpmsg-imx93` deleted with the example
+  # (E1M-NX9101 removal, #2781/#2782); the plan's `sdkVersion` is unchanged.
+  PINNED_PLANNER_ORACLE_SDK_REF: 6159a7b1a50c3267b98fed17c0e17d084143d22b
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

@@ -95,7 +95,20 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`030de105d`**
+- **Current vendor point (all templates):** **`6159a7b1a`**
+  (`6159a7b1a50c3267b98fed17c0e17d084143d22b`, alp-sdk `dev`) — the
+  `030de105d` -> `6159a7b1a` planner re-sync (tan-cli#1216; alp-sdk#2778, with
+  the E1M-NX9101 removal #2782 in range), the same change that moves
+  `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
+  `sdk_parity` `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, one
+  file:** `examples/ai/cold-chain-monitor/src/cold_chain.c` (two comment edits)
+  into `edge-ai/E1M-AEN801/src/cold_chain.c` and
+  `edge-ai/E1M-V2N101/src/cold_chain.c`. `scaffold_byte_parity.py --sdk
+  <6159a7b1a>` was 8/10 against the old tree and is rc 0, **10/10** (template,
+  sku) pairs PASS after.
+
+- **Prior vendor point (all templates):** **`030de105d`**
   (`030de105d3a106b3c10202854cf57d4e81e78c0f`, alp-sdk `dev`) — the
   `2d2a85333` -> `030de105d` planner re-sync (tan-cli#1401; alp-sdk#2774, with
   the v0.17.0 release merge #2763 in range), the same change that moves
@@ -622,8 +635,8 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`030de105d`** (alp-sdk `dev`, full sha
-  `030de105d3a106b3c10202854cf57d4e81e78c0f`) — the checkout the emit was RUN
+- Commit: **`6159a7b1a`** (alp-sdk `dev`, full sha
+  `6159a7b1a50c3267b98fed17c0e17d084143d22b`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::

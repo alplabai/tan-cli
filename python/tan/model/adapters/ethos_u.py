@@ -23,7 +23,7 @@ mere absence of an exception -- see `tan.model.check`'s
 THE MEMORY PROFILE (alp-sdk #1470): this adapter passes `--memory-mode` when
 its caller resolved one, and today every caller does -- it is a SILICON fact,
 published per part in the SoC spec's `npu_toolchain.vela.memory_mode`
-(`Sram_Only` on the Alif Ensemble parts, `Shared_Sram` on the NXP i.MX 93) and
+(`Sram_Only` on the Alif Ensemble parts) and
 carried here as `TargetSpec.vela_memory_mode`. It is never guessed: a caller
 that resolved none gets the flagless invocation, byte for byte.
 
@@ -106,7 +106,7 @@ memory mode:
   * `ethos-u85-256` -> `Ethos_U85_SYS_DRAM_Mid` / `Dedicated_Sram_384KB`
     (E1M-AEN401 / E1M-AEN601 / E1M-AEN801, Alif Ensemble E4/E6/E8)
   * `ethos-u65-256` -> `Ethos_U65_Client_Server` / `Dedicated_Sram_384KB`
-    (E1M-NX9101, NXP i.MX 93 -- NOT an Alif part)
+    (a non-Alif part, E1M-NX9101, since removed from alp-sdk)
 
 while every `ethos-u55-*` config (E1M-AEN301/501/701 and the U55 targets of the
 three AEN SKUs above) resolved to the SRAM-backed
@@ -125,18 +125,18 @@ verbatim from `vendors/nxp-imx93/README.md`: `vela --accelerator-config
 ethos-u65-256 --output-dir build/vela-imx93 --memory-mode Shared_Sram
 mobilenet_v2_quantised.tflite`. So on an NXP part that clause sent the reader
 after another vendor's file, which is not what their silicon needs and not
-where their profile comes from. That i.MX 93 line is no longer restated as
-advice for a different reason than it was: `--memory-mode Shared_Sram` is now
-what tan actually PASSES for that part, straight from `imx93.json`'s own
-`npu_toolchain.vela` block, so there is nothing left to advise a reader to do
-by hand.
+where their profile comes from. That i.MX 93 line was not restated as advice
+for a different reason: `--memory-mode Shared_Sram` was what tan PASSED for
+that part, straight from `imx93.json`'s own `npu_toolchain.vela` block (the
+part has since been removed from alp-sdk), so nothing was left to advise a
+reader to do by hand.
 
 BOTH HALVES OF THE REFUSAL'S EVIDENCE NOW COME FROM METADATA, not from prose in
 this file: WHICH vendor file (if any) to name is the SoC spec's own
 `npu_toolchain.vela.vendor_config_filename` (`@vela_vendor_config_filename`),
 and WHY a DRAM placement is wrong here is `@soc_declares_dram`, resolved from
 its `external_memory_interfaces[]` -- `alif:ensemble:e8` lists exactly `HexSPI`
-and `SD/eMMC`, `nxp:imx9:imx93` lists `LPDDR4/4X`. Each is then right for every
+and `SD/eMMC`, `nxp:imx9:imx93` listed `LPDDR4/4X`. Each is then right for every
 part automatically, including one nobody has looked at yet.
 
 Neither is read from `metadata/` HERE: `resolve_targets` already has the SoC
@@ -477,8 +477,8 @@ def _profile_clause(system_config: str | None, memory_mode: str | None,
                     defaulted: frozenset[str]) -> str:
     """The profile THIS run resolved, named as the run itself reported it
     (`_parse_vela_profile`) -- never a hardcoded `Ethos_U85_*`, which would
-    blame an Alif memory model for an `ethos-u65-256` refusal on the NXP
-    E1M-NX9101 (tan-cli#789 review MAJOR 3).
+    blame an Alif memory model for an `ethos-u65-256` refusal on the (since
+    removed) NXP E1M-NX9101 (tan-cli#789 review MAJOR 3).
 
     @defaulted is vela's OWN verdict (`_defaulted_flags` over its stdout), not
     an assumption, and it is per-flag: the blanket "vela's BUILT-IN default
