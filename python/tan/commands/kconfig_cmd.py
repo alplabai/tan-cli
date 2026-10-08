@@ -72,6 +72,7 @@ import typer
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
+from tan.core.link_refusal import refusal_code
 from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
@@ -542,11 +543,15 @@ def _run_kconfig(
             # envelope, never a traceback (mirrors build_cmd._emit_plan's own
             # backstop); includes `OrchestratorError` for an unknown/non-Zephyr
             # `--core`.
+            # tan-cli#1350: a `diagnostics.link: itcm` refusal keeps its own
+            # code and the validation exit, as in `tan build`.
+            link_code = refusal_code(err)
             _fail(
                 root=root,
                 board_path=board_path,
-                exit_code=ExitCode.RUNTIME_FAILURE,
-                code="kconfig.emit-failed",
+                exit_code=(ExitCode.VALIDATION_FAILURE if link_code
+                           else ExitCode.RUNTIME_FAILURE),
+                code=link_code or "kconfig.emit-failed",
                 message=f"the kconfig emit failed: {type(err).__name__}: {err}",
                 core=resolved_core,
                 json_mode=json_mode,

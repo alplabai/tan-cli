@@ -129,6 +129,19 @@ renderers live in `tan.commands.model_zoo_cmd` (this file is over its size
 budget); both need a resolvable SDK (`model.sdk-root-unresolved`, as `build`/
 `check`), and `add` additionally reads `board.yaml` and appends to its
 `models:` with a comment-preserving text splice (`tan.core.board_yaml_edit`).
+
+**`prep` (tan-cli#1287, host tier)** INT8-quantizes an ONNX model against a
+calibration directory and reports the fp32-vs-int8 accuracy delta; it needs the
+optional `model` extra (`tan.core.model_host`) and no SDK, board.yaml or
+hardware. Runner and renderer: `tan.commands.model_host_cmd`.
+
+**`run --device` / `ab --device` (tan-cli#1287, on-device tier)** parse a benchmark
+app's console capture into the same envelope with `tier: device`
+(`tan.commands.model_device_cmd`); live deploy awaits `tan flash --ram`.
+
+**`run` / `ab` (tan-cli#1287, host tier)** time an ONNX model on onnxruntime CPU
+(`backend: cpu-host`) and compare two models -- host references, never SoM
+performance; the on-device tier is bench-gated and not yet ported.
 """
 
 from __future__ import annotations
@@ -153,6 +166,18 @@ from tan.commands.model_zoo_cmd import (
     run_add,
     run_zoo,
     zoo_empty_data,
+)
+from tan.commands.model_device_cmd import run_device_ab, run_device_run
+from tan.commands.model_host_cmd import (
+    ab_empty_data,
+    prep_empty_data,
+    render_ab_text,
+    render_prep_text,
+    render_run_text,
+    run_ab,
+    run_empty_data,
+    run_prep,
+    run_run,
 )
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
@@ -188,7 +213,7 @@ LIST_DATA_SCHEMA_VERSION = "1"
 
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
 #: unknown-subcommand refusal lists them.
-SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add")
+SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add", "prep", "run", "ab")
 
 
 class ModelError(Exception):
@@ -960,15 +985,43 @@ def _run_doctor(
     return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
 
-def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
+def _refuse_stray_arguments(
+    subcommand: str, model_id: str | None, sku: str | None, device_flags: tuple[bool, ...] = ()
+) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
-    if model_id is not None and subcommand != "add":
+    if model_id is not None and subcommand not in ("add", "prep", "run", "ab"):
         raise ModelError(
             "model.unexpected-argument",
-            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` does.",
+            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add`, `prep`, `run` and `ab` do.",
             ExitCode.VALIDATION_FAILURE,
         )
+    if device_flags:
+        device, capture, against_capture, has_input, has_runs = device_flags
+        if (device or capture or against_capture) and subcommand not in ("run", "ab"):
+            raise ModelError(
+                "model.unexpected-argument",
+                f"`tan model {subcommand}` takes no --device/--capture/--against-capture.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if (capture or against_capture) and not device:
+            raise ModelError(
+                "model.unexpected-argument",
+                "--capture/--against-capture need --device.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if against_capture and subcommand != "ab":
+            raise ModelError(
+                "model.unexpected-argument",
+                "--against-capture belongs to `ab --device`.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if device and (has_input or has_runs):
+            raise ModelError(
+                "model.unexpected-argument",
+                "--input and --runs apply to host runs; a device run times what the target ran.",
+                ExitCode.VALIDATION_FAILURE,
+            )
     if sku and subcommand == "add":
         raise ModelError(
             "model.unexpected-argument",
@@ -993,12 +1046,18 @@ def _empty_data(subcommand: str | None) -> dict[str, Any]:
         return zoo_empty_data()
     if subcommand == "add":
         return add_empty_data()
+    if subcommand == "prep":
+        return prep_empty_data()
+    if subcommand == "run":
+        return run_empty_data()
+    if subcommand == "ab":
+        return ab_empty_data()
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
     subcommand: str = typer.Argument(
-        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add."
+        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add | prep | run | ab."
     ),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
@@ -1013,7 +1072,7 @@ def model(
         "board.yaml", "--board", "--board-yaml", metavar="PATH", help="Path to board.yaml."
     ),
     out: str = typer.Option(
-        "build/models", "--out", metavar="PATH", help="Output directory."
+        None, "--out", metavar="PATH", help="Output directory (default build/models; `prep`: build/model-prep)."
     ),
     metadata_root: str = typer.Option(
         None,
@@ -1040,16 +1099,46 @@ def model(
         help="With `zoo`: only entries bench-validated on this SoM SKU. Ignored by the others.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+    calibration: str = typer.Option(
+        None, "--calibration", metavar="DIR", help="With `prep`: directory of .npy calibration samples."
+    ),
+    per_channel: bool = typer.Option(
+        False, "--per-channel", help="With `prep`: per-channel weight quantization."
+    ),
+    min_samples: int = typer.Option(
+        8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
+    ),
+    device: bool = typer.Option(
+        False, "--device", help="With `run`/`ab`: report the on-device tier from a console capture."
+    ),
+    capture: str = typer.Option(
+        None, "--capture", metavar="FILE", help="With `--device`: the target's console capture."
+    ),
+    against_capture: str = typer.Option(
+        None, "--against-capture", metavar="FILE", help="With `ab --device`: B's console capture."
+    ),
+    against: str = typer.Option(
+        None, "--against", metavar="PATH", help="With `ab`: the second .onnx model to compare with."
+    ),
+    runs: int = typer.Option(None, "--runs", metavar="N", help="With host `run`/`ab`: timed inferences per model (default 20)."),
+    input_file: str = typer.Option(
+        None, "--input", metavar="PATH", help="With `run`/`ab`: a .npy input sample (default: seeded random)."
+    ),
     model_id: str = typer.Argument(
-        None, metavar="ID", help="With `add`: the model-zoo entry id (see `zoo`)."
+        None,
+        metavar="ID",
+        help="With `add`: the model-zoo entry id (see `zoo`). With `prep`/`run`/`ab`: the .onnx model file.",
     ),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
     (`build`), report NPU-compiler toolchain availability (`doctor`),
     statically screen a declared model's NPU eligibility (`check`), or list
     what is declared next to what is already built (`list`), list the SDK's model
-    zoo (`zoo`), or add a zoo model to the project (`add <id>`)."""
+    zoo (`zoo`), add a zoo model to the project (`add <id>`), INT8-quantize an
+    ONNX model with an accuracy report (`prep`), or time a host reference
+    run (`run`) / compare two models (`ab`)."""
     json_mode = output_format == "json"
+    out = out or ("build/model-prep" if subcommand == "prep" else "build/models")
 
     def finish(
         project_: Project,
@@ -1118,6 +1207,10 @@ def model(
                     print(line, file=sys.stderr)
             elif subcommand == "add":
                 for line in render_add_text(data):
+                    print(line, file=sys.stderr)
+            elif subcommand in ("prep", "run", "ab"):
+                render = {"prep": render_prep_text, "run": render_run_text, "ab": render_ab_text}
+                for line in render[subcommand](data):
                     print(line, file=sys.stderr)
             elif subcommand == "list":
                 # `list`: checked by SUBCOMMAND, not by `"models" in data` --
@@ -1201,7 +1294,9 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
-        _refuse_stray_arguments(subcommand, model_id, sku)
+        _refuse_stray_arguments(
+            subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None)
+        )
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
                 context=context,
@@ -1213,6 +1308,32 @@ def model(
                 metadata_root=metadata_root,
                 sdk_root=sdk_root,
                 exact=exact,
+            )
+        elif subcommand == "run" and device:
+            project_, sdk, data, issues, exit_code = run_device_run(
+                context=context, source=model_id, capture=capture
+            )
+        elif subcommand == "ab" and device:
+            project_, sdk, data, issues, exit_code = run_device_ab(
+                context=context, source=model_id, against=against, capture=capture,
+                against_capture=against_capture,
+            )
+        elif subcommand == "run":
+            project_, sdk, data, issues, exit_code = run_run(
+                context=context, source=model_id, runs=20 if runs is None else runs, input_file=input_file
+            )
+        elif subcommand == "ab":
+            project_, sdk, data, issues, exit_code = run_ab(
+                context=context, source=model_id, against=against, runs=20 if runs is None else runs, input_file=input_file
+            )
+        elif subcommand == "prep":
+            project_, sdk, data, issues, exit_code = run_prep(
+                context=context,
+                source=model_id,
+                calibration=calibration,
+                out=out,
+                per_channel=per_channel,
+                min_samples=min_samples,
             )
         elif subcommand in ("zoo", "add"):
             resolved = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No zoo was read.")

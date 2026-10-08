@@ -289,6 +289,11 @@ What those commands do:
    `<path>/.venv` and Zephyr `<path>/zephyr`, or if `bootstrap` relocated
    the checkout into `alp-workspace/` because the starting directory held
    something besides the checkout, whose venv is then `alp-workspace/.venv`.
+   `tan build` and `tan doctor` always use the resolved west workspace's
+   `zephyr/`; an `env ZEPHYR_BASE=<other tree>` override is **ignored**. When
+   it names a different tree they say so (`build.zephyr-base-ignored`, info;
+   the `zephyrBase` doctor check). To build against another tree, run `tan`
+   from that workspace.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
@@ -343,6 +348,7 @@ move.
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
 | Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write — see [SETOOLS setup](docs/setools.md)) |
+| Read the attached SW-DP / core, or a few words of memory (read-only J-Link) | `tan probe identify`, `tan probe read 0x80010000 4` (see [`tan probe`](docs/setools.md#tan-probe-read-only-j-link-identity-and-memory-read-tan-cli1406)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |

@@ -53,6 +53,7 @@ from .models import (
     Slice,
     StorageEntry,
 )
+from .ownership import load_ownership_doc, resolve_ownership
 from .partition import _is_ospi_key_unassembled, _known_flash_devices
 from .paths import BOARD_SCHEMA, METADATA_ROOT, REPO
 from .som_metadata import _sku_family, resolve_memory_map
@@ -1479,6 +1480,14 @@ def load_board_yaml(path: Path, *,
     security_block = _validate_cross_fields(
         project, som_preset, sku, storage_entries, metadata_root)
 
+    ownership = resolve_ownership(
+        load_ownership_doc(metadata_root, _sku_family_dir(sku)),
+        project.get("ownership"),
+        declared_core_types=(
+            {str(c.get("type") or "") for c in (soc_spec.get("cores") or [])
+             if c.get("id") in project["cores"]}
+            if project.get("cores") else None))
+
     out = BoardProject(
         sku=sku,
         hw_rev=hw_rev or som_preset.get("default_hw_rev"),
@@ -1497,6 +1506,7 @@ def load_board_yaml(path: Path, *,
         ota=dict(project.get("ota") or {}),
         storage=storage_entries,
         security=security_block,
+        ownership=ownership,
         raw=project,
         metadata_root=metadata_root,   # tan-cli#573: the tree THIS load read
     )
@@ -1505,5 +1515,10 @@ def load_board_yaml(path: Path, *,
     # inspect the fully-assembled project + every per-core
     # extra_libraries: entry the schema couldn't validate cleanly.
     _validate_consistency(out)
+
+    # `diagnostics.link: itcm` is an AEN M55-HE-only knob (tan-cli#1350):
+    # refuse it here so every planner consumer sees the coded error.
+    from .link_target import apply_link_target  # noqa: PLC0415
+    apply_link_target(out)
 
     return out

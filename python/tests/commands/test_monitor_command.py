@@ -155,7 +155,10 @@ def test_a_present_port_spawns_miniterm_and_reports_success(monkeypatch):
     assert doc["ok"] is True
     assert doc["data"] == {"schemaVersion": "1", "port": "COM7", "baud": 9600}
     assert captured["argv"][-2:] == ["COM7", "9600"]
-    assert "serial.tools.miniterm" in captured["argv"]
+    # The spawned console is `python -c <bootstrap>`: tan's `colors` filter is
+    # registered in miniterm's table, then miniterm's own main() runs.
+    assert captured["argv"][1] == "-c" and "serial" in captured["argv"][2]
+    assert captured["argv"][3:5] == ["--filter", "colors"]
     # The interpreter this test runs under is not frozen, so the spawn must
     # use `sys.executable` -- never a bare re-derivation, and never empty.
     assert captured["argv"][0] == sys.executable

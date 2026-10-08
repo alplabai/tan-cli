@@ -21,9 +21,11 @@ import math
 import re
 import struct
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any
 
 from tan.core.pending import is_pending_placeholder
+from tan.core.ram_run import SRAM0_BASE
 
 #: ELF `sh_flags` bits used to classify a section.
 SHF_WRITE = 0x1
@@ -77,7 +79,9 @@ def parse_berkeley_size(text: str) -> tuple[int, int] | None:
     return None
 
 
-def sizes_from_elf_sections(elf_bytes: bytes) -> tuple[int, int] | None:
+def sizes_from_elf_sections(
+    elf_bytes: bytes, off_budget_spans: Sequence[tuple[int, int]] = ()
+) -> tuple[int, int] | None:
     """Sum ELF section sizes into `(flash, ram)` bytes with Berkeley-`size`
     semantics, straight from the section headers -- the middle rung between the
     external size tool and the `rom/ram.json` fallback, so a present elf is
@@ -87,6 +91,11 @@ def sizes_from_elf_sections(elf_bytes: bytes) -> tuple[int, int] | None:
     `.text` + `.rodata` + `.data`, i.e. binutils' `text`+`data` columns.
     RAM = every `SHF_ALLOC | SHF_WRITE` section, NOBITS included: `.data` +
     `.bss` + `.noinit`, i.e. binutils' `data`+`bss` columns.
+
+    *off_budget_spans* (`(base, size)`, tan-cli#1402): a writable section whose
+    `sh_addr` falls inside one is placed in a different region than the RAM
+    budget (e.g. SRAM0 vs the core's DTCM), so it is left out of RAM. FLASH is
+    unchanged -- an initialised `.data` there is still loaded from the image.
 
     `None` -- so the caller falls through to the next rung instead of reporting
     a fake 0-byte size -- when the bytes are not ELF (a PE/Mach-O/wasm container
@@ -105,12 +114,12 @@ def sizes_from_elf_sections(elf_bytes: bytes) -> tuple[int, int] | None:
         e_shoff = struct.unpack_from(endian + "Q", elf_bytes, 0x28)[0]
         e_shentsize, e_shnum = struct.unpack_from(endian + "HH", elf_bytes, 0x3A)
         shdr = endian + "IIQQQQIIQQ"
-        type_at, flags_at, size_at = 1, 2, 5
+        type_at, flags_at, addr_at, size_at = 1, 2, 3, 5
     else:  # ELF32
         e_shoff = struct.unpack_from(endian + "I", elf_bytes, 0x20)[0]
         e_shentsize, e_shnum = struct.unpack_from(endian + "HH", elf_bytes, 0x2E)
         shdr = endian + "IIIIIIIIII"
-        type_at, flags_at, size_at = 1, 2, 5
+        type_at, flags_at, addr_at, size_at = 1, 2, 3, 5
     entry_size = struct.calcsize(shdr)
     if e_shentsize < entry_size or e_shnum == 0:
         return None
@@ -126,9 +135,10 @@ def sizes_from_elf_sections(elf_bytes: bytes) -> tuple[int, int] | None:
     saw_alloc = False
     for index in range(e_shnum):
         fields = struct.unpack_from(shdr, elf_bytes, e_shoff + index * e_shentsize)
-        sh_type, sh_flags, sh_size = (
+        sh_type, sh_flags, sh_addr, sh_size = (
             fields[type_at],
             fields[flags_at],
+            fields[addr_at],
             fields[size_at],
         )
         if not sh_flags & SHF_ALLOC:
@@ -136,7 +146,9 @@ def sizes_from_elf_sections(elf_bytes: bytes) -> tuple[int, int] | None:
         saw_alloc = True
         if sh_type != SHT_NOBITS:
             flash = min(flash + sh_size, _U64_MAX)
-        if sh_flags & SHF_WRITE:
+        if sh_flags & SHF_WRITE and not any(
+            base <= sh_addr < base + span for base, span in off_budget_spans
+        ):
             ram = min(ram + sh_size, _U64_MAX)
     return (flash, ram) if saw_alloc else None
 
@@ -226,6 +238,9 @@ class MemoryBudget:
     flash_total: int | None = None
     ram_total: int | None = None
     note: str | None = None
+    #: `(base, size)` apertures of SRAM banks that are NOT the RAM budget's region
+    #: (tan-cli#1402); a section linked inside one is not counted against it.
+    ram_off_budget_spans: tuple[tuple[int, int], ...] = ()
 
 
 def budget_note_only(note: str) -> MemoryBudget:
@@ -394,6 +409,8 @@ def slot0_bytes_for_core(
     return None
 
 
+# Only SRAM0 (SRAM0_BASE) is excluded from the RAM budget. Limitation: SRAM1
+# (0x08000000) placements are still charged against the DTCM budget.
 def resolve_budget(
     core_id: str,
     mram_mb: float | None,
@@ -449,7 +466,13 @@ def resolve_budget(
                     notes.append("ram=core tcm_kb (ITCM+DTCM)")
                 break
 
-    return MemoryBudget(flash_total, ram_total, "; ".join(notes) or None)
+    off_budget: tuple[tuple[int, int], ...] = ()
+    if ram_total is not None:
+        for name, kib in sram_banks_kb:
+            if name.upper() == "SRAM0":
+                off_budget = ((SRAM0_BASE, _kib_to_bytes(kib)),)
+                break
+    return MemoryBudget(flash_total, ram_total, "; ".join(notes) or None, off_budget)
 
 
 @dataclass

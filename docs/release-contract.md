@@ -612,19 +612,53 @@ all `schema_version: 1`. No alp-sdk tag contains `34c11c9de` yet, as of
 2026-10-03 (`git tag --contains 34c11c9de` is empty; the newest release is
 `v0.16.0`).
 
+**Addendum (2026-10-07, tan-cli#1309).** The planner mirror moved past
+`34c11c9de` to alp-sdk `ac0e2a5e096a1c8c102818650a688d0f7e709066`
+(`34c11c9de` is an ancestor) along the same seven pin sites;
+`STRICT_LOADERS_PINNED_SDK_COMMIT` stays at `34c11c9de`, because
+`scripts/strict_loaders.py` did not change in that range. `ac0e2a5e0` is now
+the floor the next tag needs, superseding `34c11c9de`. It adds two more hard
+requirements on top of the ones above: `tan new-som` scaffolds the som-preset
+`inference.auto_order` field (alp-sdk#2677), which the som-preset v2 schema
+before that change rejects; and `tan generate --target zephyr-board` for a
+V2N/V2M `m33_sm` core reads the CM33 `watchdog` block from the SoC spec
+(alp-sdk#2679), refusing an SDK whose spec has none. No alp-sdk tag
+contains `ac0e2a5e0` yet, as of 2026-10-07 (the newest release is still
+`v0.16.0`).
+
+**Addendum (2026-10-07, tan-cli#1216).** The planner mirror moved past
+`ac0e2a5e0` to alp-sdk `2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`
+(`ac0e2a5e0` is an ancestor) along the same seven pin sites, with the
+hand-port pin moving too (`gen_zephyr_board.py` re-audited and ported);
+`STRICT_LOADERS_PINNED_SDK_COMMIT` stays at `34c11c9de`. The floor the next
+tag needs becomes `b04bb0f7a`
+(`b04bb0f7a0edf6af759053311ba66eda0158968b`, alp-sdk#2685), NOT `2d2a85333`: that is the one commit in the range
+that adds a hard requirement. `tan generate --target zephyr-board` for a
+V2N/V2M `m33_sm` core now reads the SoC spec's `openamp_carveout` block
+(OpenAMP window, RAM console) and refuses an SDK whose spec has none. The
+rest of the range is optional for an older SDK: the plan's `alp.overlay` /
+`cmake-args.txt` artefacts (alp-sdk#2771) are rendered by tan's own planner,
+the sci0 pull-up and `supported:` list (alp-sdk#2747) are template text, the
+ATTN TINT route (alp-sdk#2710) is read only when the pads block sets
+`tint_slot`, and `diagnostics.link: itcm` (alp-sdk#2762) is implemented by tan
+itself, so the upstream refusal is deliberately not taken. No alp-sdk tag
+contains `b04bb0f7a` yet, as of 2026-10-07 (the newest release is still
+`v0.16.0`).
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
-contains `34c11c9de` (superseding the `20fec7a7` floor this decision
-originally named, via the interim `81a9d515` and `c81cb5db` floors -- see
-the addenda above, tan-cli#1268, tan-cli#1275 then tan-cli#1278;
+contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision
+originally named, via the interim `81a9d515`, `c81cb5db` and `34c11c9de`
+floors -- see the addenda above, tan-cli#1268, tan-cli#1275, tan-cli#1278,
+tan-cli#1309 then tan-cli#1216;
 alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
 any other row. (The renumbering addendum below moves this release's name
 from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
 Done when:
 
 - every row above reads **YES** and names that tag, and that tag contains
-  `34c11c9de` (so its `metadata/e1m_modules/*.yaml` presets are
-  `schema_version: 2`);
+  `b04bb0f7a` (so its `metadata/e1m_modules/*.yaml` presets are
+  `schema_version: 2` with `inference.auto_order`);
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
