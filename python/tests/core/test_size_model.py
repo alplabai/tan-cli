@@ -35,11 +35,12 @@ from tan.core.size import (
 
 
 def make_elf(
-    *, text=100, rodata=20, data=40, bss=200, cls=2, little=True, corrupt_size=None
+    *, text=100, rodata=20, data=40, bss=200, cls=2, little=True, corrupt_size=None,
+    data_addr=0, bss_addr=0,
 ) -> bytes:
     """A minimal ELF with the four allocated sections binutils' Berkeley columns
     sum. `cls=1` gives ELF32, `little=False` big-endian, `corrupt_size` patches
-    every allocated section's `sh_size`."""
+    every allocated section's `sh_size`; `data_addr`/`bss_addr` set `sh_addr`."""
     endian = "<" if little else ">"
     alloc, write, execinstr = 0x2, 0x1, 0x4
     secs = [
@@ -86,7 +87,8 @@ def make_elf(
     for name, typ, flags, size, off in placed:
         if corrupt_size is not None and flags & alloc:
             size = corrupt_size
-        table += struct.pack(fmt, offs[name], typ, flags, 0, off, size, 0, 0, 1, 0)
+        addr = {".data": data_addr, ".bss": bss_addr}.get(name, 0)
+        table += struct.pack(fmt, offs[name], typ, flags, addr, off, size, 0, 0, 1, 0)
     return header + body + table
 
 
@@ -120,6 +122,23 @@ def test_parse_berkeley_size_accepts_a_leading_plus_like_rust_does():
 
 
 # ------------------------------------------------------------- elf sections
+
+
+def test_sram0_placed_sections_do_not_count_against_the_dtcm_ram_budget():
+    # tan-cli#1402: under `diagnostics.link: itcm` the model arena (.bss) sits in
+    # SRAM0 while .data stays in DTCM; only the DTCM part is the 256 KB budget.
+    elf = make_elf(data=40, bss=200, data_addr=0x20000000, bss_addr=0x02000100)
+    sram0 = ((0x02000000, 4 * 1024 * 1024),)
+    assert sizes_from_elf_sections(elf) == (160, 240)
+    assert sizes_from_elf_sections(elf, sram0) == (160, 40)
+
+
+def test_resolve_budget_reports_sram0_as_an_off_budget_span():
+    banks = [("SRAM3_M55_HE_DTCM", 256.0), ("SRAM0", 4096.0)]
+    budget = resolve_budget("M55_HE", None, None, banks, [])
+    assert budget.ram_total == 256 * 1024
+    assert budget.ram_off_budget_spans == ((0x02000000, 4096 * 1024),)
+    assert resolve_budget("M55_HE", None, None, banks[:1], []).ram_off_budget_spans == ()
 
 
 def test_sizes_from_elf_sections_sums_the_berkeley_columns():
@@ -561,3 +580,17 @@ def test_slot0_does_not_disturb_the_ram_half():
     assert budget.flash_total == 2_752_512
     assert budget.ram_total == 1_048_576
     assert budget.note is None
+
+
+def test_extract_sizes_subtracts_sram0_ram_from_the_size_tool_column(tmp_path, monkeypatch):
+    # tan-cli#1402: the size tool lumps SRAM0 into `bss`; the corrected RAM is
+    # what the section table places outside the off-budget span.
+    from tan.commands import size_cmd
+
+    elf = tmp_path / "zephyr.elf"
+    elf.write_bytes(make_elf(data=40, bss=200, data_addr=0x20000000, bss_addr=0x02000100))
+    monkeypatch.setattr(size_cmd, "_sizes_from_size_tool", lambda _b, _e: (160, 240))
+    sram0 = ((0x02000000, 4 * 1024 * 1024),)
+    got, source, _ = size_cmd._extract_sizes([str(elf)], [], "size", sram0)
+    assert got == (160, 40) and source == "size-tool"
+    assert size_cmd._extract_sizes([str(elf)], [], "size")[0] == (160, 240)
