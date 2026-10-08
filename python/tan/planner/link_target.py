@@ -135,8 +135,19 @@ def apply_link_target(project: BoardProject) -> None:
             sl.link_target = "itcm"
 
 
-def itcm_conf() -> str:
-    """Kconfig half of the retarget (+ the bench-proven RAM-run settings)."""
+#: Floor for the Flow C RAM-console buffer (bytes).
+ITCM_RAM_CONSOLE_MIN_SIZE = 16384
+
+
+def itcm_conf(app_ram_console_size: int = 0) -> str:
+    """Kconfig half of the retarget (+ the bench-proven RAM-run settings).
+
+    `app_ram_console_size` is the `CONFIG_RAM_CONSOLE_BUFFER_SIZE` the app's own
+    `prj.conf` sets (0 when none): this conf is layered AFTER it, so a bare
+    16384 would shrink a larger app-set buffer and wrap its console
+    (tan-cli#1401). The size is max(16384, app value).
+    """
+    size = max(ITCM_RAM_CONSOLE_MIN_SIZE, app_ram_console_size)
     return (
         "# Flow C (AEN M55-HE ITCM RAM-run) link retarget -- board.yaml\n"
         "# `diagnostics.link: itcm`.  NOT for an image you will flash to MRAM:\n"
@@ -152,7 +163,7 @@ def itcm_conf() -> str:
         "CONFIG_DCACHE=n\n"
         "# ram_console_out() WRAPS: a buffer smaller than the app's output\n"
         "# reads back as two interleaved points in the run.\n"
-        "CONFIG_RAM_CONSOLE_BUFFER_SIZE=16384\n"
+        f"CONFIG_RAM_CONSOLE_BUFFER_SIZE={size}\n"
     )
 
 
@@ -185,4 +196,8 @@ def extra_config_artefacts(project: BoardProject,
     """
     if not applies_to(project.diagnostics, slice_):
         return []
-    return [(CONF_NAME, itcm_conf()), (OVERLAY_NAME, itcm_overlay())]
+    # Lazy: kconfig imports this module (the shared reader of the app's prj.conf).
+    from .kconfig import _app_ram_console_size  # noqa: PLC0415
+
+    return [(CONF_NAME, itcm_conf(_app_ram_console_size(project, slice_))),
+            (OVERLAY_NAME, itcm_overlay())]

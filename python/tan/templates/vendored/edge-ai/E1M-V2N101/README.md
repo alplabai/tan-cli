@@ -62,13 +62,13 @@ it. Pick either via
      models/ is a child of this dir, not a sibling -- don't "fix" this. -->
 
 No model is shipped (stub + deterministic classifier/fallback). See
-[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md) for the
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/ai/cold-chain-monitor/models/README.md) for the
 autoencoder training recipe.
 
 ## Tests
 
 In the alp-sdk tree, unit tests live in
-[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/tests/unit/cold_chain) and run with:
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain
