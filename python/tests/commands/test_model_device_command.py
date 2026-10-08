@@ -69,9 +69,9 @@ def test_ab_device_compares_two_captures(tmp_path):
     assert doc["data"]["a"]["tier"] == doc["data"]["b"]["tier"] == "device"
 
 
-def test_without_a_capture_or_live_flow_is_a_coded_refusal(tmp_path):
+def test_without_a_capture_a_project_without_a_manifest_is_a_coded_refusal(tmp_path):
     code, doc = invoke("run", "--device", "--project", str(proj(tmp_path)))
-    assert code == 2 and doc["issues"][0]["code"] == "model.device-flow-unavailable"
+    assert code == 2 and doc["issues"][0]["code"] == "model.device-no-project"
     assert doc["data"]["result"] is None
 
 
@@ -103,7 +103,7 @@ def test_a_live_flow_is_used_when_no_capture_is_given(tmp_path, monkeypatch):
     p = proj(tmp_path)
     seen = []
 
-    def flow(context, label):
+    def flow(context, label, live):
         seen.append(label)
         return capture()
 

@@ -11,12 +11,11 @@ monitor paths, so they enter through ONE seam, `LIVE_FLOW`:
 * `--capture FILE` ingests a console capture taken by whoever ran the board
   (the bench's `ram-run.sh`, `tan monitor`, a `ram_console_buf` dump). It needs
   no hardware, no extra and no onnxruntime -- parsing is stdlib.
-* Without `--capture`, `--device` calls `LIVE_FLOW(...)` -- a callable that
-  deploys the app and returns the console text. It is `None` until the
-  `tan flash --ram` / monitor-capture work (tan-cli#1313) provides one, and
-  `--device` then refuses with `model.device-flow-unavailable` rather than
-  pretending. `capture_via` composes any deploy/read pair with the same coded
-  failures and is what the hermetic tests drive with stubs.
+* Without `--capture`, `--device` calls `LIVE_FLOW(...)`, which RAM-runs the
+  already-built `diagnostics.link: itcm` project through `tan flash --ram`'s own
+  Flow C and returns the RAM console (`tan.commands.model_device_live`); the row
+  then carries `source: live`. `capture_via` composes any deploy/read pair with
+  the same coded failures.
 
 powerMj is always `null` on this tier (energy is reported in `energy`, with its
 scope label, from usable active+idle sample pairs only). peakSramKib is
@@ -33,7 +32,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from tan.commands.build_output import ProjectContext
+from tan.commands.build_output import ProjectContext, resolve_project_context
+from tan.commands.model_device_live import LiveOptions, live_console
 from tan.commands.model_host_cmd import (
     ab_empty_data,
     resolve_model_path,
@@ -54,9 +54,10 @@ Result = tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]
 #: ceiling; this only stops a wrong file being slurped).
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 
-#: `(context, model_label) -> console text | Issue`. Set by the flash/monitor
-#: integration once it exists; `None` means "no live path in this build".
-LIVE_FLOW: Callable[[ProjectContext, str | None], str | Issue] | None = None
+#: `(context, model_label, options) -> console text | Issue`: RAM-run the project
+#: through Flow C and return its console (`model_device_live.live_console`). A seam
+#: so a test can substitute a deploy that needs no probe.
+LIVE_FLOW: Callable[[ProjectContext, str | None, LiveOptions], str | Issue] = live_console
 
 
 def capture_via(
@@ -92,22 +93,14 @@ def _read_capture(context: ProjectContext, raw: str, role: str) -> str | Issue:
 
 
 def _console_for(
-    context: ProjectContext, capture: str | None, label: str | None, role: str, flag: str
+    context: ProjectContext, capture: str | None, label: str | None, role: str, live: LiveOptions
 ) -> str | Issue:
     if capture:
         return _read_capture(context, capture, role)
-    if LIVE_FLOW is None:
-        return Issue(
-            "model.device-flow-unavailable",
-            "error",
-            f"`--device` needs a console capture for {role} ({flag} FILE from the bench run); live "
-            "deploy-and-capture (`tan flash --ram` + monitor capture, tan-cli#1313) is not "
-            "available in this build.",
-        )
-    return LIVE_FLOW(context, label)
+    return LIVE_FLOW(context, label, live)
 
 
-def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
+def _row(label: str | None, text: str, live: bool = False) -> tuple[dict, Any] | Issue:
     """The `result` row for one console capture, or the `model.device-capture-invalid` refusal."""
     try:
         result, energy, diag = run_result_from_capture(parse_console(text))
@@ -120,7 +113,9 @@ def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
             size = os.stat(label).st_size
         except OSError:
             size = None
+    extra = {"source": "live"} if live else {}
     return {
+        **extra,
         "model": label or diag.get("model"),
         "backend": result.backend,
         "tier": "device",
@@ -172,7 +167,9 @@ def _device_label(context: ProjectContext, source: str | None) -> str | None | I
     return resolved if isinstance(resolved, Issue) else resolved.as_posix()
 
 
-def run_device_run(*, context: ProjectContext, source: str | None, capture: str | None) -> Result:
+def run_device_run(
+    *, context: ProjectContext, source: str | None, capture: str | None, live: LiveOptions | None = None
+) -> Result:
     project, sdk = context.project(), context.sdk
     data = run_empty_data()
 
@@ -182,10 +179,11 @@ def run_device_run(*, context: ProjectContext, source: str | None, capture: str 
     label = _device_label(context, source)
     if isinstance(label, Issue):
         return refuse(label)
-    text = _console_for(context, capture, label, "the run", "--capture")
+    live = live or LiveOptions()
+    text = _console_for(context, capture, label, "the run", live)
     if isinstance(text, Issue):
         return refuse(text)
-    built = _row(label, text)
+    built = _row(label, text, live=not capture)
     if isinstance(built, Issue):
         return refuse(built)
     row, _ = built
@@ -201,20 +199,32 @@ def run_device_ab(
     against: str | None,
     capture: str | None,
     against_capture: str | None,
+    live: LiveOptions | None = None,
 ) -> Result:
     project, sdk = context.project(), context.sdk
     data = ab_empty_data()
     rows: list[tuple[dict, Any]] = []
     issues: list[Issue] = []
-    for role, raw, cap in (("A", source, capture), ("B", against, against_capture)):
-        label = _device_label(context, raw)
+    live = live or LiveOptions()
+    context_b = context
+    if not against_capture and live.against_project:
+        context_b = resolve_project_context(live.against_project, None, live.sdk_root)
+    if not against_capture and context_b is context:
+        return project, sdk, data, [Issue(
+            "model.device-live-needs-two-projects", "error",
+            "`ab --device` without --against-capture runs each project in turn: pass the second "
+            "project with --against-project (nothing was run).",
+        )], ExitCode.VALIDATION_FAILURE
+    for role, raw, cap, ctx in (
+        ("A", source, capture, context), ("B", against, against_capture, context_b)
+    ):
+        label = _device_label(ctx, raw)
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
-        flag = "--capture" if role == "A" else "--against-capture"
-        text = _console_for(context, cap, label, f"model {role}", flag)
+        text = _console_for(ctx, cap, label, f"model {role}", live)
         if isinstance(text, Issue):
             return project, sdk, data, [text], ExitCode.VALIDATION_FAILURE
-        built = _row(label, text)
+        built = _row(label, text, live=not cap)
         if isinstance(built, Issue):
             return project, sdk, data, [built], ExitCode.VALIDATION_FAILURE
         rows.append(built)

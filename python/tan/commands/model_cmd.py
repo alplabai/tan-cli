@@ -136,8 +136,11 @@ optional `model` extra (`tan.core.model_host`) and no SDK, board.yaml or
 hardware. Runner and renderer: `tan.commands.model_host_cmd`.
 
 **`run --device` / `ab --device` (tan-cli#1287, on-device tier)** parse a benchmark
-app's console capture into the same envelope with `tier: device`
-(`tan.commands.model_device_cmd`); live deploy awaits `tan flash --ram`.
+app's console into the same envelope with `tier: device`
+(`tan.commands.model_device_cmd`): from `--capture FILE`, or live -- without
+`--capture` the already-built `diagnostics.link: itcm` project is RAM-run through
+`tan flash --ram`'s Flow C (`--confirm`, never MRAM) and its `ram_console_buf`
+parsed (`tan.commands.model_device_live`, rows carry `source: live`).
 
 **`run` / `ab` (tan-cli#1287, host tier)** time an ONNX model on onnxruntime CPU
 (`backend: cpu-host`) and compare two models -- host references, never SoM
@@ -168,6 +171,7 @@ from tan.commands.model_zoo_cmd import (
     zoo_empty_data,
 )
 from tan.commands.model_device_cmd import run_device_ab, run_device_run
+from tan.commands.model_device_live import LiveOptions
 from tan.commands.model_host_cmd import (
     ab_empty_data,
     prep_empty_data,
@@ -986,7 +990,11 @@ def _run_doctor(
 
 
 def _refuse_stray_arguments(
-    subcommand: str, model_id: str | None, sku: str | None, device_flags: tuple[bool, ...] = ()
+    subcommand: str,
+    model_id: str | None,
+    sku: str | None,
+    device_flags: tuple[bool, ...] = (),
+    live: LiveOptions | None = None,
 ) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
@@ -1014,6 +1022,13 @@ def _refuse_stray_arguments(
             raise ModelError(
                 "model.unexpected-argument",
                 "--against-capture belongs to `ab --device`.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if live is not None and live.any_set() and not (device and not (capture or against_capture)):
+            raise ModelError(
+                "model.unexpected-argument",
+                "--core/--wait/--confirm/--probe-*/--jlink/--against-project apply to a live "
+                "`run`/`ab --device` (no --capture).",
                 ExitCode.VALIDATION_FAILURE,
             )
         if device and (has_input or has_runs):
@@ -1109,7 +1124,29 @@ def model(
         8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
     ),
     device: bool = typer.Option(
-        False, "--device", help="With `run`/`ab`: report the on-device tier from a console capture."
+        False,
+        "--device",
+        help="With `run`/`ab`: report the on-device tier, from --capture FILE or live (RAM-run the "
+        "built diagnostics.link: itcm project, needs --confirm).",
+    ),
+    core: str = typer.Option(
+        "m55_he", "--core", metavar="CORE_ID", help="With live `--device`: the ITCM-linked slice to RAM-run."
+    ),
+    wait: float = typer.Option(
+        1.5, "--wait", metavar="SECONDS", min=0.0, max=3600.0,
+        help="With live `--device`: seconds the image runs before the RAM console is read.",
+    ),
+    confirm: bool = typer.Option(
+        False, "--confirm",
+        help="With live `--device`: arm the RAM-run (resets the whole device; never writes MRAM).",
+    ),
+    probe_serial: str = typer.Option(None, "--probe-serial", metavar="SN", help="With live `--device`: J-Link serial."),
+    probe_usb_path: str = typer.Option(
+        None, "--probe-usb-path", metavar="BUS-PORT", help="With live `--device`: J-Link USB port path (e.g. 3-4.2)."
+    ),
+    jlink: str = typer.Option(None, "--jlink", metavar="PATH", help="With live `--device`: J-Link Commander binary."),
+    against_project: str = typer.Option(
+        None, "--against-project", metavar="PATH", help="With live `ab --device`: B's project root (A is --project)."
     ),
     capture: str = typer.Option(
         None, "--capture", metavar="FILE", help="With `--device`: the target's console capture."
@@ -1294,8 +1331,19 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
+        live = LiveOptions(
+            core=core if isinstance(core, str) else "m55_he",
+            wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
+            confirm=confirm is True,
+            probe_serial=probe_serial if isinstance(probe_serial, str) else None,
+            probe_usb_path=probe_usb_path if isinstance(probe_usb_path, str) else None,
+            jlink=jlink if isinstance(jlink, str) else None,
+            sdk_root=sdk_root,
+            against_project=against_project if isinstance(against_project, str) else None,
+        )
         _refuse_stray_arguments(
-            subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None)
+            subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None),
+            live,
         )
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
@@ -1311,12 +1359,12 @@ def model(
             )
         elif subcommand == "run" and device:
             project_, sdk, data, issues, exit_code = run_device_run(
-                context=context, source=model_id, capture=capture
+                context=context, source=model_id, capture=capture, live=live
             )
         elif subcommand == "ab" and device:
             project_, sdk, data, issues, exit_code = run_device_ab(
                 context=context, source=model_id, against=against, capture=capture,
-                against_capture=against_capture,
+                against_capture=against_capture, live=live,
             )
         elif subcommand == "run":
             project_, sdk, data, issues, exit_code = run_run(
