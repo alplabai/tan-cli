@@ -21,7 +21,7 @@ import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
@@ -287,6 +287,29 @@ def _slice_cmake_args_artefact(
     return (CMAKE_ARGS_ARTEFACT, _slice_cmake_args(project, slice_))
 
 
+#: Every shared generated artefact: `(path under the build root, emitter,
+#: conditional)`.  ONE call site per artefact: `_shared_artefacts` (the plan)
+#: and `_shared_artefact` (the standalone `--emit`) both run the emitter from
+#: THIS table, and the latter runs only the one it was asked for, so one
+#: emitter's refusal (e.g. `emit_sysbuild_conf` on an unsupported `boot:`)
+#: cannot leak into another mode (tan-cli#1216, ADR-0026 §D).
+#:
+#: `<alp/system_ipc.h>` is the canonical include path consumers use (see
+#: include/alp/rpc.h §usage and the per-slice main.c references) -- it sits in
+#: an `alp/` subdir so slice CMakeLists add `generated/` straight to the
+#: include path.  Apps that don't declare storage[] still get a stub
+#: `dts-partitions.dtsi` so downstream #include resolves.  Conditional
+#: artefacts (sysbuild / TF-M) follow absence-emits-nothing: they only appear
+#: when their emit is non-empty.
+_SHARED_EMITTERS: tuple[tuple[str, Callable[[BoardProject], str], bool], ...] = (
+    ("generated/alp/system_ipc.h", emit_ipc_contract_h, False),
+    ("generated/dts-reservations.dtsi", emit_dts_reservations, False),
+    ("generated/dts-partitions.dtsi", emit_dts_partitions, False),
+    ("alp_sysbuild.conf", emit_sysbuild_conf, True),
+    ("sysbuild/tfm/tfm.conf", emit_tfm_sysbuild_conf, True),
+)
+
+
 def _shared_artefacts(
     project: BoardProject,
     build_root: Path,
@@ -295,44 +318,39 @@ def _shared_artefacts(
 
     Single source for `_materialise_shared` and `emit_build_plan`
     (same byte-parity contract as `_slice_config_artefact`).
-    Conditional artefacts (sysbuild / TF-M) follow absence-emits-
-    nothing: they only appear when their emit is non-empty.
     """
     build_root = Path(build_root)
-    gen = build_root / "generated"
-    out: list[tuple[Path, str]] = [
-        # `<alp/system_ipc.h>` is the canonical include path consumers
-        # use (see include/alp/rpc.h §usage and the per-slice main.c
-        # references) -- the header sits in an `alp/` subdir so slice
-        # CMakeLists add `generated/` straight to the include path.
-        (gen / "alp" / "system_ipc.h", emit_ipc_contract_h(project)),
-        (gen / "dts-reservations.dtsi", emit_dts_reservations(project)),
-        # Apps that don't declare storage[] still get a stub file with
-        # a "nothing to emit" comment so downstream #include resolves.
-        (gen / "dts-partitions.dtsi", emit_dts_partitions(project)),
-    ]
-    sysbuild_conf = emit_sysbuild_conf(project)
-    if sysbuild_conf:
-        out.append((build_root / "alp_sysbuild.conf", sysbuild_conf))
-    tfm_conf = emit_tfm_sysbuild_conf(project)
-    if tfm_conf:
-        out.append((build_root / "sysbuild" / "tfm" / "tfm.conf",
-                    tfm_conf))
+    out: list[tuple[Path, str]] = []
+    for rel, emitter, conditional in _SHARED_EMITTERS:
+        contents = emitter(project)
+        if conditional and not contents:
+            continue
+        out.append((build_root.joinpath(*rel.split("/")), contents))
     return out
 
 
-def _shared_tfm_conf(project: BoardProject) -> str:
-    """The `sysbuild/tfm/tfm.conf` contents `_shared_artefacts` carries, or
-    "" when the project has none (absence-emits-nothing).
+def _shared_artefact(project: BoardProject, name: str) -> str:
+    """Contents of the shared artefact at `name` (its full path under the build
+    root, e.g. `generated/dts-partitions.dtsi`), running ONLY that artefact's
+    emitter.  The standalone `--emit` modes render through this, so they and
+    the plan's `sharedArtefacts[].contents` share one call site per artefact.
 
-    `--emit tfm-sysbuild-conf` renders through this, so the standalone emit
-    and the plan's `sharedArtefacts[].contents` come from one call site
-    (tan-cli#1216, ADR-0026 §D).
+    The unconditional artefacts always exist; an unknown `name` raises.  A
+    conditional one (sysbuild / TF-M) yields "" when its emit is empty.
     """
-    for path, contents in _shared_artefacts(project, Path("build")):
-        if path.parts[-3:] == ("sysbuild", "tfm", "tfm.conf"):
-            return contents
-    return ""
+    matches = [(emitter, conditional) for rel, emitter, conditional
+               in _SHARED_EMITTERS if rel == name]
+    if len(matches) != 1:
+        raise OrchestratorError(
+            f"no unique shared artefact '{name}' ({len(matches)} matches)")
+    emitter, _conditional = matches[0]
+    return emitter(project)
+
+
+def _shared_tfm_conf(project: BoardProject) -> str:
+    """The `sysbuild/tfm/tfm.conf` contents, or "" when the project has none
+    (absence-emits-nothing).  Runs only the TF-M emitter (tan-cli#1216)."""
+    return _shared_artefact(project, "sysbuild/tfm/tfm.conf")
 
 
 def _slice_toolchain(slice_: Slice) -> dict[str, Optional[str]]:

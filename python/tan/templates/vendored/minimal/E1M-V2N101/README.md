@@ -16,9 +16,9 @@ If `[hello] tick 0` doesn't appear, the suspect list is short:
     on the wrong UART, wrong baud rate, or wrong USB enumeration.
 
 Pin down which one BEFORE moving on to alp-sdk's
-[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/gpio-button-led)
+[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/gpio-button-led)
 or
-[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)
+[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner)
 -- neither is part of this scaffolded project.
 
 ## What this shows
@@ -65,7 +65,7 @@ tio -b 115200 <your-serial-device>
 
 Per-OS device naming (and the alternative terminals each OS
 prefers) is documented in
-[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
+[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cross-platform-setup.md)
 section 7.7.
 
 <!-- cross-platform-lint:ignore -->
@@ -100,9 +100,9 @@ LPT)").
 
 ## Reference
 
-- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/firmware-quickstart.md)
+- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/firmware-quickstart.md)
   -- single-OS bring-up walk-through.
-- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
+- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cross-platform-setup.md)
   -- Windows/macOS/Linux toolchain + serial-port notes.
-- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/troubleshooting.md)
   -- common boot/flash/console failures + fixes.

@@ -645,6 +645,16 @@ itself, so the upstream refusal is deliberately not taken. No alp-sdk tag
 contains `b04bb0f7a` yet, as of 2026-10-07 (the newest release is still
 `v0.16.0`).
 
+**Addendum (2026-10-08, tan-cli#1401).** The planner mirror moved to alp-sdk
+`030de105d3a106b3c10202854cf57d4e81e78c0f`, and the floor the next tag needs
+does NOT move: it stays `b04bb0f7a`. The only planner change in range is
+alp-sdk#2774 (the RAM-console size floor, `BoardProject.source_dir`), which tan's
+own in-process planner computes itself, so no tan code path requires an SDK
+that carries it. What did change is that alp-sdk cut the pre-release tag
+`v0.17.0-rc1` (it contains `b04bb0f7a`, so the `git tag --contains` claim in the
+addendum above no longer holds); the decision below still waits for a STABLE
+tag, so it is unchanged.
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
 contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision

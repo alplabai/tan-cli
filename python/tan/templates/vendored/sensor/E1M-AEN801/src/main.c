@@ -7,7 +7,7 @@
  *
  * Pattern: open the bus, init the chip driver, loop reading the
  * register every second, close cleanly.  Contrasts with
- * https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner which probes every 7-bit address for ACKs
+ * https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner which probes every 7-bit address for ACKs
  * without knowing what's behind them.
  *
  * Hardware: the BMP581 barometer sits on BOARD_I2C_SENSORS on every
@@ -16,7 +16,7 @@
  * metadata/boards/e1m-x-evk.yaml (not part of this scaffolded
  * project) `i2c_devices:`.  On a brand-new
  * bring-up you may want to build and run the alp-sdk repo's
- * https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner example first to confirm which
+ * https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner example first to confirm which
  * address ACKs -- it isn't part of this scaffolded project.
  *
  * (#1269: this example used to target the TMP112 temperature
@@ -25,7 +25,7 @@
  * hardware.  BRD_I2C is a separate controller instance regardless
  * (on the E1M-AEN family it is SoC I2C0, function C -- #1848), so
  * simply repointing the bus_id would still not reach a TMP112 there; see
- * https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112
+ * https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112
  * pattern.)
  *
  * What success looks like (real hardware):
@@ -110,7 +110,7 @@ int main(void)
      * (NACK on probe) up-front.  If init fails the example exits
      * cleanly -- maybe the chip isn't populated, maybe the address
      * is wrong, maybe the bus is held low by another device.
-     * https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner can confirm which devices ACK. */
+     * https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner can confirm which devices ACK. */
 	bmp581_t     sensor;
 	alp_status_t s = bmp581_init(&sensor, bus, BMP581_ADDR_7BIT);
 	if (s != ALP_OK) {
@@ -120,7 +120,7 @@ int main(void)
          *                     (the bus floats high without them).
          *   * ALP_ERR_INVAL -- bad argument (NULL ctx or NULL bus).
          *
-         * Use the alp-sdk repo's https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner
+         * Use the alp-sdk repo's https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner
          * example to enumerate what IS on this bus before chasing a
          * BMP581 that may not be populated. */
 		printf("[i2c-master] bmp581_init @ 0x%02x -> %d "

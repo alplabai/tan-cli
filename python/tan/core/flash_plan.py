@@ -1072,14 +1072,20 @@ class FlashInputs:
 #: `ALP_FLASH_FORCE=1` -- the mechanism that actually works -- so the other two
 #: pointed the reader at a manifest key and stayed silent about the env var.
 #: Most-specific-first, matching the SETOOLS resolution message's shape.
-CONFIRM_REMEDY = (
-    "to actually flash, most-specific first: `--confirm` on the command line, "
-    "`ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in "
-    "the manifest"
-)
+def confirm_remedy(action: str = "actually flash") -> str:
+    """The remedy sentence, with `action` naming what the gate holds back
+    (`tan model run --device` passes "run on the device", tan-cli#1417)."""
+    return (
+        f"to {action}, most-specific first: `--confirm` on the command line, "
+        "`ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in "
+        "the manifest"
+    )
 
 
-def confirm_gate_note(why: str) -> str:
+CONFIRM_REMEDY = confirm_remedy()
+
+
+def confirm_gate_note(why: str, action: str = "actually flash") -> str:
     """The parenthetical every confirm-gated preview appends.
 
     `why` is `dry-run` (an explicit preview, nothing to remedy) or the
@@ -1087,7 +1093,7 @@ def confirm_gate_note(why: str) -> str:
     """
     if why == "dry-run":
         return why
-    return f"{why} -- {CONFIRM_REMEDY}"
+    return f"{why} -- {confirm_remedy(action)}"
 
 
 def backend_for(method: str) -> BackendMeta | None:

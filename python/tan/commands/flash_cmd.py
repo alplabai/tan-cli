@@ -99,6 +99,8 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
+from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
@@ -369,6 +371,10 @@ class _Entry:
     #: (a UART-console build). `_run` appends a `flash.ram-console-symbol-missing`
     #: warning. Never emitted by `as_dict()`.
     ram_console_missing: bool = False
+    #: tan-cli#1372: a `--ram` run that loaded (or, under --dry-run, would load) the image.
+    #: `_run` appends an `info` `flash.ram-debugger-detach-clears-trcena`. Never emitted
+    #: by `as_dict()`.
+    trcena_note: bool = False
     #: tan-cli#1343 review: the device configuration names another Alif family than
     #: this slice's J-Link part profile (the warning text). `_run` appends a
     #: `flash.device-config-mismatch` warning.
@@ -3098,6 +3104,25 @@ def _flash_entry_body(
                       issue_code="flash.setools-untrusted-source"),
                 lines,
             )
+        # tan-cli#1371: an ELF LOADed below the app's MRAM slot (an ITCM image) is refused
+        # BEFORE anything spawns -- the probe listing, the SETOOLS sign and the write
+        # alike -- whatever the manifest says (stale / hand-edited / direct call). Only the
+        # shapes tan controls are checked (they need `slot0_load_address`); an
+        # operator-supplied ATOC with no slot0 may carry a legitimate ITCM load entry.
+        # Flow A (`west flash`, `alif_flash` runner) is NOT checked: it refuses a bad
+        # reset vector itself and supports images linked at the ITCM global alias.
+        slot0 = slot0_address(flash_args)
+        unlinked = (
+            mram_link_guard(artefact_path, entry_id, slot0=slot0) if slot0 is not None else None
+        )
+        if unlinked is not None:
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+            lines.append(f"  FAIL: {unlinked}")
+            return (
+                1,
+                entry(method, "failed", 1, unlinked, issue_code=CODE_NOT_MRAM_LINKED),
+                lines,
+            )
         # tan-cli#1312: probe selection is the FIRST decision about a Flow D
         # entry -- ahead of the SETOOLS sign, the preflight and the write, and
         # it applies under `--dry-run` too (a preview that would refuse is not
@@ -4431,6 +4456,9 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.mram-image-not-mram-linked":
+                # tan-cli#1371: a literal `Issue(...)` for the static code gate.
+                issues.append(Issue("flash.mram-image-not-mram-linked", "error", entry.message))
             elif entry.issue_code == "flash.ram-image-not-ram-linked":
                 issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-unconfirmed":
@@ -4477,6 +4505,15 @@ def _run(
             )
             text_lines.append(message)
             issues.append(Issue("flash.ram-console-symbol-missing", "warning", message))
+        if entry.trcena_note:
+            message = (
+                f"{entry.id}: detaching the debugger clears DEMCR.TRCENA (bit 24), which stops "
+                "the DWT cycle counter (CYCCNT) and any ITM/trace output in the running image "
+                "about 10 ms after start. Firmware that uses DWT/ITM must set TRCENA again "
+                "after start, or a cycle count it reports is wrong."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.ram-debugger-detach-clears-trcena", "info", message))
         if entry.preview_sign_skipped:
             message = (
                 f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
@@ -4809,7 +4846,10 @@ def flash(
         "binary and --dry-run as a Flow D write. Needs exactly one slice (--core), which "
         "must be the M55 HE core, and --confirm (or ALP_FLASH_FORCE=1 / flash_args.confirm): "
         "loadbin resets the whole device (AIRCR.SYSRESETREQ, which resets the Secure "
-        "Enclave) and replaces the running image.",
+        "Enclave) and replaces the running image. Detaching the debugger clears "
+        "DEMCR.TRCENA, which stops the DWT cycle counter (CYCCNT) and ITM trace in the "
+        "running image: firmware using them must set TRCENA again after start "
+        "(flash.ram-debugger-detach-clears-trcena, an info issue on every --ram envelope).",
     ),
     ram_console: bool = typer.Option(
         False,
