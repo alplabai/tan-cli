@@ -95,12 +95,11 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`c4eb27645`**
-  (`c4eb2764542cfaaaaaa637113af56af5cd3b2edd`, alp-sdk `dev`) — the
-  `6159a7b1a` -> `c4eb27645` planner re-sync (tan-cli#1427). The range holds no
-  change to `scripts/**` or `metadata/**` (alp-sdk#2782's merge and the #2783
-  docs commit), so nothing was re-vendored and `scaffold_byte_parity.py --sdk
-  <c4eb27645>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+- **Current vendor point (all templates):** **`0dee99fb5`**
+  (`0dee99fb519b511e0a7fe4da63b333b9246040b4`, alp-sdk `dev`) — the
+  `c4eb27645` -> `0dee99fb5` planner re-sync (alp-sdk#2791 `cameras:`, with
+  #2784 in range). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <0dee99fb5>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
   unchanged. The pin moves in the same change as `parity.yml`'s
   `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
   `ref:` and `test_planner_relocation_freshness.py`'s
@@ -652,14 +651,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`c4eb27645`** (alp-sdk `dev`, full sha
-  `c4eb2764542cfaaaaaa637113af56af5cd3b2edd`) — the checkout the emit was RUN
+- Commit: **`0dee99fb5`** (alp-sdk `dev`, full sha
+  `0dee99fb519b511e0a7fe4da63b333b9246040b4`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `030de105d` (tan-cli#1401), and before that
+  This line used to say `c4eb27645` (tan-cli#1427), and before that
+  `030de105d` (tan-cli#1401), and before that
   `2d2a85333` (tan-cli#1216), and before that
   `ac0e2a5e0` (tan-cli#1309), and before that
   `34c11c9de` (tan-cli#1278), and before that
