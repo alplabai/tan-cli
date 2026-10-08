@@ -344,6 +344,11 @@ def test_the_planners_fixture_restores_sys_path_and_sys_modules_on_teardown():
         f"sys.modules leaked after teardown: {result['leaked_modules']}")
 
 
+#: Modes served by `buildplan._shared_artefact` (tan-cli#1216).
+_SHARED_ARTEFACT_MODES = (
+    "ipc-contract-h", "dts-reservations", "dts-partitions", "tfm-sysbuild-conf")
+
+
 def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
     """`(kind, text)` -- `kind` is 'ok' or the exception class name.
 
@@ -356,6 +361,12 @@ def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
     except Exception as err:  # noqa: BLE001 -- comparing failures on purpose
         return (f"load:{type(err).__name__}", str(err))
     try:
+        if pkg.__name__.startswith("tan.") and mode in _SHARED_ARTEFACT_MODES:
+            # tan's own front door for these modes (tan-cli#1216): measure the
+            # dispatch `tan generate` runs, not the emitters beside it.
+            from tan.planner.cli import emit_artefact  # noqa: PLC0415
+
+            return ("ok", emit_artefact(project, mode, board_yaml=board))
         if mode == "system-manifest":
             return ("ok", pkg.emit_system_manifest(project))
         if mode == "ipc-contract-h":
@@ -2304,3 +2315,47 @@ def test_shared_headers_match_the_build_plans_own_shared_artefact(
     assert got == shared[0], (
         f"{board}: --emit {mode} diverges from the build-plan's sharedArtefacts "
         + _first_diff(shared[0], got))
+
+
+#: A `boot:` block that loads but `emit_sysbuild_conf` refuses: an explicit
+#: two-slot swap on E1M-AEN801's single-slot `memory_map:`.  (rsa3072 is
+#: refused at load on this family, so it cannot reach the emitters.)
+_REFUSED_BOOT = (
+    "boot:\n  method: mcuboot\n  swap_algorithm: scratch\n  signing:\n"
+    "    algorithm: ecdsa_p256\n    key_file: keys/mcuboot_shared_dev_ecdsa_p256.pem\n",
+)
+
+
+@pytest.mark.parametrize("boot_block", _REFUSED_BOOT, ids=["scratch-swap"])
+def test_a_refused_boot_block_does_not_leak_into_the_other_shared_modes(
+    planners, tmp_path, boot_block
+):
+    """tan-cli#1216: `emit_sysbuild_conf` raising must not break
+    `ipc-contract-h` / `dts-reservations` / `dts-partitions` /
+    `tfm-sysbuild-conf` -- each runs only its own emitter. Matches upstream
+    (`alp_orchestrate`) result and error kind for every mode."""
+    import shutil
+
+    upstream, relocated = planners
+    src = SDK / "examples" / "connectivity" / "iot-fleet-ota"
+    if not (src / "board.yaml").is_file():
+        pytest.skip("iot-fleet-ota example not present in this SDK checkout")
+    dst = tmp_path / "iot-fleet-ota"
+    shutil.copytree(src, dst)
+    text = (dst / "board.yaml").read_text(encoding="utf-8")
+    head, _, tail = text.partition("\nboot:\n")
+    assert tail, "fixture board.yaml has no boot: block to replace"
+    rest = tail.split("\n\n", 1)[1] if "\n\n" in tail else ""
+    board = dst / "board.yaml"
+    board.write_text(head + "\n" + boot_block + "\n" + rest, encoding="utf-8")
+
+    # The premise: the sysbuild emitter really does refuse this board.
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(relocated.OrchestratorError):
+        relocated.emit_sysbuild_conf(project)
+
+    for mode in _SHARED_ARTEFACT_MODES:
+        want = _render(upstream, board, mode)
+        got = _render(relocated, board, mode)
+        assert got == want, f"{mode}: tan {got[0]} vs upstream {want[0]}"
+        assert got[0] == "ok", f"{mode} must render despite the refused boot: {got}"

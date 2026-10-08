@@ -89,11 +89,11 @@ def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
     if mode == "system-manifest":
         return emit_system_manifest(project)
     if mode == "ipc-contract-h":
-        return _shared_artefact(project, "alp/system_ipc.h")
+        return _shared_artefact(project, "generated/alp/system_ipc.h")
     if mode == "dts-reservations":
-        return _shared_artefact(project, "dts-reservations.dtsi")
+        return _shared_artefact(project, "generated/dts-reservations.dtsi")
     if mode == "dts-partitions":
-        return _shared_artefact(project, "dts-partitions.dtsi")
+        return _shared_artefact(project, "generated/dts-partitions.dtsi")
     if mode == "storage-mounts-c":
         return emit_storage_mounts_c(project)
     if mode == "tfm-sysbuild-conf":
