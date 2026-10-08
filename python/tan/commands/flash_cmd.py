@@ -342,6 +342,10 @@ class _Entry:
     #: (a UART-console build). `_run` appends a `flash.ram-console-symbol-missing`
     #: warning. Never emitted by `as_dict()`.
     ram_console_missing: bool = False
+    #: tan-cli#1372: a `--ram` run that loaded (or, under --dry-run, would load) the image.
+    #: `_run` appends an `info` `flash.ram-debugger-detach-clears-trcena`. Never emitted
+    #: by `as_dict()`.
+    trcena_note: bool = False
     #: tan-cli#1343 review: the device configuration names another Alif family than
     #: this slice's J-Link part profile (the warning text). `_run` appends a
     #: `flash.device-config-mismatch` warning.
@@ -4364,6 +4368,15 @@ def _run(
             )
             text_lines.append(message)
             issues.append(Issue("flash.ram-console-symbol-missing", "warning", message))
+        if entry.trcena_note:
+            message = (
+                f"{entry.id}: detaching the debugger clears DEMCR.TRCENA (bit 24), which stops "
+                "the DWT cycle counter (CYCCNT) and any ITM/trace output in the running image "
+                "about 10 ms after start. Firmware that uses DWT/ITM must set TRCENA again "
+                "after start, or a cycle count it reports is wrong."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.ram-debugger-detach-clears-trcena", "info", message))
         if entry.preview_sign_skipped:
             message = (
                 f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
@@ -4665,7 +4678,10 @@ def flash(
         "binary and --dry-run as a Flow D write. Needs exactly one slice (--core), which "
         "must be the M55 HE core, and --confirm (or ALP_FLASH_FORCE=1 / flash_args.confirm): "
         "loadbin resets the whole device (AIRCR.SYSRESETREQ, which resets the Secure "
-        "Enclave) and replaces the running image.",
+        "Enclave) and replaces the running image. Detaching the debugger clears "
+        "DEMCR.TRCENA, which stops the DWT cycle counter (CYCCNT) and ITM trace in the "
+        "running image: firmware using them must set TRCENA again after start "
+        "(flash.ram-debugger-detach-clears-trcena, an info issue on every --ram envelope).",
     ),
     ram_console: bool = typer.Option(
         False,

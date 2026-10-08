@@ -352,7 +352,9 @@ def test_without_ram_console_nothing_is_read(tmp_path, monkeypatch):
     rc, data, issues, _l, _s = _run(tmp_path)
     assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["check", "load"]
     assert "text" not in data["entries"][0]["ramConsole"]
-    assert _codes(issues) == ["flash.dpidr-preflight-unarmed"]
+    assert _codes(issues) == [
+        "flash.ram-debugger-detach-clears-trcena", "flash.dpidr-preflight-unarmed",
+    ]
 
 
 def test_an_mram_linked_image_is_refused_before_any_spawn(tmp_path, monkeypatch):
@@ -968,3 +970,64 @@ def test_a_load_banner_without_an_ap_is_noted_not_silently_skipped(tmp_path, mon
     # A banner that DOES name the AP carries no such note.
     jl, (rc, data, _i, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out())
     assert "attachedCoreAtLoadNote" not in data["entries"][0]["jlink"]
+
+
+# ── tan-cli#1372: the debugger-detach advisory (DEMCR.TRCENA) ────────────────
+
+TRCENA_CODE = "flash.ram-debugger-detach-clears-trcena"
+
+
+def _trcena(issues):
+    return [i for i in issues if i.code == TRCENA_CODE]
+
+
+def _assert_trcena_advisory(issues):
+    found = _trcena(issues)
+    assert len(found) == 1 and found[0].severity == "info"
+    message = found[0].message
+    assert "m55_he" in message and "DEMCR.TRCENA" in message
+    assert "DWT" in message and "CYCCNT" in message and "set TRCENA again" in message
+
+
+def test_a_successful_ram_run_carries_the_trcena_advisory(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch)
+    rc, _data, issues, _l, _s = _run(tmp_path)
+    assert rc == 0
+    _assert_trcena_advisory(issues)
+
+
+def test_a_ram_dry_run_carries_the_trcena_advisory(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, _data, issues, _l, _s = _run(tmp_path, dry_run=True)
+    assert rc == 0 and jl.scripts == []
+    _assert_trcena_advisory(issues)
+
+
+def test_an_unconfirmed_ram_preview_has_no_trcena_advisory(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    _rc, _data, issues, _l, _s = _run(tmp_path, confirm_flag=False)
+    assert jl.scripts == [] and _trcena(issues) == []
+
+
+def test_a_refused_ram_run_has_no_trcena_advisory(tmp_path, monkeypatch):
+    _setup(
+        tmp_path, monkeypatch,
+        elf=make_elf(base=0x80010000, entry=0x80010101), binary=make_bin(reset=0x80010101),
+    )
+    FakeJlink(monkeypatch)
+    rc, _data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and _trcena(issues) == []
+
+
+def test_the_ram_help_names_trcena_and_survives_rich_markup():
+    from typer.main import get_command
+
+    from tan.cli import app
+
+    flash = get_command(app).get_command(None, "flash")
+    help_text = next(p.help for p in flash.params if "--ram" in p.opts)
+    assert "TRCENA" in help_text and "DEMCR" in help_text
+    assert "[" not in help_text  # rich markup eats `[...]` in help text
