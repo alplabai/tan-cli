@@ -2271,3 +2271,36 @@ def test_tfm_sysbuild_conf_matches_the_build_plans_own_shared_artefact(
     assert got == (shared[0] if shared else ""), (
         f"{board}: --emit tfm-sysbuild-conf diverges from the build-plan's "
         "sharedArtefacts tfm.conf")
+
+
+@pytest.mark.parametrize("mode,suffix", [
+    ("ipc-contract-h", "/generated/alp/system_ipc.h"),
+    ("dts-reservations", "/generated/dts-reservations.dtsi"),
+    ("dts-partitions", "/generated/dts-partitions.dtsi"),
+])
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_shared_headers_match_the_build_plans_own_shared_artefact(
+    planners, board, mode, suffix
+):
+    """tan-cli#1216 (ADR-0026 §D): `ipc-contract-h`, `dts-reservations` and
+    `dts-partitions` render through `buildplan._shared_artefact`, the same
+    `_shared_artefacts` call that fills the plan's `sharedArtefacts[].contents`.
+    Silicon-relevant (IPC contract, carve-outs, flash partitions): any byte
+    difference is a failure."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith(suffix)]
+    assert len(shared) == 1, f"{board}: plan carries {len(shared)} {suffix}"
+    from tan.planner.cli import emit_artefact
+
+    got = emit_artefact(project, mode, board_yaml=board)
+    assert got == shared[0], (
+        f"{board}: --emit {mode} diverges from the build-plan's sharedArtefacts "
+        + _first_diff(shared[0], got))

@@ -38,15 +38,12 @@ from tan import planner_emit
 from . import (
     OrchestratorError,
     emit_build_plan,
-    emit_dts_partitions,
-    emit_dts_reservations,
-    emit_ipc_contract_h,
     emit_kconfig,
     emit_storage_mounts_c,
     emit_system_manifest,
     load_board_yaml,
 )
-from .buildplan import _shared_tfm_conf
+from .buildplan import _shared_artefact, _shared_tfm_conf
 from .paths import REPO
 from .template import (
     TemplateError,
@@ -92,11 +89,11 @@ def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
     if mode == "system-manifest":
         return emit_system_manifest(project)
     if mode == "ipc-contract-h":
-        return emit_ipc_contract_h(project)
+        return _shared_artefact(project, "alp/system_ipc.h")
     if mode == "dts-reservations":
-        return emit_dts_reservations(project)
+        return _shared_artefact(project, "dts-reservations.dtsi")
     if mode == "dts-partitions":
-        return emit_dts_partitions(project)
+        return _shared_artefact(project, "dts-partitions.dtsi")
     if mode == "storage-mounts-c":
         return emit_storage_mounts_c(project)
     if mode == "tfm-sysbuild-conf":
