@@ -19,7 +19,13 @@ else raises `DeviceCaptureError`, never a plausible number.
   upper bound on pure inference time (the energy app also polls the monitor IC
   inside it; the latency-only app does not) -- hence the app-neutral
   `LATENCY_SCOPE`.
-* `peakSramKib` stays `None` (the app does not report it).
+  When the app also printed `LATENCY-RESULT`, its own `ms_per_inference` wins
+  (tan-cli#1404): the app derives it from its raw cycle counts over every good
+  window (all inferences, not a median of per-window spans), so it can differ
+  slightly from the window-derived figure; the device is the authority on its
+  own latency.
+* `peakSramKib` is ENERGY-CFG `sram_peak_bytes` / 1024 when the app reports it,
+  else `None`. The model name is ENERGY-CFG `model`.
 * `RunResult.power_mj` stays `None`; energy rides in `RunResult.energy`, a
   labelled board-level carrier-rail delta (`EnergyMeasurement`), only when the
   capture holds usable active+idle sample pairs. Pairs the app itself marked
@@ -51,6 +57,12 @@ _KERNEL_CLOCK = "k-cycle-get-32"
 #: What `latencyMs` is, carried in every device row.
 LATENCY_SCOPE = "window-span-per-inference"
 
+#: `latencyMs` when the app's own LATENCY-RESULT `ms_per_inference` is used instead.
+#: That value is the app's, computed from the nominal `cycles_per_s`; it does NOT
+#: go through tan's measured-clock reconciliation, and may time a different set of
+#: inferences than the ENERGY-W active windows.
+LATENCY_SCOPE_DEVICE_RESULT = "device-latency-result"
+
 _U32 = 1 << 32
 _WERR_RE = re.compile(r"^ENERGY-WERR (\d+) (active|idle) timed_out=(\d)")
 _WARN_WRAP_RE = re.compile(r"^ENERGY-WARN (active|idle) window (\d+) ms exceeds the cycle-counter wrap")
@@ -79,6 +91,7 @@ class ParsedCapture:
     timed_out: frozenset = frozenset()
     skipped: frozenset = frozenset()
     wrapped: frozenset = frozenset()
+    latency_result: dict[str, Any] | None = None
 
 
 def _json_object(text: str, what: str) -> dict[str, Any]:
@@ -144,6 +157,7 @@ def parse_console(text: str) -> ParsedCapture:
     samples: dict[int, dict[str, list[tuple[int, int]]]] = {}
     spans: dict[int, dict[str, tuple[int, int, float, int]]] = {}
     device_result: dict[str, Any] | None = None
+    latency_result: dict[str, Any] | None = None
     werr: list[str] = []
     warn: list[str] = []
     pair_skips: list[str] = []
@@ -194,6 +208,8 @@ def parse_console(text: str) -> ParsedCapture:
                 skipped.add(int(m.group(1)))
         elif line.startswith("ENERGY-RESULT "):
             device_result = _json_object(line[len("ENERGY-RESULT "):], "ENERGY-RESULT")
+        elif line.startswith("LATENCY-RESULT "):
+            latency_result = _json_object(line[len("LATENCY-RESULT "):], "LATENCY-RESULT")
         # else: banner / printk noise (incl. ENERGY-SCAN) -- ignored.
 
     if cfg is None:
@@ -210,7 +226,7 @@ def parse_console(text: str) -> ParsedCapture:
             if len(points) < 2:
                 raise DeviceCaptureError(f"window {window} phase {phase!r} has {len(points)} sample(s); need >= 2")
     return ParsedCapture(cfg, samples, spans, device_result, werr, warn, pair_skips,
-                         frozenset(timed_out), frozenset(skipped), frozenset(wrapped))
+                         frozenset(timed_out), frozenset(skipped), frozenset(wrapped), latency_result)
 
 
 def _samples_to_power(points: list[tuple[int, int]], cycles_per_s: float,
@@ -319,6 +335,7 @@ def capture_diagnostics(parsed: ParsedCapture, energy: EnergyMeasurement | None)
         "cyclesPerSMeasured": measured,
         "deviceValueMjPerInference": device_value,
         "hostVsDeviceRatio": ratio,
+        "model": parsed.cfg.get("model") if isinstance(parsed.cfg.get("model"), str) else None,
         "npuDispatched": bool(parsed.cfg.get("npu_dispatched", False)),
         "windows": sorted(parsed.uptime_spans),
         "werrLines": list(parsed.werr),
@@ -368,6 +385,17 @@ def run_result_from_capture(parsed: ParsedCapture) -> tuple[RunResult, EnergyMea
             note = f"energy not derived: {err}"
     diagnostics = capture_diagnostics(parsed, energy)
     diagnostics["energyNote"] = note
+    diagnostics["windowLatencyMs"] = latency_ms
+    diagnostics["latencyScope"] = LATENCY_SCOPE
+    if parsed.latency_result is not None and "ms_per_inference" in parsed.latency_result:
+        # Device-reported: nominal cycles_per_s, no measured-clock check (see
+        # LATENCY_SCOPE_DEVICE_RESULT); the window-derived value stays in diagnostics.
+        latency_ms = _number(parsed.latency_result["ms_per_inference"], "LATENCY-RESULT ms_per_inference")
+        diagnostics["latencyScope"] = LATENCY_SCOPE_DEVICE_RESULT
+    peak_sram_kib = None
+    if "sram_peak_bytes" in parsed.cfg:
+        peak_sram_kib = _number(parsed.cfg["sram_peak_bytes"], "ENERGY-CFG sram_peak_bytes",
+                                positive=False) / 1024
     backend = "ethos-u" if parsed.cfg.get("npu_dispatched") else "cpu-device"
-    result = RunResult(backend, latency_ms, None, None, None, inferences, energy)
+    result = RunResult(backend, latency_ms, None, peak_sram_kib, None, inferences, energy)
     return result, energy, diagnostics

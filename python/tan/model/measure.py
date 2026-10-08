@@ -6,8 +6,9 @@ alp-sdk#933). The host run (`backend="cpu-host"`) is a FUNCTIONAL + host-latency
 reference, NOT the target SoM's performance. The on-device tier (target
 latency, peak arena SRAM, per-rail energy via the on-board monitor IC) is the
 bench-gated follow-on that fills the SAME `RunResult` schema with real numbers;
-until then `power_mj`/`peak_sram_kib` stay `None` and nothing here fabricates
-them. The energy-integration math (`integrate_energy`, `windowed_delta`,
+the host run leaves `power_mj`/`peak_sram_kib` `None` and nothing here
+fabricates them; the device tier (`tan.core.model_device`) fills `peak_sram_kib`
+from the app's ENERGY-CFG `sram_peak_bytes` and energy from its capture. The energy-integration math (`integrate_energy`, `windowed_delta`,
 `EnergyMeasurement`) is the on-device tier's, ported unchanged and PURE; the
 estimate-vs-measured feedback loop is not ported yet.
 
@@ -96,7 +97,7 @@ class RunResult:
     backend: str                 # "cpu-host" (reference) | on-device backend later
     latency_ms: float            # median wall-clock per inference
     output_argmax: int | None
-    peak_sram_kib: int | None    # None on host — on-device only
+    peak_sram_kib: float | None    # None on host — on-device only
     power_mj: float | None       # None on host — on-board monitor read (HW-gated)
     runs: int
     energy: EnergyMeasurement | None = None  # None until a real bench run populates it
