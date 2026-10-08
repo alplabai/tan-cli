@@ -103,7 +103,12 @@ from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
 from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
-from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import (
+    resolve_sdk_root_ladder,
+    sdk_resolution_issues,
+    sdk_search_summary,
+)
 from tan.core.system_manifest import manifest_candidates
 from tan.core.dp_id import (
     _CONNECT_FAILED_TARGET_RE,
@@ -4173,11 +4178,16 @@ def _run(
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
         # reported EMPTY on this path, not the value computed above (verified
         # against the oracle).
+        # tan-cli#1423: name where tan looked and the flag that fixes it.
+        message = (
+            f"Cannot locate alp-sdk root. {sdk_search_summary(Path(cwd))} Pass "
+            f"`--sdk-root <path to an alp-sdk checkout>`, or {NO_SDK_NEXT_STEPS}."
+        )
         return (
             ExitCode.RUNTIME_FAILURE,
             _data(""),
-            [Issue("flash.sdk-root-not-found", "error", "Cannot locate alp-sdk root.")],
-            ["flash: Cannot locate alp-sdk root."],
+            [Issue("flash.sdk-root-not-found", "error", message)],
+            [f"flash: {message}"],
             None,
         )
 

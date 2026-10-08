@@ -215,6 +215,24 @@ def _home_alp_dir() -> Path:
     return Path(home or ".") / ".alp"
 
 
+def sdk_search_summary(workspace_root: Path) -> str:
+    """tan-cli#1423: where `resolve_sdk_root_ladder` looked, tier by tier, for
+    a `*.sdk-root-*` refusal to quote beside its `--sdk-root` remedy. There is
+    no env-var remedy to add: `ALP_SDK_ROOT` is not a tier (see that ladder's
+    docstring)."""
+    root = Path(workspace_root).absolute()
+    near = ", ".join(
+        f"`{_to_posix(p)}`"
+        for p in (root, root / "alp-sdk", root.parent / "alp-sdk", root.parent / "alp-sdk-upstream")
+    )
+    return (
+        f"Neither `--sdk-root`, the project pin `{_to_posix(root / '.alp' / 'sdk-path')}` nor "
+        f"the global default `{_to_posix(_home_alp_dir() / 'sdk-default')}` named a usable "
+        f"checkout, and none was found at {near} or in a directory above "
+        f"`{_to_posix(root)}`."
+    )
+
+
 def _read_pointer_json(pointer: Path) -> dict[str, Any] | None:
     """Parse a pointer file (`.alp/sdk-path`, `~/.alp/sdk-default`) into its
     dict, or `None` on ANY failure -- missing, unreadable, invalid JSON, or a

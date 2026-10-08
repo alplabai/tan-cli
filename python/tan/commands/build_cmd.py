@@ -126,6 +126,7 @@ from tan.core.sdk_discovery import (
     project_pin_issue,
     resolve_sdk_root_ladder,
     sdk_ladder_divergence_issue,
+    sdk_search_summary,
 )
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.env import stderr_is_tty, terminal_width
@@ -2019,7 +2020,11 @@ def build(
             define_cores=list(core) if core else None,
         )
     except BuildError as err:
-        exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", err.message)]
+        message = err.message
+        if err.code == "build.sdk-root-unresolved":
+            # tan-cli#1423: where the ladder looked, beside the message's own remedy.
+            message = f"{message} {sdk_search_summary(Path(workspace_root))}"
+        exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", message)]
     except Exception as err:  # noqa: BLE001 -- see below
         # The port's most-repeated defect class: an uncaught exception
         # escapes as a raw traceback, stdout stays empty, and the
