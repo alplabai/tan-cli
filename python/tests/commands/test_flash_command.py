@@ -7249,3 +7249,39 @@ def test_no_atoc_environment_variable_is_read_anywhere_in_the_flash_path():
         f"alp-sdk#2025): an exported variable acknowledges every later write, "
         f"including unattended ones. Found: {offenders}"
     )
+
+
+# ── tan-cli#1405: `--build-root X` is the SAME value `tan build` takes ──────
+
+
+def _plant_manifest(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(OK_SLICE, encoding="utf-8", newline="")
+
+
+def test_build_root_finds_manifest_at_root(tmp_path):
+    _plant_manifest(tmp_path / "X" / "system-manifest.yaml")
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--build-root", "X", write_manifest=False
+    )
+    assert "flash.manifest-not-found" not in codes(envelope(out))
+
+
+def test_build_root_finds_manifest_under_build_subdir(tmp_path):
+    # Where `tan build --build-root X` actually writes it.
+    _plant_manifest(tmp_path / "X" / "build" / "system-manifest.yaml")
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--build-root", "X", write_manifest=False
+    )
+    assert "flash.manifest-not-found" not in codes(envelope(out))
+
+
+def test_build_root_manifest_not_found_names_both_paths(tmp_path):
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--build-root", "X", write_manifest=False
+    )
+    payload = envelope(out)
+    assert codes(payload) == ["flash.manifest-not-found"]
+    message = payload["issues"][0]["message"]
+    assert os.path.join("X", "system-manifest.yaml") in message
+    assert os.path.join("X", "build", "system-manifest.yaml") in message

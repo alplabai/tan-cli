@@ -45,6 +45,28 @@ SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 #: The single input document, read from the build root.
 MANIFEST_FILE = "system-manifest.yaml"
 
+
+def manifest_candidates(build_root: str) -> list[str]:
+    """Where a consumer looks for the manifest given `--build-root X`:
+    `X/system-manifest.yaml` first (a root that IS the build dir), then
+    `X/build/system-manifest.yaml` -- where `tan build --build-root X` writes
+    it (tan-cli#1405). The same `X` therefore works for build and every
+    consumer."""
+    return [
+        os.path.join(build_root, MANIFEST_FILE),
+        os.path.join(build_root, "build", MANIFEST_FILE),
+    ]
+
+
+def find_manifest(build_root: str, is_file=os.path.isfile) -> str:
+    """The first existing candidate, else the first (so the caller's
+    not-found/read error names the primary path)."""
+    candidates = manifest_candidates(build_root)
+    for candidate in candidates:
+        if is_file(candidate):
+            return candidate
+    return candidates[0]
+
 #: Subdirectory `west build` writes into when it is emitted with NO `-d` --
 #: which is exactly how the SDK's build plan emits it (I-18). See
 #: [`slice_elf_candidates`].
