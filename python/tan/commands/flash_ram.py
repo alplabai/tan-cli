@@ -401,7 +401,7 @@ def _run_ram_entry(
             if watches else None
         ),
     )
-    session_ms = int(round((time.monotonic() - started) * 1000))
+    spawn_ms = int(round((time.monotonic() - started) * 1000))
     transcript = f"{outcome.stdout}\n{outcome.stderr}"
     _save_transcript(ctx, entry_id, report, load, outcome)
     if guard is not None and guard.tripped:
@@ -450,7 +450,7 @@ def _run_ram_entry(
     if watches:
         samples = ram_watch.parse_samples(transcript, watches, watch_ms)
         report["watch"] = samples
-        report["ram"]["watch"]["sessionMs"] = session_ms
+        report["ram"]["watch"]["spawnMs"] = spawn_ms
         missing = sum(1 for s in samples if s["values"] is None)
         if missing == len(samples):
             watch_note = (

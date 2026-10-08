@@ -1140,13 +1140,13 @@ def test_the_load_timeout_scales_with_a_long_watch(tmp_path, monkeypatch):
     assert load_timeout > 1000 + 1000 * 2.0
 
 
-def test_no_data_at_all_has_its_own_message_and_session_ms(tmp_path, monkeypatch):
+def test_no_data_at_all_has_its_own_message_and_spawn_ms(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     FakeJlink(monkeypatch)
     rc, data, issues, _l, _s = _run(tmp_path, ram_wait=0.0, ram_watch=("0x42002000",))
     msg = next(i.message for i in issues if i.code == "flash.ram-watch-incomplete")
     assert "NO data" in msg
-    assert isinstance(data["entries"][0]["ram"]["watch"]["sessionMs"], int)
+    assert isinstance(data["entries"][0]["ram"]["watch"]["spawnMs"], int)
 
 
 def test_watch_with_ram_console_skips_the_pre_sleep_but_still_reads(tmp_path, monkeypatch):
