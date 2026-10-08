@@ -64,7 +64,7 @@ def test_the_ram_console_floor_is_2048(app_size, want):
 def test_itcm_conf_takes_the_larger_of_16384_and_the_apps_size(app_size, want):
     from tan.planner.link_target import itcm_conf
 
-    conf = itcm_conf(app_size)
+    conf = itcm_conf(app_ram_console_size=app_size)
     assert f"CONFIG_RAM_CONSOLE_BUFFER_SIZE={want}\n" in conf
     assert conf.count("CONFIG_RAM_CONSOLE_BUFFER_SIZE=") == 1
 
@@ -72,8 +72,27 @@ def test_itcm_conf_takes_the_larger_of_16384_and_the_apps_size(app_size, want):
 def test_itcm_conf_default_is_unchanged():
     from tan.planner.link_target import itcm_conf
 
-    assert itcm_conf() == itcm_conf(0)
+    assert itcm_conf() == itcm_conf(True, app_ram_console_size=0)
     assert itcm_conf().endswith("CONFIG_RAM_CONSOLE_BUFFER_SIZE=16384\n")
+
+
+def test_a_uart_itcm_conf_ignores_the_apps_buffer_size():
+    from tan.planner.link_target import itcm_conf
+
+    conf = itcm_conf(False, app_ram_console_size=65536)
+    assert "CONFIG_RAM_CONSOLE_BUFFER_SIZE" not in conf
+    assert "CONFIG_DCACHE" not in conf
+    assert "CONFIG_FLASH_LOAD_OFFSET=0x0\n" in conf
+
+
+def test_the_uart_itcm_artefact_carries_no_buffer_size_even_with_an_app_value(tmp_path):
+    from tan.planner.link_target import CONF_NAME, extra_config_artefacts
+
+    project, slice_ = _app(tmp_path, "CONFIG_RAM_CONSOLE_BUFFER_SIZE=65536\n")
+    project.diagnostics = {"link": "itcm", "console": "uart"}
+    slice_.os, slice_.core_id = "zephyr", "m55_he"
+    arts = dict(extra_config_artefacts(project, slice_))
+    assert "CONFIG_RAM_CONSOLE_BUFFER_SIZE" not in arts[CONF_NAME]
 
 
 def test_the_itcm_artefact_reads_the_slices_prj_conf(tmp_path):

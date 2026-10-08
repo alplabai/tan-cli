@@ -1889,7 +1889,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/planner/link_target.py",
-      "note": "board.yaml `diagnostics.link: itcm` combined with an explicit non-RAM `diagnostics.console:` (uart/alp/linux/none). A Flow C RAM-run produces zero UART bytes; the RAM console is the only observable. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "board.yaml `diagnostics.link: itcm` combined with an explicit `diagnostics.console:` of alp/linux/none. A Flow C RAM-run supports the RAM console (the default) or the board UART (`uart`, accepted since tan-cli#1374); alp/linux/none stay refused (unproven on a RAM-run image). Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "build.plan-warning",
@@ -2114,6 +2114,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
       "note": "Added closing tan-cli#1372 (ask 1). EMISSION CONDITION: every `tan flash --ram` (AEN Flow C) entry that loaded the image, and every --dry-run of one (status ok); not on a refusal and not on an unconfirmed preview (status planned). The Commander script ends with `exit`, and closing the J-Link session rewrites DEMCR and clears TRCENA (bit 24), which stops the DWT cycle counter (CYCCNT) in the running app about 10 ms after `go` -- while the envelope still says ok: true. Bench 2026-10-07, e1m-aen-evk-02 (E1M-AEN803, M55-HE): DEMCR 00100000 (TRCENA=0), DWT_CTRL 80000001, DHCSR 05110000 (C_DEBUGEN=0); firmware re-writing TRCENA restarted the counter. A false `RESULT PASS 215 cycles/inference` was printed; the real figure was about 5052. Informational: the run itself succeeded. Answered by firmware setting DEMCR.TRCENA again after start. The J-Link script is unchanged (no DEMCR/DWT writes, no halt); whether tan can avoid the clear is waiting on a bench A/B (tan-cli#1372 ask 2). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.mram-image-not-mram-linked",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1371. EMISSION CONDITION: a Flow D (alif_mram_jlink) entry of a shape tan itself controls -- the mramxip loadbin at flash_args.slot0_load_address, or the SETOOLS app-gen-toc auto-sign (mramAddress); both need slot0_load_address -- whose artefact ELF (the artefact itself, or the same-stem .elf beside a raw .bin) has a lowest nonzero-FileSiz LOAD segment p_paddr (the LOAD address, not p_vaddr) below slot0_load_address, i.e. an ITCM/RAM-linked image (a lower bound only: an image linked ABOVE its own slot, e.g. an M55-HP image written to the M55-HE slot, is not caught, and equality is not required because an image header can offset the first segment); or an ELF-magic artefact whose program headers cannot be parsed (ELF64, big-endian, truncated, program headers past EOF, no LOAD segment with content), which is refused rather than skipped; or a raw .bin whose same-stem .elf is more than 60 s older than the .bin (its link address cannot vouch for it). Refused before any spawn (no probe listing, no app-gen-toc, no J-Link), under --dry-run too. NOT checked: an operator-supplied ATOC with no slot0_load_address (it may carry a legitimate ITCM load entry); Flow A (zephyr_west_flash on the alif_flash runner), whose runner refuses a bad reset vector itself and supports ITCM-alias images; west flash generally; baremetal_cmake_flash; a .bin with no same-stem .elf. The mirror of flash.ram-image-not-ram-linked, and defence in depth behind the manifest's flash_method ram_run_only (a stale or hand-edited manifest). Answered by rebuilding MRAM-linked, or by RAM-running the image with `tan flash --ram`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.ram-image-not-ram-linked",
