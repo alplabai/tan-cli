@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.core.bootstrap import get_manifest_path
+
 #: The marker `build_cmd._workspace_unresolved_issues` matches to promote the
 #: refused slice's reason into the coded `build.workspace-unresolved` issue,
 #: the same idiom as `tan.core.plan_exec.CROSS_DRIVE_MSG`.
@@ -76,20 +78,77 @@ def workspace_unresolved_refusal(
         return None
     if zephyr_base and west_ancestor(Path(zephyr_base)) is not None:
         return None
+    message = (
+        f"{WORKSPACE_UNRESOLVED_MSG} -- `west build` would run from `{spawn_cwd}`, "
+        f"which has no `.west` on any ancestor; {_unresolved_facts(zephyr_base, sdk_root)}. "
+        f"west would stop with `unknown command \"build\"`. {_remedies(sdk_root)}"
+    )
+    return WorkspaceRefusal(message, f"{WORKSPACE_UNRESOLVED_MSG} (run `tan bootstrap`)")
+
+
+def _unresolved_facts(zephyr_base: str | None, sdk_root: Path) -> str:
     zephyr_base_fact = (
         f"ZEPHYR_BASE `{zephyr_base}` has no `.west` above it either"
         if zephyr_base
         else "ZEPHYR_BASE is unset"
     )
     sdk_parent = sdk_root.parent
-    message = (
-        f"{WORKSPACE_UNRESOLVED_MSG} -- `west build` would run from `{spawn_cwd}`, "
-        f"which has no `.west` on any ancestor; {zephyr_base_fact}; and neither "
-        f"`{sdk_parent}` nor `{sdk_parent / 'zephyrproject'}` (next to --sdk-root "
-        f"`{sdk_root}`) holds a `.west`. west would stop with `unknown command \"build\"`. "
+    return (
+        f"{zephyr_base_fact}; and neither `{sdk_parent}` nor "
+        f"`{sdk_parent / 'zephyrproject'}` (next to --sdk-root `{sdk_root}`) holds a `.west`"
+    )
+
+
+def _remedies(sdk_root: Path) -> str:
+    return (
         f"Run `tan bootstrap --sdk-root {sdk_root}` to create a workspace for this "
         f"checkout, or set ZEPHYR_BASE to an existing workspace's `zephyr/` -- that "
         f"builds against that workspace's Zephyr revision and patches, which need "
         f"not match this checkout's `west.yml`."
     )
-    return WorkspaceRefusal(message, f"{WORKSPACE_UNRESOLVED_MSG} (run `tan bootstrap`)")
+
+
+def manifest_project(topdir: Path) -> Path | None:
+    """The manifest project `<topdir>/.west/config` names, or `None` when the
+    config is missing or names none."""
+    try:
+        config = (topdir / ".west" / "config").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    rel = get_manifest_path(config)
+    return topdir / rel.strip() if rel else None
+
+
+def unresolved_workspace_verdict(
+    start: Path, zephyr_base: str | None, sdk_root: Path
+) -> tuple[str, str]:
+    """tan-cli#1432: `tan doctor`'s `workspace` verdict when tan resolved no
+    workspace for `sdk_root`, as `(status, detail)`, agreeing with what
+    `tan build` will then do from `start`.
+
+    `warn` when west's own unguarded walk still lands on a `.west` -- above
+    `start` (west uses it; the build succeeds against THAT workspace's Zephyr),
+    or above `zephyr_base` (west's fallback, which is not verified to reach
+    the `build` extension, hence "may"). `fail` otherwise, naming the same
+    facts and remedies as `build.workspace-unresolved`.
+    """
+    sdk_root = Path(sdk_root)
+    found = west_ancestor(start)
+    lead = f"west will use `{found}`, a `.west` above `{Path(start).absolute()}`"
+    if found is None and zephyr_base:
+        found = west_ancestor(Path(zephyr_base))
+        lead = f"west may fall back to `{found}`, a `.west` above ZEPHYR_BASE `{zephyr_base}`"
+    if found is None:
+        return "fail", (
+            f"no Zephyr workspace for --sdk-root `{sdk_root}`: `{Path(start).absolute()}` has "
+            f"no `.west` on any ancestor; {_unresolved_facts(zephyr_base, sdk_root)}, so "
+            f"a `west build` slice is refused as `build.workspace-unresolved`. {_remedies(sdk_root)}"
+        )
+    names = manifest_project(found)
+    manifest = f"names `{names}` as its manifest" if names else "names no manifest project"
+    return "warn", (
+        f"no workspace has --sdk-root `{sdk_root}` as its manifest, but {lead}, which "
+        f"{manifest} -- a build uses that workspace's Zephyr revision and patches, which "
+        f"need not match this checkout's `west.yml`. Run `tan bootstrap --sdk-root "
+        f"{sdk_root}` for a workspace of its own."
+    )
