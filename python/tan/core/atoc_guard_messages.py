@@ -10,7 +10,8 @@ loosely so this module need not import the one that imports it.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import re
+from typing import Any, Iterable, Mapping
 
 #: Spelled exactly as alp-sdk's runner `do_add_parser` registers it.
 REPLACE_ATOC_FLAG = "--replace-atoc"
@@ -196,3 +197,36 @@ def passed_note(verdict: Any, *, failed: bool = False) -> str:
             f"whether {names} is still listed is unknown"
         )
     return f"ATOC guard: {REPLACE_ATOC_FLAG} overrode resident entries, now delisted: {names}"
+
+
+#: Two host-setup notices west prints whatever the write's outcome
+#: (tan-cli#1426), each matched by its WORDING, never by its logger: zephyr's
+#: runner loader failing to import a runner module (`runners/__init__.py`,
+#: `_import_runner_module`), and a runner saying an optional Python package is
+#: missing (alif_flash's `fdt` hint for app-gen-toc, logged from `do_run`).
+#: Keying on the `WARNING: runners.<name>:` prefix alone would also take a
+#: warning the runner's own ATOC guard might log, and label it unrelated.
+_RUNNER_SETUP_NOISE = (
+    re.compile(r'^(?:WARNING: )?The module for runner "[^"]+" could not be imported\b'),
+    re.compile(r"^WARNING: runners\.[\w.]+: the '[^']+' Python package\b[^.]*\bwas not found\b"),
+)
+
+
+def split_runner_setup_noise(lines: Iterable[str]) -> tuple[list[str], list[str]]:
+    """`(kept, noise)`: `lines` with west's runner-loading warnings moved out,
+    order preserved on both sides."""
+    kept: list[str] = []
+    noise: list[str] = []
+    for line in lines:
+        is_noise = any(p.match(line.strip()) for p in _RUNNER_SETUP_NOISE)
+        (noise if is_noise else kept).append(line)
+    return kept, noise
+
+
+def runner_setup_note(entry_id: str, noise: Iterable[str]) -> str:
+    """The warning that carries what a refusal's message no longer does."""
+    return (
+        f"zephyr_west_flash[{entry_id}]: west also printed runner setup warnings, "
+        "unrelated to the ATOC guard's refusal (a west runner or a Python package it "
+        f"imports is missing from this environment): {' | '.join(n.strip() for n in noise)}"
+    )
