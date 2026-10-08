@@ -16,7 +16,7 @@ config artefacts layered AFTER the slice's `alp.conf`.
 Pure: no IO, no SDK read.  HE-only by design: the knob retargets the M55-HE
 slice only, and is refused when the project has no M55-HE app of its own (an
 M55-HP-only project included), on any SKU but AEN801/AEN803, with a sysbuild
-(`boot:`) project, and with an explicit `alp`/`linux`/`none` console.
+(`boot:`) project, and with an explicit `linux`/`none` console.
 
 `console: uart` is accepted (tan-cli#1374).  The #1374 bench (e1m-aen-evk-02,
 AEN803, 2026-10-07) ran a UART5 shell RAM-run with ONLY `zephyr,flash = &itcm;`,
