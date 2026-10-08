@@ -1320,6 +1320,13 @@ from tests.conftest import sdk_root
 #: plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
 #: goldens (the `v0.17.0-rc1` cut, #2763); #2774's console floor is exercised
 #: by no example plan: the re-capture shows no other changed byte.
+#:
+#: RE-MEASURED again at `6159a7b1a` (tan-cli#1216) -- 103 boards, 721 emits
+#: (0 error-contract), 3,046,444 B (was 104 / 728 / 7 / 2,540,037). Every changed
+#: byte is attributed: +171 pairs of `alp_hw_info_build.h` / `alp-west-libs.yml`
+#: `configArtefacts` entries across 100 `build-plan.json` goldens (#2778), and
+#: the 7 `.error` goldens of `rpmsg-imx93` deleted with the example (#2782).
+#: The plan's `sdkVersion` did not move.
 #: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
 #: supersedes the bot's #1310 proposal for the same range, which could not
 #: apply the hand-ports and would have broken two things -- see below).
@@ -1357,20 +1364,32 @@ from tests.conftest import sdk_root
 #:     now emits max(16384, the same `_app_ram_console_size`) instead of a bare
 #:     16384, because `alp-link-itcm.conf` is layered AFTER `prj.conf` and
 #:     would shrink a larger app buffer. `tests/planner/test_ram_console_floor.py`.
-#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `030de105` -> `c4eb27645` (alp-sdk
-#: `dev`; #2782 / alp-sdk#2781: E1M-NX9101 / i.MX 93 removed, the module was never
-#: produced; #2778: `alp_hw_info_build.h` and `alp-west-libs.yml` slice
-#: configArtefacts). Twelve mirrored files changed: `kconfig.py` (nxp-imx9 family
-#: token, the ethos_u65 / ETHOS_U_N93 branches), `secure.py`, `validate.py`,
-#: `sdk_compat.py`, `loader.py`, `carveout.py`, `aperture.py` (NX9 removal), plus
-#: `libraries.py`, `memory.py`, `orchestrator.py`, `partition.py` (comment /
-#: dev-range deltas) and `buildplan.py`/`__init__.py` (#2778: `_slice_hw_info_h`,
-#: `_slice_west_libraries`, the two artefact helpers and the
-#: `hw-info-unavailable` warning, ported by hand into tan's `buildplan.py`;
-#: `planner_emit.py`'s `--core` renders now call the same two helpers, as
-#: upstream's `alp_project.py` does). `aperture.py` and `secure.py` were ported
-#: by hand too (tan's copies diverge in the touched regions).
-PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- NX9101 removal + slice hw-info/west-libs artefacts (alp-sdk#2781/#2782/#2778)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `030de105` -> `6159a7b1` (tan-cli#1216,
+#: alp-sdk#2778). Thirteen mirrored files changed in range:
+#:
+#:   * `buildplan.py` -- #2778: `HW_INFO_ARTEFACT` / `WEST_LIBS_ARTEFACT`,
+#:     `HwInfoUnavailable`, `_slice_hw_info_h`, `_slice_west_libraries`,
+#:     `_slice_hw_info_artefact` / `_slice_west_libs_artefact`, and the two new
+#:     entries appended AFTER `cmake-args.txt` in `emit_build_plan` (a SKU
+#:     outside the production families downgrades to a `hw-info-unavailable`
+#:     warning). Ported by hand (the tool reported a conflict around tan's
+#:     sibling-subpackage import of the emitters); the helpers import
+#:     `tan.planner.project_emit.*` rather than `alp_project_emit`.
+#:     `planner_emit._render_v1_shaped` now calls the same two helpers for
+#:     `--core`, mirroring `alp_project._run_v2_per_core_emit`.
+#:   * `aperture.py`, `secure.py` -- E1M-NX9101 removal (#2782), comments and
+#:     the `nxp-imx9` boot-method default. Ported by hand (tool conflict on
+#:     tan-side comment edits).
+#:   * `__init__.py`, `carveout.py`, `kconfig.py`, `libraries.py`, `loader.py`,
+#:     `memory.py`, `orchestrator.py`, `partition.py`, `sdk_compat.py`,
+#:     `validate.py` -- NX9101-removal and doc-wording edits; merged cleanly.
+#:     `libraries.py`'s relocated `_SOC_FAMILY_TOKEN` drops `imx93`.
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `6159a7b1` -> `c4eb27645` (tan-cli#1427).
+#: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
+#: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
+#: at `c4eb27645` and is unchanged, so nothing is ported.
+PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- #2782 merge + docs; no planner change in range (tan-cli#1427)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2386,17 +2405,21 @@ PINNED_HASHES: dict[str, str] = {
 #: scripts/alp_project_loader.py scripts/sentinels.py scripts/whole_device_alias.py
 #: scripts/alp_cli` is empty), and every `HAND_PORT_HASHES` entry re-hashes
 #: unchanged at `030de105`, so only the pin moves.
-#: AUDITED RE-SYNC (hand-ports): `030de105` -> `c4eb27645` (alp-sdk#2781/#2782/#2778).
-#: NX9 removal ported by hand into `zephyr_board.py` (`_sku_family_slug`),
-#: `som_metadata.py` (`_SKU_FAMILY`/`_sku_family`), `slugs.py` (`pca9451a` row)
-#: and `libraries.py` (`imx93` token). #2778's `alp_project_emit/hw_info.py` change
-#: (`metadata_root` made optional) needs no port: tan's `_emit_hw_info_h` already
-#: takes a required `metadata_root`; its `alp_project.py` change is ported as
-#: `planner_emit.py`'s use of the shared `buildplan` helpers. The remaining
-#: deltas in range are comment/docstring-only upstream (`diagnostic_format.py`,
-#: `validator.py`, `native_sim.py`, `alp_template.py`) and have no tan counterpart
-#: text to move.
-HAND_PORT_PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- NX9101 removal + slice hw-info/west-libs artefacts (alp-sdk#2781/#2782/#2778)
+#: AUDIT `030de105` -> `6159a7b1` (tan-cli#1216): ten hand-port sources changed
+#: in range, all re-hashed in `HAND_PORT_HASHES`. Ported: the E1M-NX9101 removal
+#: (#2782) -- `_SKU_FAMILY` / `_sku_family` lose `NX9` in `som_metadata.py` and
+#: `zephyr_board.py`'s `_sku_family_slug`, `slugs.py`'s `_CHIP_SUBSYSTEMS` loses
+#: `pca9451a`, and the `imx93` west token went with `libraries.py` (above). The
+#: `alp_project_emit/hw_info.py` `metadata_root` parameter was already ported
+#: (alp-sdk#1964; tan's is required, not optional). `alp_project.py`'s
+#: `--core` routing through `_slice_hw_info_h` / `_slice_west_libraries` is
+#: ported in `planner_emit.py` (see the mirror note above). The rest
+#: (`alp_cli/*`, `alp_template.py`, `native_sim.py`, `alp_project_loader.py`
+#: comments) are doc-wording only.
+#:
+#: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
+#: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
+HAND_PORT_PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- no hand-port change in range (tan-cli#1427)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

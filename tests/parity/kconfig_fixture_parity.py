@@ -34,9 +34,9 @@ that is the actual drift this gate exists to catch. So does an ABSENT
 upstream fixture. There is no "predates the feature / not yet applicable"
 branch, close to the rule `toolchain_lock_parity.py` states for
 `metadata/toolchains.json`, and on a measurement rather than a
-generalisation: of the 35 distinct values `PINNED_SDK_TAG` has held across
+generalisation: of the 36 distinct values `PINNED_SDK_TAG` has held across
 `.github/workflows/parity.yml`'s history,
-`tests/fixtures/kconfig-contract/emit-kconfig.golden.json` is present at 33.
+`tests/fixtures/kconfig-contract/emit-kconfig.golden.json` is present at 34.
 The two exceptions are `df312cec` and `f04ea42e`, July-2026 pins predating
 the fixture upstream -- `f04ea42e` was the pin in force when this script was
 first written (tan-cli `ca34090e`, #40), which is what the deleted branch

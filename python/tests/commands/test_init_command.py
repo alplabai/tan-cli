@@ -874,7 +874,8 @@ def test_from_example_refuses_a_som_retarget_onto_a_flow_style_som_block(tmp_pat
 def test_from_example_without_som_tolerates_a_flow_style_som_block(tmp_path):
     """The counterpart negative: with NO `--som` at all there is nothing to
     retarget, so a flow-style `som:` block must not block the copy -- it is
-    carried through verbatim, and the retarget-free read of it does not raise."""
+    carried through verbatim, and `init.hw-rev-not-buildable`'s advisory
+    read of it degrades to "cannot judge" rather than raising."""
     sdk = tmp_path / "sdk"
     (sdk / "scripts").mkdir(parents=True)
     (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
@@ -1773,6 +1774,14 @@ def unvendored_family(monkeypatch):
     monkeypatch.setattr(scaffold, "_SOM_FAMILIES", families)
 
 
+def _invoke_init(*argv):
+    from typer.testing import CliRunner
+
+    from tan.cli import app
+
+    return CliRunner().invoke(app, ["init", *argv])
+
+
 @pytest.mark.parametrize(
     "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
 )
@@ -1789,14 +1798,8 @@ def test_a_som_family_without_a_tree_is_refused_instead_of_getting_the_alif_tree
 
     The refusal writes nothing, is a coded issue, and names `minimal-app`
     (tan's own vendor-neutral template), which scaffolds the same SKU."""
-    from typer.testing import CliRunner
-
-    from tan.cli import app
-
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(
-        app, ["init", "--som", "E1M-ZZ9101", "--template", template_id, "--format", "json"]
-    )
+    result = _invoke_init("--som", "E1M-ZZ9101", "--template", template_id, "--format", "json")
     body = json.loads(result.stdout)
 
     assert result.exit_code == 2, body
@@ -1807,13 +1810,23 @@ def test_a_som_family_without_a_tree_is_refused_instead_of_getting_the_alif_tree
     # The refusal must write NOTHING -- not a half-Alif project, not `.alp/`.
     assert list(tmp_path.iterdir()) == [], "a refused init must not touch disk"
 
-    ok = CliRunner().invoke(
-        app, ["init", "--som", "E1M-ZZ9101", "--template", "minimal-app", "--format", "json"]
-    )
+    ok = _invoke_init("--som", "E1M-ZZ9101", "--template", "minimal-app", "--format", "json")
     assert ok.exit_code == 0, ok.stdout
     board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
     assert "sku: E1M-ZZ9101" in board
     assert "  m33:\n" in board
+
+
+def test_the_refusal_is_a_coded_issue_in_text_mode_too(tmp_path, monkeypatch, unvendored_family):
+    """Text mode still gets the message on stderr and the same exit code -- no
+    traceback, no empty stdout."""
+    monkeypatch.chdir(tmp_path)
+    result = _invoke_init("--som", "E1M-ZZ9101", "--template", "sensor-starter")
+
+    assert result.exit_code == 2
+    assert "Traceback" not in result.output, result.output
+    assert "E1M-ZZ9101" in result.output
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_alif_family_sku_that_is_not_the_tree_sku_still_scaffolds(tmp_path):
@@ -1832,19 +1845,373 @@ def test_an_alif_family_sku_that_is_not_the_tree_sku_still_scaffolds(tmp_path):
 
 # ---------------------------------------------------------------------------
 # the envelope's `sdk` block (tan-cli#491 defect 5)
-# tan-cli#1008 review majors 1+2 -- the `hw_rev:` a retargeted board.yaml carries
 # ---------------------------------------------------------------------------
 
 
-def _sdk_with_example(tmp_path, example_rel, board_yaml):
-    """A fake SDK holding one example whose `board.yaml` is `board_yaml`."""
+def _init_sdk_argv(sdk: Path, *extra: str) -> tuple[str, ...]:
+    return ("init", "--template", "minimal-app", "--sdk-root", str(sdk), "--format", "json", *extra)
+
+
+def test_every_init_outcome_carries_the_sdk_block(tmp_path):
+    """tan-cli#491 defect 5. `init` passed no `sdk=` to `Envelope(...)` at all,
+    so the key was ABSENT from all four outcomes -- preview, successful write,
+    overwrite-guard refusal, and every `_emit_error` -- while the frozen v0.4.1
+    oracle answers the identical argv with `sdk:{root,sourceTier}` (the `init`
+    capture in `tests/fixtures/oracle_captures/test_oracle_parity.json`:
+    `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
+    only field naming WHICH checkout a run is about to permanently pin --
+    `data.sdkPinned` is `null` on three of the four.
+
+    All four asserted as ONE case, deliberately: the defect was that they
+    DISAGREED with the oracle uniformly, and a fix to one path alone would
+    leave the same hole on the other three.
+
+    `root` is the ABSOLUTE path, not the `./sdk` typed -- `_Sdk.display`'s own
+    tan-cli#263 divergence, which this field only reports."""
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    expected = {"root": sdk.as_posix(), "sourceTier": "sdkRootFlag"}
+
+    preview = envelope(run_tan(*_init_sdk_argv(sdk, "--preview"), cwd=tmp_path))
+    assert preview.get("sdk") == expected, preview
+
+    written = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert written.get("sdk") == expected, written
+    assert written["data"]["sdkPinned"] == sdk.as_posix()
+
+    (tmp_path / "board.yaml").write_text("# local edit\n", encoding="utf-8")
+    refused = envelope(run_tan(*_init_sdk_argv(sdk), cwd=tmp_path))
+    assert refused["exitCode"] == 3, refused
+    assert [i["code"] for i in refused["issues"]] == ["init.would-overwrite"]
+    assert refused.get("sdk") == expected, refused
+
+    failed = envelope(
+        run_tan(
+            "init", "--template", "nope", "--sdk-root", str(sdk), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert [i["code"] for i in failed["issues"]] == ["init.invalid-template"]
+    assert failed.get("sdk") == expected, failed
+
+
+def test_the_sdk_block_reports_the_discovery_tier_too(tmp_path):
+    """The tier is the half `_resolve_sdk_root` was dropping. With no
+    `--sdk-root` the wide ladder answers from the child `<ws>/alp-sdk`, and
+    `sourceTier` must say `discovery` -- a block that hardcoded `sdkRootFlag`
+    would pass the case above and be wrong here.
+
+    HOME is redirected so a real `~/.alp/sdk-default` cannot answer the
+    `globalDefault` tier first and change the expected tier."""
+    _sdk_checkout(tmp_path / "alp-sdk")
+    project = tmp_path / "proj"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--preview", "--format", "json",
+            cwd=project,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["sdk"] == {
+        "root": (tmp_path / "alp-sdk").as_posix(),
+        "sourceTier": "discovery",
+    }, env
+
+
+def test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block(tmp_path):
+    """The block is gated on the loader marker, matching
+    `build_output.resolve_project_context` ("only what core's own loader-marker
+    check accepted"). `_pin_sdk` silently declines to pin a non-checkout, so
+    reporting `sdk` here would advertise a checkout that is about to be pinned
+    and is not -- and `data.sdkPinned` proves it was not.
+
+    tan-cli#642: this is the exact repro -- an unresolvable `--sdk-root` --
+    and it must no longer be silent about it: `ok:true`/`exitCode:0` (the
+    project still scaffolds), but a coded warning names the path that failed
+    to resolve, and the project is still written with no `.alp/sdk-path`."""
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(typo),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert "sdk" not in env, env
+    assert env["data"]["sdkPinned"] is None
+    assert not (tmp_path / ".alp" / "sdk-path").exists()
+    assert [i["code"] for i in env["issues"]] == ["init.sdk-root-invalid"]
+    warning = env["issues"][0]
+    assert warning["severity"] == "warning"
+    assert str(typo) in warning["message"]
+    assert "sdkPinned" not in warning["message"]  # sanity: the path, not the field name
+
+
+def test_sdk_root_unresolved_is_silent_when_no_sdk_root_was_passed_at_all(tmp_path):
+    """`init.sdk-root-invalid` is scoped to an EXPLICIT `--sdk-root` that
+    failed to resolve -- not to the ordinary case of no `--sdk-root` at all,
+    which every other ladder tier already handles on its own terms (or not,
+    by design: `minimal-app` scaffolds with no SDK reachable at all)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "minimal-app", "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    assert env["issues"] == []
+
+
+def test_sdk_root_invalid_fires_for_an_sdk_root_a_bootstrap_relocation_broke(tmp_path):
+    """tan-cli#642's more realistic route: nobody types a nonsense path, but a
+    previously-valid `--sdk-root` can stop resolving between calls -- e.g.
+    once `tan bootstrap` has relocated it. Simulated here by pointing
+    `--sdk-root` at a directory that was NEVER a checkout to begin with (the
+    observable shape -- 'the marker file is not there right now' -- is
+    identical either way; `_is_sdk_checkout` cannot distinguish 'never was'
+    from 'moved out from under this run')."""
+    relocated_away = tmp_path / "sdk-relocated-elsewhere"
+    relocated_away.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            *_init_sdk_argv(relocated_away),
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["sdkPinned"] is None
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.sdk-root-invalid" in codes, env["issues"]
+
+
+def test_an_error_before_the_sdk_resolves_leaves_the_key_absent(tmp_path):
+    """`_emit_error`'s `sdk` defaults to `None` because both handlers can be
+    reached before `_resolve_sdk_root` has run. Proven with `--project` naming
+    a path that is a FILE: `os.path.abspath` succeeds, the scaffold write
+    refuses, and the envelope must still be an envelope."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = envelope(
+        run_tan(
+            "init", "--template", "nope", "--project", str(blocker), "--format", "json",
+            cwd=tmp_path,
+            env_extra={"HOME": str(home), "USERPROFILE": str(home)},
+        )
+    )
+    assert "sdk" not in env, env
+    assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]
+
+
+def test_an_error_after_an_unresolved_sdk_root_still_omits_the_sdk_block(tmp_path):
+    """The `_emit_error` sibling of
+    `test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block`: here
+    `resolved_sdk` IS bound (unlike the case above, where the key is absent
+    because `_resolve_sdk_root` never ran at all) but is not a real checkout,
+    and the failure is an ordinary validation error (`init.invalid-template`)
+    raised AFTER `_resolve_sdk_root` -- exactly the `_emit_error` call site at
+    tan-cli#922, `_emit_error(json_mode, err, resolved_sdk)`.  `_sdk_reportable`
+    must still gate that call the same way it gates `_emit_outcome`'s: nothing
+    was pinned, so the envelope must not advertise a checkout that a
+    `--sdk-root` typo never resolved to."""
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    proc = run_tan(
+        "init", "--template", "bogus-xyz", "--som", "E1M-AEN801",
+        "--sdk-root", str(typo), "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert env["exitCode"] != 0, env
+    assert "sdk" not in env, env
+    assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]
+
+# tan-cli#743 -- a default hw_rev the SDK itself marks not buildable
+# ---------------------------------------------------------------------------
+
+
+def _sdk_with_hw_rev_status(
+    tmp_path, *, sku="E1M-V2N101", family_dir="v2n", hw_rev="r1", status="tbd",
+):
+    """A fake SDK carrying one SoM preset (`default_hw_rev: <hw_rev>`) and
+    its family's `hw-revisions.yaml` entry for that revision, in the real
+    shapes `hw_rev_not_buildable` reads. `status=None` omits the
+    `status:` key entirely (the "missing key" not-buildable case)."""
     sdk = tmp_path / "sdk"
     (sdk / "scripts").mkdir(parents=True)
     (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
-    example = sdk / "examples" / example_rel
-    example.mkdir(parents=True)
-    (example / "board.yaml").write_text(board_yaml, encoding="utf-8")
+
+    modules = sdk / "metadata" / "e1m_modules"
+    modules.mkdir(parents=True)
+    (modules / f"{sku}.yaml").write_text(
+        f"sku: {sku}\ndefault_hw_rev: {hw_rev}\n", encoding="utf-8",
+    )
+    family = modules / family_dir
+    family.mkdir()
+    entry = f"    min_sdk_version: ~\n    max_sdk_version: ~\n"
+    if status is not None:
+        entry += f"    status: {status}\n"
+    (family / "hw-revisions.yaml").write_text(
+        f"family: {family_dir}\nhw_revisions:\n  {hw_rev}:\n{entry}",
+        encoding="utf-8",
+    )
     return sdk
+
+
+def test_init_warns_when_the_default_hw_rev_is_not_buildable(tmp_path):
+    """tan-cli#743. Measured on `dev` before this fix:
+
+        $ tan init --som E1M-V2N101 --template minimal-app ...
+        init: created './nx-probe' from template 'minimal-app'
+        init rc=0
+        $ tan validate --project nx-probe ...
+        sdk-compat: SoM E1M-V2N101 hw_rev 'r1' exists but is not buildable
+        (status: 'tbd').
+        validate rc=2
+
+    `validate` is not wrong -- the fact is real. `init` resolved the exact
+    same SoM preset and said nothing about it. Now it must warn, not stay
+    silent, naming the same hw_rev and status `validate` will refuse next."""
+    sdk = _sdk_with_hw_rev_status(tmp_path)
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.hw-rev-not-buildable" in codes, env["issues"]
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert warn["severity"] == "warning"
+    assert "E1M-V2N101" in warn["message"]
+    assert "'r1'" in warn["message"]
+    assert "'tbd'" in warn["message"]
+    # Files are still written -- that is the whole point of warning over refusing.
+    assert (tmp_path / "board.yaml").is_file()
+
+
+def test_init_warns_for_a_default_hw_rev_with_no_status_key_at_all(tmp_path):
+    """`revision_buildable`'s broad reading, mirrored here: a `status:`-less
+    entry is not buildable either, and the message must say so without
+    quoting a status that doesn't exist."""
+    sdk = _sdk_with_hw_rev_status(tmp_path, status=None)
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    # tan-cli#1008 review nit: asserted BEFORE the `next(...)` below -- a
+    # mutant that flips the missing-`status:` branch must die on ITS OWN
+    # assertion (no `init.hw-rev-not-buildable` in the codes), not on an
+    # incidental `StopIteration` from `next()` finding nothing to match.
+    assert "init.hw-rev-not-buildable" in [i["code"] for i in env["issues"]], env["issues"]
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "no `status:` key" in warn["message"]
+
+
+def test_init_is_silent_when_the_default_hw_rev_is_buildable(tmp_path):
+    """Anti-false-alarm: `status: production` (or any status outside
+    `{reserved, tbd}`) must not warn."""
+    sdk = _sdk_with_hw_rev_status(tmp_path, status="production")
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
+
+
+def test_init_is_silent_with_no_sdk_root_resolved(tmp_path):
+    """No `--sdk-root` and no discoverable checkout means nothing to read the
+    default hw_rev's status FROM -- must not crash, and must not warn from
+    the SKU string alone."""
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
+
+
+def test_init_reaches_the_same_warning_across_every_som_family(tmp_path):
+    """The issue's own ask: this is not a single-family special case. Sweep
+    every family's SKU->directory mapping, not just the one that was
+    reported."""
+    for sku, family_dir in (
+        ("E1M-AEN301", "aen"),
+        ("E1M-V2N101", "v2n"),
+        ("E1M-V2M101", "v2n-m1"),
+    ):
+        case_root = tmp_path / family_dir
+        case_root.mkdir()
+        _sdk_with_hw_rev_status(case_root, sku=sku, family_dir=family_dir)
+
+        proc = run_tan(
+            "init", "--som", sku, "--template", "minimal-app",
+            "--sdk-root", "./sdk", "--format", "json", cwd=case_root,
+        )
+        env = envelope(proc)
+
+        assert proc.returncode == 0, (sku, env)
+        codes = [i["code"] for i in env["issues"]]
+        assert "init.hw-rev-not-buildable" in codes, (sku, env["issues"])
+
+
+# tan-cli#1008 review majors 1+2
+# ---------------------------------------------------------------------------
+
+
+def test_init_from_example_without_som_warns_from_the_disk_sku(tmp_path):
+    """tan-cli#1008 review major 1's own repro (caseB): a bare
+    `--from-example`, no `--som` at all. The copied example's own
+    board.yaml already names a not-buildable SKU -- `init` must warn from
+    THAT, not stay silent because `--som` is `None`."""
+    sdk = _sdk_with_hw_rev_status(tmp_path)  # E1M-V2N101 / v2n / r1 / tbd
+    example = sdk / "examples" / "multicore" / "rpmsg-v2n"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-V2N101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n",
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/rpmsg-v2n",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.hw-rev-not-buildable" in codes, env["issues"]
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "E1M-V2N101" in warn["message"]
+    assert "'r1'" in warn["message"]
+    assert "'tbd'" in warn["message"]
+    assert "explicitly sets `hw_rev: r1`" in warn["message"]
 
 
 def test_init_from_example_drops_a_cross_family_hw_rev_from_the_written_board_yaml(tmp_path):
@@ -1855,9 +2222,12 @@ def test_init_from_example_drops_a_cross_family_hw_rev_from_the_written_board_ya
     so a regression reaching the CLI (e.g. `changing_sku` always `False`)
     would not have been caught where a customer would actually see it. Reads
     the file directly, the same way the round-3 `caseA` transcript did."""
-    _sdk_with_example(
-        tmp_path, "multicore/rpmsg-aen",
+    sdk = _sdk_with_hw_rev_status(tmp_path)  # E1M-V2N101 / v2n / r1 / tbd
+    example = sdk / "examples" / "multicore" / "rpmsg-aen"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
         "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n  m55_hp:\n    app: .\n",
+        encoding="utf-8",
     )
 
     proc = run_tan(
@@ -1870,6 +2240,11 @@ def test_init_from_example_drops_a_cross_family_hw_rev_from_the_written_board_ya
     board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
     assert "sku: E1M-V2N101" in board
     assert "hw_rev:" not in board  # r2 belongs to the ORIGINAL (aen) family
+    # And init's own hw-rev-not-buildable check catches the new SoM's
+    # default (r1/tbd) taking its place, rather than the mismatch surfacing
+    # as an unexplained `tan validate` refusal three commands later.
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.hw-rev-not-buildable" in codes, env["issues"]
 
 
 def test_init_from_example_keeps_an_intra_family_hw_rev_in_the_written_board_yaml(tmp_path):
@@ -1878,11 +2253,28 @@ def test_init_from_example_keeps_an_intra_family_hw_rev_in_the_written_board_yam
     file's explicit `hw_rev:` rather than silently substitute the target
     SKU's own `default_hw_rev:` -- a DIFFERENT declared revision (real data:
     E1M-AEN301's `default_hw_rev: r2`, distinct `pad_route_overrides` from
-    `r1`) with a clean `tan validate`. `--som` retargeting within a family is
-    real (an EVK-shaped example moved to a sibling SKU)."""
-    _sdk_with_example(
-        tmp_path, "bringup/aen-evk",
+    `r1`) with no warning and a clean `tan validate`. `--som` retargeting
+    within a family is real (an EVK-shaped example moved to a sibling SKU),
+    so this must not depend on a fake SDK's contrived `default_hw_rev`."""
+    sdk = _sdk_with_hw_rev_status(
+        tmp_path, sku="E1M-AEN301", family_dir="aen", hw_rev="r2", status="production",
+    )
+    # E1M-AEN301's OWN family table additionally declares `r1` -- the
+    # example's explicit value -- distinct from its buildable
+    # `default_hw_rev: r2`, so a pass that dropped the file's `hw_rev:` and
+    # silently fell back to the default would stay silent here too.
+    family = sdk / "metadata" / "e1m_modules" / "aen" / "hw-revisions.yaml"
+    family.write_text(
+        "family: aen\nhw_revisions:\n"
+        "  r1:\n    status: production\n"
+        "  r2:\n    status: production\n",
+        encoding="utf-8",
+    )
+    example = sdk / "examples" / "bringup" / "aen-evk"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
         "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n  m55_hp:\n    app: .\n",
+        encoding="utf-8",
     )
 
     proc = run_tan(
@@ -1895,44 +2287,80 @@ def test_init_from_example_keeps_an_intra_family_hw_rev_in_the_written_board_yam
     board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
     assert "sku: E1M-AEN301" in board
     assert "hw_rev: r1" in board  # survives -- same family as the source SKU
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
 
 
 def test_init_from_example_with_a_no_op_som_keeps_the_files_own_explicit_hw_rev(tmp_path):
-    """tan-cli#1008 review major 2's own repro (caseA) is closed by DROPPING
-    the sibling `hw_rev:` on a cross-SKU retarget (see
+    """tan-cli#1008 review major 2's own repro (caseA) is now closed by
+    DROPPING the sibling `hw_rev:` on a cross-SKU retarget (see
     `test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes`), so an
-    explicit hw_rev can only survive when `--som` does NOT actually change the
-    SKU -- exercised here with `--som` equal to the example's own SKU
-    (`retarget_board_yaml_som`'s byte-exact no-op case)."""
-    _sdk_with_example(
-        tmp_path, "multicore/rpmsg-aen",
-        "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n  m55_hp:\n    app: .\n",
+    explicit hw_rev can only survive into the warning when `--som` does NOT
+    actually change the SKU -- exercised here with `--som` equal to the
+    example's own SKU (`retarget_board_yaml_som`'s byte-exact no-op case).
+    The warning must name the file's own explicit value, not claim the file
+    "sets no explicit hw_rev:", and must not silently default to the SoM's
+    `default_hw_rev` instead."""
+    sdk = _sdk_with_hw_rev_status(
+        tmp_path, sku="E1M-V2N101", family_dir="v2n", hw_rev="r9", status="production",
+    )
+    # `E1M-V2N101`'s OWN family table additionally declares `r1`, the
+    # example's explicit (not-buildable) value -- distinct from the SoM
+    # preset's buildable `default_hw_rev: r9`, so a pass that ignored the
+    # file and used the default would wrongly stay silent.
+    family = sdk / "metadata" / "e1m_modules" / "v2n" / "hw-revisions.yaml"
+    family.write_text(
+        "family: v2n\nhw_revisions:\n"
+        "  r9:\n    status: production\n"
+        "  r1:\n    status: tbd\n",
+        encoding="utf-8",
+    )
+    example = sdk / "examples" / "multicore" / "rpmsg-v2n"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-V2N101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n",
+        encoding="utf-8",
     )
 
     proc = run_tan(
-        "init", "--from-example", "multicore/rpmsg-aen", "--som", "E1M-AEN801",
+        "init", "--from-example", "multicore/rpmsg-v2n", "--som", "E1M-V2N101",
         "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
     )
     env = envelope(proc)
 
     assert proc.returncode == 0, env
     board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
-    assert "sku: E1M-AEN801" in board
+    assert "sku: E1M-V2N101" in board
     assert "hw_rev: r1" in board  # a no-op --som never touches it
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "E1M-V2N101" in warn["message"]
+    assert "'r1'" in warn["message"]
+    assert "explicitly sets `hw_rev: r1`" in warn["message"]
+    assert "sets no explicit" not in warn["message"]
+    assert "'r9'" not in warn["message"]  # the buildable default must not be named instead
 
 
-def test_init_from_example_without_som_keeps_an_hw_rev_its_family_does_not_declare(tmp_path):
-    """With no `--som` there is no retarget to strip anything, so a
-    hand-authored example whose own board.yaml names an `hw_rev:` is copied
-    verbatim. Whether that revision is KNOWN is `tan validate`'s own check
-    (`revision_known`), not `tan init`'s."""
-    _sdk_with_example(
-        tmp_path, "bringup/odd-hw-rev",
-        "som:\n  sku: E1M-AEN801\n  hw_rev: r9\ncores:\n  m55_hp:\n    app: .\n",
+def test_init_is_silent_when_the_files_own_hw_rev_is_unknown_to_its_family(tmp_path):
+    """tan-cli#1008 review major 2's original repro shape (a `hw_rev:` the
+    family table does not even declare) is now UNREACHABLE via a SKU
+    retarget -- `retarget_board_yaml_som` drops the sibling `hw_rev:`
+    outright when the SKU actually changes, so no retargeted board.yaml can
+    carry a foreign-family value any more. It remains reachable with no
+    `--som` at all (no retarget to strip anything): a hand-authored example
+    whose own board.yaml already names an hw_rev its OWN family table does
+    not declare. Whether an hw_rev is a KNOWN revision is `tan validate`'s
+    own separate check (`revision_known`, not `revision_buildable`) -- this
+    warning must stay silent rather than mis-describe that different
+    failure as "not buildable"."""
+    sdk = _sdk_with_hw_rev_status(tmp_path)  # E1M-V2N101 / v2n declares only r1
+    example = sdk / "examples" / "bringup" / "malformed-hw-rev"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-V2N101\n  hw_rev: r9\ncores:\n  m33:\n    app: .\n",
+        encoding="utf-8",
     )
 
     proc = run_tan(
-        "init", "--from-example", "bringup/odd-hw-rev",
+        "init", "--from-example", "bringup/malformed-hw-rev",
         "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
     )
     env = envelope(proc)
@@ -1940,6 +2368,239 @@ def test_init_from_example_without_som_keeps_an_hw_rev_its_family_does_not_decla
     assert proc.returncode == 0, env
     board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
     assert "hw_rev: r9" in board
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
+
+
+def test_init_hw_rev_message_omits_the_unsatisfiable_alternative_clause(tmp_path):
+    """tan-cli#1008 review minor: v2n publishes exactly one hw_rev for
+    E1M-V2N101 today, so "or until board.yaml names a buildable `hw_rev:`
+    explicitly" is advice that reproduces the identical refusal if
+    followed -- it must not be offered when there is no other revision to
+    name."""
+    sdk = _sdk_with_hw_rev_status(tmp_path)  # v2n's only declared rev is r1
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "names a buildable" not in warn["message"]
+
+
+def test_init_hw_rev_message_offers_the_alternative_clause_when_one_exists(tmp_path):
+    sdk = _sdk_with_hw_rev_status(tmp_path)
+    family = sdk / "metadata" / "e1m_modules" / "v2n" / "hw-revisions.yaml"
+    family.write_text(
+        "family: v2n\nhw_revisions:\n"
+        "  r1:\n    status: tbd\n"
+        "  r2:\n    status: production\n",
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    warn = next(i for i in env["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "or until board.yaml names a buildable `hw_rev:` explicitly" in warn["message"]
+
+
+def test_init_skips_the_check_when_board_yaml_is_overridden(tmp_path):
+    """`--board-yaml` renders customer content verbatim; this command does
+    not parse it for an effective SKU/hw_rev, so the check -- keyed off the
+    `--som`/default-template SKU -- must not fire a warning that may not
+    describe what actually got written."""
+    sdk = _sdk_with_hw_rev_status(tmp_path)
+    override = tmp_path / "custom-board.yaml"
+    override.write_text(
+        "som:\n  sku: E1M-V2N101\n  hw_rev: r1\ncores:\n  m33:\n    os: zephyr\n    app: .\n",
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "init", "--som", "E1M-V2N101", "--template", "minimal-app",
+        "--board-yaml", str(override), "--sdk-root", "./sdk", "--format", "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
+
+
+def test_init_from_example_warns_using_the_planned_board_yaml_sku(tmp_path):
+    """tan-cli#1008 review round 3's vacuity check, the `--from-example`
+    sibling of the `--topology` fix above (same class caught twice on this
+    PR): the PREVIOUS version of this test asserted `without_som` stays
+    silent, and passed -- but only because its fake SDK OMITTED an
+    `E1M-AEN801` preset entirely, so `hw_rev_not_buildable` had nothing to
+    check against regardless of which SKU the check used. Adding that
+    preset (as the round-3 reviewer did, to prove the vacuity) turns the old
+    assertion red: the example's own board.yaml -- already written to disk,
+    unretargeted -- names `E1M-AEN801`, whose default hw_rev this SDK now
+    also marks not-buildable. Both legs must warn: `without_som` naming the
+    example's own `E1M-AEN801`, `with_som` naming the `--som`-retargeted
+    `E1M-V2N101` -- proving the warning tracks what is actually on disk, not
+    whether `--som` was given."""
+    sdk = _sdk_with_hw_rev_status(tmp_path, sku="E1M-AEN801", family_dir="aen")
+    modules = sdk / "metadata" / "e1m_modules"
+    (modules / "E1M-V2N101.yaml").write_text(
+        "sku: E1M-V2N101\ndefault_hw_rev: r1\n", encoding="utf-8",
+    )
+    (modules / "v2n").mkdir()
+    (modules / "v2n" / "hw-revisions.yaml").write_text(
+        "family: v2n\nhw_revisions:\n  r1:\n"
+        "    min_sdk_version: ~\n    max_sdk_version: ~\n    status: tbd\n",
+        encoding="utf-8",
+    )
+    example = sdk / "examples" / "bringup" / "board-selftest"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8",
+    )
+
+    without_som = run_tan(
+        "init", "--from-example", "bringup/board-selftest",
+        "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env_without = envelope(without_som)
+    assert env_without["exitCode"] == 0, env_without
+    codes_without = [i["code"] for i in env_without["issues"]]
+    assert "init.hw-rev-not-buildable" in codes_without, env_without["issues"]
+    warn_without = next(
+        i for i in env_without["issues"] if i["code"] == "init.hw-rev-not-buildable"
+    )
+    assert "E1M-AEN801" in warn_without["message"]
+
+    retargeted = tmp_path / "retargeted"
+    retargeted.mkdir()
+    with_som = run_tan(
+        "init", "--from-example", "bringup/board-selftest", "--som", "E1M-V2N101",
+        "--sdk-root", str(sdk), "--format", "json", cwd=retargeted,
+    )
+    env_with = envelope(with_som)
+    assert env_with["exitCode"] == 0, env_with
+    codes_with = [i["code"] for i in env_with["issues"]]
+    assert "init.hw-rev-not-buildable" in codes_with, env_with["issues"]
+    warn_with = next(i for i in env_with["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "E1M-V2N101" in warn_with["message"]
+
+
+def test_init_topology_warns_using_the_planned_board_yaml_sku(tmp_path):
+    """tan-cli#743 review, against tan-cli#996's `--topology`, which landed on
+    `dev` while this fix was in flight: `_plan_from_topology` delegates to
+    `_plan_from_example` (same retarget-only-with---som behaviour), but it
+    sets `from_example` to `None` -- the original fix's condition
+    (`from_example is not None`) would have missed this sibling path
+    entirely. The gate that actually matters is `is_example_shaped`
+    (`template_id.startswith("example:")`), true for `--topology` too.
+
+    tan-cli#1008 review major 1 SUPERSEDES this test's original contract.
+    Before that fix, the code only read `--som`, so a bare `--topology` (no
+    `--som` at all) fell silent even though the example's own board.yaml --
+    already written to disk -- names a SKU (`E1M-AEN801`, made deliberately
+    not-buildable by this fake SDK) whose default hw_rev the SDK itself
+    refuses: exactly the tan-cli#743 contradiction, surviving on this sibling
+    path. The old assertion (`without_som` must NOT warn) pinned that silence
+    as correct; it was the bug, not a spec. The check now reads the SKU off
+    the PLANNED board.yaml content instead (`vendored_som`), so both legs
+    warn here -- `without_som` naming the example's own `E1M-AEN801`,
+    `with_som` naming the `--som`-retargeted `E1M-V2N101` -- proving the
+    warning tracks what's actually on disk, not the flag."""
+    sdk = _sdk_with_hw_rev_status(tmp_path, sku="E1M-AEN801", family_dir="aen")
+    modules = sdk / "metadata" / "e1m_modules"
+    (modules / "E1M-V2N101.yaml").write_text(
+        "sku: E1M-V2N101\ndefault_hw_rev: r1\n", encoding="utf-8",
+    )
+    (modules / "v2n").mkdir()
+    (modules / "v2n" / "hw-revisions.yaml").write_text(
+        "family: v2n\nhw_revisions:\n  r1:\n"
+        "    min_sdk_version: ~\n    max_sdk_version: ~\n    status: tbd\n",
+        encoding="utf-8",
+    )
+    example = sdk / "examples" / "bringup" / "board-selftest"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8",
+    )
+    cat = sdk / "metadata" / "templates"
+    cat.mkdir(parents=True)
+    cat_json = cat / "catalog-v1.json"
+    cat_json.write_text(
+        json.dumps({"schemaVersion": 1, "templates": [{
+            "id": "board-selftest",
+            "example": "examples/bringup/board-selftest",
+            "cores": [{"id": "m55_hp", "os": "zephyr"}],
+        }]}),
+        encoding="utf-8",
+    )
+
+    without_som = run_tan(
+        "init", "--topology", "m55_hp:zephyr", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env_without = envelope(without_som)
+    assert env_without["exitCode"] == 0, env_without
+    codes_without = [i["code"] for i in env_without["issues"]]
+    assert "init.hw-rev-not-buildable" in codes_without, env_without["issues"]
+    warn_without = next(
+        i for i in env_without["issues"] if i["code"] == "init.hw-rev-not-buildable"
+    )
+    assert "E1M-AEN801" in warn_without["message"]
+
+    retargeted = tmp_path / "retargeted"
+    retargeted.mkdir()
+    with_som = run_tan(
+        "init", "--topology", "m55_hp:zephyr", "--som", "E1M-V2N101",
+        "--sdk-root", str(sdk), "--format", "json", cwd=retargeted,
+    )
+    env_with = envelope(with_som)
+    assert env_with["exitCode"] == 0, env_with
+    codes_with = [i["code"] for i in env_with["issues"]]
+    assert "init.hw-rev-not-buildable" in codes_with, env_with["issues"]
+    warn_with = next(i for i in env_with["issues"] if i["code"] == "init.hw-rev-not-buildable")
+    assert "E1M-V2N101" in warn_with["message"]
+
+
+def test_init_hw_rev_fallback_gate_is_example_shaped_not_from_example(tmp_path):
+    """Regression for the ORIGINAL sibling-path defect this whole check's
+    fix targeted, now confined to the one branch tan-cli#1008 major 1 left
+    as a fallback: when an example plans NO board.yaml at all (nothing for
+    `vendored_som` to read), the effective-SKU gate must still be
+    `is_example_shaped` (true for `--topology` too), not `from_example is
+    not None` (`None` for `--topology`) -- the latter would wrongly fall
+    through to checking `DEFAULT_SOM_SKU` (the `--template` branch's own
+    formula) on a bare `--topology` with no `--som` at all. This SDK
+    deliberately makes `DEFAULT_SOM_SKU` itself (`E1M-AEN801`) not-buildable
+    to make that wrong fallthrough observable."""
+    sdk = _sdk_with_hw_rev_status(tmp_path, sku="E1M-AEN801", family_dir="aen")
+    example = sdk / "examples" / "bringup" / "no-board-yaml"
+    example.mkdir(parents=True)
+    (example / "src").mkdir()
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    cat = sdk / "metadata" / "templates"
+    cat.mkdir(parents=True)
+    (cat / "catalog-v1.json").write_text(
+        json.dumps({"schemaVersion": 1, "templates": [{
+            "id": "no-board-yaml",
+            "example": "examples/bringup/no-board-yaml",
+            "cores": [{"id": "m55_hp", "os": "zephyr"}],
+        }]}),
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "init", "--topology", "m55_hp:zephyr", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.hw-rev-not-buildable" not in [i["code"] for i in env["issues"]]
 
 
 # ---------------------------------------------------------------------------

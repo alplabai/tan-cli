@@ -446,6 +446,10 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
             f"--core {core} not present in board.yaml "
             f"(known: {sorted(project.cores.keys())})")
 
+    from tan.planner.buildplan import (  # noqa: PLC0415
+        _slice_hw_info_h,
+        _slice_west_libraries,
+    )
     from tan.planner.project_emit.hw_info import _emit_hw_info_h  # noqa: PLC0415
     from tan.planner.project_emit.native_sim import (  # noqa: PLC0415
         _emit_native_sim_overlay,
@@ -471,8 +475,6 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
         if core is not None:
             # Single source shared with the build plan's
             # `alp_hw_info_build.h` configArtefact (ADR-0026 §D).
-            from tan.planner.buildplan import _slice_hw_info_h  # noqa: PLC0415
-
             return _slice_hw_info_h(project, project.cores[core])
         return _emit_hw_info_h(
             shaped, project.som_preset, project.board_preset,
@@ -485,8 +487,6 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     if core is not None:
         # Single source shared with the build plan's `alp-west-libs.yml`
         # configArtefact (ADR-0026 §D).
-        from tan.planner.buildplan import _slice_west_libraries  # noqa: PLC0415
-
         return _slice_west_libraries(project, project.cores[core])
     else:
         union_l: set[str] = set()

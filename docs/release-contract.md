@@ -655,12 +655,17 @@ that carries it. What did change is that alp-sdk cut the pre-release tag
 addendum above no longer holds); the decision below still waits for a STABLE
 tag, so it is unchanged.
 
-**Addendum (2026-10-08, E1M-NX9101 removal, alp-sdk#2781/#2782).** The planner
-mirror moved again, to alp-sdk `dev`
-`c4eb2764542cfaaaaaa637113af56af5cd3b2edd` (includes #2782). The floor does NOT move: it stays `b04bb0f7a`. The change drops
-the `E1M-NX9*` / i.MX 93 family from tan's planner, scaffold and model tables;
-an SDK checkout older than #2782 still ships that module's metadata, which tan
-no longer plans (the module was never produced).
+**Addendum (2026-10-08, tan-cli#1216).** The planner mirror moved again, to
+alp-sdk `6159a7b1a50c3267b98fed17c0e17d084143d22b`, and the floor the next tag
+needs still does NOT move: it stays `b04bb0f7a`. The planner change in range is
+alp-sdk#2778 (the plan's `alp_hw_info_build.h` / `alp-west-libs.yml`
+artefacts), which tan's own in-process planner renders itself, so no tan code
+path requires an SDK that carries it; the rest is the E1M-NX9101 removal
+(alp-sdk#2782). The decision below is unchanged.
+
+**Addendum (2026-10-08, tan-cli#1427).** The planner mirror moved to alp-sdk
+`dev` `c4eb2764542cfaaaaaa637113af56af5cd3b2edd` (docs-only for `scripts/**` and
+`metadata/**` over `6159a7b1a`). The floor does NOT move: it stays `b04bb0f7a`.
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag

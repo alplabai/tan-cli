@@ -96,9 +96,33 @@ from an un-revendored SDK change.
   tree unchanged.
 
 - **Current vendor point (all templates):** **`c4eb27645`**
-  (`c4eb2764542cfaaaaaa637113af56af5cd3b2edd`, alp-sdk `dev`, includes #2782)
-  — the `030de105d` -> `c4eb27645` planner re-sync for the E1M-NX9101
-  removal (alp-sdk#2781), the same change that moves
+  (`c4eb2764542cfaaaaaa637113af56af5cd3b2edd`, alp-sdk `dev`) — the
+  `6159a7b1a` -> `c4eb27645` planner re-sync (tan-cli#1427). The range holds no
+  change to `scripts/**` or `metadata/**` (alp-sdk#2782's merge and the #2783
+  docs commit), so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <c4eb27645>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+  unchanged. The pin moves in the same change as `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Prior vendor point (all templates):** **`6159a7b1a`**
+  (`6159a7b1a50c3267b98fed17c0e17d084143d22b`, alp-sdk `dev`) — the
+  `030de105d` -> `6159a7b1a` planner re-sync (tan-cli#1216; alp-sdk#2778, with
+  the E1M-NX9101 removal #2782 in range), the same change that moves
+  `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
+  `sdk_parity` `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, one
+  file:** `examples/ai/cold-chain-monitor/src/cold_chain.c` (two comment edits)
+  into `edge-ai/E1M-AEN801/src/cold_chain.c` and
+  `edge-ai/E1M-V2N101/src/cold_chain.c`. `scaffold_byte_parity.py --sdk
+  <6159a7b1a>` was 8/10 against the old tree and is rc 0, **10/10** (template,
+  sku) pairs PASS after.
+
+- **Earlier vendor point (all templates):** **`030de105d`**
+  (`030de105d3a106b3c10202854cf57d4e81e78c0f`, alp-sdk `dev`) — the
+  `2d2a85333` -> `030de105d` planner re-sync (tan-cli#1401; alp-sdk#2774, with
+  the v0.17.0 release merge #2763 in range), the same change that moves
   `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
   `sdk_parity` `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`. **Re-vendored, two

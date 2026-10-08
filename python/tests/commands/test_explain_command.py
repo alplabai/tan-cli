@@ -172,7 +172,33 @@ def test_family_gated_templates_publish_a_non_empty_exclusion_when_one_exists(
     monkeypatch.setattr(explain_cmd, "UNSUPPORTED_SOM_FAMILY_PREFIXES", ("E1M-ZZ9",))
     som = resolve(template_id, None).extra_data["som"]
     assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": ["E1M-ZZ9"]}
-    assert "Refuses --som for these SoM families: E1M-ZZ9." in details(template=template_id)
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_report_their_exclusion_in_text_mode_too(
+    template_id, monkeypatch
+):
+    """PR #985 review, minor 5: text mode used to say nothing at all about
+    the family exclusion for these four templates, even though JSON already
+    carried `data.som.initRefusesSkuPrefixes` -- a human running `tan explain
+    --template <id>` with no `--format json` only discovered the restriction
+    as `init.som-unsupported`, at `tan init` time. Derived from the SAME
+    table `data.som` reads, not a second hand-typed sentence. Exercised with
+    an injected tree-less family row, since the real table has none."""
+    import tan.commands.explain_cmd as explain_cmd
+
+    monkeypatch.setattr(explain_cmd, "UNSUPPORTED_SOM_FAMILY_PREFIXES", ("E1M-ZZ9",))
+    lines = details(template=template_id)
+    assert "Refuses --som for these SoM families: E1M-ZZ9." in lines
+
+
+def test_no_exclusion_line_when_every_family_has_a_tree():
+    """The real table: nothing to refuse, so no `Refuses --som` sentence."""
+    assert not any(
+        line.startswith("Refuses --som") for line in details(template="sensor-starter")
+    )
 
 
 def test_som_is_absent_not_null_for_module_templates_and_generation_targets():

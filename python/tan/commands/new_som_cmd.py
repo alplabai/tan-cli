@@ -137,7 +137,7 @@ _HW_REV_RE = re.compile(r"^[a-z0-9_-]+$")
 #: Canonical backend keys already known to the device dispatcher, plus the
 #: schema-legal lowercase `tbd` placeholder -- verbatim from the original.
 INFERENCE_BACKENDS = ("ethos_u", "drpai", "deepx_dxm1", "tbd")
-ETHOS_U_VARIANTS = ("u55", "u65", "u85")
+ETHOS_U_VARIANTS = ("u55", "u85")
 
 #: `data.schemaVersion` for `--format json` (tan-cli#399). 1 because this is
 #: the first shape `new-som` has ever put on the wire -- there is no earlier
@@ -1235,7 +1235,7 @@ def new_som(
         fail(f"--cores has duplicate id(s) {dup_cores}; every core id must be unique")
         return
     if inference_backend == "ethos_u" and ethos_u_variant is None:
-        fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u65/u85)")
+        fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u85)")
         return
     if vendor is None:
         vendor = soc_ref.split(":")[0]
