@@ -294,7 +294,7 @@ def family_revision(metadata_root: Path,
                     hw_rev: Optional[str]) -> dict[str, Any]:
     """The SoM-family `hw_revisions:` entry for `hw_rev`, or {}.
 
-    `family_dir` is the directory name (`aen`, `v2n`, `v2n-m1`, `imx93`),
+    `family_dir` is the directory name (`aen`, `v2n`, `v2n-m1`),
     not the SoM preset's `family:` string (`alif-ensemble`, ...) -- the two
     differ and only the former names a path.
     """
