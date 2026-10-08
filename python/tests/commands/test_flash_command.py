@@ -7296,4 +7296,17 @@ def test_nested_manifest_makes_its_directory_the_effective_build_root(tmp_path):
     )
     payload = envelope(out)
     assert payload["data"]["buildRoot"] == str(tmp_path / "X" / "build")
-    assert f"west flash --build-dir {tmp_path / 'X' / 'build'}" in out
+    # Search the decoded envelope, not the raw JSON text: on Windows the path's
+    # backslashes are escaped in `out`, so a substring match on it never hits.
+    def _strings(node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from _strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from _strings(value)
+
+    expected = f"west flash --build-dir {tmp_path / 'X' / 'build'}"
+    assert any(expected in s for s in _strings(payload)), payload
