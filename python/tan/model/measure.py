@@ -96,7 +96,7 @@ class RunResult:
     backend: str                 # "cpu-host" (reference) | on-device backend later
     latency_ms: float            # median wall-clock per inference
     output_argmax: int | None
-    peak_sram_kib: int | None    # None on host — on-device only
+    peak_sram_kib: float | None    # None on host — on-device only
     power_mj: float | None       # None on host — on-board monitor read (HW-gated)
     runs: int
     energy: EnergyMeasurement | None = None  # None until a real bench run populates it

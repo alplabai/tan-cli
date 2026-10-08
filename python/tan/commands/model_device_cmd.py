@@ -18,9 +18,10 @@ monitor paths, so they enter through ONE seam, `LIVE_FLOW`:
   pretending. `capture_via` composes any deploy/read pair with the same coded
   failures and is what the hermetic tests drive with stubs.
 
-peakSramKib and powerMj are always `null` on this tier (the app reports no peak
-SRAM; energy is reported in `energy`, with its scope label, from usable
-active+idle sample pairs only).
+powerMj is always `null` on this tier (energy is reported in `energy`, with its
+scope label, from usable active+idle sample pairs only). peakSramKib is
+ENERGY-CFG `sram_peak_bytes` / 1024 and `model` falls back to ENERGY-CFG `model`
+when no model file is named (tan-cli#1404); both are `null` if the app omits them.
 Refusals are plain `Issue(...)` returns so the registry gate sees the codes.
 """
 
@@ -121,14 +122,15 @@ def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
         except OSError:
             size = None
     return {
-        "model": label,
+        "model": label or diag.get("model"),
         "backend": result.backend,
         "tier": "device",
-        # Median over active windows of (window span / inferences completed).
+        # The app's own LATENCY-RESULT ms_per_inference when printed, else the median
+        # over active windows of (window span / inferences completed).
         "latencyMs": result.latency_ms,
         "latencyScope": LATENCY_SCOPE,
         "outputArgmax": None,
-        "peakSramKib": None,
+        "peakSramKib": result.peak_sram_kib,
         # Always null on the device tier: energy is reported in `energy`, with
         # its own scope label, never as a bare number.
         "powerMj": None,
