@@ -24,7 +24,7 @@ from tan.model.adapters.executorch import ExecutorchAdapter
 from tan.model.package import read_manifest_file, read_package
 from tan.model.targets import resolve_targets
 from tan.planner_root import bind_sdk_root
-from tests.conftest import needs_sdk_vela_profile, sdk_root
+from tests.conftest import needs_nx9101, needs_sdk_vela_profile, sdk_root
 
 SDK = sdk_root()
 
@@ -417,6 +417,7 @@ def test_a_real_refusal_names_the_vendor_file_the_bound_metadata_declares(tmp_pa
             "alp-sdk does not redistribute") in refused[0].reason
 
 
+@needs_nx9101
 @_needs_vela
 def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     """THE (g) GUARD, end to end through a REAL vela process.
@@ -459,6 +460,7 @@ def test_an_nxp_refusal_never_sends_the_reader_to_an_alif_file(tmp_path):
     assert "`tan model build` skips this target and still builds the SKU's others." in reason
 
 
+@needs_nx9101
 @_needs_vela
 def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
     """The deliberate decision for "what if they ALL refuse".
@@ -496,7 +498,7 @@ def test_every_target_refusing_is_an_error_not_an_empty_package(tmp_path):
     ("E1M-AEN401", "ethos-u85-256", "Sram_Only"),
     ("E1M-AEN601", "ethos-u85-256", "Sram_Only"),
     ("E1M-AEN801", "ethos-u85-256", "Sram_Only"),
-    ("E1M-NX9101", "ethos-u65-256", "Shared_Sram"),
+    pytest.param("E1M-NX9101", "ethos-u65-256", "Shared_Sram", marks=needs_nx9101),
 ])
 def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
         tmp_path, sku, accel_config, memory_mode):

@@ -276,6 +276,19 @@ _BOUND_SDK: Path | None = sdk_root()
 #: DRAM-backed profile -- which on parts that have no DRAM reports 0 KiB SRAM
 #: and is exactly what `VelaFootprintRefused` exists to refuse. Under an older
 #: pin that refusal is CORRECT behaviour, so these tests have no premise.
+#: alp-sdk#2782 removed E1M-NX9101 (i.MX 93) and its `nxp/imx9` SoC JSON. The
+#: tests that read the REAL NX9101 preset/spec have no premise on a tree
+#: without it, and run unchanged on an older one.
+nx9101_in_bound_sdk = (
+    _BOUND_SDK is not None
+    and (_BOUND_SDK / "metadata" / "e1m_modules" / "E1M-NX9101.yaml").is_file()
+)
+needs_nx9101 = pytest.mark.skipif(
+    _BOUND_SDK is not None and not nx9101_in_bound_sdk,
+    reason="the bound alp-sdk carries no E1M-NX9101 preset (removed in "
+           "alp-sdk#2782); this test asserts against that real metadata.",
+)
+
 needs_sdk_vela_profile = pytest.mark.skipif(
     _BOUND_SDK is not None and not sdk_publishes_vela_profile(_BOUND_SDK),
     reason=(

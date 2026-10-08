@@ -107,14 +107,18 @@ fields and ONLY for that exact one-segment insertion -- see
 ``_NESTED_ARTIFACT_TAILS``.
 
 The fourth is a slice's ``configArtefacts`` list gaining the plan's rendered
-reference artefacts AFTER the oracle's own entries -- ``alp.overlay`` and
-``cmake-args.txt``, in that order (alp-sdk #2771, tan-cli #1216/#1394). The
-oracle predates them. Allowed ONLY when the live list is the oracle's list
-unchanged followed by exactly ``[alp.overlay, cmake-args.txt]``,
-``[cmake-args.txt]`` (a board with no header, which also warns) or
-``[alp.overlay]``, matched by basename -- see ``_RENDERED_TAILS``. Any change
-to the oracle's own entries, any other extra entry, and a different order of
-these two still FAIL. The ``diagnostics.link: itcm`` halves are NOT in the
+reference artefacts AFTER the oracle's own entries -- ``alp.overlay``,
+``cmake-args.txt``, ``alp_hw_info_build.h`` and ``alp-west-libs.yml``, in that
+order (alp-sdk #2771/#2777, tan-cli #1216/#1394). The oracle predates them.
+Allowed ONLY when the live list is the oracle's list unchanged followed by
+exactly one of four tails, matched by basename -- see ``_RENDERED_TAILS``:
+the full ``[alp.overlay, cmake-args.txt, alp_hw_info_build.h,
+alp-west-libs.yml]``, the same without ``alp.overlay`` (a board with no
+header, which also warns), the same without ``alp_hw_info_build.h`` (a SKU
+outside the production families, which also warns), or without both.
+``cmake-args.txt`` and ``alp-west-libs.yml`` are unconditional. Any change to
+the oracle's own entries, any other extra entry, any partial tail that never
+occurs, and a different order of these still FAIL. The ``diagnostics.link: itcm`` halves are NOT in the
 allowance (no oracle board uses itcm).
 
 Any OTHER diff -- a changed command, a changed env value, a changed slice
@@ -407,12 +411,13 @@ def normalize_plan(plan: dict) -> dict:
 
 
 #: Basename sequences a slice's ``configArtefacts`` may GAIN, after the oracle's
-#: own entries (tan-cli #1216/#1394, alp-sdk #2771). Exact and ordered; the
+#: own entries (tan-cli #1216/#1394, alp-sdk #2771/#2777). Exact and ordered; the
 #: itcm halves are deliberately absent.
 _RENDERED_TAILS = (
-    ("alp.overlay", "cmake-args.txt"),
-    ("cmake-args.txt",),
-    ("alp.overlay",),
+    ("alp.overlay", "cmake-args.txt", "alp_hw_info_build.h", "alp-west-libs.yml"),
+    ("cmake-args.txt", "alp_hw_info_build.h", "alp-west-libs.yml"),
+    ("alp.overlay", "cmake-args.txt", "alp-west-libs.yml"),
+    ("cmake-args.txt", "alp-west-libs.yml"),
 )
 
 #: Synthetic path suffix `_walk_diff` yields for an allowed rendered tail.

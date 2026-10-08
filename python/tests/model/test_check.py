@@ -34,7 +34,7 @@ from tan.model.check import (
 )
 from tan.model.perf import coverage_from_placement
 from tan.model.tensorio import OpDesc
-from tests.conftest import sdk_root
+from tests.conftest import needs_nx9101, sdk_root
 
 SDK = sdk_root()
 
@@ -2128,6 +2128,7 @@ def test_a_tflite_model_against_a_real_v2n_v2m_sku_reports_onnx_backends_undeter
         assert rep.npu_coverage != "cpu-only"
 
 
+@needs_nx9101
 @pytestmark_real_sdk
 def test_real_imx93_topology_is_a55_cluster_and_m33_only():
     """tan-cli#791 round-2 review item 1 / item 6 NIT (b): item 1's own fix
@@ -2142,6 +2143,7 @@ def test_real_imx93_topology_is_a55_cluster_and_m33_only():
     assert "cortex_potato" not in topology        # names no core anywhere
 
 
+@needs_nx9101
 @pytestmark_real_sdk
 def test_real_imx93_declares_no_paired_core_for_its_lone_ethos_u65():
     """The other half of the real-metadata proof: imx93.json's `ethos-u65`
@@ -2154,6 +2156,7 @@ def test_real_imx93_declares_no_paired_core_for_its_lone_ethos_u65():
     assert target.paired_core is None
 
 
+@needs_nx9101
 @pytestmark_real_sdk
 def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_path):
     """The reviewer's OWN verification method (tan model check, the

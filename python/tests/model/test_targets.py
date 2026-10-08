@@ -14,7 +14,12 @@ check `pytestmark` skips on."""
 import pytest
 
 from tan.planner_root import bind_sdk_root
-from tests.conftest import needs_sdk_vela_profile, sdk_root
+from tests.conftest import (
+    needs_nx9101,
+    needs_sdk_vela_profile,
+    nx9101_in_bound_sdk,
+    sdk_root,
+)
 
 SDK = sdk_root()
 
@@ -69,6 +74,7 @@ def test_an_alif_ethos_u_target_carries_the_builtin_memory_mode_but_not_the_vend
     assert u85[0].vela_vendor_system_config is None
 
 
+@needs_nx9101
 @needs_sdk_vela_profile
 def test_an_nxp_ethos_u_target_carries_its_own_memory_mode():
     specs = resolve_targets("E1M-NX9101", metadata_root=_META)
@@ -97,7 +103,9 @@ def test_the_real_soc_specs_answer_the_dram_question_per_part():
         for spec in resolve_targets(sku, metadata_root=_META):
             if spec.silicon_ref != "*":
                 assert spec.soc_declares_dram is False, f"{sku}/{spec.silicon_ref}"
-    for sku in ("E1M-NX9101", "E1M-V2N101"):
+    # (E1M-NX9101 left alp-sdk in #2782; it is checked wherever the tree has it.)
+    skus = ("E1M-V2N101",) + (("E1M-NX9101",) if nx9101_in_bound_sdk else ())
+    for sku in skus:
         for spec in resolve_targets(sku, metadata_root=_META):
             if spec.silicon_ref != "*":
                 assert spec.soc_declares_dram is True, f"{sku}/{spec.silicon_ref}"
