@@ -16,7 +16,7 @@ config artefacts layered AFTER the slice's `alp.conf`.
 Pure: no IO, no SDK read.  HE-only by design: the knob retargets the M55-HE
 slice only, and is refused when the project has no M55-HE app of its own (an
 M55-HP-only project included), on any SKU but AEN801/AEN803, with a sysbuild
-(`boot:`) project, and with an explicit `alp`/`linux`/`none` console.
+(`boot:`) project, and with an explicit `linux`/`none` console.
 
 `console: uart` is accepted (tan-cli#1374).  The #1374 bench (e1m-aen-evk-02,
 AEN803, 2026-10-07) ran a UART5 shell RAM-run with ONLY `zephyr,flash = &itcm;`,
@@ -51,7 +51,9 @@ _PROVEN_SKUS = ("E1M-AEN801", "E1M-AEN803")
 _LINK_VALUES = ("auto", "itcm")
 #: `diagnostics.console:` values a Flow C image accepts: the RAM console (the
 #: default; read over SWD) or the board UART (a RAM-run shell, tan-cli#1374).
-_CONSOLE_VALUES = ("auto", "ram", "uart")
+#: `alp` is kconfig's own alias of `uart` (`kconfig._CONSOLE_ALIASES`), so it is
+#: the UART console here too and emits exactly the `uart` bytes (tan-cli#1419).
+_CONSOLE_VALUES = ("auto", "ram", "uart", "alp")
 
 
 class LinkTargetError(OrchestratorError):
@@ -68,7 +70,7 @@ def _console(diagnostics: dict[str, Any] | None) -> str:
 
 def uses_ram_console(diagnostics: dict[str, Any] | None) -> bool:
     """Whether an ITCM image uses the RAM console (`auto` is promoted to it):
-    True for `auto`/`ram`, False for `uart` and anything else."""
+    True for `auto`/`ram`, False for `uart`, its alias `alp`, and anything else."""
     return _console(diagnostics) in ("auto", "ram")
 
 

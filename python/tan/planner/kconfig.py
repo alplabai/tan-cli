@@ -597,7 +597,7 @@ def _emit_console(diagnostics: dict[str, Any], slice_: Slice,
     # observable is the RAM console, so an AUTO console is promoted to it.  An
     # explicit `console: uart` is NOT promoted: it keeps the board UART console
     # and `link_target.itcm_conf` emits no RAM-console bits for it
-    # (tan-cli#1374).  alp/linux/none are refused by the loader.
+    # (tan-cli#1374).  linux/none are refused by the loader (alp is a uart alias).
     if auto and link_applies_to(diagnostics, slice_):
         console = "ram"
     ram_size = _RAM_CONSOLE_MIN_SIZE
