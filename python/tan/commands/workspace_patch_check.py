@@ -117,19 +117,31 @@ def _workspace_heads(west: str, workspace: Path) -> dict[str, str] | None:
 _PATCH_ENTRY = re.compile(r"^\s*-?\s*path:\s*['\"]?([^'\"#\s]+)", re.MULTILINE)
 
 
-def _patched_files(sdk: Path) -> list[str]:
-    """Repo-relative paths every `patches.yml` patch writes (`+++ b/<path>`)."""
+def _patched_files(sdk: Path) -> list[str] | None:
+    """Repo-relative paths every `patches.yml` patch touches, or `None`.
+
+    Both sides of each hunk header count: `+++ b/<path>` for a file a patch
+    writes and `--- a/<path>` for one it deletes (`+++ /dev/null`), so a
+    deleted file's reappearance after a revert moves the fingerprint.
+
+    `None` when the list cannot be trusted to be complete: `patches.yml` or
+    any named patch is unreadable, or no path was found at all. A partial
+    list would silently weaken the cache key towards HEAD-only, reopening the
+    revert hole for the dropped files, so the caller skips caching instead.
+    """
     rels: set[str] = set()
     try:
         entries = _PATCH_ENTRY.findall((sdk / _PATCHES_YML).read_text(encoding="utf-8"))
         for entry in entries:
             text = (sdk / "zephyr" / "patches" / entry).read_text(encoding="utf-8", errors="replace")
-            rels.update(
-                ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")
-            )
-    except OSError:
-        pass
-    return sorted(rels)
+            for ln in text.splitlines():
+                if ln.startswith("+++ b/"):
+                    rels.add(ln[len("+++ b/"):].strip())
+                elif ln.startswith("--- a/"):
+                    rels.add(ln[len("--- a/"):].strip())
+    except (OSError, ValueError):
+        return None
+    return sorted(rels) or None
 
 
 def _tree_fingerprint(module_dirs: list[str], rels: list[str]) -> dict[str, str]:
@@ -215,8 +227,10 @@ def _check(
         heads = _workspace_heads(west, workspace)
         if heads is not None:
             try:
-                tree = _tree_fingerprint(list(heads), _patched_files(sdk))
-                key = cache_key(patches_yml.read_bytes(), {**heads, **tree})
+                rels = _patched_files(sdk)
+                if rels is not None:
+                    tree = _tree_fingerprint(list(heads), rels)
+                    key = cache_key(patches_yml.read_bytes(), {**heads, **tree})
             except OSError:
                 key = None
         cached = _read_cache(cache_dir / CACHE_FILE, key) if key is not None else None

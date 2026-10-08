@@ -253,3 +253,59 @@ def test_build_cache_lands_in_the_build_dir_not_the_project_root(world, monkeypa
     workspace_patch_issues(project, str(world.sdk), has_zephyr_slice=True)
     assert (project / "build" / wpc.CACHE_FILE).is_file()
     assert not (project / wpc.CACHE_FILE).exists()
+
+
+def test_patched_files_collects_written_and_deleted_paths(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0002-del.patch\n    module: mod\n"
+    )
+    (world.sdk / "zephyr" / "patches" / "mod" / "0002-del.patch").write_text(
+        "--- a/src/gone.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+    )
+    assert wpc._patched_files(world.sdk) == ["src/f.c", "src/gone.c"]
+
+
+def test_a_deleted_file_reappearing_misses_the_cache(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0002-del.patch\n    module: mod\n"
+    )
+    (world.sdk / "zephyr" / "patches" / "mod" / "0002-del.patch").write_text(
+        "--- a/src/gone.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+    )
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache).cached
+    # `git checkout -- .` restores the file the patch deleted; HEAD is untouched.
+    (world.moddir / "src" / "gone.c").write_text("a\n")
+    world.mode("missing")
+    r = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not r.cached and r.state == wpc.MISSING
+
+
+def test_an_unreadable_patch_means_no_fingerprint_and_no_cache(world, monkeypatch):
+    patch = world.sdk / "zephyr" / "patches" / "mod" / "0001-x.patch"
+    patch.unlink()  # patches.yml still names it: OSError mid-loop
+    assert wpc._patched_files(world.sdk) is None
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not (cache / wpc.CACHE_FILE).exists()
+    second = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not second.cached and len(world.calls()) == 2
+
+
+def test_a_partially_unreadable_patch_list_is_not_returned(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0009-missing.patch\n    module: mod\n"
+    )
+    assert wpc._patched_files(world.sdk) is None
+
+
+def test_an_empty_patch_list_is_not_cached(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text("patches: []\n")
+    assert wpc._patched_files(world.sdk) is None
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not (cache / wpc.CACHE_FILE).exists()
