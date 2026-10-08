@@ -290,6 +290,26 @@ def main(argv: list[str] | None = None) -> int:
                 errors += 1
             captured.append((target, body))
 
+    # Synthetic boards live in the fixture (tan-cli#1424), not in the SDK's
+    # examples/, so the error-contract branch of the regression test never
+    # depends on an example alp-sdk may delete. Goldens sit beside the
+    # board.yaml, outside `emits/`, which is rmtree'd below.
+    synthetic = args.out / "synthetic"
+    synthetic_captured: list[tuple[Path, str]] = []
+    for board in sorted(synthetic.rglob("board.yaml")):
+        for mode in MODES:
+            kind, text = render(alp_orchestrate, board, mode)
+            body = normalise(text, sdk)
+            if kind == "ok":
+                target = board.parent / (mode + _EXTENSION[mode])
+            else:
+                target = board.parent / (mode + ".error")
+                body = f"{kind}\n{body}"
+            synthetic_captured.append((target, body))
+    for target, body in synthetic_captured:
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+
     emits = args.out / "emits"
     if emits.exists():
         shutil.rmtree(emits)
