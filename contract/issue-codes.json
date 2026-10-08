@@ -3571,6 +3571,14 @@
       "note": "tan-cli#1376: before dispatch of a plan with a Zephyr slice, alp-sdk's `zephyr/patches.yml` is not applied in the resolved workspace (verifier result cached positively in `<project>/build/.tan-workspace-patches.json`, keyed by workspace HEADs + patches.yml + the patched files' mtime/size). Warning only: never changes `ok` or the exit code. Could be promoted to an error later. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
+      "code": "build.workspace-patches-uncached",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/workspace_patches.py",
+      "note": "tan-cli#1384: the workspace patch-check cache key could not be built in full (the west module list, `zephyr/patches.yml` or a patch it names was unreadable), so nothing is cached and every build re-verifies. The message names the reason. Never changes `ok` or the exit code. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
       "code": "build.zephyr-base-ignored",
       "status": "reserved",
       "severity": "info",
