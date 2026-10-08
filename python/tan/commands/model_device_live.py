@@ -17,6 +17,7 @@ adds are plain `Issue(...)` returns so the registry gate sees the codes.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,8 @@ class LiveRun:
     text: str
     issues: list[Issue]
     flash: dict | None = None
+    #: Where the raw console was saved (`<build>/flash-logs/model-console-<ts>.txt`), if it was.
+    console_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,9 @@ class LiveRefusal:
 
     issues: list[Issue]
     exit_code: ExitCode = ExitCode.VALIDATION_FAILURE
+    #: The `flash` provenance block when the image WAS RAM-loaded and reset before
+    #: the refusal (tan-cli#1417); `None` when nothing reached the board.
+    flash: dict | None = None
 
 
 def _refuse(issue: Issue, *before: Issue) -> LiveRefusal:
@@ -109,7 +115,7 @@ def _preflight(context: ProjectContext, live: LiveOptions) -> Issue | None:
     return None
 
 
-def _provenance(entry: dict, live: LiveOptions) -> dict:
+def _provenance(entry: dict, live: LiveOptions, console_path: str | None = None) -> dict:
     jlink = entry.get("jlink") or {}
     block = {
         "core": live.core,
@@ -119,7 +125,36 @@ def _provenance(entry: dict, live: LiveOptions) -> dict:
     }
     if jlink.get("dpidr"):
         block["dpidr"] = jlink["dpidr"]
+    if console_path:
+        block["consolePath"] = console_path
     return block
+
+
+def _save_console(context: ProjectContext, text: object) -> tuple[str | None, list[Issue]]:
+    """Write the raw RAM console next to the Flow C transcript
+    (`<build>/flash-logs/model-console-<UTC ts>.txt`, never overwritten) so
+    `latencyMs` can be checked against the app's own `LATENCY-RESULT`. A write
+    failure is a warning: the measurement is still valid."""
+    if not isinstance(text, str):
+        return None, []
+    logs = Path(context.workspace_root) / "build" / "flash-logs"
+    base = time.strftime("model-console-%Y%m%dT%H%M%SZ", time.gmtime())
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        n = 0
+        while True:
+            path = logs / (f"{base}.txt" if n == 0 else f"{base}-{n}.txt")
+            try:
+                with open(path, "x", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                return str(path), []
+            except FileExistsError:
+                n += 1
+    except OSError as err:
+        return None, [Issue(
+            "model.device-console-unsaved", "warning",
+            f"The raw RAM console could not be saved under {logs}: {err}",
+        )]
 
 
 def live_console(context: ProjectContext, label: str | None, live: LiveOptions) -> LiveRun | LiveRefusal:
@@ -150,11 +185,14 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
     entry = entries[0] if entries else {}
     flash_issues = list(issues)
     if entry.get("status") == "planned":
-        return _refuse(Issue(
+        # First, so a consumer reading issues[0] sees the actionable refusal; Flow C's
+        # own `flash.nothing-flashed` / `flash.confirm-required` follow it.
+        return LiveRefusal([Issue(
             "model.device-confirm-required", "error",
             "A live device run RAM-loads the image and resets the whole device (including the Secure "
-            f"Enclave); nothing was run: {confirm_gate_note('--confirm was not given')}.",
-        ), *flash_issues)
+            "Enclave); nothing was run: "
+            f"{confirm_gate_note('--confirm was not given', 'run on the device')}.",
+        ), *flash_issues])
     failed = int(code) != 0 or entry.get("status") == "failed"
     if failed:
         if not any(i.severity == "error" for i in flash_issues):
@@ -165,14 +203,17 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
         return LiveRefusal(flash_issues, ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE)
     console = entry.get("ramConsole") or {}
     text = console.get("text")
+    console_path, save_issues = _save_console(context, text)
+    flash_issues.extend(save_issues)
+    flash = _provenance(entry, live, console_path)
     if not isinstance(text, str) or not text.strip():
         which = console.get("selected")
         why = (
             "the build selected the UART console, which a RAM-run cannot read"
             if which == "uart" else f"nothing was printed in the {live.wait:g}s wait"
         )
-        return _refuse(Issue(
+        return LiveRefusal([*flash_issues, Issue(
             "model.device-console-empty", "error",
             f"The RAM console is empty ({why}); raise --wait or check the benchmark app.",
-        ), *flash_issues)
-    return LiveRun(text, flash_issues, _provenance(entry, live))
+        )], flash=flash)
+    return LiveRun(text, flash_issues, flash, console_path)

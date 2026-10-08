@@ -2772,6 +2772,14 @@
       "note": "tan-cli#1287: live `--device`: the RAM-run succeeded but the RAM console is empty or the build selected the UART console. VALIDATION_FAILURE. A plain `Issue(\"model.device-console-empty\", ...)` construction in `model_device_live.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.device-console-unsaved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_live.py",
+      "note": "tan-cli#1417: live `--device`: the raw RAM console could not be written to `<build>/flash-logs/model-console-<ts>.txt`; the measurement is still returned (`flash.consolePath` is absent). A warning, exit unchanged. A plain `Issue(\"model.device-console-unsaved\", ...)` construction in `model_device_live.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "model.device-live-needs-two-projects",
       "status": "reserved",
       "severity": "error",

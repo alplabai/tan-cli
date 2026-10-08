@@ -5,7 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      55,
+      57,
+      "_row"
+    ],
+    [
+      57,
       "run_device_ab"
     ]
   ]
