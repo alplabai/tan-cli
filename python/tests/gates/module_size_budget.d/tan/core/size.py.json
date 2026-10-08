@@ -5,11 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      56,
+      62,
       "resolve_budget"
     ],
     [
-      62,
+      72,
       "sizes_from_elf_sections"
     ]
   ]
