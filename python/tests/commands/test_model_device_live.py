@@ -45,14 +45,17 @@ def project(root: Path, name: str, manifest: str | None = MANIFEST) -> Path:
     return p
 
 
-def flow_result(text="x", status="ok", rc=0, issues=(), selected="ram"):
+def flow_result(text="x", status="ok", rc=0, issues=(), selected="ram", build_root=None):
     console = {"selected": selected, "requested": True}
     if text is not None:
         console["text"] = text
     entry = {"status": status, "message": "stub", "ramConsole": console,
              "jlink": {"transcriptPath": "/t/ram_run-m55_he-1.log", "attachedCore": {"apAddr": "0x00300000"},
                        "dpidr": "0x4C013477"}}
-    return ExitCode(rc), {"entries": [entry]}, list(issues), [], None
+    data = {"entries": [entry]}
+    if build_root is not None:
+        data["buildRoot"] = str(build_root)
+    return ExitCode(rc), data, list(issues), [], None
 
 
 class Stub:
@@ -81,6 +84,8 @@ def test_happy_path_ram_runs_and_parses_the_console(tmp_path, monkeypatch):
     r = doc["data"]["result"]
     assert r["tier"] == "device" and r["source"] == "live" and r["latencyMs"] == 100.0
     assert Path(r["project"]) == p
+    console_path = r["flash"].pop("consolePath")
+    assert Path(console_path).parent == p / "build" / "flash-logs"
     assert r["flash"] == {
         "core": "m55_he", "wait": 2.0, "transcriptPath": "/t/ram_run-m55_he-1.log",
         "attachedCore": {"apAddr": "0x00300000"}, "dpidr": "0x4C013477",
@@ -255,7 +260,7 @@ def test_real_flow_c_spawns_nothing_without_confirm_and_is_armed_by_the_env(tmp_
     jl = FakeJlink(monkeypatch)
     args = ("run", "--device", "--project", str(tmp_path), "--sdk-root", str(tmp_path / "sdk"))
     code, doc = invoke(*args)
-    assert code == 2 and doc["issues"][-1]["code"] == "model.device-confirm-required", doc
+    assert code == 2 and doc["issues"][0]["code"] == "model.device-confirm-required", doc
     assert not any(jl.kind(s) in ("load", "read") for s in jl.scripts)  # no load, no console read
     jl.scripts.clear()
     monkeypatch.setenv("ALP_FLASH_FORCE", "1")
@@ -264,3 +269,148 @@ def test_real_flow_c_spawns_nothing_without_confirm_and_is_armed_by_the_env(tmp_
     # the parser refuses it -- what matters here is that Flow C ran)
     assert [jl.kind(s) for s in jl.scripts][-2:] == ["load", "read"], (doc, jl.scripts)
     assert code == 2 and doc["issues"][-1]["code"] == "model.device-capture-invalid"
+
+
+def test_confirm_required_is_first_and_does_not_say_to_actually_flash(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALP_FLASH_FORCE", raising=False)
+    p = project(tmp_path, "a")
+    nothing = Issue("flash.nothing-flashed", "warning", "no image written")
+    Stub(monkeypatch, [flow_result(None, status="planned", issues=[nothing])])
+    code, doc = invoke("run", "--device", "--project", str(p))
+    codes = [i["code"] for i in doc["issues"]]
+    assert code == 2 and codes == ["model.device-confirm-required", "flash.nothing-flashed"], codes
+    msg = doc["issues"][0]["message"]
+    assert "actually flash" not in msg and "to run on the device" in msg and "--confirm" in msg
+
+
+def test_live_row_carries_the_console_and_saves_it_next_to_the_transcript(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    text = CONSOLE.replace("{n}", "10")
+    Stub(monkeypatch, [flow_result(text)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 0, doc
+    row = doc["data"]["result"]
+    assert row["consoleText"] == text and row["consoleTruncated"] is False
+    saved = Path(row["flash"]["consolePath"])
+    assert saved.parent == p / "build" / "flash-logs" and saved.name.startswith("model-console-")
+    assert saved.name.endswith("Z.txt")
+    assert saved.read_bytes() == text.encode("utf-8")  # newline="\n": byte-exact on every OS
+    assert doc["issues"] == []
+
+
+def test_console_text_is_capped_to_its_tail_but_the_saved_file_is_whole(tmp_path, monkeypatch):
+    from tan.commands import model_device_cmd
+
+    monkeypatch.setattr(model_device_cmd, "MAX_CONSOLE_TEXT_CHARS", 50)
+    p = project(tmp_path, "a")
+    text = CONSOLE.replace("{n}", "10")
+    Stub(monkeypatch, [flow_result(text)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    row = doc["data"]["result"]
+    assert code == 0 and row["consoleTruncated"] is True and row["consoleText"] == text[-50:]
+    assert Path(row["flash"]["consolePath"]).read_bytes() == text.encode("utf-8")
+
+
+def test_unsavable_console_is_a_warning_not_a_failure(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    (p / "build" / "flash-logs").write_text("a file, not a directory", encoding="utf-8", newline="\n")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 0 and [i["code"] for i in doc["issues"]] == ["model.device-console-unsaved"]
+    assert "consolePath" not in doc["data"]["result"]["flash"]
+
+
+def test_refusals_after_a_successful_load_keep_the_flash_provenance(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    Stub(monkeypatch, [flow_result("  \n")])
+    code, doc = invoke("run", "--device", "--confirm", "--wait", "3", "--project", str(p))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.device-console-empty"
+    flash = doc["data"]["flash"]
+    assert flash["core"] == "m55_he" and flash["wait"] == 3.0
+    assert flash["transcriptPath"] == "/t/ram_run-m55_he-1.log" and "consolePath" not in flash  # a blank console is not saved
+    assert doc["data"]["result"] is None
+    Stub(monkeypatch, [flow_result("not a benchmark console\n")])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.device-capture-invalid"
+    assert doc["data"]["flash"]["dpidr"] == "0x4C013477"
+    assert Path(doc["data"]["flash"]["consolePath"]).read_bytes() == b"not a benchmark console\n"
+    # nothing reached the board: no provenance claimed
+    Stub(monkeypatch, [flow_result(None, status="failed", rc=1)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert "flash" not in doc["data"]
+
+
+def test_ab_refusal_after_a_load_names_the_side_that_was_loaded(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result("garbage\n")])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 2 and set(doc["data"]["flash"]) == {"a"}
+
+
+def test_capture_invalid_suggests_raising_wait(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    Stub(monkeypatch, [flow_result("not a benchmark console\n")])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 2 and "raise --wait" in doc["issues"][-1]["message"]
+
+
+def test_top_level_model_matches_the_row(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 0 and doc["data"]["model"] == doc["data"]["result"]["model"] == "kws"
+    (p / "m.onnx").write_bytes(b"x")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("run", "m.onnx", "--device", "--confirm", "--project", str(p))
+    assert doc["data"]["model"] == doc["data"]["result"]["model"] and doc["data"]["model"].endswith("m.onnx")
+
+
+def test_ab_refusal_on_b_after_a_loaded_keeps_a_provenance(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")), flow_result("garbage\n")])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.device-capture-invalid"
+    flash = doc["data"]["flash"]
+    assert set(flash) == {"a", "b"}
+    assert Path(flash["a"]["consolePath"]).parent == a / "build" / "flash-logs"
+    assert Path(flash["a"]["consolePath"]).is_file() and Path(flash["b"]["consolePath"]).is_file()
+
+
+def test_ab_b_failing_before_its_load_still_reports_a(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")),
+                       flow_result(None, status="failed", rc=1)])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 1 and doc["issues"][-1]["code"] == "model.device-flash-failed"
+    assert set(doc["data"]["flash"]) == {"a"}
+    assert Path(doc["data"]["flash"]["a"]["consolePath"]).is_file()
+
+
+def test_console_is_saved_under_the_build_root_flow_c_used(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    nested = tmp_path / "elsewhere" / "build" / "m55_he"
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"), build_root=nested)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    saved = Path(doc["data"]["result"]["flash"]["consolePath"])
+    assert code == 0 and saved.parent == nested / "flash-logs" and saved.is_file()
+    assert not (p / "build" / "flash-logs").exists()
+
+
+def test_blank_console_is_not_saved_or_reported(tmp_path, monkeypatch):
+    p = project(tmp_path, "a")
+    Stub(monkeypatch, [flow_result("  \n")])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == 2 and "consolePath" not in doc["data"]["flash"]
+    assert [i["code"] for i in doc["issues"]] == ["model.device-console-empty"]
+    assert not (p / "build" / "flash-logs").exists()
+
+
+def test_ab_missing_b_model_refuses_before_a_loads_the_board(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    (a / "a.onnx").write_bytes(b"x")
+    stub = Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("ab", "a.onnx", "--against", "missing.onnx", "--device", "--confirm",
+                       "--project", str(a), "--against-project", str(b))
+    assert code == 2 and [i["code"] for i in doc["issues"]] == ["model.model-source-missing"]
+    assert stub.calls == []  # A never loaded the board
+    assert "flash" not in doc["data"]

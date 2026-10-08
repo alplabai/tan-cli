@@ -54,6 +54,12 @@ Result = tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]
 #: ceiling; this only stops a wrong file being slurped).
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 
+#: Longest `consoleText` carried in a live row, in CHARACTERS (not bytes). A larger
+#: console is trimmed (`consoleTruncated: true`); the saved
+#: `model-console-*.txt` always holds all of it. Over the cap the TAIL is kept --
+#: `LATENCY-RESULT` is printed last.
+MAX_CONSOLE_TEXT_CHARS = 64 * 1024
+
 #: `(context, model_label, options) -> console text | Issue`: RAM-run the project
 #: through Flow C and return its console (`model_device_live.live_console`). A seam
 #: so a test can substitute a deploy that needs no probe.
@@ -109,7 +115,10 @@ def _row(
         result, energy, diag = run_result_from_capture(parse_console(text))
     except (DeviceCaptureError, KeyError, ValueError, TypeError, ArithmeticError, AttributeError,
             RecursionError) as err:
-        return Issue("model.device-capture-invalid", "error", f"Unusable device capture: {err}")
+        return Issue(
+            "model.device-capture-invalid", "error",
+            f"Unusable device capture: {err}; if the app had not finished, raise --wait.",
+        )
     size = None
     if label:
         try:
@@ -117,7 +126,13 @@ def _row(
         except OSError:
             size = None
     live = run is not None and run.flash is not None
-    extra = {"source": "live", "project": project_path, "flash": run.flash} if live else {"source": "capture"}
+    extra = {"source": "capture"}
+    if live:
+        extra = {
+            "source": "live", "project": project_path, "flash": run.flash,
+            "consoleText": text[-MAX_CONSOLE_TEXT_CHARS:],
+            "consoleTruncated": len(text) > MAX_CONSOLE_TEXT_CHARS,
+        }
     return {
         **extra,
         "model": label or diag.get("model"),
@@ -186,14 +201,26 @@ def run_device_run(
     live = live or LiveOptions()
     run = _console_for(context, capture, label, "the run", live)
     if isinstance(run, LiveRefusal):
+        if run.flash is not None:
+            data["flash"] = run.flash
         return project, sdk, data, run.issues, run.exit_code
     built = _row(label, run.text, run, context.workspace_root)
     if isinstance(built, Issue):
+        if run.flash is not None:
+            data["flash"] = run.flash  # the board WAS loaded and reset
         return project, sdk, data, [*run.issues, built], ExitCode.VALIDATION_FAILURE
     row, _ = built
-    data["model"] = label
+    data["model"] = row["model"]
     data["result"] = row
     return project, sdk, data, [*run.issues, *_degraded(row, "device run")], ExitCode.SUCCESS
+
+
+def _note_loaded(data: dict, flashes: dict, role: str, flash: dict | None) -> None:
+    """Refused `ab`: report every side that had already RAM-loaded and reset the board."""
+    if flash is not None:
+        flashes[role.lower()] = flash
+    if flashes:
+        data["flash"] = dict(flashes)
 
 
 def run_device_ab(
@@ -209,6 +236,7 @@ def run_device_ab(
     data = ab_empty_data()
     rows: list[tuple[dict, Any]] = []
     issues: list[Issue] = []
+    flashes: dict[str, dict] = {}
     live = live or LiveOptions()
     if bool(capture) != bool(against_capture):
         return project, sdk, data, [Issue(
@@ -225,19 +253,24 @@ def run_device_ab(
             "`ab --device` without --against-capture runs each project in turn: pass the second "
             "project with --against-project (nothing was run).",
         )], ExitCode.VALIDATION_FAILURE
-    for role, raw, cap, ctx in (
-        ("A", source, capture, context), ("B", against, against_capture, context_b)
-    ):
-        label = _device_label(ctx, raw)
+    sides = (("A", source, capture, context), ("B", against, against_capture, context_b))
+    # Both labels first: a missing model file must refuse before A loads the board.
+    labels = [_device_label(ctx, raw) for _, raw, _, ctx in sides]
+    for label in labels:
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
+    for (role, _raw, cap, ctx), label in zip(sides, labels):
         run = _console_for(ctx, cap, label, f"model {role}", live)
         if isinstance(run, LiveRefusal):
+            _note_loaded(data, flashes, role, run.flash)
             return project, sdk, data, [*issues, *run.issues], run.exit_code
         built = _row(label, run.text, run, ctx.workspace_root)
         if isinstance(built, Issue):
+            _note_loaded(data, flashes, role, run.flash)
             return project, sdk, data, [*issues, *run.issues, built], ExitCode.VALIDATION_FAILURE
         rows.append(built)
+        if run.flash is not None:
+            flashes[role.lower()] = run.flash
         issues.extend(run.issues)
         issues.extend(_degraded(built[0], f"device run {role}"))
     (a_row, a_res), (b_row, b_res) = rows
