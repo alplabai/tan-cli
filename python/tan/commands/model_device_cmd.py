@@ -253,12 +253,13 @@ def run_device_ab(
             "`ab --device` without --against-capture runs each project in turn: pass the second "
             "project with --against-project (nothing was run).",
         )], ExitCode.VALIDATION_FAILURE
-    for role, raw, cap, ctx in (
-        ("A", source, capture, context), ("B", against, against_capture, context_b)
-    ):
-        label = _device_label(ctx, raw)
+    sides = (("A", source, capture, context), ("B", against, against_capture, context_b))
+    # Both labels first: a missing model file must refuse before A loads the board.
+    labels = [_device_label(ctx, raw) for _, raw, _, ctx in sides]
+    for label in labels:
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
+    for (role, _raw, cap, ctx), label in zip(sides, labels):
         run = _console_for(ctx, cap, label, f"model {role}", live)
         if isinstance(run, LiveRefusal):
             _note_loaded(data, flashes, role, run.flash)

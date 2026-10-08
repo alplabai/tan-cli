@@ -401,4 +401,16 @@ def test_blank_console_is_not_saved_or_reported(tmp_path, monkeypatch):
     Stub(monkeypatch, [flow_result("  \n")])
     code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
     assert code == 2 and "consolePath" not in doc["data"]["flash"]
+    assert [i["code"] for i in doc["issues"]] == ["model.device-console-empty"]
     assert not (p / "build" / "flash-logs").exists()
+
+
+def test_ab_missing_b_model_refuses_before_a_loads_the_board(tmp_path, monkeypatch):
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    (a / "a.onnx").write_bytes(b"x")
+    stub = Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("ab", "a.onnx", "--against", "missing.onnx", "--device", "--confirm",
+                       "--project", str(a), "--against-project", str(b))
+    assert code == 2 and [i["code"] for i in doc["issues"]] == ["model.model-source-missing"]
+    assert stub.calls == []  # A never loaded the board
+    assert "flash" not in doc["data"]

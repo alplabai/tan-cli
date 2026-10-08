@@ -219,5 +219,5 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
         return LiveRefusal([*flash_issues, Issue(
             "model.device-console-empty", "error",
             f"The RAM console is empty ({why}); raise --wait or check the benchmark app.",
-        ), *save_issues], flash=flash)
+        )], flash=flash)
     return LiveRun(text, [*flash_issues, *save_issues], flash, console_path)
