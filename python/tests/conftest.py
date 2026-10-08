@@ -1247,6 +1247,9 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # build` subprocess; it reads that from `REAL_ENVIRON` above, not from
     # `os.environ` inside the test body, for exactly this reason.
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    # `tan doctor`'s stale-install check does one `git ls-remote` for a VCS
+    # install; a test must never touch the network.
+    monkeypatch.setenv("TAN_DOCTOR_OFFLINE", "1")
     # `SOURCE_DATE_EPOCH` wins over the clock in `tan.core.timestamp`, so a
     # developer or CI image that exports it (reproducible-build setups do)
     # changes every `generatedAt`/`updatedAt` this suite observes -- and a
@@ -1269,6 +1272,12 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # toolchain-root test see THAT store instead of the fresh-per-test
     # `home/.alp/toolchains` this fixture builds below.
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    # `tan.env.terminal_width` honours `$COLUMNS` first, and `doctor` wraps
+    # unconditionally, so a shell exporting a narrow COLUMNS re-wraps the
+    # strings the text-mode tests assert on (tan-cli#1337). Tests that need
+    # a width set it themselves, after this fixture.
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))

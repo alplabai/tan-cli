@@ -425,7 +425,7 @@ def sign_slot0(
             f"{FLOW_D_METHOD}: could not prepare a scratch copy of the SETOOLS install "
             f"'{setools_dir}' for the sign step: {err}"
         ) from err
-    started = time.time_ns()
+    started, before = time.time_ns(), _snapshot(setools_dir)
     try:
         # BEFORE anything can be interrupted: the caller registers the scratch's
         # removal here, so a KeyboardInterrupt mid-sign cannot leak the tree.
@@ -435,29 +435,49 @@ def sign_slot0(
             scratch, setools_dir, app_gen_toc, artefact_bin, entry_id, mram_address,
             device_config,
         )
-        return dataclasses.replace(signed, shared_touched=_newer_than(setools_dir, started))
+        return dataclasses.replace(signed, shared_touched=_newer_than(setools_dir, started, before))
     except BaseException:
         cleanup_scratch(scratch)
         raise
 
 
-def _newer_than(root: str, since_ns: int, limit: int = 5) -> tuple[str, ...]:
-    """Files under `root` modified after `since_ns` (cheap post-check that the
-    overlay kept the shared install untouched). Never raises."""
-    found: list[str] = []
+def _snapshot(root: str) -> dict[str, tuple[int, int]]:
+    """`{path: (mtime_ns, size)}` for every file under `root`. Never raises."""
+    snap: dict[str, tuple[int, int]] = {}
     try:
         for base, _dirs, files in os.walk(root):
             for name in files:
                 path = os.path.join(base, name)
                 try:
-                    if os.lstat(path).st_mtime_ns > since_ns:
-                        found.append(path)
+                    st = os.lstat(path)
                 except OSError:
                     continue
-                if len(found) >= limit:
-                    return tuple(found)
+                snap[path] = (st.st_mtime_ns, st.st_size)
     except OSError:
         pass
+    return snap
+
+
+def _newer_than(
+    root: str,
+    since_ns: int,
+    before: dict[str, tuple[int, int]] | None = None,
+    limit: int = 5,
+) -> tuple[str, ...]:
+    """Files under `root` changed since the sign began (cheap post-check that
+    the overlay kept the shared install untouched). A file counts when it is
+    absent from the `before` snapshot, its (mtime, size) differs from it, or its
+    mtime is newer than `since_ns`. The snapshot is what makes this robust: on
+    Windows file mtimes come from a coarse (~15 ms) clock that can lag
+    `time.time_ns()`, so a write right after `since_ns` was taken can carry an
+    mtime <= it and a bare timestamp compare misses it. Never raises."""
+    found: list[str] = []
+    for path, (mtime_ns, size) in _snapshot(root).items():
+        prior = None if before is None else before.get(path)
+        if mtime_ns > since_ns or (before is not None and prior != (mtime_ns, size)):
+            found.append(path)
+            if len(found) >= limit:
+                break
     return tuple(found)
 
 

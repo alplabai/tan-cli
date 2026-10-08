@@ -11,6 +11,8 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
+
 from tan.commands import flash_cmd
 from tan.core import flow_d_report
 from tests.commands.test_flash_command import _flow_d_run

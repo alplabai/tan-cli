@@ -42,6 +42,15 @@ PATTERNS = (
 #: Every entry is DEBT unless marked OK. The value of this gate is that the list
 #: cannot grow silently.
 ALLOWED: dict[str, str] = {
+    "link_target.py": (
+        "OK (tracked debt): the `diagnostics.link: itcm` allow-list of the two "
+        "SKUs the Flow C ITCM retarget is bench-proven on (E1M-AEN801/AEN803, "
+        "tan-cli#1350 review). A deliberately conservative PROOF list, not a "
+        "resolved fact -- every other Ensemble SKU is refused until someone "
+        "proves it. It belongs in the SoM preset metadata once alp-sdk grows a "
+        "`flow_c_itcm_proven` field; until then the list lives here, in the "
+        "one file that enforces it."
+    ),
     "explain_cmd.py": "OK: customer-facing prose; naming real parts is the feature",
     "hw_info.py": (
         "OK: EMITTED customer-facing prose, not a resolved fact. The `E1M-AEN801` "

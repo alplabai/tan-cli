@@ -101,6 +101,7 @@ import typer
 
 from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
 from tan.core.mram_link import CODE_NOT_MRAM_LINKED
+from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.dp_id import (
@@ -264,6 +265,9 @@ _DRAIN_JOIN_S = 2.0
 #: still carrying it, rather than folding it into the generic "no registered
 #: backend" message every OTHER unrecognised method gets.
 _REMOVED_SWD_PROBE_METHOD = "swd_probe"
+
+#: Reserved `flash_method`: a slice with no known flash recipe (tan-cli#1370).
+NO_FLASH_METHOD = "none"
 
 
 @dataclass
@@ -1377,6 +1381,7 @@ def _spawn_jlink(
     executable: str | None = None,
     extra_env: dict[str, str] | None = None,
     no_stdin: bool = False,
+    script_prefix: str = "tan-flash-",
 ) -> _Outcome:
     """Materialise the Commander script to a temp file, append its path as the
     final `-CommanderScript` argument, spawn, and remove the temp file.
@@ -1390,7 +1395,7 @@ def _spawn_jlink(
     it carries the flash addresses, and a leaked one in the system temp dir is
     both a mess and a small information leak.
     """
-    handle, path = tempfile.mkstemp(prefix="tan-flash-", suffix=".jlink")
+    handle, path = tempfile.mkstemp(prefix=script_prefix, suffix=".jlink")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as fh:
             # tan-cli#1312: these probes are clones, and a SEGGER firmware
@@ -1545,6 +1550,7 @@ def _execute(
     workspace: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
     jlink_exe: str | None = None,
+    script_prefix: str | None = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1617,6 +1623,8 @@ def _execute(
                 return _Outcome(success=False, stderr=refusal, captured=capture)
             extra_env = probe_guard.env()
         extra = {"extra_env": extra_env} if extra_env else {}
+        if script_prefix:
+            extra["script_prefix"] = script_prefix
         return _spawn_jlink(
             argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S, None, workspace, exe, **extra,
         )
@@ -2150,6 +2158,9 @@ class _Context:
     ram: bool = False
     ram_console: bool = False
     ram_wait: float = 1.5
+    #: `--assume-he` (tan-cli#1354): proceed when the attached-core check cannot confirm
+    #: the M55-HE (ambiguous/unreadable ITCM). A documented risk, never the default.
+    assume_he: bool = False
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
@@ -2243,6 +2254,8 @@ class _ProbeGuard:
     #: A verification just passed and nothing has run since -- the DPIDR
     #: preflight may reuse it instead of listing the emulators a second time.
     fresh: bool = False
+    #: Temp-file prefix for the guard's own `ShowEmuList` script (`tan probe`: `tan-probe-`).
+    script_prefix: str | None = None
 
     def env(self) -> dict[str, str] | None:
         """`TAN_PROBE_USB_PATH`, for a wrapper to cross-check its mask."""
@@ -2301,6 +2314,8 @@ def _guard_verdict(
             None,
         )
     extra = {"extra_env": guard.env()} if guard.env() else {}
+    if guard.script_prefix:
+        extra["script_prefix"] = guard.script_prefix
     outcome = _spawn_jlink(
         [spawned[0], "-NoGui", "1", "-CommanderScript"], "ShowEmuList\nexit\n", True,
         _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], no_stdin=True, **extra,
@@ -2818,6 +2833,18 @@ def _flash_entry_body(
         lines.append(msg)
         return -1, entry(None, "skipped", -1, msg), lines
 
+    # tan-cli#1370: `none` is the reserved "no flash recipe is known" method (a
+    # plain `tan build --board` target no SoM preset names). The manifest schema
+    # requires a flash_method on every slice, so this is how a slice says "skip
+    # me" in a schema-valid way; same outcome as the no-flash_method skip above.
+    if raw_method == NO_FLASH_METHOD:
+        msg = (
+            f"flash: {kind} '{entry_id}' has flash_method '{NO_FLASH_METHOD}' (no flash "
+            "recipe is known for this board target); skipping"
+        )
+        lines.append(msg)
+        return -1, entry(None, "skipped", -1, msg), lines
+
     # Flow D by default where the manifest armed it; Flow A otherwise. `method`
     # is what dispatches AND what the envelope reports, so a consumer can see
     # which transport actually ran. See `select_flash_method`.
@@ -2844,6 +2871,16 @@ def _flash_entry_body(
                 "projected into this manifest when the preset declares it). tan has "
                 "no built-in replacement for a LOCAL SWD write today (e.g. recovering "
                 "a bricked bridge) -- see docs/setools.md and tan-cli#610."
+            )
+        elif method == RAM_RUN_ONLY_METHOD:
+            # tan-cli#1350: an ITCM-linked image (board.yaml `diagnostics.link:
+            # itcm`) is linked at 0x0; signing and writing it to MRAM slot0
+            # would produce a broken image. Refuse, name the right command.
+            msg = (
+                f"flash: {kind} '{entry_id}' is linked for the M55-HE ITCM "
+                "(board.yaml `diagnostics.link: itcm`) and cannot be written to MRAM -- "
+                f"RAM-run it with `tan flash --ram --core {entry_id}`, or remove "
+                "`diagnostics.link` and rebuild for a flash."
             )
         else:
             msg = (
@@ -2976,11 +3013,10 @@ def _flash_entry_body(
         # tan-cli#1371: an ELF LOADed below the app's MRAM slot (an ITCM image) is refused
         # BEFORE anything spawns -- the probe listing, the SETOOLS sign and the write
         # alike -- whatever the manifest says (stale / hand-edited / direct call). Only the
-        # shapes tan controls are checked: the mramxip `loadbin` and the SETOOLS auto-sign,
-        # both of which need `slot0_load_address`. An operator-supplied ATOC with no slot0
-        # may carry a legitimate ITCM load entry and is skipped. Flow A (`west flash` on
-        # the `alif_flash` runner) is NOT checked: that runner refuses a bad reset vector
-        # itself and supports images linked at the ITCM global alias.
+        # shapes tan controls are checked (they need `slot0_load_address`); an
+        # operator-supplied ATOC with no slot0 may carry a legitimate ITCM load entry.
+        # Flow A (`west flash`, `alif_flash` runner) is NOT checked: it refuses a bad
+        # reset vector itself and supports images linked at the ITCM global alias.
         slot0 = slot0_address(flash_args)
         unlinked = (
             mram_link_guard(artefact_path, entry_id, slot0=slot0) if slot0 is not None else None
@@ -3972,6 +4008,7 @@ def _run(
     ram: bool = False,
     ram_console: bool = False,
     ram_wait: float = 1.5,
+    assume_he: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4063,6 +4100,23 @@ def _run(
     # ones, which is the habit alp-sdk#2025's own header warns against. Its
     # only two spellings are the `--atoc-unqueryable` flag and
     # `flash_args.atoc_unqueryable` (`flash_plan.atoc_replacement_acknowledged`).
+    # tan-cli#1350: a project marked RAM-only (`diagnostics.link: itcm`) is
+    # refused as a WHOLE plain `tan flash` run, before any write -- see
+    # `ram_run_only_project_refusal`. A `--ram` run passes through this point
+    # too (its branch is further down), so `ram` must be forwarded: without it
+    # the rule refused the very `tan flash --ram --core <id>` its own message
+    # recommends.
+    ram_only_message = ram_run_only_project_refusal(
+        [(s.core_id, s.flash_method) for s in manifest.slices], core, helper, ram=ram
+    )
+    if ram_only_message is not None:
+        return (
+            ExitCode.VALIDATION_FAILURE,
+            _data(build_root),
+            [Issue("flash.ram-run-only-project", "error", ram_only_message)],
+            [ram_only_message],
+            sdk,
+        )
     plan = plan_flash_targets(manifest, core, helper)
 
     # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
@@ -4161,6 +4215,7 @@ def _run(
         ram=ram,
         ram_console=ram_console,
         ram_wait=ram_wait,
+        assume_he=assume_he,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     if ram:
@@ -4256,11 +4311,13 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
-            elif entry.issue_code == "flash.ram-image-not-ram-linked":
-                issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
             elif entry.issue_code == "flash.mram-image-not-mram-linked":
                 # tan-cli#1371: a literal `Issue(...)` for the static code gate.
                 issues.append(Issue("flash.mram-image-not-mram-linked", "error", entry.message))
+            elif entry.issue_code == "flash.ram-image-not-ram-linked":
+                issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
+            elif entry.issue_code == "flash.ram-core-unconfirmed":
+                issues.append(Issue("flash.ram-core-unconfirmed", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-unsupported":
                 issues.append(Issue("flash.ram-core-unsupported", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-mismatch":
@@ -4611,6 +4668,20 @@ def flash(
         "build has no such symbol: nothing is read, the envelope says which console the "
         "build selected, and flash.ram-console-symbol-missing is a warning, not an error.",
     ),
+    assume_he: bool = typer.Option(
+        False,
+        "--assume-he",
+        help="With --ram: proceed when the attached-core check has NO evidence either way "
+        "(tan-cli#1354). Before loading, tan decides from the access port J-Link reports "
+        "`Core found` on (HE APAddr 0x00300000, HP 0x00200000) and reads 4 words at the local "
+        "ITCM 0x0 and at the HE global window 0x58000000 as corroboration (the HP window is "
+        "never read). Only an HE access port proceeds. HP evidence refuses "
+        "(flash.ram-core-mismatch) and a contradiction on an HE attach refuses "
+        "(flash.ram-core-unconfirmed), and --assume-he NEVER overrides either. It overrides "
+        "only a missing or unplaceable access port / an unreadable check, AT YOUR OWN RISK -- "
+        "a generic Cortex-M55 attach picks whichever M55 access port it finds and the bench "
+        "has seen HE 6 of 6 times, which is not proof.",
+    ),
     wait: float = typer.Option(
         1.5,
         "--wait",
@@ -4723,8 +4794,11 @@ def flash(
             param_hint="--probe-usb-path",
         )
 
-    if (ram_console is True or (isinstance(wait, (int, float)) and wait != 1.5)) and ram is not True:
-        raise typer.BadParameter("--ram-console / --wait only mean something with --ram")
+    if (
+        ram_console is True or assume_he is True
+        or (isinstance(wait, (int, float)) and wait != 1.5)
+    ) and ram is not True:
+        raise typer.BadParameter("--ram-console / --wait / --assume-he only mean something with --ram")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -4767,6 +4841,7 @@ def flash(
             ram=ram if isinstance(ram, bool) else False,
             ram_console=ram_console if isinstance(ram_console, bool) else False,
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
+            assume_he=assume_he if isinstance(assume_he, bool) else False,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

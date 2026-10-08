@@ -60,6 +60,18 @@ merge drops and nothing ever re-adds -- see "What is deliberately excluded"
 below and `entry_violations`'s own docstring for why no git-log-based walk
 can close either of them.)
 
+## Repeated adds of identical bytes are not a mutation (stacked PRs)
+
+The promise is about CONTENT, not about how many commits recorded the add.
+When dev squash-merges a parent PR, a stacked child branch still carries the
+parent's original commits while dev carries the parent's squash commit, so
+once the child merges dev its history walks TWO "A" records for the same
+ledger path. Both add the same bytes, so nothing was edited or lost, and
+`entry_violations` accepts any number of "A" records provided every added
+blob sha is identical. A later modify/delete, or adds whose blobs differ,
+still fail. No rebase is needed (or useful) for the identical-twin shape, so
+nothing in the failure text suggests one for it.
+
 ## What is deliberately excluded
 
 `MODULE_SIZE_BUDGET_LOG.d/README.md` is not an entry (`_module_size_budget_
@@ -279,10 +291,21 @@ def _introducing_commit(cwd: Path, path: str) -> tuple[str, str] | None:
     return None
 
 
+#: Marker appended to a path's records when it was added more than once with
+#: differing content. `_violation_failure_message` keys its own remedy off
+#: this text.
+_DIFFERING_ADDS = (
+    "added more than once with differing content (the add records do not "
+    "all hold the same blob)"
+)
+
+
 def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
     """path -> what is wrong with it -- empty when every entry under
-    `dir_rel` was added exactly once (or introduced by a merge commit, which
-    records nothing), is still present in HEAD's own tree, and still holds
+    `dir_rel` was added (once, or several times with byte-identical content,
+    as when a squash-merged parent's original commits and its squash commit
+    both sit in a child branch's history; or introduced by a merge commit,
+    which records nothing), is still present in HEAD's own tree, and still holds
     byte-for-byte the content it was introduced with.
 
     Uses `--name-status` (not `--follow`, not `-M` rename detection): an
@@ -502,13 +525,25 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
 
     violations: dict[str, list[str]] = {}
     for path, seen in statuses.items():
-        # Exactly one "A"-status record is the only clean history. Anything
-        # else -- a second record of any kind (a re-add after delete, a
-        # modify, ...), or a first record that is not "A" at all (should be
-        # unreachable given git's own model, guarded anyway rather than
-        # assumed) -- is a violation.
-        if len(seen) != 1 or seen[0][0] != "A":
+        # The only clean histories are: every record is an "A", and every
+        # added blob is byte-identical (compared by blob sha). One "A" is the
+        # ordinary case. Several identical "A"s are the squash-merge shape:
+        # a child branch still carries its parent's original commits while
+        # dev carries the parent's squash commit, so a merge of dev into the
+        # child walks both adds of the same bytes. Nothing was edited, so the
+        # ledger's append-only promise holds. Anything else -- a modify, a
+        # delete, a first record that is not "A" (should be unreachable given
+        # git's own model, guarded anyway), or "A"s whose content differs --
+        # is a violation.
+        if any(status != "A" for status, _ in seen):
             violations[path] = [f"{status} at {commit}" for status, commit in seen]
+            continue
+        if len(seen) > 1:
+            add_oids = {_blob_oid(cwd, commit, path) for _, commit in seen}
+            if len(add_oids) != 1 or None in add_oids:
+                violations[path] = [
+                    f"{status} at {commit}" for status, commit in seen
+                ] + [_DIFFERING_ADDS]
 
     tree_result = _git_ok(
         "ls-tree", "-r", "--name-only", "HEAD", "--", dir_rel, cwd=cwd
@@ -755,6 +790,23 @@ _DELETE_REMEDY = (
 )
 
 
+_DUPLICATE_ADD_REMEDY = (
+    "DUPLICATE-ADD violation(s) above (the path was added more than once and "
+    "the copies are NOT byte-identical): repeated adds are tolerated only "
+    "when every added blob is the same, which is what a squash-merged "
+    "parent leaves behind in a child branch (original commits plus dev's "
+    "squash commit). A divergent copy means an entry was edited between "
+    "its adds. Make the entry byte-identical to the copy dev already has "
+    "(`git checkout origin/dev -- <path>` on the branch that re-added it "
+    "differently), and drop or fold the commit that introduced the "
+    "divergent bytes so no add record carries them."
+)
+
+
+def _is_duplicate_add_shaped(records: list[str]) -> bool:
+    return any(record == _DIFFERING_ADDS for record in records)
+
+
 def _violation_failure_message(violations: dict[str, list[str]]) -> str:
     """The failure text for `test_every_entry_under_module_size_budget_log_d_
     was_only_ever_added` -- tan-cli#1093. The gate's original text prescribed
@@ -790,16 +842,26 @@ def _violation_failure_message(violations: dict[str, list[str]]) -> str:
     for the pin.
     """
     shapes = [_is_delete_shaped(records) for records in violations.values()]
-    modify_shaped = any(not shape for shape in shapes)
+    dup_shaped = any(
+        not delete and _is_duplicate_add_shaped(records)
+        for delete, records in zip(shapes, violations.values())
+    )
+    modify_shaped = any(
+        not delete and not _is_duplicate_add_shaped(records)
+        for delete, records in zip(shapes, violations.values())
+    )
     delete_shaped = any(shapes)
     remedies = []
+    if dup_shaped:
+        remedies.append(_DUPLICATE_ADD_REMEDY)
     if modify_shaped:
         remedies.append(_MODIFY_REMEDY)
     if delete_shaped:
         remedies.append(_DELETE_REMEDY)
     return (
         f"{LOG_DIR_REL} entries must only ever be ADDED, never modified or "
-        f"removed once committed. Violating path(s): {violations}.\n\n"
+        f"removed once committed (re-adding byte-identical content, as a "
+        f"squash-merged parent does, is fine). Violating path(s): {violations}.\n\n"
         + "\n\n".join(remedies) + "\n\n"
         "Why neither shape can be fixed by adding a commit, and why a "
         "rebase does not cost dev anything it would have kept: this check "
@@ -1010,6 +1072,83 @@ def test_an_entry_added_once_and_never_touched_again_passes_clean(tmp_path):
 
     violations = entry_violations(repo, "LOG.d")
     assert violations == {}, f"an untouched entry must not be flagged, but got: {violations}"
+
+
+def _parent_and_squash_twin(repo: Path, squash_lines: list[str]) -> Path:
+    """The stacked-PR shape: a parent branch adds an entry, the child branches
+    from it, and `main` receives the parent as a SQUASH commit (an unrelated
+    commit adding the same path, with `squash_lines` as its content). The
+    child then merges `main` (`-s ours`, so a differing twin does not stop the
+    merge on an add/add conflict; an identical twin would merge cleanly
+    anyway), leaving both add commits reachable from the child's HEAD."""
+    _init_repo(repo)
+    _write(repo, "README.md", ["base"])
+    _commit(repo, "base")
+    _git(repo, "branch", "-M", "main")
+    entry_dir = repo / "LOG.d"
+
+    _git(repo, "checkout", "-q", "-b", "parent")
+    entry_dir.mkdir()
+    _write(entry_dir, "2026-08-30-aaaaaaaa.md", ["- 2026-08-30 -- parent reason"])
+    _commit(repo, "parent adds the entry")
+    _git(repo, "checkout", "-q", "-b", "child")
+    _write(repo, "child.txt", ["child work"])
+    _commit(repo, "child work")
+
+    _git(repo, "checkout", "-q", "main")
+    entry_dir.mkdir()
+    _write(entry_dir, "2026-08-30-aaaaaaaa.md", squash_lines)
+    _commit(repo, "squash of parent")
+
+    _git(repo, "checkout", "-q", "child")
+    _git(repo, "merge", "-q", "-s", "ours", "--no-edit", "main")
+    return entry_dir
+
+
+def test_a_duplicate_add_with_identical_content_passes_clean(tmp_path):
+    """The squash-merge shape (original parent commit + dev's squash commit
+    both reachable, same bytes) is not a mutation of the ledger."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _parent_and_squash_twin(repo, ["- 2026-08-30 -- parent reason"])
+
+    path = "LOG.d/2026-08-30-aaaaaaaa.md"
+    assert len(_walk_records_for(repo, path)) == 2, "fixture must walk two adds"
+    assert entry_violations(repo, "LOG.d") == {}
+
+
+def test_a_duplicate_add_with_differing_content_is_caught(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _parent_and_squash_twin(repo, ["- 2026-08-30 -- DIFFERENT reason"])
+
+    violations = entry_violations(repo, "LOG.d")
+    records = violations.get("LOG.d/2026-08-30-aaaaaaaa.md")
+    assert records and _DIFFERING_ADDS in records, violations
+    message = _violation_failure_message(violations)
+    assert _DUPLICATE_ADD_REMEDY in message
+    assert "`drop` the commit that deleted it" not in message
+
+
+def test_a_modify_after_duplicate_identical_adds_is_caught(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    entry_dir = _parent_and_squash_twin(repo, ["- 2026-08-30 -- parent reason"])
+    _write(entry_dir, "2026-08-30-aaaaaaaa.md", ["- 2026-08-30 -- edited"])
+    _commit(repo, "edits the entry after the duplicate adds")
+
+    assert entry_violations(repo, "LOG.d").get("LOG.d/2026-08-30-aaaaaaaa.md")
+
+
+def test_a_delete_after_duplicate_identical_adds_is_caught(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    entry_dir = _parent_and_squash_twin(repo, ["- 2026-08-30 -- parent reason"])
+    (entry_dir / "2026-08-30-aaaaaaaa.md").unlink()
+    _commit(repo, "deletes the entry after the duplicate adds")
+
+    records = entry_violations(repo, "LOG.d").get("LOG.d/2026-08-30-aaaaaaaa.md")
+    assert records and _is_delete_shaped(records), records
 
 
 def test_readme_under_the_directory_is_not_treated_as_an_entry(tmp_path):

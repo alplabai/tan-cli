@@ -359,7 +359,9 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
     executable, argv0 = seen[-1][0], seen[-1][1]
     assert executable is not None, "the preflight pinned no executable"
     assert Path(executable).parent == realbin, f"preflight loaded {executable!r}"
-    assert argv0 == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
+    # The identity is the tool name; Windows PATH resolution carries its PATHEXT
+    # suffix (`JLinkExe.EXE`), which the banner does not depend on.
+    assert Path(argv0).stem == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
 
 
 def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
@@ -923,7 +925,7 @@ def test_doctor_probe_host_python_spawns_the_resolved_interpreter(hostile, spy):
 
     assert spy.argvs, "_probe_host_python never spawned an interpreter"
     for argv, executable in zip(spy.argvs, spy.executables):
-        assert argv[0] in ("py", "python", "python3"), (
+        assert Path(argv[0]).name in ("py", "python", "python3"), (
             f"the child's own argv[0] became {argv[0]!r}"
         )
         assert executable is not None, "an interpreter spawn pinned no executable"
@@ -997,7 +999,7 @@ def test_collect_threads_probe_host_pythons_resolved_path_into_posix_venv_capabl
     monkeypatch.setattr(
         doctor_cmd,
         "_probe_host_python",
-        lambda floor: ("python3", (3, 12), "/resolved/bin/python3"),
+        lambda floor, *a: ("python3", (3, 12), "/resolved/bin/python3"),
     )
     captured: dict[str, object] = {}
 

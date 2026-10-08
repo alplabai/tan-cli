@@ -25,7 +25,6 @@ from tan.core.plan_tokens import (
     DeferredPlaceholder,
     DeferredPolicy,
     LeftoverToken,
-    ORIGIN_BOARD_YAML,
     PLAN_TOKEN_NAMES,
     PLAN_PATH_MODE_TOKENED,
     TokenValues,
@@ -159,34 +158,6 @@ def git_short_head(sdk_root: Path) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
-def _string_values(node: object) -> set[str]:
-    """Every string scalar VALUE under `node` (mapping values and sequence
-    items, recursively). Mapping keys never count."""
-    if isinstance(node, str):
-        return {node}
-    if isinstance(node, dict):
-        return set().union(*(_string_values(v) for v in node.values()))
-    if isinstance(node, list):
-        return set().union(*(_string_values(v) for v in node))
-    return set()
-
-
-def _board_yaml_string_values(board_yaml_path: str) -> frozenset[str] | None:
-    """The string scalar values of the project's own board.yaml, or `None`
-    when it cannot be read or parsed (missing, a directory, undecodable,
-    invalid YAML, PyYAML absent). `None` means the interim deferred-placeholder
-    rule does not apply -- never an exception. A comment or a key naming
-    `${NAME}` is not a value, so it does not make the name a declared
-    placeholder."""
-    try:
-        import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
-
-        doc = yaml.safe_load(Path(board_yaml_path).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 -- any read/parse failure just turns the rule off
-        return None
-    return frozenset(_string_values(doc))
-
-
 def _deferred_extra_note(plan: BuildPlan, e: LeftoverToken, policy: DeferredPolicy) -> str:
     """What to append to a `build.plan-token-unresolved` message so the
     refusal also says what a malformed `deferredPlaceholders` cost, or how a
@@ -208,31 +179,24 @@ def _deferred_extra_note(plan: BuildPlan, e: LeftoverToken, policy: DeferredPoli
         else:
             notes += (
                 f" If `{e.token}` is a placeholder meant for the build host or the device, "
-                f"it is accepted when the plan's `deferredPlaceholders` lists `{name}` "
-                f"(alplabai/alp-sdk#2696), or when the project's board.yaml writes "
-                f"`{e.token}` as a whole value."
+                f"it is accepted only when the plan's `deferredPlaceholders` lists `{name}` "
+                f"(alplabai/alp-sdk#2696); this plan carries no `deferredPlaceholders` at "
+                f"all -- re-emit it with a current planner."
             )
     return notes
 
 
 def _deferred_text(d: DeferredPlaceholder) -> str:
     if d.live_kconfig:
-        text = (
+        return (
             f"placeholder `${{{d.name}}}` in `{d.field}` sits on a live line of a Kconfig "
             f"fragment; Kconfig does not expand `${{{d.name}}}`, so the firmware will carry "
             f"the literal text unless something substitutes it before the build"
         )
-    else:
-        text = (
-            f"placeholder `${{{d.name}}}` in `{d.field}` is left as written for the build "
-            f"host or the device to supply; tan does not substitute it"
-        )
-    if d.origin == ORIGIN_BOARD_YAML:
-        text += (
-            f" (recognised because the project's board.yaml has `${{{d.name}}}` as a value; "
-            f"the plan carries no `deferredPlaceholders`, pending alplabai/alp-sdk#2696)"
-        )
-    return text
+    return (
+        f"placeholder `${{{d.name}}}` in `{d.field}` is left as written for the build "
+        f"host or the device to supply; tan does not substitute it"
+    )
 
 
 def deferred_placeholder_issues(
@@ -282,6 +246,7 @@ def apply_plan_token_substitution(
     toolchain_root: str | None,
     toolchain_advice: str = NO_TOOLCHAIN_ADVICE,
     deferred_out: list[DeferredPlaceholder] | None = None,
+    project_root: str | None = None,
 ) -> tuple[BuildPlan, list[SliceDemotion]]:
     """Apply the build-plan token-substitution pass to `plan` before
     materialise writes anything or a slice command runs. A no-op unless
@@ -316,13 +281,17 @@ def apply_plan_token_substitution(
     # base dir. They coincide only in the default config -- a tokened plan
     # substituting ${PROJECT_ROOT} from one while slices actually run under
     # the other would silently build against the wrong tree.
-    if board_yaml_path is None:
+    # `project_root` is the `board.yaml`-less route's own (tan-cli#1359: `tan
+    # build --board`): there is no board.yaml to derive it from, so the caller
+    # names it (the build root) instead.
+    if board_yaml_path is None and project_root is None:
         raise TokenSubstitutionError(
             "build.plan-invalid",
             "a `planPathMode: tokened` plan needs a resolved board.yaml to derive "
             "${PROJECT_ROOT} from -- pass `--board-yaml <PATH>` or run from a project.",
         )
-    project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
+    if project_root is None:
+        project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
 
     if project_root_diverges_from_exec_base(project_root, exec_base):
         raise TokenSubstitutionError(
@@ -370,9 +339,7 @@ def apply_plan_token_substitution(
     values = TokenValues(
         sdk_root=sdk_root, project_root=project_root, python=python, toolchain_root=toolchain_root
     )
-    policy = DeferredPolicy(
-        plan.deferred_placeholders, lambda: _board_yaml_string_values(board_yaml_path)
-    )
+    policy = DeferredPolicy(plan.deferred_placeholders)
     try:
         out, demoted = substitute_plan_tokens(plan, values, policy)
     except LeftoverToken as e:

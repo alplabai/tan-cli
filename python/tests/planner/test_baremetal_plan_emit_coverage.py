@@ -306,8 +306,15 @@ def test_an_off_core_is_exempt_from_the_loader_rules(base_dir):
 def _emit_one_slice(project, base_dir: Path) -> dict:
     from tan.planner.buildplan import emit_build_plan
 
+    # The project is synthetic (no board.yaml on disk), but `emit_build_plan`
+    # reads the file it is handed: `deferredPlaceholders` (alp-sdk#2696) only
+    # lists a `${NAME}` the board.yaml text itself carries.  An empty file
+    # declares none, which is what this synthetic project has.
+    board_yaml = base_dir / "board.yaml"
+    if not board_yaml.exists():
+        board_yaml.write_text("", encoding="utf-8")
     plan = json.loads(emit_build_plan(project,
-                                      board_yaml=base_dir / "board.yaml",
+                                      board_yaml=board_yaml,
                                       build_root=base_dir / "build"))
     assert len(plan["slices"]) == 1
     return plan["slices"][0]
@@ -358,8 +365,12 @@ def test_a_baremetal_slice_reaches_the_plan_with_configure_then_build(base_dir):
         {"tool": "cmake", "args": ["--build", "."], "cwd": build_dir}]
     assert emitted["artifacts"] == dict(
         ALL_NULL_ARTIFACTS, outputDir=f"{build_dir}/output")
+    # `alp-baremetal.cmake` is the one the configure reads, so it comes
+    # first; the rendered reference artefacts follow (tan-cli#1216).
     assert [a["path"] for a in emitted["configArtefacts"]] == [
-        f"{build_dir}/alp-baremetal.cmake"]
+        f"{build_dir}/alp-baremetal.cmake",
+        f"{build_dir}/alp.overlay",
+        f"{build_dir}/cmake-args.txt"]
 
 
 def test_a_baremetal_slice_that_cannot_configure_carries_no_build_step(base_dir):

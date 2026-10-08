@@ -169,6 +169,7 @@ from tan.core.scaffold import (
     vendored_som,
     write_files,
 )
+from tan.core.board_files import retarget_example_board_files
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -999,6 +1000,10 @@ def _plan_from_example(
         )
 
     if som:
+        # tan-cli#1351: read BEFORE board.yaml is retargeted below, which
+        # would erase the example's own SKU. `boards/<old board>.{conf,
+        # overlay}` never applies on another SKU's board target.
+        files = retarget_example_board_files(files, som, sdk.path / "metadata")
         # Retarget the copied board.yaml onto the chosen SoM, so an example can
         # be scaffolded onto the customer's own module rather than the example's.
         try:

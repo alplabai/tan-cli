@@ -32,8 +32,12 @@ CODE_CONSOLE_SYMBOL_MISSING = "flash.ram-console-symbol-missing"
 CODE_FAILED = "flash.ram-failed"
 CODE_CORE_UNSUPPORTED = "flash.ram-core-unsupported"
 CODE_CORE_MISMATCH = "flash.ram-core-mismatch"
+CODE_CORE_UNCONFIRMED = "flash.ram-core-unconfirmed"
 
 #: The RAM console buffer symbol (`CONFIG_RAM_CONSOLE`).
+#: SRAM0's local aperture base on the AEN parts (shared with `core.size`).
+SRAM0_BASE = 0x02000000
+
 CONSOLE_SYMBOL = "ram_console_buf"
 
 #: Largest region one `mem8` command reads (bench-env.sh `bench_mem8_chunks`).
@@ -216,8 +220,8 @@ def apertures_for(core_id: str, banks_kib: Sequence[tuple[str, float]]) -> Apert
     code = [(0x0, itcm), (_ITCM_GLOBAL[token], itcm)]
     data = [(0x20000000, dtcm)]
     if sram0 is not None:
-        code.append((0x02000000, sram0))
-        data.append((0x02000000, sram0))
+        code.append((SRAM0_BASE, sram0))
+        data.append((SRAM0_BASE, sram0))
     return Apertures(tuple(code), tuple(data))
 
 
@@ -226,7 +230,7 @@ def _within(address: int, length: int, spans: Sequence[tuple[int, int]]) -> bool
 
 
 def _plausible_base(base: int) -> bool:
-    return base in (0x0, 0x50000000, 0x58000000) or 0x02000000 <= base < 0x03000000
+    return base in (0x0, 0x50000000, 0x58000000) or SRAM0_BASE <= base < 0x03000000
 
 
 def plan_ram_image(
@@ -481,11 +485,196 @@ def check_session(transcript: str, *, loadbin: bool) -> str | None:
     return None
 
 
-_ATTACHED = re.compile(r"^(?:Found Cortex-M\S*.*|.*\bAP\[\d+\].*|.*CoreSight.*)$", re.MULTILINE)
+_AP_ADDR = re.compile(r"AP\[(\d+)\]\s*\(APAddr\s+(0x[0-9A-Fa-f]+)\)")
+_AP_CORE_FOUND = re.compile(r"AP\[(\d+)\]:\s*Core found")
+_CPUID = re.compile(r"CPUID register:\s*(0x[0-9A-Fa-f]+)")
+_FOUND = re.compile(r"^Found Cortex-M\S*.*$", re.MULTILINE)
+
+#: The debug access ports of the two M55s on the Ensemble E8, from the bench: HE AP
+#: 0x00300000, HP AP 0x00200000 (alp-sdk scripts/bench/aen/openocd-ram-run.sh:16-17;
+#: changelog.d/2037-openocd-m55he-bench-core-selection.md:4 "0x00200000 is the M55-HP,
+#: not the HE, and 0x00300000 is the HE"; changelog.d/2025.md:31 `AP[3] (APAddr
+#: 0x00300000)` is the AHB-AP carrying the M55 debug).
+HE_AP_ADDR = 0x00300000
+HP_AP_ADDR = 0x00200000
 
 
-def attached_core_lines(transcript: str, limit: int = 4) -> list[str]:
-    """The J-Link lines that say WHICH core/AP it attached to (`Found Cortex-M55 r1p0,
-    Little endian.`, `AP[1]: ...`), when it prints them -- reported so a wrong-core
-    attach is visible in the envelope. Empty when J-Link printed none."""
-    return [m.group(0).strip() for m in _ATTACHED.finditer(transcript)][:limit]
+def attached_core(transcript: str) -> dict | None:
+    """Which core J-Link attached to, from its own `connect` banner: the AP that reports
+    `AP[n]: Core found` (with its `APAddr`), the `CPUID register` and the `Found
+    Cortex-M55 ...` line. The `APAddr` of the Core-found AP is what tells HE from HP --
+    the `Found Cortex-M55 r1p0` line alone is identical for both. `None` when the
+    transcript names no Core-found AP. More than one distinct Core-found AP is
+    reported as `multiple`."""
+    addrs = {int(m.group(1)): m.group(2) for m in _AP_ADDR.finditer(transcript)}
+    found = [int(m.group(1)) for m in _AP_CORE_FOUND.finditer(transcript)]
+    cpuid = _CPUID.search(transcript)
+    line = _FOUND.search(transcript)
+    if not found and not cpuid and not line:
+        return None
+    ports = sorted(set(found))
+    out: dict = {
+        "coreFoundAp": ports[0] if len(ports) == 1 else (ports or None),
+        "apAddr": addrs.get(ports[0]) if len(ports) == 1 else None,
+        "cpuid": cpuid.group(1) if cpuid else None,
+        "found": line.group(0).strip() if line else None,
+    }
+    if len(ports) > 1:
+        out["multiple"] = [addrs.get(p) for p in ports]
+    return out
+
+
+def ap_verdict(attached: dict | None) -> str:
+    """`he` / `hp` from the Core-found AP's address; `multiple` / `unidentified` otherwise."""
+    if not attached:
+        return "unidentified"
+    if "multiple" in attached:
+        # More than one Core-found AP. If ANY of them is the HP's, that is HP evidence
+        # (non-overridable); otherwise it is merely unplaceable.
+        for addr in attached["multiple"]:
+            try:
+                if addr is not None and int(addr, 16) == HP_AP_ADDR:
+                    return "hp"
+            except ValueError:
+                continue
+        return "multiple"
+    try:
+        addr = int(attached["apAddr"], 16)
+    except (TypeError, ValueError):
+        return "unidentified"
+    return {HE_AP_ADDR: "he", HP_AP_ADDR: "hp"}.get(addr, "unidentified")
+
+
+def combine_verdicts(ap: str, itcm: str) -> str:
+    """The AP is the PRIMARY identification; the ITCM-alias read corroborates. Agreement
+    or silence from the secondary keeps the primary; a contradiction is `conflict`. With
+    no usable AP the ITCM verdict stands alone."""
+    if ap in ("he", "hp"):
+        other = "hp" if ap == "he" else "he"
+        return "conflict" if itcm == other else ap
+    return itcm
+
+
+# ── which core did the generic attach land on? (tan-cli#1354) ───────────────
+#
+# J-Link's "Found Cortex-M55 r1p0" is the same line for the HE and the HP core, and a
+# generic `Cortex-M55` attach takes whichever M55 access port it finds. The DECISION
+# rests on the access port: the AP that reports `AP[n]: Core found`, whose APAddr is
+# 0x00300000 for the HE and 0x00200000 for the HP.
+#
+# CORROBORATION is a single read-only `mem32` pair: a core's LOCAL ITCM at 0x0 is its own
+# global window, HE 0x58000000 (alp-sdk metadata/socs/alif/ensemble/e8.json
+# `itcm_global_base` 1476395008 at line 106; docs/aen-bench-bringup.md:20 "loadAddress=
+# 0x50000000 = HP ITCM global, vs HE's 0x58000000"). The HP window 0x50000000 is NEVER
+# read, and this is MEASURED, not cautious. Bench round 8 (2026-10-07, evk-02, AEN803
+# 2026W36-0001, read-only A/B): A2 = `mem32 0x0` + `mem32 0x58000000` ONLY -> A3 `h` OK
+# (DHCSR 00130003). A4 = the full check INCLUDING `mem32 0x50000000` -> A5/A6 `h` FAILS
+# (`WARNING: CPU could not be halted`, DHCSR 00110003) and the core stays unhaltable until a
+# PIN reset (C0-C2 recovered it); the read itself returned words with no error, and the later
+# load only worked through the fallback chain ending in `SYSRESETREQ has confused core` ->
+# VECTRESET. The shipped script is exactly the A2 reads: the local ITCM 0x0 and the HE
+# window, nothing else.
+
+HE_ALIAS = _ITCM_GLOBAL["M55_HE"]
+CORE_CHECK_WORDS = 4
+
+#: Halt/reset trouble J-Link reports in a load transcript. The Flow D reset markers plus
+#: the ones a RAM-run's halt-then-loadbin hits first: a core that would not halt, a core
+#: J-Link could not find, and the SYSRESETREQ-confused fallback (bench round 8).
+RAM_RUN_TROUBLE_MARKERS = (
+    "CPU could not be halted",
+    "Could not find core",
+    "SYSRESETREQ has confused core",
+    "Failed to halt CPU",
+    "CPU is not halted",
+    "Reset: Failed",
+    "CPU may have not been reset",
+)
+
+
+def trouble_markers(transcript: str) -> tuple[str, ...]:
+    """Every halt/reset-trouble marker present in `transcript`, in marker order."""
+    return tuple(m for m in RAM_RUN_TROUBLE_MARKERS if m in transcript)
+
+_MEM32_LINE = re.compile(r"^([0-9A-Fa-f]{8}) = ((?:[0-9A-Fa-f]{8}(?:\s+|$))+)$")
+
+
+def core_check_script(pre: Sequence[str]) -> str:
+    """The read-only identification session: `connect` (no halt, no loadbin), then
+    `mem32` of the local ITCM and of the HE global alias ONLY. Addresses and the word
+    count are ints rendered with `0x%X`."""
+    reads = [f"mem32 0x{a:X}, 0x{CORE_CHECK_WORDS:X}" for a in (0x0, HE_ALIAS)]
+    return "\n".join([*pre, *reads, "exit"]) + "\n"
+
+
+def parse_mem32(transcript: str, address: int, count: int = CORE_CHECK_WORDS) -> tuple[int, ...] | None:
+    """The `count` 32-bit words J-Link dumped at `address`, or `None` when the dump is
+    missing, short, or not contiguous from `address` (an unreadable window prints
+    `Could not read memory.` and no dump line). Strict: a line that does not match
+    `ADDR = WWWWWWWW ...` is ignored, never guessed at."""
+    words: dict[int, int] = {}
+    for raw in transcript.splitlines():
+        match = _MEM32_LINE.match(raw.strip())
+        if not match:
+            continue
+        base = int(match.group(1), 16)
+        for i, tok in enumerate(match.group(2).split()):
+            words.setdefault(base + 4 * i, int(tok, 16))
+    wanted = [address + 4 * i for i in range(count)]
+    if not all(a in words for a in wanted):
+        return None
+    return tuple(words[a] for a in wanted)
+
+
+def core_verdict(local: tuple[int, ...] | None, he: tuple[int, ...] | None) -> str:
+    """The ITCM corroboration alone: `match` when the local view equals the HE window,
+    `disagree` when both read and differ, `unreadable` when either could not be read."""
+    if local is None or he is None:
+        return "unreadable"
+    return "match" if local == he else "disagree"
+
+
+def combine_verdicts(ap: str, itcm: str) -> str:
+    """The decision. ONLY the access port can say HE: `he` needs `ap == he` and an ITCM
+    that matches or is silent. The ITCM never confirms on its own.
+
+    * `ap == he`, ITCM `disagree` -> `conflict` (a local view that is NOT the HE window
+      on an HE-looking attach is suspicious, and not overridable);
+    * `ap == hp` -> `hp` (an ITCM that matches the HE window against an HP access port is
+      reported as `conflict-hp`: still HP evidence, still never overridable);
+    * no AP evidence (`unidentified` / `multiple`) -> `unidentified`."""
+    if ap == "he":
+        return "conflict" if itcm == "disagree" else "he"
+    if ap == "hp":
+        return "conflict-hp" if itcm == "match" else "hp"
+    return "unidentified"
+
+
+#: Verdicts `--assume-he` may override: the evidence is MISSING, not contrary. Anything
+#: that involves HP evidence, or a contradiction on an HE attach, is never overridable.
+OVERRIDABLE_VERDICTS = frozenset({"unidentified", "unreadable"})
+
+
+def core_check(transcript: str) -> tuple[str, dict]:
+    """`(verdict, evidence)` for a [`core_check_script`] transcript: the Core-found AP
+    (decisive) combined with the ITCM words (corroboration). `evidence` is the envelope's
+    `ram.coreCheck` body."""
+    local = parse_mem32(transcript, 0x0)
+    he = parse_mem32(transcript, HE_ALIAS)
+
+    def hexed(words):
+        return None if words is None else [f"0x{w:08X}" for w in words]
+
+    attached = attached_core(transcript)
+    ap = ap_verdict(attached)
+    itcm = core_verdict(local, he)
+    evidence = {
+        "ap": attached,
+        "apVerdict": ap,
+        "itcmWords": {
+            "local0x00000000": hexed(local),
+            f"he0x{HE_ALIAS:08X}": hexed(he),
+        },
+        "itcmVerdict": itcm,
+    }
+    return combine_verdicts(ap, itcm), evidence
