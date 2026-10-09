@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands import flash_cmd, reset_cmd
+from tan.commands import reset_confirm as rc_mod
 from tan.core import reset_plan as rp
 from tan.core.jlink_probe import JLinkProbe
 
@@ -21,7 +22,7 @@ PROBE = JLinkProbe("3-4.2", SERIAL)
 
 
 class FakeJlink:
-    def __init__(self, monkeypatch, *, fail=False, banner="Script processing completed.\n"):
+    def __init__(self, monkeypatch, *, fail=False, banner="TAN_PROBE_ISOLATED_USB_PATH=3-4.2\nScript processing completed.\n"):
         self.scripts: list[str] = []
         self.envs: list[dict | None] = []
         self.fail, self.banner = fail, banner
@@ -61,10 +62,15 @@ def _run(tmp_path, pulse=100, usb="3-4.2", **kw):
                           enumerate_probes=lambda: [PROBE], **kw)
 
 
+def codes(issues):
+    return [i.code for i in issues]
+
+
 def test_one_pulse_script_is_r0_sleep_r1_and_nothing_else(env, monkeypatch):
     jl = FakeJlink(monkeypatch)
     rc, data, issues, lines = _run(env)
-    assert rc == 0 and issues == []
+    assert rc == 0 and codes(issues) == ["reset.boot-not-confirmed"]
+    assert data["resetObserved"] == "unknown"
     (script,) = jl.reset_scripts()
     body = [ln for ln in script.splitlines() if ln]
     assert body[-4:] == ["r0", "sleep 100", "r1", "q"] and "connect" not in body
@@ -149,12 +155,12 @@ def test_cli_envelope_shape(env, monkeypatch):
     assert r.exit_code == 0, r.output
     body = json.loads(r.stdout)
     assert body["command"] == "reset" and body["ok"] is True
-    assert body["data"]["pulseMs"] == 150 and body["issues"] == []
+    assert body["data"]["pulseMs"] == 150 and body["data"]["resetObserved"] == "unknown"
+    assert [i["code"] for i in body["issues"]] == ["reset.boot-not-confirmed"]
 
 
-def test_jlink_is_not_asked_to_connect(env, monkeypatch):
+def _spy_execute(monkeypatch):
     seen = {}
-    FakeJlink(monkeypatch)
     real = flash_cmd._execute
 
     def spy(plan, *a, **k):
@@ -162,10 +168,84 @@ def test_jlink_is_not_asked_to_connect(env, monkeypatch):
         return real(plan, *a, **k)
 
     monkeypatch.setattr(flash_cmd, "_execute", spy)
+    return seen
+
+
+def test_jlink_argv_is_the_proven_one(env, monkeypatch):
+    seen = _spy_execute(monkeypatch)
+    FakeJlink(monkeypatch)
     assert _run(env)[0] == 0
-    assert "-device" not in seen["argv"] and "-speed" not in seen["argv"]
-    assert seen["argv"][seen["argv"].index("-autoconnect") + 1] == "0"
+    assert seen["argv"] == ("JLinkExe", "-NoGui", "1", "-ExitOnError", "1", "-CommanderScript")
     assert "connect" in rp.FORBIDDEN_VERBS
+
+
+def test_with_a_place_there_is_one_spawn_and_no_serial_line(env, monkeypatch):
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, issues, _ = _run(env)
+    assert rc == 0 and data["singleSpawn"] is True
+    assert len(jl.scripts) == 1 and "ShowEmuList" not in jl.scripts[0]
+    assert "SelectEmuBySN" not in jl.scripts[0]
+    assert jl.envs[0] == {"TAN_PROBE_USB_PATH": "3-4.2"}
+    assert data["probe"]["isolation"] == "wrapper-attested:3-4.2"
+
+
+def test_without_the_wrapper_handshake_the_fast_path_fails(env, monkeypatch):
+    FakeJlink(monkeypatch, banner="Script processing completed.\n")
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, _, issues, _ = _run(env)
+    assert rc == 1 and issues[0].code == "flash.probe-verify-failed"
+
+
+def test_a_handshake_for_another_path_fails(env, monkeypatch):
+    FakeJlink(monkeypatch, banner="TAN_PROBE_ISOLATED_USB_PATH=3-9\nScript processing completed.\n")
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, _, issues, _ = _run(env)
+    assert rc == 1 and issues[0].code == "flash.probe-verify-failed"
+
+
+class _Console:
+    def __init__(self, chunks):
+        self.chunks, self.closed, self.flushed = list(chunks), False, False
+
+    def reset_input_buffer(self):
+        self.flushed = True
+
+    def read(self, n=1):
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self):
+        self.closed = True
+
+
+def _confirm(monkeypatch, chunks):
+    ser = _Console(chunks)
+    monkeypatch.setattr(rc_mod, "open_console", lambda spec: ser)
+    return ser, rc_mod.confirm_spec("rfc2217://gw:4001", "Zephyr", None, 0.5)
+
+
+def test_a_matching_console_line_confirms_the_reset(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser, spec = _confirm(monkeypatch, [b"*** Booting Zephyr OS ***\n"])
+    rc, data, issues, _ = _run(env, confirm=spec)
+    assert rc == 0 and data["resetObserved"] is True and issues == []
+    assert data["console"]["matchedLine"].endswith("Zephyr OS ***")
+    assert ser.flushed and ser.closed
+
+
+def test_no_console_line_is_not_a_reset(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser, spec = _confirm(monkeypatch, [b"still in STOP\n"])
+    rc, data, issues, _ = _run(env, confirm=spec)
+    assert rc == 1 and data["resetObserved"] is False
+    assert issues[0].code == "reset.boot-not-observed" and ser.closed
+
+
+def test_confirm_options_must_come_together():
+    with pytest.raises(rc_mod.ConfirmError):
+        rc_mod.confirm_spec("p", None, None, None)
+    with pytest.raises(rc_mod.ConfirmError):
+        rc_mod.confirm_spec("p", "(", None, None)
 
 
 def test_cli_rejects_a_malformed_usb_path(env):

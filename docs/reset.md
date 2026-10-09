@@ -3,6 +3,7 @@
 
 ```sh
 tan reset [--pulse-ms 100] [--probe-usb-path 3-4.2 | --probe-serial SN] [--jlink PATH] \
+          [--confirm-console PORT --expect REGEX [--confirm-baud 115200] [--confirm-timeout 30]] \
           [--format json]
 JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2
 ```
@@ -18,8 +19,9 @@ r1
 q
 ```
 
-JLinkExe is started as `JLinkExe -if SWD -autoconnect 0 -NoGui 1 -ExitOnError 1 -CommanderScript <file>`:
-no `-device`, no `-speed`, no `connect`. Commander toggles the reset pin without
+JLinkExe is started as `JLinkExe -NoGui 1 -ExitOnError 1 -CommanderScript <file>` (the argv
+of the bench-proven invocation): no `-if`, no `-autoconnect`, no `-device`, no `-speed`, no
+`connect`. Commander toggles the reset pin without
 attaching to the target; a `connect` against an Alif target in STOP either fails
 (the debug domain is gated) or disturbs the evidence this verb exists to keep.
 The script matches the bench-proven one (`r0`, `sleep 100`, `r1`, `q`).
@@ -44,3 +46,28 @@ written, erased or flashed. A test holds the generated script to that verb list.
   `Script processing completed.` and none of `FAILED`, `Cannot connect`,
   `Could not open` in the output; otherwise `reset.failed` (exit 1).
 * `reset.internal-failure` (exit 5) is a tan bug.
+
+## One spawn, and what it proves
+
+* With `JLINK_RUN_PLACE` set and `--probe-usb-path` given, `tan reset` makes ONE
+  J-Link spawn (`data.singleSpawn: true`) and does not run the `ShowEmuList`
+  verification pass first: each pass through the board-farm wrapper costs tens of
+  seconds, longer than a STOP window. The wrapper itself refuses a
+  `TAN_PROBE_USB_PATH` that is not its place's port (exit 96) before it opens any
+  probe, and tan checks afterwards that the output carries
+  `TAN_PROBE_ISOLATED_USB_PATH=<that path>` (`data.probe.isolation:
+  wrapper-attested:<path>`); a missing or different handshake is
+  `flash.probe-verify-failed`, saying the pulse already ran. In that mode the
+  script has no `SelectEmuBySN` line (the wrapper's mask leaves one emulator).
+  Without a place, the `tan flash` guard runs first as before.
+* Exit 0 means **the pulse was sent**, not that the board rebooted (a target in
+  STOP can ignore it). `data.resetObserved` is `"unknown"` and the info issue
+  `reset.boot-not-confirmed` says so, unless you pass `--confirm-console PORT
+  --expect REGEX`: the console (a local tty or `rfc2217://`) is opened before the
+  pulse; after J-Link exits its queue is dropped and it is read for up to
+  `--confirm-timeout`. A matching line gives `resetObserved: true` and
+  `data.console`; none gives `reset.boot-not-observed` (exit 1). Only bytes
+  arriving after J-Link exits count, so pick a banner printed some time after
+  reset. `--confirm-console` needs pyserial: install `tan-cli[monitor]`
+  (`pip install -e "./python[monitor]"` for a checkout; a bare editable install
+  lacks it and the error says so).

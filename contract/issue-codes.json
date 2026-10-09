@@ -3659,6 +3659,30 @@
       "note": "tan-cli#1452: `tan reset --pulse-ms` is outside 1..10000 milliseconds. Refused before any J-Link spawn (exit 2). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "reset.boot-not-confirmed",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `tan reset` sent the pulse but was not asked to watch the console, so `data.resetObserved` is `\"unknown\"`: a pulse that exits 0 does not prove the board rebooted. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "reset.boot-not-observed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `tan reset --confirm-console PORT --expect REGEX` sent the pulse but no console line matched within `--confirm-timeout` (bytes counted only after J-Link exits); `data.resetObserved` is false. Exit 1. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "reset.console-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `--confirm-console` could not be opened (or pyserial is missing: install `tan-cli[monitor]`). Refused before the pulse. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "reset.failed",
       "status": "reserved",
       "severity": "error",
