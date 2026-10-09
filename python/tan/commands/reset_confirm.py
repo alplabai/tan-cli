@@ -86,8 +86,9 @@ class Drain:
     that arrives (measured: 0.088 s after exit) during that read is kept, and two
     readers never run at once."""
 
-    def __init__(self, ser) -> None:
+    def __init__(self, ser, clock=time.monotonic) -> None:
         self._ser = ser
+        self._clock = clock  # injectable so tests need no wall-clock races
         self._halt = threading.Event()
         self._chunks: list[tuple[float, bytes]] = []
         self._stopped = False
@@ -101,7 +102,7 @@ class Drain:
             except Exception:  # noqa: BLE001 -- observe() reports a dead link
                 return
             if got:
-                self._chunks.append((time.monotonic(), got))
+                self._chunks.append((self._clock(), got))
             else:
                 time.sleep(0.005)
 
@@ -128,7 +129,9 @@ def open_console(spec: ConfirmSpec):
     return monitor_session.open_port(spec.port, spec.baud, capture=True)
 
 
-def observe(ser, spec: ConfirmSpec, initial: bytes = b"", exit_ts: float | None = None) -> dict[str, Any]:
+def observe(
+    ser, spec: ConfirmSpec, initial: bytes = b"", exit_ts: float | None = None, clock=time.monotonic
+) -> dict[str, Any]:
     """After J-Link exited: wait for `--expect`, starting with `initial` (what the
     `Drain` stamped at or after `exit_ts`). The queue is NOT flushed here: a flush
     could discard a banner that is already waiting.
@@ -136,9 +139,10 @@ def observe(ser, spec: ConfirmSpec, initial: bytes = b"", exit_ts: float | None 
     `window_s` of J-Link exiting: a later one (e.g. an RTC-alarm wake out of STOP) is recorded as
     `lateMatchAtSeconds` and is not a reset."""
     try:
-        t0 = time.monotonic()
+        t0 = clock()
         res = serial_capture.capture(
-            ser, duration_s=max(spec.timeout_s, spec.window_s), until=spec.expect, initial=initial
+            ser, duration_s=max(spec.timeout_s, spec.window_s), until=spec.expect, initial=initial,
+            clock=clock,
         )
         # Latency from J-Link's exit, not from when this capture began.
         total = res.elapsed_s + (t0 - exit_ts if exit_ts is not None else 0.0)

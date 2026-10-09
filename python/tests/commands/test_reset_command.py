@@ -271,30 +271,44 @@ def test_cli_rejects_a_malformed_usb_path(env):
     assert r.exit_code == 2
 
 
-class _LateConsole(_Console):
-    """Says nothing for `delay` seconds, then the banner."""
+class _FakeClock:
+    t = 100.0
 
-    def __init__(self, delay):
+    def __call__(self):
+        return self.t
+
+
+class _LateConsole(_Console):
+    """Each read takes `delay` fake seconds; the banner comes with the first one."""
+
+    def __init__(self, clock, delay):
         super().__init__([])
-        import time as _t
-        self._t, self._due = _t, _t.monotonic() + delay
+        self.clock, self.delay = clock, delay
 
     def read(self, n=1):
-        if self._t.monotonic() >= self._due and not self.chunks:
-            self.chunks = [b"RTC alarm wake: Zephyr\n"]
-        self._t.sleep(0.02)
-        return self.chunks.pop(0) if self.chunks else b""
+        self.clock.t += self.delay
+        if self.delay is not None and not getattr(self, "_said", False):
+            self._said = True
+            return b"RTC alarm wake: Zephyr\n"
+        return b""
 
 
 def test_a_match_after_the_window_is_not_a_reset(env, monkeypatch):
     FakeJlink(monkeypatch)
-    ser = _LateConsole(0.4)
+    clock = _FakeClock()
+    ser = _LateConsole(clock, 0.4)
     monkeypatch.setattr(rc_mod, "open_console", lambda spec: ser)
+    monkeypatch.setattr(rc_mod, "Drain", _NoDrain)
+    real = rc_mod.observe
+    monkeypatch.setattr(
+        rc_mod, "observe",
+        lambda ser, spec, initial=b"", exit_ts=None: real(ser, spec, initial, clock(), clock=clock),
+    )
     spec = rc_mod.confirm_spec("rfc2217://gw:4001", "Zephyr", None, 2.0, 0.2)
     rc, data, issues, _ = _run(env, confirm=spec)
     assert rc == 1 and data["resetObserved"] is False
     assert issues[0].code == "reset.boot-not-observed"
-    assert data["console"]["lateMatchAtSeconds"] >= 0.4
+    assert data["console"]["lateMatchAtSeconds"] == 0.4
     assert data["console"]["matchLatencySeconds"] is None and data["console"]["matchedLine"] is None
 
 
@@ -418,54 +432,61 @@ def test_the_console_is_closed_when_the_spawn_raises(env, monkeypatch):
     assert ser.closed
 
 
+class _GatedPort:
+    """First read returns `first` at once; every later read blocks on `release` and then returns
+    `then`. `entered` is set when a blocking read has started, so a test never has to guess."""
+
+    def __init__(self, first=b"", then=b"banner\n"):
+        import threading
+
+        self.first, self.then = first, then
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.calls = 0
+
+    def read(self, n=1):
+        self.calls += 1
+        if self.calls == 1:
+            return self.first
+        self.entered.set()
+        if self.release.wait(10.0):
+            self.release.clear()
+            data, self.then = self.then, b""
+            return data
+        return b""
+
+
+def _drain_over(port, clock):
+    return rc_mod.Drain(port, clock=clock)
+
+
 def test_drain_keeps_a_banner_that_lands_while_it_is_mid_read():
     import threading
-    import time
 
-    ready = threading.Event()
-
-    class Port:
-        def __init__(self):
-            self.queue = [b"stale line\n"]
-
-        def read(self, n=1):
-            if self.queue:
-                return self.queue.pop(0)
-            if ready.wait(0.1):  # a 0.1 s blocking read, like pyserial's timeout
-                ready.clear()
-                return b"banner\n"
-            return b""
-
-    port = Port()
-    drain = rc_mod.Drain(port)
-    time.sleep(0.1)
-    exit_ts = time.monotonic()
-    threading.Timer(0.05, ready.set).start()  # the banner lands 50 ms after exit, mid-read
-    time.sleep(0.01)
-    kept = drain.stop(exit_ts)
-    # Either the drain's own in-flight read caught it (kept) or it is still queued for the
-    # capture's read: it is never discarded, and the pre-exit stale line is never handed on.
-    left = port.read()
-    assert b"banner\n" in kept + [left]
-    assert b"stale line\n" not in kept
+    clock = _FakeClock()
+    port = _GatedPort(first=b"stale line\n")
+    drain = _drain_over(port, clock)
+    assert port.entered.wait(10.0)  # the reader is now parked inside read(), stale line stamped 100.0
+    clock.t = 105.0
+    exit_ts = clock.t  # J-Link exits
+    result = []
+    stopper = threading.Thread(target=lambda: result.append(drain.stop(exit_ts)))
+    stopper.start()
+    assert drain._halt.wait(10.0)  # stop() has been called while the read is still blocked
+    clock.t = 105.05  # the banner lands 50 ms after exit
+    port.release.set()
+    stopper.join(10.0)
+    assert result == [[b"banner\n"]]  # kept; the pre-exit stale line is not handed on
 
 
 def test_drain_that_cannot_stop_is_reported_not_raced():
-    import threading
-
-    block = threading.Event()
-
-    class Port:
-        def read(self, n=1):
-            block.wait(2.0)
-            return b""
-
-    drain = rc_mod.Drain(Port())
+    port = _GatedPort()
+    drain = _drain_over(port, _FakeClock())
+    assert port.entered.wait(10.0)
     try:
         with pytest.raises(rc_mod.DrainStuck):
-            drain.stop(0.0, timeout=0.05)
+            drain.stop(0.0, timeout=0.01)
     finally:
-        block.set()
+        port.release.set()
         drain.stop()
 
 
@@ -481,20 +502,3 @@ def test_a_stuck_drain_means_the_console_is_not_read(env, monkeypatch):
     rc, data, issues, _ = _run(env, confirm=spec)
     assert rc == 1 and issues[0].code == "reset.console-read-failed"
     assert ser.chunks == [b"Zephyr\n"]  # nothing was read beside the stuck reader
-
-
-def test_drain_joins_a_long_blocked_read_and_keeps_the_banner_that_ends_it():
-    import threading
-    import time
-
-    ready = threading.Event()
-
-    class Port:
-        def read(self, n=1):
-            return b"banner\n" if ready.wait(1.0) else b""
-
-    drain = rc_mod.Drain(Port())
-    time.sleep(0.05)
-    exit_ts = time.monotonic()
-    threading.Timer(0.05, ready.set).start()  # 50 ms after exit, while the thread is mid-read
-    assert drain.stop(exit_ts) == [b"banner\n"]
