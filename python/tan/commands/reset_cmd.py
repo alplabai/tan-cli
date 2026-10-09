@@ -160,6 +160,20 @@ def _run(
         rp.check_pulse_ms(pulse_ms)
     except rp.ResetArgError as err:
         return _fail(data, Issue("reset.bad-argument", "error", str(err)), ExitCode.VALIDATION_FAILURE)
+    place = data["place"]
+    if place:
+        # A reservation place is named: the ONLY J-Link program tan may spawn is the trusted
+        # wrapper. Refuse before any spawn rather than run a raw ShowEmuList that enumerates
+        # other places' probes.
+        wrapper, why = trusted_path.configured_wrapper()
+        if wrapper is None:
+            data["wrapper"] = {"trusted": False, "reason": why}
+            return _fail(data, Issue(
+                "reset.wrapper-required", "error",
+                f"{PLACE_ENV} is set but no trusted wrapper is configured ({why}): set "
+                "TAN_JLINK_WRAPPER to the absolute path of the board-farm JLinkExe shim. "
+                "Nothing was spawned."))
+        jlink_path = jlink_path or wrapper  # an explicit --jlink wins, and is checked below
     found = resolve_jlink(jlink_path, project_dir=project_dir)
     exe = found.path if found is not None else None
     data["jlink"] = {"binary": exe, "binarySource": found.source if found else None}
@@ -167,6 +181,11 @@ def _run(
         return _fail(data, Issue("reset.failed", "error", fc._NO_TRUSTED_JLINK))
     trusted, reason = trusted_path.is_configured_wrapper(exe)
     data["wrapper"] = {"trusted": trusted, "reason": reason}
+    if place and not trusted:
+        return _fail(data, Issue(
+            "reset.wrapper-required", "error",
+            f"{PLACE_ENV} is set but the J-Link program is not the configured wrapper ({reason}); "
+            "nothing was spawned."))
     # Single-spawn mode only when the J-Link program IS the configured wrapper: a real SEGGER
     # JLinkExe given JLINK_RUN_PLACE would skip ShowEmuList and pulse whichever probe
     # enumerates first.

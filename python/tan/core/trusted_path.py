@@ -104,6 +104,18 @@ def _supported() -> bool:
     return True
 
 
+def configured_wrapper() -> tuple[str | None, str | None]:
+    """`(path, None)` when `TAN_JLINK_WRAPPER` names a safe wrapper, else `(None, reason code)`."""
+    if not _supported():
+        return None, REASON_UNSUPPORTED
+    configured = os.environ.get(WRAPPER_ENV, "").strip()
+    if not configured:
+        return None, REASON_ENV_UNSET
+    if unsafe(configured) is not None:
+        return None, REASON_PATH_UNSAFE
+    return configured, None
+
+
 def is_configured_wrapper(exe: str | None) -> tuple[bool, str | None]:
     """`(True, None)` only when `exe` IS the wrapper named by `TAN_JLINK_WRAPPER`
     (absolute, trustworthy, same realpath). Otherwise `(False, reason code)`: a

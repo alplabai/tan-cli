@@ -3707,6 +3707,14 @@
       "note": "tan-cli#1452: the `--confirm-console` port failed while being read after the pulse, so the reboot is neither confirmed nor refuted (`data.resetObserved` is `\"unknown\"`). Exit 1. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
+      "code": "reset.wrapper-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `JLINK_RUN_PLACE` is set but `TAN_JLINK_WRAPPER` is unset, unsafe or not the resolved J-Link program. Refused before any spawn so no raw JLinkExe enumerates other places' probes. Exit 1. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "reset.failed",
       "status": "reserved",
       "severity": "error",

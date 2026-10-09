@@ -100,6 +100,7 @@ def test_out_of_range_pulse_is_refused_before_any_spawn(env, monkeypatch, bad):
 
 def test_jlink_run_place_is_reported_and_left_in_the_spawn_environment(env, monkeypatch):
     FakeJlink(monkeypatch)
+    as_wrapper(env, monkeypatch)
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     rc, data, _, lines = _run(env)
     assert rc == 0 and data["place"] == "aen-evk-02" and "aen-evk-02" in lines[0]
@@ -325,43 +326,67 @@ def test_confirm_spec_refuses_bad_urls(url):
         rc_mod.confirm_spec(url, "x", None, None)
 
 
-def test_a_real_jlink_with_a_place_takes_the_guarded_two_pass_path(env, monkeypatch):
+def _no_exec(monkeypatch):
+    calls = []
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", lambda *a, **k: calls.append(a) or pytest.fail("spawned"))
+    return calls
+
+
+def test_a_place_without_a_wrapper_is_refused_before_any_spawn(env, monkeypatch):
+    _no_exec(monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")  # PATH has a raw JLinkExe, no TAN_JLINK_WRAPPER
+    rc, data, issues, _ = _run(env)
+    assert rc == 1 and issues[0].code == "reset.wrapper-required"
+    assert data["wrapper"] == {"trusted": False, "reason": "wrapper-env-unset"}
+
+
+def test_a_trusted_wrapper_beats_path_when_no_jlink_flag_is_given(env, monkeypatch, tmp_path):
     jl = FakeJlink(monkeypatch)
-    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")  # no TAN_JLINK_WRAPPER: not the shim
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "JLinkExe"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    os.chmod(shim, 0o755)
+    monkeypatch.setenv("TAN_JLINK_WRAPPER", str(shim))
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, _, _ = _run(env)  # PATH still holds the raw stub; the wrapper must win
+    assert rc == 0 and data["jlink"]["binary"] == str(shim) and data["singleSpawn"] is True
+    assert data["wrapper"]["trusted"] is True and jl.reset_scripts()
+
+
+def test_an_explicit_jlink_that_is_not_the_wrapper_is_refused_with_a_place(env, monkeypatch, tmp_path):
+    _no_exec(monkeypatch)
+    other = tmp_path / "other"
+    other.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(other, 0o755)
+    as_wrapper(env, monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, issues, _ = reset_cmd._run(
+        100, None, "3-4.2", str(other), str(env), enumerate_probes=lambda: [PROBE])
+    assert rc == 1 and issues[0].code == "reset.wrapper-required"
+    assert data["wrapper"]["reason"] == "wrapper-not-resolved-binary"
+
+
+@pytest.mark.parametrize("mode", ["unsafe", "relative"])
+def test_an_unsafe_wrapper_with_a_place_is_refused(env, monkeypatch, mode):
+    _no_exec(monkeypatch)
+    if mode == "unsafe":
+        os.chmod(env / "tools" / "JLinkExe", 0o777)
+        as_wrapper(env, monkeypatch)
+    else:
+        monkeypatch.setenv("TAN_JLINK_WRAPPER", "JLinkExe")
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, issues, _ = _run(env)
+    assert rc == 1 and issues[0].code == "reset.wrapper-required"
+    assert data["wrapper"]["reason"] == "wrapper-path-unsafe"
+
+
+def test_without_a_place_a_real_jlink_takes_the_guarded_two_pass_path(env, monkeypatch):
+    jl = FakeJlink(monkeypatch)
     rc, data, _, _ = _run(env)
     assert rc == 0 and data["singleSpawn"] is False and data["wrapper"]["trusted"] is False
     assert any("ShowEmuList" in x for x in jl.scripts)
     assert f"SelectEmuBySN {SERIAL}" in jl.reset_scripts()[0]
-
-
-def test_a_wrapper_path_that_is_not_the_resolved_binary_is_not_trusted(env, monkeypatch, tmp_path):
-    jl = FakeJlink(monkeypatch)
-    other = tmp_path / "other"
-    other.write_text("#!/bin/sh\nexit 0\n")
-    os.chmod(other, 0o755)
-    monkeypatch.setenv("TAN_JLINK_WRAPPER", str(other))
-    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
-    rc, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-not-resolved-binary"
-    assert any("ShowEmuList" in x for x in jl.scripts)
-
-
-def test_a_world_writable_wrapper_is_not_trusted(env, monkeypatch):
-    FakeJlink(monkeypatch)
-    stub = env / "tools" / "JLinkExe"
-    os.chmod(stub, 0o777)
-    as_wrapper(env, monkeypatch)
-    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
-    _, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-path-unsafe"
-
-
-def test_a_relative_wrapper_path_is_not_trusted(env, monkeypatch):
-    FakeJlink(monkeypatch)
-    monkeypatch.setenv("TAN_JLINK_WRAPPER", "JLinkExe")
-    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
-    _, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-path-unsafe"
 
 
 class _DeadConsole(_Console):

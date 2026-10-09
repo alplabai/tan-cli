@@ -129,3 +129,15 @@ file really masks the other probes. tan checks that the path is safe and that th
 resolved program is that path; after the pulse it checks the wrapper's
 `TAN_PROBE_ISOLATED_USB_PATH` handshake, which a wrapper that does not mask could
 also print. Point the variable only at the board-farm shim.
+
+## A named place requires the wrapper
+
+When `JLINK_RUN_PLACE` is set, the only J-Link program `tan reset` will spawn is
+the trusted wrapper. With no `--jlink`, a trusted `TAN_JLINK_WRAPPER` is used ahead
+of `TAN_JLINK`, PATH and `/opt/SEGGER`; an explicit `--jlink` still wins but must
+resolve to that same file. If the wrapper is unset, unsafe or not the resolved
+program, the run is refused as `reset.wrapper-required` BEFORE any spawn, because a
+raw `ShowEmuList` would enumerate every probe on the host, including other places'.
+Without a place, the guarded two-pass path with a real JLinkExe is unchanged.
+Timing seen on evk-02: about 47 s from start to pulse single-spawn and about 96 s
+two-pass; that is the wrapper's latency (#1462), not tan's.
