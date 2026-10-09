@@ -20,9 +20,6 @@ from dataclasses import dataclass
 from tan.core.flash_plan import commander_path, validate_commander_path
 from tan.core.flow_d_report import SECTOR_BYTES, hex_addr, sector_span
 
-#: Base of the on-die MRAM window on Alif Ensemble (alp-sdk `soc_flash_base`).
-MRAM_BASE = 0x80000000
-
 CODE_INVALID = "flash.raw-invalid"
 CODE_RESERVATION = "flash.raw-reservation-required"
 CODE_FAILED = "flash.raw-failed"
@@ -58,7 +55,7 @@ def parse_raw(spec: str) -> RawSpec:
 
 
 def validate_ranges(
-    specs: Sequence[RawSpec], mram_bytes: int, base: int = MRAM_BASE
+    specs: Sequence[RawSpec], mram_bytes: int, base: int
 ) -> None:
     """Refuse every unaligned, empty, out-of-MRAM or overlapping range. The loader rewrites
     whole 16 KiB sectors and fills a short tail with 0xFF, so a blob whose address or size
@@ -116,3 +113,24 @@ def planned(specs: Sequence[RawSpec], sha256s: Sequence[str]) -> list[dict]:
         }
         for s, digest in zip(specs, sha256s)
     ]
+
+
+#: What the board-farm reservation-enforcing J-Link wrapper (a shell shim into its
+#: `jlink-run.sh` stand-in mode) carries in its text, so tan can tell it from a raw
+#: SEGGER binary without knowing where it is installed.
+WRAPPER_MARKERS = (b"JLINK_RUN_STANDIN", b"JLINK_RUN_PLACE")
+
+
+def is_reservation_wrapper(head: bytes) -> bool:
+    """Whether the first bytes of the resolved J-Link program are a reservation-enforcing
+    wrapper script (a binary SEGGER executable carries neither marker)."""
+    return any(marker in head for marker in WRAPPER_MARKERS)
+
+
+def lease_holder(show_text: str) -> str | None:
+    """The `acquired:` holder (`host/user`) in `labgrid-client -p <place> show` output."""
+    for line in show_text.splitlines():
+        if line.startswith("  acquired:"):
+            holder = line.split(":", 1)[1].strip()
+            return holder or None
+    return None

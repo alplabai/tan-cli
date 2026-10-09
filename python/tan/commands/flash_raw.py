@@ -10,13 +10,17 @@ built image plus a signed ATOC), so this is the same J-Link part-profile path wi
 **Guards, in order:** every `--raw` is parsed and its range validated BEFORE anything is
 spawned (`tan.core.raw_write`: explicit hex address, 16 KiB sector alignment, whole
 sectors, inside the SKU's MRAM, no overlap), under `--dry-run` too. A real write then
-needs `--confirm` and a held bench reservation (`JLINK_RUN_PLACE` set), and goes through
+needs the CLI `--confirm` and a held bench reservation (see `_reservation_refusal`), and goes through
 the Flow D probe-selection guard and DPIDR preflight. tan derives no address from a name
 or a map, so an ATOC/STOC is only ever written where the user said.
 """
 from __future__ import annotations
 
+import getpass
+import json
 import os
+import socket
+import subprocess
 from typing import Any
 
 from tan.commands import flash_cmd as fc
@@ -29,8 +33,7 @@ from tan.core.flash_plan import (
     _DEFAULT_JLINK_SPEED,
     confirm_gate_note,
     dpidr_preflight_unarmed,
-    fa_bool_checked,
-    fa_int_checked,
+        fa_int_checked,
     fa_str_checked,
     validate_identifier,
 )
@@ -47,6 +50,8 @@ from tan.core.raw_write import (
     CODE_RESERVATION,
     RawError,
     RawSpec,
+    is_reservation_wrapper,
+    lease_holder,
     parse_raw,
     planned,
     raw_script,
@@ -96,7 +101,7 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
                 raise RawError(f"cannot read {spec.path} ({err})") from err
             sized.append(RawSpec(spec.path, spec.address, size))
             digests.append(digest)
-        validate_ranges(sized, _mram_bytes(ctx))
+        validate_ranges(sized, *reversed(_mram_window(ctx)))
         device = fa_str_checked(flash_args, "jlink_flash_device", False)
         if device is None:
             raise RawError(
@@ -106,7 +111,7 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
         validate_identifier(device, "jlink_flash_device")
     except (RawError, FlashPlanError) as err:
         return fail(str(err), CODE_INVALID)
-    report["raw"] = {"writes": planned(sized, digests), "resets": False, "signs": False}
+    report["raw"] = {"writes": planned(sized, digests), "resetCommands": False, "signs": False}
 
     # ── J-Link: trusted binary, probe selection, parameters ──
     found = resolve_jlink(ctx.jlink_path, project_dir=ctx.project_dir)
@@ -154,26 +159,22 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
         lines.append(f"  {msg}")
         return 0, entry("ok", 0, msg), lines
 
-    try:
-        confirmed = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
-    except FlashPlanError as err:
-        return fail(str(err), CODE_INVALID)
+    # The CLI `--confirm` (or ALP_FLASH_FORCE=1) ONLY: a manifest's `flash_args.confirm`
+    # is project-controlled and must never arm a raw MRAM overwrite.
+    confirmed = bool(ctx.force_confirm)
     if not confirmed:
         msg = (
             f"{METHOD}[{entry_id}]: would write {summary} -- NOT written: "
-            f"{confirm_gate_note('--confirm was not given')}"
+            f"{confirm_gate_note('--confirm was not given (flash_args.confirm does not arm --raw)')}"
         )
         lines.append(f"  {msg}")
         return 0, entry("planned", 0, msg), lines
 
     place = os.environ.get(RESERVATION_ENV, "").strip()
-    if not place:
-        return fail(
-            f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is "
-            "not set. Acquire the labgrid place first and run under it so the J-Link wrapper "
-            "serves this probe.", CODE_RESERVATION,
-        )
-    report["jlink"]["reservation"] = {"env": RESERVATION_ENV, "place": place}
+    refusal = _reservation_refusal(place, exe)
+    if refusal is not None:
+        return fail(refusal, CODE_RESERVATION)
+    report["jlink"]["reservation"] = {"env": RESERVATION_ENV, "place": place, "verified": "labgrid"}
 
     # ── the wrong-board guard, exactly as for a Flow D write ──
     armed = not dpidr_preflight_unarmed(FLOW_D_METHOD, flash_args, None)
@@ -182,8 +183,10 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
             "ALP_FLASH_REQUIRE_DPIDR=1 is set and flash_args.expect_dpidr / jlink_device are "
             "not both set -- refusing to write with no wrong-board guard", CODE_INVALID,
         )
-    if guard is not None and armed:
-        refusal = fc._probe_guard_refusal(guard, exe, None, ctx.workspace)
+    if guard is not None:
+        refusal = fc._probe_guard_refusal(
+            guard, fc._jlink_program(ctx.venv_bin, exe), None, ctx.workspace
+        )
         if refusal is not None:
             return fail(refusal, None, probe_refusal=guard.tripped_code)
         guard.fresh = True
@@ -217,10 +220,10 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
             + ", ".join(reset_failures(transcript))
         )
 
-    message = f"{METHOD}[{entry_id}]: wrote {summary}; cache-verified; not reset"
+    message = f"{METHOD}[{entry_id}]: wrote {summary}; cache-verified; no reset command was sent"
     if ctx.readback:
         writes = [
-            {"address": w["address"], "size": w["size"], "path": w["path"]}
+            {"address": w["address"], "size": w["size"], "path": w["path"], "sha256": w["sha256"]}
             for w in report["raw"]["writes"]
         ]
         failure = fc._flow_d_readback(
@@ -233,16 +236,62 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
         if report["jlink"].get("verification") == VERIFICATION_READBACK:
             message += "; read back in a fresh J-Link session (sha256 match)"
     message += (
-        " -- the board still runs what it booted with; power-cycle for the Secure Enclave to "
-        "boot the restored contents"
+        " -- loadbin may have halted the core; power-cycle the board so the Secure Enclave boots "
+        "the restored contents"
     )
     lines.append(f"  ok: {message}")
     return 0, entry("ok", 0, message, preflight_unarmed=not armed), lines
 
 
-def _mram_bytes(ctx: Any) -> int:
-    """The SKU's MRAM length from the SoC metadata of the SDK in use (`variants[].mram_mb`,
-    else the family default `soc_flash_mb`). Refuses -- never guesses -- when unreadable."""
+def _reservation_refusal(place: str, exe: str | None) -> str | None:
+    """A refusal text unless a bench reservation is provably held: the place is named
+    (`JLINK_RUN_PLACE`), the resolved J-Link program is the reservation-enforcing wrapper
+    (a raw SEGGER binary ignores the variable, so a place paired with one is refused), and
+    labgrid itself says THIS host/user holds the place."""
+    need = (
+        "Needs: JLINK_RUN_PLACE=<labgrid place you hold>, a reservation-enforcing JLinkExe "
+        "wrapper first on PATH (or --jlink), and `labgrid-client` able to reach the coordinator."
+    )
+    if not place:
+        return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}"
+    try:
+        with open(exe or "", "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        head = b""
+    if not is_reservation_wrapper(head):
+        return (
+            f"{RESERVATION_ENV}={place} is set but the J-Link program ({exe}) is not a "
+            "reservation-enforcing wrapper -- a raw SEGGER binary ignores it, so nothing would "
+            f"enforce the lease. {need}"
+        )
+    me = f"{socket.gethostname()}/{getpass.getuser()}"
+    holder = lease_holder(_labgrid_show(place) or "")
+    if holder != me:
+        return (
+            f"you do not hold the labgrid place {place} (acquired by: "
+            f"{holder or 'nobody / not readable'}; you are {me}). {need}"
+        )
+    return None
+
+
+def _labgrid_show(place: str) -> str | None:
+    """`labgrid-client -p <place> show` output, or `None` when it cannot be run."""
+    try:
+        done = subprocess.run(
+            ["labgrid-client", "-p", place, "show"], capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _mram_window(ctx: Any) -> tuple[int, int]:
+    """`(base, length)` of the SKU's MRAM from the SoC metadata of the SDK in use: the SoC
+    document's `soc_flash_base` and the SKU's OWN variant `mram_mb` (E3 ships 1.5 MB and
+    5.5 MB parts, so there is no family fallback). Refuses -- never guesses -- when the SDK
+    metadata, the variant or either number cannot be read."""
     from tan.commands.build_output import read_sdk_som_and_soc
     from tan.core.size import resolve_variant
 
@@ -255,16 +304,25 @@ def _mram_bytes(ctx: Any) -> int:
     if walked is None:
         raise RawError(
             f"cannot bound the write: no readable SoM preset / SoC metadata for '{ctx.sku}' "
-            f"under {metadata_root} -- refusing to guess the MRAM size"
+            f"under {metadata_root} -- refusing to guess the MRAM window"
         )
-    _silicon, silicon_variant, variants, soc_flash_mb, _cores = walked
-    variant = resolve_variant(silicon_variant, ctx.sku, variants) or {}
-    mb = variant.get("mram_mb")
-    if not isinstance(mb, (int, float)) or isinstance(mb, bool) or mb <= 0:
-        mb = soc_flash_mb
+    silicon, silicon_variant, variants, _soc_flash_mb, _cores = walked
+    variant = resolve_variant(silicon_variant, ctx.sku, variants)
+    mb = variant.get("mram_mb") if variant else None
     if not isinstance(mb, (int, float)) or isinstance(mb, bool) or mb <= 0:
         raise RawError(
-            f"cannot bound the write: the SoC metadata for '{ctx.sku}' states no MRAM size "
-            "(variants[].mram_mb / soc_flash_mb) -- refusing to guess it"
+            f"cannot bound the write: '{ctx.sku}' does not resolve to a SoC variant that states "
+            "mram_mb (a family default would be wrong, e.g. E3 has 1.5 MB parts) -- refusing"
         )
-    return int(mb * 1024 * 1024)
+    parts = silicon.split(":")
+    try:
+        with open(os.path.join(metadata_root, "socs", *parts[:2], f"{parts[2]}.json"), encoding="utf-8") as fh:
+            base = json.load(fh).get("soc_flash_base")
+    except (OSError, ValueError, IndexError):
+        base = None
+    if not isinstance(base, int) or isinstance(base, bool) or base <= 0:
+        raise RawError(
+            f"cannot bound the write: the SoC document for '{ctx.sku}' states no soc_flash_base "
+            "-- refusing to assume the MRAM base"
+        )
+    return base, int(mb * 1024 * 1024)

@@ -12,14 +12,24 @@ from pathlib import Path
 import pytest
 
 from tan.commands import flash_cmd, flash_raw
+import getpass
+import json
+import socket
+
+from tan.commands import build_output
 from tan.core import raw_write
 from tan.core.raw_write import RawError, RawSpec
+
+_real_window = flash_raw._mram_window
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
 
 SECTOR = 0x4000
 MRAM = 0x580000  # 5.5 MiB, the E8 window [0x80000000, 0x80580000)
 SLOT0 = 0x80010000
+BASE = 0x80000000
+ME = f"{socket.gethostname()}/{getpass.getuser()}"
+WRAPPER = '#!/bin/bash\nJLINK_RUN_STANDIN=1 exec jlink-run.sh "$@"\n'
 ATOC = 0x8057C000
 
 
@@ -53,11 +63,11 @@ def test_parse_splits_on_the_last_at_and_wants_an_explicit_hex_address():
 )
 def test_ranges_are_refused(specs, why):
     with pytest.raises(RawError, match=why):
-        raw_write.validate_ranges(specs, MRAM)
+        raw_write.validate_ranges(specs, MRAM, BASE)
 
 
 def test_the_atoc_sector_is_accepted_only_at_the_address_given():
-    raw_write.validate_ranges([RawSpec("atoc", ATOC, SECTOR), RawSpec("s", SLOT0, 2 * SECTOR)], MRAM)
+    raw_write.validate_ranges([RawSpec("atoc", ATOC, SECTOR), RawSpec("s", SLOT0, 2 * SECTOR)], MRAM, BASE)
 
 
 def test_the_script_writes_verifies_and_never_resets_or_runs():
@@ -113,7 +123,7 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
     tools = tmp_path / "tools"
     tools.mkdir(exist_ok=True)
     stub = tools / "JLinkExe"
-    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    stub.write_text(WRAPPER, encoding="utf-8")
     os.chmod(stub, 0o755)
     monkeypatch.setenv("PATH", str(tools))
     monkeypatch.delenv("TAN_JLINK", raising=False)
@@ -121,7 +131,8 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
     monkeypatch.setenv(flash_raw.RESERVATION_ENV, "e1m-aen-evk-02")
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_cmd, "_flow_d_preflight", lambda *_a, **_k: None)
-    monkeypatch.setattr(flash_raw, "_mram_bytes", lambda _ctx: MRAM)
+    monkeypatch.setattr(flash_raw, "_mram_window", lambda _ctx: (BASE, MRAM))
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: f"Place '{place}':\n  acquired: {ME}\n")
     data = blobs or [os.urandom(2 * SECTOR), os.urandom(SECTOR)]
     paths = []
     for i, blob in enumerate(data):
@@ -158,14 +169,16 @@ def test_a_raw_write_loads_verifies_hashes_and_never_resets(tmp_path, monkeypatc
     assert [w["sha256"] for w in entry["raw"]["writes"]] == [_sha(b) for b in blobs]
     assert [w["address"] for w in entry["raw"]["writes"]] == ["0x80010000", "0x8057C000"]
     assert [w["sectorSpan"]["count"] for w in entry["raw"]["writes"]] == [2, 1]
-    assert entry["raw"]["resets"] is False
-    assert entry["jlink"]["reservation"] == {"env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02"}
+    assert entry["raw"]["resetCommands"] is False
+    assert entry["jlink"]["reservation"] == {
+        "env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02", "verified": "labgrid"}
     assert jl.kinds() == ["write"]
     script = jl.scripts[-1]
     assert f"loadbin {paths[0]} 0x80010000" in script and f"verifybin {paths[1]} 0x8057C000" in script
     assert "device PART" in script
     assert not any(w in script for w in ("RSetType", "\nr\n", "\ng\n"))
     assert "power-cycle" in entry["message"] and "readback" not in entry["message"]
+    assert "no reset command was sent" in entry["message"] and "still runs" not in entry["message"]
 
 
 def test_readback_is_a_fresh_session_without_a_reset(tmp_path, monkeypatch):
@@ -257,3 +270,89 @@ def test_raw_and_ram_cannot_be_combined(tmp_path, monkeypatch):
     jl = FakeJlink(monkeypatch)
     rc, data, issues, _l, _s = _run(tmp_path, _specs(paths), ram=True)
     assert rc == 1 and _codes(issues) == ["flash.raw-invalid"] and jl.scripts == []
+
+
+def test_the_manifest_confirm_never_arms_a_raw_write(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    manifest = tmp_path / "build" / "system-manifest.yaml"
+    manifest.write_text(
+        manifest.read_text().replace("{jlink_flash_device: PART}", "{jlink_flash_device: PART, confirm: true}"),
+        encoding="utf-8", newline="",
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths), confirm_flag=False)
+    assert data["entries"][0]["status"] == "planned" and jl.scripts == []
+
+
+def test_a_place_paired_with_a_raw_segger_binary_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    (tmp_path / "tools" / "JLinkExe").write_bytes(b"\x7fELF\x02\x01\x01 raw segger")
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "not a reservation-enforcing wrapper" in data["entries"][0]["message"]
+    assert jl.scripts == []
+
+
+@pytest.mark.parametrize("show", [None, "Place 'p':\n  acquired: other-host/someone\n", "Place 'p':\n"])
+def test_a_lease_labgrid_does_not_show_as_ours_is_refused(tmp_path, monkeypatch, show):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: show)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "do not hold the labgrid place" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_readback_compares_against_the_recorded_hash_not_a_rehash(tmp_path, monkeypatch):
+    """The file changing on disk after it was hashed must not move the expectation."""
+    blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    jl.blobs = blobs
+    original = jl._spawn
+
+    def _tamper(argv, script, *a, **k):
+        out = original(argv, script, *a, **k)
+        if "loadbin" in script:
+            for p in paths:
+                p.write_bytes(b"\x00" * len(p.read_bytes()))
+        return out
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _tamper)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths), readback=True)
+    assert rc == 0, (data, issues)
+    regions = data["entries"][0]["jlink"]["readback"]["regions"]
+    assert [r["sha256Expected"] for r in regions] == [_sha(b) for b in blobs]
+
+
+def test_the_wrapper_marker_and_lease_parsers():
+    assert raw_write.is_reservation_wrapper(b"...JLINK_RUN_STANDIN=1...")
+    assert not raw_write.is_reservation_wrapper(b"\x7fELF")
+    assert raw_write.lease_holder("x\n  acquired: h/u\n  y") == "h/u"
+    assert raw_write.lease_holder("  acquired:\n") is None
+
+
+def _soc(tmp_path, monkeypatch, variants, base=BASE):
+    meta = tmp_path / "sdk" / "metadata" / "socs" / "alif" / "ensemble"
+    meta.mkdir(parents=True)
+    (meta / "e3.json").write_text(json.dumps({"soc_flash_base": base} if base else {}), encoding="utf-8")
+    monkeypatch.setattr(
+        build_output, "read_sdk_som_and_soc",
+        lambda root, sku, **k: ("alif:ensemble:e3", "ORDER", variants, 5.5, []),
+    )
+    return type("Ctx", (), {"sdk_root": str(tmp_path / "sdk"), "sku": "S"})()
+
+
+def test_the_mram_window_is_the_skus_own_variant_and_the_documents_base(tmp_path, monkeypatch):
+    ctx = _soc(tmp_path, monkeypatch, [{"order_code": "ORDER", "mram_mb": 1.5}])
+    window = _real_window(ctx)
+    assert window == (BASE, int(1.5 * 1024 * 1024))
+
+
+def test_an_unresolved_variant_or_missing_base_is_refused_not_defaulted(tmp_path, monkeypatch):
+    ctx = _soc(tmp_path, monkeypatch, [{"order_code": "OTHER", "mram_mb": 5.5}])  # no match
+    with pytest.raises(RawError, match="does not resolve"):
+        _real_window(ctx)
+    ctx = _soc(tmp_path / "b", monkeypatch, [{"order_code": "ORDER", "mram_mb": 5.5}], base=0)
+    with pytest.raises(RawError, match="soc_flash_base"):
+        _real_window(ctx)

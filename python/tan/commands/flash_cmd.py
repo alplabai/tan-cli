@@ -5155,8 +5155,9 @@ def flash(
         "not an explicit 0x literal or not 16 KiB sector-aligned, a blob that is empty or not a "
         "whole number of sectors, a range outside the SKU's MRAM, overlapping ranges. tan never "
         "derives an address, so an ATOC/STOC is only ever written where YOU said. Needs "
-        "--confirm and a held bench reservation (JLINK_RUN_PLACE set: "
-        "flash.raw-reservation-required). --readback re-reads each blob in a fresh session "
+        "the CLI --confirm (never flash_args.confirm) and a provably held bench reservation "
+        "(JLINK_RUN_PLACE set, a reservation-enforcing JLinkExe wrapper, and labgrid-client "
+        "showing you as holder: flash.raw-reservation-required). --readback re-reads each blob in a fresh session "
         "(no reset) and compares sha256; the envelope carries each blob's sha256.",
     ),
     assume_he: bool = typer.Option(

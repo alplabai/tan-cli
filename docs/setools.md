@@ -181,11 +181,16 @@ part profile and the Flow D probe guard, `loadbin` + `verifybin` per blob, **no
 reset**, no signing. Every address is an explicit `0x` literal, 16 KiB
 sector-aligned; every blob a whole number of sectors; all inside the SKU's MRAM
 and non-overlapping, or `flash.raw-invalid` (previews included). tan derives no
-address, so an ATOC/STOC is only written where you name it. A real write also
-needs a held bench reservation, `JLINK_RUN_PLACE` set
-(`flash.raw-reservation-required`). The envelope's `raw.writes[]` carries each
-blob's `sha256`, address and sector span. Power-cycle afterwards so the Secure
-Enclave boots the restored contents.
+address, so an ATOC/STOC is only written where you name it. A real write needs the
+CLI `--confirm` (never a manifest's `flash_args.confirm`) and a provably held bench
+reservation (`flash.raw-reservation-required` otherwise): `JLINK_RUN_PLACE` set, the
+J-Link program a reservation-enforcing wrapper (a raw SEGGER binary ignores the
+variable and is refused), and `labgrid-client -p <place> show` reporting this
+host/user as holder. The MRAM window is the SKU's own variant `mram_mb` at the SoC
+document's `soc_flash_base`; a SKU that does not resolve is refused. The envelope's
+`raw.writes[]` carries each blob's `sha256`, address and sector span;
+`raw.resetCommands` is `false` (no reset command is sent, but `loadbin` may halt the
+core). Power-cycle afterwards so the Secure Enclave boots the restored contents.
 
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
