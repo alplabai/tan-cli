@@ -66,7 +66,7 @@ def test_a_relative_zephyr_base_resolves_against_the_project_as_build_does(tmp_p
     sdk = _sibling_sdk(tmp_path)
     project = tmp_path / "scratch" / "app"
     project.mkdir(parents=True)
-    status, detail = unresolved_workspace_verdict(project, "../../home/zephyr", sdk)
+    status, detail = unresolved_workspace_verdict(project, str(Path("../..") / home.name / "zephyr"), sdk)
     assert status == "warn"
     assert f"west may fall back to `{home.resolve()}`" in detail
 
