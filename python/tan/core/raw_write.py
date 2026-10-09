@@ -146,3 +146,15 @@ def lease_swd_path(show_text: str) -> str | None:
             if found:
                 return found.group(1)
     return None
+
+
+def lease_changed(show_text: str) -> str | None:
+    """The place's `changed:` timestamp in `labgrid-client show` output (labgrid 26.0 updates it
+    on every acquire/release), strictly: exactly one distinct, non-empty value, else `None`.
+    The lease file records it at acquire time so a lease cannot outlive its acquisition."""
+    values = {
+        line.split(":", 1)[1].strip()
+        for line in show_text.splitlines()
+        if line.startswith("  changed:")
+    }
+    return next(iter(values)) if len(values) == 1 and next(iter(values)) else None

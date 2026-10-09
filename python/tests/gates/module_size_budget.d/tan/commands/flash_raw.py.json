@@ -5,8 +5,12 @@
   "lines": null,
   "long_functions": [
     [
-      51,
+      62,
       "_reservation_refusal"
+    ],
+    [
+      65,
+      "_lease_refusal"
     ],
     [
       184,

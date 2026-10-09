@@ -19,7 +19,6 @@ from __future__ import annotations
 import hmac
 import json
 import os
-import pwd
 import re
 import socket
 import stat
@@ -54,6 +53,7 @@ from tan.core.raw_write import (
     CODE_RESERVATION,
     RawError,
     RawSpec,
+    lease_changed,
     lease_holder,
     lease_swd_path,
     parse_raw,
@@ -273,14 +273,31 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     return 0, entry("ok", 0, message, preflight_unarmed=not armed), lines
 
 
+def _platform_refusal() -> str | None:
+    """`pwd`/`grp`/`getuid` and `O_NOFOLLOW` are POSIX-only, imported lazily so that
+    `import tan.cli` works everywhere; the raw-write interlock needs them, so it refuses
+    where they are missing rather than guessing."""
+    try:
+        import grp  # noqa: F401
+        import pwd  # noqa: F401
+    except ImportError:
+        return "unsupported on this platform: the --raw reservation interlock needs POSIX pwd/grp"
+    if os.name == "nt" or not hasattr(os, "getuid") or not hasattr(os, "O_NOFOLLOW"):
+        return "unsupported on this platform: the --raw reservation interlock needs POSIX uid/O_NOFOLLOW"
+    return None
+
+
 def _current_user() -> str:
     """The account name of the real uid (never `USER`/`LOGNAME`, which the caller controls)."""
+    import pwd
+
     return pwd.getpwuid(os.getuid()).pw_name
 
 
 def _private_group(gid: int) -> bool:
     """Whether `gid` is a group only the current user belongs to (a user-private group)."""
     import grp
+    import pwd
 
     me = _current_user()
     try:
@@ -360,44 +377,71 @@ def _labgrid_client() -> str | None:
     return None
 
 
-def _lease_refusal(place: str) -> str | None:
+def _lease_refusal(place: str) -> tuple[str | None, str | None]:
     """Refusal text unless THIS session proves it acquired `place`: `TAN_LEASE_NONCE` is set,
     well-formed, and equals the nonce in this user's own 0600 lease file for exactly that
-    place. Any missing, unreadable, mis-owned, mis-moded or mismatching piece refuses."""
+    place. Any missing, unreadable, mis-owned, mis-moded or mismatching piece refuses. Returns
+    `(refusal, changed)`: the `changed=` recorded at acquire time, to be compared with the
+    place's CURRENT labgrid `changed:` so a stale lease from an earlier acquisition is refused."""
     how = (
         f"Acquire the place from this shell with `eval \"$(scripts/bench/tan-lease.sh acquire "
         f"{place})\"` so {NONCE_ENV} and {LEASE_DIR}/{place}.lease agree; a place held by another "
         "session of the same labgrid user is not yours to write."
     )
     if not _PLACE_RE.fullmatch(place):
-        return f"the place name {place!r} is not a plain labgrid place name. {how}"
+        return f"the place name {place!r} is not a plain labgrid place name. {how}", None
     nonce = os.environ.get(NONCE_ENV, "").strip()
     if not _NONCE_RE.fullmatch(nonce):
-        return f"{NONCE_ENV} is not set to a lease nonce, so this session has not acquired {place}. {how}"
+        return f"{NONCE_ENV} is not set to a lease nonce, so this session has not acquired {place}. {how}", None
     directory = os.path.expanduser(LEASE_DIR)
     path = os.path.join(directory, f"{place}.lease")
+    # Opened with O_NOFOLLOW and judged by fstat of the OPEN descriptors: no lstat-then-open race.
     try:
-        dst, fst = os.lstat(directory), os.lstat(path)
+        dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
-        return f"there is no lease file {path}: this session never acquired {place} with the lease helper. {how}"
-    if not stat.S_ISDIR(dst.st_mode) or dst.st_uid != os.getuid() or dst.st_mode & 0o077:
-        return f"the lease directory {directory} must be a directory owned by you with mode 0700. {how}"
-    if not stat.S_ISREG(fst.st_mode) or fst.st_uid != os.getuid() or fst.st_mode & 0o077:
-        return f"the lease file {path} must be a regular file owned by you with mode 0600. {how}"
+        return f"there is no lease directory {directory}: this session never acquired {place} with the lease helper. {how}", None
     try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read(4096)
-    except (OSError, UnicodeDecodeError):
-        return f"the lease file {path} cannot be read. {how}"
-    fields = dict(
-        line.split("=", 1) for line in text.splitlines() if "=" in line
-    )
-    if fields.get("place") != place or not hmac.compare_digest(fields.get("nonce", ""), nonce):
+        dst = os.fstat(dfd)
+        try:
+            ffd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return (
+                f"there is no readable regular lease file {path} (symlinks are refused): this "
+                f"session never acquired {place} with the lease helper. {how}"
+            ), None
+        try:
+            fst = os.fstat(ffd)
+            if not stat.S_ISDIR(dst.st_mode) or dst.st_uid != os.getuid() or dst.st_mode & 0o077:
+                return f"the lease directory {directory} must be a directory owned by you with mode 0700. {how}", None
+            if not stat.S_ISREG(fst.st_mode) or fst.st_uid != os.getuid() or fst.st_mode & 0o077:
+                return f"the lease file {path} must be a regular file owned by you with mode 0600. {how}", None
+            with os.fdopen(ffd, encoding="utf-8", closefd=False) as fh:
+                text = fh.read(4096)
+        except (OSError, UnicodeDecodeError):
+            return f"the lease file {path} cannot be read. {how}", None
+        finally:
+            os.close(ffd)
+    finally:
+        os.close(dfd)
+    fields = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    recorded = fields.get("nonce", "")
+    # Validate the file's nonce's shape too, then compare bytes in constant time.
+    if (
+        fields.get("place") != place
+        or not _NONCE_RE.fullmatch(recorded)
+        or not hmac.compare_digest(recorded.encode("ascii"), nonce.encode("ascii"))
+    ):
         return (
             f"{NONCE_ENV} does not match the lease on {place} -- another session holds that lease, "
             f"not this one. {how}"
-        )
-    return None
+        ), None
+    changed = fields.get("changed", "").strip()
+    if not changed:
+        return (
+            f"the lease on {place} records no labgrid `changed` value, so it cannot be bound to "
+            f"one acquisition. {how}"
+        ), None
+    return None, changed
 
 
 def _reservation_refusal(
@@ -418,7 +462,10 @@ def _reservation_refusal(
     )
     if not place:
         return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}", None
-    lease = _lease_refusal(place)
+    unsupported = _platform_refusal()
+    if unsupported is not None:
+        return f"{unsupported}. {need}", None
+    lease, leased_changed = _lease_refusal(place)
     if lease is not None:
         return lease, None
     configured = os.environ.get(WRAPPER_ENV, "").strip()
@@ -442,6 +489,14 @@ def _reservation_refusal(
             f"{holder or 'nobody / not readable / ambiguous'}; you are {me}"
             + (f"; labgrid-client: {why_show}" if why_show else "")
             + f"). {need}"
+        ), None
+    current_changed = lease_changed(text or "")
+    if current_changed is None or current_changed != leased_changed:
+        return (
+            f"the lease on {place} was written for an earlier acquisition (labgrid `changed:` was "
+            f"{leased_changed!r}, is {current_changed or 'not reported'!r}): the place has been "
+            "released/re-acquired since, so this lease is stale. Release and acquire it again "
+            "with the lease helper. " + need
         ), None
     leased = lease_swd_path(text or "")
     if leased is None or usb_path is None or leased != usb_path:

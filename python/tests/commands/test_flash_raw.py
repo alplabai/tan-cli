@@ -32,6 +32,7 @@ SLOT0 = 0x80010000
 BASE = 0x80000000
 ME = f"{socket.gethostname()}/{pwd.getpwuid(os.getuid()).pw_name}"
 NONCE = "ab" * 24
+CHANGED = "2026-10-09 17:12:47.796610"
 OTHER_NONCE = "cd" * 24
 SERIAL = "000999000001"
 USB = "3-4.3"
@@ -41,14 +42,14 @@ ATOC = 0x8057C000
 
 def _lease(directory, place, nonce, mode=0o600):
     path = directory / f"{place}.lease"
-    path.write_text(f"place={place}\nnonce={nonce}\n", encoding="utf-8")
+    path.write_text(f"place={place}\nnonce={nonce}\nchanged={CHANGED}\n", encoding="utf-8")
     os.chmod(path, mode)
     return path
 
 
-def _show(holder=ME, path=USB):
+def _show(holder=ME, path=USB, changed=CHANGED):
     block = f"Acquired resource 'swd' (e/p/NetworkUSBDebugger/swd):\n  {{'path': '{path}'}}\n" if path else ""
-    return f"Place 'p':\n  matches:\n    e/NetworkUSBDebugger/swd\n  acquired: {holder}\n{block}"
+    return f"Place 'p':\n  matches:\n    e/NetworkUSBDebugger/swd\n  acquired: {holder}\n  changed: {changed}\n{block}"
 
 
 def _sha(data: bytes) -> str:
@@ -506,7 +507,7 @@ def test_a_nonce_for_a_different_place_does_not_cover_this_one(tmp_path, monkeyp
     monkeypatch.setenv("JLINK_RUN_PLACE", "e1m-aen-evk-03")
     rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
     assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
-    assert "no lease file" in data["entries"][0]["message"] and jl.scripts == []
+    assert "no readable regular lease file" in data["entries"][0]["message"] and jl.scripts == []
 
 
 def test_the_matching_session_nonce_is_allowed(tmp_path, monkeypatch):
@@ -522,26 +523,26 @@ def test_the_matching_session_nonce_is_allowed(tmp_path, monkeypatch):
 def test_a_malformed_nonce_is_refused(tmp_path, monkeypatch, bad):
     _setup(tmp_path, monkeypatch)
     monkeypatch.setenv(flash_raw.NONCE_ENV, bad)
-    assert flash_raw._lease_refusal("e1m-aen-evk-02")
+    assert flash_raw._lease_refusal("e1m-aen-evk-02")[0]
 
 
 def test_lease_files_and_places_are_validated(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     leases = tmp_path / "leases"
-    assert flash_raw._lease_refusal("e1m-aen-evk-02") is None
+    assert flash_raw._lease_refusal("e1m-aen-evk-02")[0] is None
     os.chmod(leases / "e1m-aen-evk-02.lease", 0o644)
-    assert "mode 0600" in flash_raw._lease_refusal("e1m-aen-evk-02")
+    assert "mode 0600" in flash_raw._lease_refusal("e1m-aen-evk-02")[0]
     os.chmod(leases / "e1m-aen-evk-02.lease", 0o600)
     os.chmod(leases, 0o770)
-    assert "mode 0700" in flash_raw._lease_refusal("e1m-aen-evk-02")
+    assert "mode 0700" in flash_raw._lease_refusal("e1m-aen-evk-02")[0]
     os.chmod(leases, 0o700)
     (leases / "x.lease").symlink_to(leases / "e1m-aen-evk-02.lease")
-    assert "regular file" in flash_raw._lease_refusal("x")
+    assert "regular lease file" in flash_raw._lease_refusal("x")[0]
     for place in ("../e1m", "a/b", "", "-x"):
-        assert "plain labgrid place name" in flash_raw._lease_refusal(place)
-    (leases / "e1m-aen-evk-02.lease").write_text(f"place=other\nnonce={NONCE}\n")
+        assert "plain labgrid place name" in flash_raw._lease_refusal(place)[0]
+    (leases / "e1m-aen-evk-02.lease").write_text(f"place=other\nnonce={NONCE}\nchanged={CHANGED}\n")
     os.chmod(leases / "e1m-aen-evk-02.lease", 0o600)
-    assert "does not match" in flash_raw._lease_refusal("e1m-aen-evk-02")
+    assert "does not match" in flash_raw._lease_refusal("e1m-aen-evk-02")[0]
 
 
 def test_the_user_comes_from_the_uid_not_the_environment(monkeypatch):
@@ -662,3 +663,69 @@ def test_no_reset_is_refused_up_front_when_any_entry_is_not_flow_d(tmp_path, mon
     )
     assert rc == 1 and _codes(issues) == ["flash.no-reset-invalid"]
     assert "m55_hp" in issues[0].message and jl.scripts == []
+
+
+def test_a_lease_from_an_earlier_acquisition_is_stale(tmp_path, monkeypatch):
+    """Review: bind the lease to the labgrid acquisition via its `changed:` timestamp."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (_show(changed="2026-10-10 01:00:00.000001"), ""))
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "earlier acquisition" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_labgrid_reporting_no_changed_value_fails_closed(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    text = "\n".join(l for l in _show().splitlines() if "changed" not in l) + "\n"
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (text, ""))
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and "earlier acquisition" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_a_lease_without_a_changed_value_or_with_a_malformed_nonce_is_refused(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    path = tmp_path / "leases" / "e1m-aen-evk-02.lease"
+    path.write_text(f"place=e1m-aen-evk-02\nnonce={NONCE}\n")
+    assert "records no labgrid `changed`" in flash_raw._lease_refusal("e1m-aen-evk-02")[0]
+    path.write_text(f"place=e1m-aen-evk-02\nnonce=not-hex\nchanged={CHANGED}\n")
+    assert "does not match" in flash_raw._lease_refusal("e1m-aen-evk-02")[0]
+
+
+def test_the_lease_file_is_opened_without_following_symlinks(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    leases = tmp_path / "leases"
+    real = leases / "real.lease"
+    _lease(leases, "real", NONCE)
+    (leases / "evil.lease").symlink_to(real)
+    refusal, _ = flash_raw._lease_refusal("evil")
+    assert "symlinks are refused" in refusal
+
+
+def test_lease_changed_parser_is_strict():
+    assert raw_write.lease_changed("  changed: 2026-10-09 17:12:47.796610\n") == "2026-10-09 17:12:47.796610"
+    assert raw_write.lease_changed("  changed: a\n  changed: b\n") is None
+    assert raw_write.lease_changed("  changed:\n") is None
+    assert raw_write.lease_changed("nothing") is None
+
+
+def test_pwd_and_grp_are_imported_lazily_and_the_tool_still_imports_without_them():
+    """CI runs Windows/macOS: a top-level `import pwd` would break `import tan.cli` there."""
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent("""
+        import sys
+        sys.modules['pwd'] = None
+        sys.modules['grp'] = None
+        import tan.cli
+        from tan.commands import flash_raw
+        print(flash_raw._platform_refusal())
+        print(flash_raw._reservation_refusal('p', '/x', '3-4.2')[0])
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    first, second = out.stdout.strip().splitlines()[:2]
+    assert first.startswith("unsupported on this platform") and "unsupported on this platform" in second

@@ -211,6 +211,9 @@ reservation (`flash.raw-reservation-required` otherwise, failing closed):
 holder alone cannot tell sessions apart; acquire with
 `eval "$(scripts/bench/tan-lease.sh acquire <place>)"`, release with
 `scripts/bench/tan-lease.sh release <place>`);
+the lease also records the place's labgrid `changed:` timestamp (updated on every acquire/release) and
+the gate refuses a lease whose value no longer matches, so a lease left over from an earlier
+acquisition is stale; `--raw` is unsupported where POSIX `pwd`/`grp`/uid are missing (Windows);
 `JLINK_RUN_PLACE` set; the J-Link program tan runs resolves to the wrapper named by
 an absolute `TAN_JLINK_WRAPPER` (outside the cwd, not world-writable; a marker string
 inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolute,
