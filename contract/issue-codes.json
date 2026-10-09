@@ -1420,6 +1420,22 @@
       "note": "`tan monitor --capture` hit a serial I/O error while reading the port. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
+      "code": "monitor.capture-reopen-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_actions.py",
+      "note": "tan-cli#1451: `tan monitor --capture --reopen-at BAUD --on REGEX` matched, closed the port, and could not reopen it at the new baud. The capture stops; the port is left closed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-send-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_actions.py",
+      "note": "tan-cli#1451: writing the `--send` input to the console failed or stalled (the write is bounded to 1 s on rfc2217://). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "monitor.capture-log-failed",
       "status": "reserved",
       "severity": "error",
