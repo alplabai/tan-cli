@@ -333,7 +333,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "identify read $global_flags --core --project --build-root --probe-serial --probe-usb-path --jlink" -- "$cur") )
       ;;
     reset)
-      COMPREPLY=( $(compgen -W "$global_flags --project --pulse-ms --device --speed --probe-serial --probe-usb-path --jlink" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --project --pulse-ms --probe-serial --probe-usb-path --jlink" -- "$cur") )
       ;;
     diff|presets)
       COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )

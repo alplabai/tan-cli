@@ -57,7 +57,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _run(tmp_path, pulse=100, usb="3-4.2", **kw):
-    return reset_cmd._run(pulse, "Cortex-M55", 4000, None, usb, None, str(tmp_path),
+    return reset_cmd._run(pulse, None, usb, None, str(tmp_path),
                           enumerate_probes=lambda: [PROBE], **kw)
 
 
@@ -67,7 +67,7 @@ def test_one_pulse_script_is_r0_sleep_r1_and_nothing_else(env, monkeypatch):
     assert rc == 0 and issues == []
     (script,) = jl.reset_scripts()
     body = [ln for ln in script.splitlines() if ln]
-    assert body[-4:] == ["r0", "Sleep 100", "r1", "exit"]
+    assert body[-4:] == ["r0", "sleep 100", "r1", "q"] and "connect" not in body
     assert script.count("r0") == 1 and script.count("r1") == 1
     assert not set(rp.script_verbs(script)) & set(rp.FORBIDDEN_VERBS)
     assert data["pulseMs"] == 100 and data["writes"] is False
@@ -77,7 +77,7 @@ def test_one_pulse_script_is_r0_sleep_r1_and_nothing_else(env, monkeypatch):
 def test_pulse_width_is_configurable(env, monkeypatch):
     jl = FakeJlink(monkeypatch)
     rc, data, _, _ = _run(env, pulse=250)
-    assert rc == 0 and "Sleep 250\n" in jl.reset_scripts()[0] and data["pulseMs"] == 250
+    assert rc == 0 and "sleep 250\n" in jl.reset_scripts()[0] and data["pulseMs"] == 250
 
 
 @pytest.mark.parametrize("bad", [0, -5, 10001])
@@ -129,6 +129,22 @@ def test_cli_envelope_shape(env, monkeypatch):
     body = json.loads(r.stdout)
     assert body["command"] == "reset" and body["ok"] is True
     assert body["data"]["pulseMs"] == 150 and body["issues"] == []
+
+
+def test_jlink_is_not_asked_to_connect(env, monkeypatch):
+    seen = {}
+    FakeJlink(monkeypatch)
+    real = flash_cmd._execute
+
+    def spy(plan, *a, **k):
+        seen["argv"] = plan.argv
+        return real(plan, *a, **k)
+
+    monkeypatch.setattr(flash_cmd, "_execute", spy)
+    assert _run(env)[0] == 0
+    assert "-device" not in seen["argv"] and "-speed" not in seen["argv"]
+    assert seen["argv"][seen["argv"].index("-autoconnect") + 1] == "0"
+    assert "connect" in rp.FORBIDDEN_VERBS
 
 
 def test_cli_rejects_a_malformed_usb_path(env):

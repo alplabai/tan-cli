@@ -3664,7 +3664,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/reset_cmd.py",
-      "note": "tan-cli#1452: `tan reset` could not pulse nRESET: no trusted J-Link binary, a bad `--device`/probe serial token, or the J-Link Commander run failed or did not report `Script processing completed`. Probe-selection refusals reuse `flash.probe-*`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "tan-cli#1452: `tan reset` could not pulse nRESET: no trusted J-Link binary, a bad probe serial token, or the J-Link Commander run failed or did not report `Script processing completed`. Probe-selection refusals reuse `flash.probe-*`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "reset.internal-failure",

@@ -3,7 +3,7 @@
 
 ```sh
 tan reset [--pulse-ms 100] [--probe-usb-path 3-4.2 | --probe-serial SN] [--jlink PATH] \
-          [--device Cortex-M55] [--speed 4000] [--format json]
+          [--format json]
 JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2
 ```
 
@@ -12,15 +12,20 @@ The recovery from a non-waking STOP on the AEN bench is one clean pin pulse.
 
 ```
 SelectEmuBySN <serial>      (only when a probe is selected)
-si SWD / speed / device / connect
 r0
-Sleep <pulse-ms>
+sleep <pulse-ms>
 r1
-exit
+q
 ```
 
+JLinkExe is started as `JLinkExe -if SWD -autoconnect 0 -NoGui 1 -CommanderScript <file>`:
+no `-device`, no `-speed`, no `connect`. Commander toggles the reset pin without
+attaching to the target; a `connect` against an Alif target in STOP either fails
+(the debug domain is gated) or disturbs the evidence this verb exists to keep.
+The script matches the bench-proven one (`r0`, `sleep 100`, `r1`, `q`).
+
 It is **not** the pin reset `tan flash` runs (`RSetType 2; r; g`, retried): no
-halt, no `RSetType`, no `g`, no connect-under-reset, no retry. Nothing is
+`connect`, no halt, no `RSetType`, no `g`, no connect-under-reset, no retry. Nothing is
 written, erased or flashed. A test holds the generated script to that verb list.
 
 * `--pulse-ms` is how long nRESET is held low: default 100, range 1 to 10000
@@ -33,7 +38,7 @@ written, erased or flashed. A test holds the generated script to that verb list.
   by the `JLinkExe` spawn, so a board-farm shim picks the place per command, as
   for `tan flash`. The envelope reports it in `data.place` (`null` when unset).
 * Envelope `data`: `pulseMs`, `place`, `writes` (always `false`), `jlink`
-  (`binary`, `binarySource`, `device`), `probe` (selection echo), `script`
+  (`binary`, `binarySource`), `probe` (selection echo), `script`
   (the exact lines sent). Success needs the Commander's
   `Script processing completed.`; otherwise `reset.failed` (exit 1).
 * `reset.internal-failure` (exit 5) is a tan bug.
