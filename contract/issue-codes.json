@@ -2909,6 +2909,14 @@
       "note": "tan-cli#1287: the capture parsed but carries `ENERGY-WERR`/`ENERGY-WARN` lines or `npu_dispatched=false`; the result is returned and the evidence is the message. A warning, exit 0. A plain `Issue(\"model.device-capture-degraded\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.device-energy-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1387: the capture's energy delta is below the rail's noise, so `result.energy` is null and the raw mean/spread/rail/pair count move to `diagnostics.unresolvedEnergy`. The app's own verdict wins when it printed one (`RESULT FAIL: delta not resolvable ...` makes it unresolved; `RESULT PASS: ... mJ/inference` keeps it); otherwise tan applies the app's rule (aen-inference-energy `NOISE_SIGMA` = 3: with >= 2 pairs the mean must exceed 3 standard errors of the mean, with one pair it must be > 0). Latency is a separate measurement and is unaffected. A warning, exit 0. Previously the bench capture in the issue returned `ok:true` with 2.446e-06 mJ/inference and a spread three times larger. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
