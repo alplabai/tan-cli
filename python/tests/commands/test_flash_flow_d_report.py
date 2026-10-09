@@ -183,7 +183,9 @@ def test_a_failed_reset_is_a_warning_not_a_claimed_pin_reset(tmp_path, monkeypat
     assert "Reset: Failed" in note.message and "low power" in note.message
     assert any("NOT confirmed" in line for line in lines)
     # The non-halting probe ran and could not confirm either.
-    assert entry["jlink"]["bootProbe"] == {"performed": True, "dhcsr": None, "trouble": []}
+    probe = entry["jlink"]["bootProbe"]
+    assert probe["performed"] is True and probe["dhcsr"] is None and probe["trouble"] == []
+    assert probe["pcsr"] == []
 
 
 _HALT_FAIL = CLEAN + "****** Error: Failed to halt CPU\n"
@@ -252,6 +254,58 @@ def test_a_probe_session_that_reset_or_failed_to_halt_cannot_confirm(tmp_path, m
         assert data["entries"][0]["jlink"]["reset"] == "unconfirmed"
 
 
+PC_IN = "E000101C = 80010000\n"  # inside the 1-byte mramxip app at 0x80010000 of `_ARGS`
+
+
+def test_pc_samples_inside_the_new_image_confirm_when_the_reset_bit_is_gone(tmp_path, monkeypatch):
+    out = "E000EDF0 = 01040001\n" + PC_IN * 3
+    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
+    assert rc == 0, (data, issues)
+    jl = data["entries"][0]["jlink"]
+    assert jl["resetConfirmedBy"] == "pcsr" and jl["reset"] == "pin-reset"
+    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+    assert jl["bootProbe"]["pcsr"] == ["0x80010000"] * 3
+    assert jl["bootProbe"]["imageRanges"] == [["0x80010000", "0x80010001"]]
+
+
+@pytest.mark.parametrize(
+    "samples,dhcsr",
+    [
+        ("E000101C = FFFFFFFF\n" * 3, "01040001"),      # sleeping: no sample
+        ("E000101C = 00000100\n" * 3, "01040001"),      # old image / loader / ROM
+        (PC_IN + "E000101C = 00000100\n" + PC_IN, "01040001"),  # one stray sample vetoes
+        (PC_IN * 3, "01020001"),                         # halted core
+        (PC_IN * 3, "01080001"),                         # locked up
+    ],
+)
+def test_pc_samples_without_evidence_keep_the_issue(tmp_path, monkeypatch, samples, dhcsr):
+    out = f"E000EDF0 = {dhcsr}\n" + samples
+    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+    assert "resetConfirmedBy" not in data["entries"][0]["jlink"]
+
+
+def test_the_reset_bit_still_confirms_without_any_pc_sample(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _run(
+        tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": "E000EDF0 = 03050001\n"}
+    )
+    assert data["entries"][0]["jlink"]["resetConfirmedBy"] == "dhcsr"
+
+
+def test_the_image_ranges_come_from_the_elf_next_to_the_flashed_bin(tmp_path):
+    from tests.commands.test_flash_ram import make_elf
+    from tan.core.flash_plan import FlowDShape
+
+    (tmp_path / "app.elf").write_bytes(make_elf(base=0x100, filesz=64))
+    (tmp_path / "app.bin").write_bytes(b"\x00" * 8)
+    shape = FlowDShape(device="D", app_address=None, artefact=str(tmp_path / "app.bin"))
+    assert flash_cmd._flow_d_image_ranges(shape) == [(0x100, 0x140)]
+    (tmp_path / "app.elf").unlink()
+    assert flash_cmd._flow_d_image_ranges(shape) == []
+    shape = FlowDShape(device="D", app_address="0x80010000", artefact=str(tmp_path / "app.bin"))
+    assert flash_cmd._flow_d_image_ranges(shape) == [(0x80010000, 0x80010008)]
+
+
 def test_a_clean_reset_runs_no_boot_probe(tmp_path, monkeypatch):
     fake, (rc, *_rest) = _run(tmp_path, monkeypatch)
     assert rc == 0 and not any("mem32" in s for s in fake.scripts)
@@ -268,7 +322,16 @@ def test_dhcsr_helpers():
     assert not flow_d_report.dhcsr_core_running(0x01080001) and not flow_d_report.dhcsr_core_running(None)
     assert flow_d_report.probe_trouble("Reset: Failed") and not flow_d_report.probe_trouble("Reset delay: 0 ms")
     script = flow_d_report.nohalt_probe_script("si SWD\ndevice P\nconnect\nloadbin x 0x1\nexit\n")
-    assert script == "si SWD\ndevice P\nconnect\nmem32 0xE000EDF0 1\nexit\n"
+    assert script == (
+        "si SWD\ndevice P\nconnect\nmem32 0xE000EDF0 1\n"
+        + "mem32 0xE000101C 1\nSleep 5\n" * 3 + "exit\n"
+    )
+    assert flow_d_report.pcsr_samples("E000101C = 80010004\nE000101C = FFFFFFFF") == [0x80010004, 0xFFFFFFFF]
+    rng = [(0x80010000, 0x80020000)]
+    assert flow_d_report.pcsr_in_ranges([0x80010004, 0xFFFFFFFF], rng)
+    assert not flow_d_report.pcsr_in_ranges([0xFFFFFFFF] * 3, rng)  # no evidence
+    assert not flow_d_report.pcsr_in_ranges([0x80010004, 0x100], rng)  # one outside vetoes
+    assert not flow_d_report.pcsr_in_ranges([0x80010004], [])
 
 
 def test_a_failed_write_still_leaves_its_transcript(tmp_path, monkeypatch):

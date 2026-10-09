@@ -83,6 +83,15 @@ _DHCSR_RAN = DHCSR_S_SLEEP | DHCSR_S_RETIRE_ST | DHCSR_S_RESET_ST
 #: the core, which makes its DHCSR read evidence of that session, not of the flash's reset.
 PROBE_TROUBLE_MARKERS = ("Reset:",)
 
+#: DWT_PCSR, the program-counter sample register: a NON-halting witness of where a RUNNING
+#: core is executing (tan-cli#1453 review). DHCSR's S_RESET_ST is cleared by J-Link's own
+#: reads and will usually be gone, so this is the second witness. It needs the DWT unit
+#: present (Cortex-M55 has it) and readable while the core runs; a halted or sleeping core
+#: returns 0xFFFFFFFF, which is no sample at all.
+DWT_PCSR_ADDRESS = "0xE000101C"
+PCSR_NO_SAMPLE = 0xFFFFFFFF
+PCSR_SAMPLES = 3
+
 
 def nohalt_probe_script(jlink_script: str) -> str:
     """A fresh, read-only, NON-halting session: the write's preamble up to and including
@@ -95,7 +104,10 @@ def nohalt_probe_script(jlink_script: str) -> str:
             break
     else:
         raise ValueError("the write script has no `connect` line to build a probe from")
-    out += [f"mem32 {DHCSR_ADDRESS} 1", "exit"]
+    out.append(f"mem32 {DHCSR_ADDRESS} 1")
+    for _ in range(PCSR_SAMPLES):
+        out += [f"mem32 {DWT_PCSR_ADDRESS} 1", "Sleep 5"]
+    out.append("exit")
     return "\n".join(out) + "\n"
 
 
@@ -120,6 +132,23 @@ def dhcsr_core_running(value: int | None) -> bool:
     return (
         value is not None and bool(value & _DHCSR_RAN)
         and not value & (DHCSR_S_HALT | DHCSR_S_LOCKUP)
+    )
+
+
+def pcsr_samples(transcript: str) -> list[int]:
+    """Every PC sample a `mem32 0xE000101C 1` printed, in order (0xFFFFFFFF included)."""
+    return [int(m, 16) for m in re.findall(r"E000101C\s*=\s*([0-9A-Fa-f]{8})", transcript)]
+
+
+def pcsr_in_ranges(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) -> bool:
+    """True when at least one real sample exists and EVERY real sample lies inside
+    `ranges` (`[start, end)` of the image tan just flashed). 0xFFFFFFFF is no evidence; a
+    sample outside the ranges (old image, loader, ROM) vetoes. The old image is not known to
+    tan, so an old image linked into the same range is not excluded -- that residual is why
+    S_RESET_ST stays the stronger witness."""
+    real = [x for x in samples if x != PCSR_NO_SAMPLE]
+    return bool(real) and bool(ranges) and all(
+        any(lo <= x < hi for lo, hi in ranges) for x in real
     )
 
 

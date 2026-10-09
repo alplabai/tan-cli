@@ -77,6 +77,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, Mapping
 
 #: POSIX-only, and the ONE reason this file has a conditional import
@@ -222,8 +223,12 @@ from tan.core.flow_d_report import (
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
     VERIFICATION_READBACK_NOTE,
+    DHCSR_S_HALT,
+    DHCSR_S_LOCKUP,
     dhcsr_in,
     dhcsr_confirms_reset,
+    pcsr_in_ranges,
+    pcsr_samples,
     dhcsr_core_running,
     probe_trouble,
     dpidr_in,
@@ -2874,6 +2879,7 @@ def _flash_entry_body(
     # tan-cli#1321: what the read-only DPIDR preflight read, for the `jlink` block.
     preflight_facts: dict[str, Any] = {}
     flow_d_writes: list[dict[str, Any]] = []
+    flow_d_ranges: list[tuple[int, int]] = []
 
     def entry(
         method: str | None,
@@ -3374,6 +3380,7 @@ def _flash_entry_body(
                     lines,
                 )
             flow_d_writes = _flow_d_writes(flash_args, shape)
+            flow_d_ranges = _flow_d_image_ranges(shape)
             # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
             # that reaches into another write's first sector (or a resident entry the
             # new ATOC does not rewrite) would erase it. Refused before anything is
@@ -3568,7 +3575,9 @@ def _flash_entry_body(
                 plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
             )
             reset_unconfirmed = report["jlink"].get("reset") == "unconfirmed"
-        if reset_unconfirmed and _flow_d_confirm_boot(plan, ctx, report, probe_guard, jlink_exe):
+        if reset_unconfirmed and _flow_d_confirm_boot(
+            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges
+        ):
             reset_unconfirmed = False
     if readback_failure is not None:
         code, text = readback_failure
@@ -3801,17 +3810,43 @@ def _flow_d_record(
     return bool(failures) and outcome.success
 
 
+def _flow_d_image_ranges(shape: FlowDShape) -> list[tuple[int, int]]:
+    """`[start, end)` ranges the NEW image executes from, for the PCSR boot witness: the
+    LOAD segments of the app ELF beside the flashed `.bin`; else, in the mramxip shape, the
+    blob's own MRAM window. Empty (no PCSR evidence possible) when neither is known."""
+    from tan.core.ram_run import RamRunError, parse_elf
+
+    try:
+        with open(os.path.splitext(shape.artefact)[0] + ".elf", "rb") as fh:
+            elf = parse_elf(fh.read())
+        ranges = [(seg.vaddr, seg.vaddr + seg.filesz) for seg in elf.segments if seg.filesz > 0]
+        if ranges:
+            return ranges
+    except (OSError, RamRunError):
+        pass
+    try:
+        if shape.app_address is not None:
+            start = int(shape.app_address, 16)
+            return [(start, start + os.path.getsize(shape.artefact))]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
 def _flow_d_confirm_boot(
     plan: FlashPlan,
     ctx: _Context,
     report: dict[str, Any],
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None = None,
+    image_ranges: Sequence[tuple[int, int]] = (),
 ) -> bool:
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
     the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
-    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened. True, and
+    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened; failing
+    that, PC samples (DWT_PCSR) that all fall inside the new image do (`resetConfirmedBy:
+    "pcsr"`). True, and
     the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
     `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
     unconfirmed. Never raises, never writes."""
@@ -3836,14 +3871,29 @@ def _flow_d_confirm_boot(
     if trouble:
         return False  # the probe itself reset/halted: its DHCSR says nothing about the flash
     block["coreRunning"] = dhcsr_core_running(value)
-    if not dhcsr_confirms_reset(value):
-        return False
-    block.update(
-        reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
-        resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
-        "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
-    )
-    return True
+    samples = pcsr_samples(text)
+    block["bootProbe"]["pcsr"] = [f"0x{x:08X}" for x in samples]
+    block["bootProbe"]["imageRanges"] = [[f"0x{lo:08X}", f"0x{hi:08X}"] for lo, hi in image_ranges]
+    if dhcsr_confirms_reset(value):
+        block.update(
+            reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
+            resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
+            "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
+        )
+        return True
+    # Second, non-halting witness: S_RESET_ST is usually already cleared by J-Link's own reads.
+    # The PC samples (DWT_PCSR) must all fall inside the image tan just flashed; 0xFFFFFFFF
+    # (halted/sleeping) is no evidence, and a halted or locked-up core never confirms.
+    halted = value is not None and bool(value & (DHCSR_S_HALT | DHCSR_S_LOCKUP))
+    if not halted and pcsr_in_ranges(samples, image_ranges):
+        block.update(
+            reset="pin-reset", resetConfirmedBy="pcsr",
+            dhcsr=None if value is None else f"0x{value:08X}",
+            resetNote="the halt after the reset failed, but every PC sample (DWT_PCSR, read "
+            "without halting) lies inside the image just flashed.",
+        )
+        return True
+    return False
 
 
 def _flow_d_readback_unreachable(
