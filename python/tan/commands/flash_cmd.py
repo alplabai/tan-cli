@@ -1930,9 +1930,7 @@ _FLOW_D_VERIFIED_ONLY = (
     "did not halt)"
 )
 #: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
-_FLOW_D_VERIFIED_NOHALT = (
-    "; cache-verified and PIN-reset (boot confirmed without a halt: DHCSR {dhcsr})"
-)
+_FLOW_D_VERIFIED_NOHALT = "; cache-verified and PIN-reset (boot confirmed without a halt: {witness})"
 
 
 def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
@@ -3572,11 +3570,12 @@ def _flash_entry_body(
         )
         if outcome.success and ctx.readback:
             readback_failure = _flow_d_readback(
-                plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
+                plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe,
+                entry_id=entry_id,
             )
             reset_unconfirmed = report["jlink"].get("reset") == "unconfirmed"
         if reset_unconfirmed and _flow_d_confirm_boot(
-            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges
+            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id
         ):
             reset_unconfirmed = False
     if readback_failure is not None:
@@ -3604,7 +3603,7 @@ def _flash_entry_body(
             if report.get("jlink", {}).get("resetConfirmedBy"):
                 ok_message = ok_message.replace(
                     _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
-                        dhcsr=report["jlink"]["dhcsr"]), 1)
+                        witness=report["jlink"]["witness"]), 1)
             elif report.get("jlink", {}).get("reset") == "unconfirmed":
                 ok_message = ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY, 1)
             else:
@@ -3833,6 +3832,32 @@ def _flow_d_image_ranges(shape: FlowDShape) -> list[tuple[int, int]]:
     return []
 
 
+def _pcsr_witness(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) -> str:
+    real = [x for x in samples if x != 0xFFFFFFFF]
+    inside = next(((lo, hi) for lo, hi in ranges if real and lo <= real[0] < hi), ranges[0])
+    return (
+        f"{len(real)} PC sample(s) (DWT_PCSR, e.g. 0x{real[0]:08X}) inside the image range "
+        f"0x{inside[0]:08X}-0x{inside[1]:08X}"
+    )
+
+
+def _save_session_log(
+    ctx: _Context, entry_id: str, label: str, script: str, outcome: _Outcome
+) -> dict[str, Any]:
+    """tan-cli#1458: every J-Link session of a Flow D run leaves its transcript under
+    `flash-logs/` (`alif_mram_jlink-<core>-<label>-<UTC>.log`), not only the write's.
+    `{"transcriptPath": ...}` or `{"transcriptError": ...}`; never raises."""
+    try:
+        return {"transcriptPath": _write_transcript(
+            _flow_d_log_path(ctx.build_root, f"{entry_id}-{label}"),
+            f"# tan flash {FLOW_D_METHOD}[{entry_id}] {label} session rc={outcome.returncode}\n"
+            f"## J-Link Commander script\n{_DISABLE_FW_UPDATE}{script}\n"
+            f"## stdout\n{outcome.stdout}\n## stderr\n{outcome.stderr}\n",
+        )}
+    except OSError as err:
+        return {"transcriptPath": None, "transcriptError": str(err)}
+
+
 def _flow_d_confirm_boot(
     plan: FlashPlan,
     ctx: _Context,
@@ -3840,6 +3865,7 @@ def _flow_d_confirm_boot(
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None = None,
     image_ranges: Sequence[tuple[int, int]] = (),
+    entry_id: str = "entry",
 ) -> bool:
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
@@ -3862,11 +3888,12 @@ def _flow_d_confirm_boot(
         True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
     )
     text = f"{probe.stdout}\n{probe.stderr}"
+    saved = _save_session_log(ctx, entry_id, "bootprobe", script, probe)
     value = dhcsr_in(text) if probe.success else None
     trouble = probe_trouble(text)
     block["bootProbe"] = {
         "performed": True, "dhcsr": None if value is None else f"0x{value:08X}",
-        "trouble": list(trouble),
+        "trouble": list(trouble), **saved,
     }
     if trouble:
         return False  # the probe itself reset/halted: its DHCSR says nothing about the flash
@@ -3877,6 +3904,7 @@ def _flow_d_confirm_boot(
     if dhcsr_confirms_reset(value):
         block.update(
             reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
+            witness=f"DHCSR 0x{value:08X}, S_RESET_ST set",
             resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
             "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
         )
@@ -3889,6 +3917,7 @@ def _flow_d_confirm_boot(
         block.update(
             reset="pin-reset", resetConfirmedBy="pcsr",
             dhcsr=None if value is None else f"0x{value:08X}",
+            witness=_pcsr_witness(samples, image_ranges),
             resetNote="the halt after the reset failed, but every PC sample (DWT_PCSR, read "
             "without halting) lies inside the image just flashed.",
         )
@@ -3922,6 +3951,7 @@ def _flow_d_readback(
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None = None,
     reset_after: bool = True,
+    entry_id: str = "entry",
 ) -> tuple[str, str] | None:
     """`--readback` (tan-cli#1321): re-read every written region in a FRESH
     J-Link session (`savebin`) and compare sha256 with the source file. `None`
@@ -3940,7 +3970,7 @@ def _flow_d_readback(
     block says `reset: "not-run"` and the message says the board was NOT reset."""
     block = report.setdefault("jlink", {})
     result, carried = _flow_d_readback_session(
-        plan, ctx, writes, block, probe_guard, jlink_exe, reset_after
+        plan, ctx, writes, block, probe_guard, jlink_exe, reset_after, entry_id
     )
     if result is None or not reset_after or carried:
         return result
@@ -3949,6 +3979,9 @@ def _flow_d_readback(
         tail = _execute(
             dataclasses.replace(plan, jlink_script=readback_script(plan.jlink_script, [])),
             True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
+        )
+        block["resetTail"] = _save_session_log(
+            ctx, entry_id, "resettail", readback_script(plan.jlink_script, []), tail
         )
         if tail.success and not (probe_guard is not None and probe_guard.tripped):
             failures = reset_failures(f"{tail.stdout}\n{tail.stderr}")
@@ -3970,6 +4003,7 @@ def _flow_d_readback_session(
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None,
     reset_after: bool,
+    entry_id: str = "entry",
 ) -> tuple[tuple[str, str] | None, bool]:
     """The read-back proper: `(result, carried)`, `carried` meaning the session ran to
     the end of its script (so a reset tail in it ran)."""
@@ -3985,7 +4019,7 @@ def _flow_d_readback_session(
         try:
             script = readback_script(
                 plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)],
-                reset_after=reset_after,
+                reset_after=reset_after, halt_first=reset_after,
             )
         except (ValueError, FlashPlanError) as err:
             block["readback"] = {"performed": False, "reason": str(err)}
@@ -3998,6 +4032,7 @@ def _flow_d_readback_session(
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
             return (f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped), False
+        block["readbackSession"] = _save_session_log(ctx, entry_id, "readback", script, read)
         read_text = f"{read.stdout}\n{read.stderr}"
         # Markers count only BEFORE the reset tail: the tail's own errors say nothing
         # about whether memory could be read.
@@ -4847,8 +4882,8 @@ def _run(
                     "core running, reset not proven: a read-only DHCSR check shows a running "
                     "core but not a reset since the write -- it may be the old image. "
                     if running else
-                    "could not halt to confirm the PIN reset, and a read-only DHCSR check did "
-                    "not confirm it either (the target may be in low power). "
+                    "no witness: the halt failed and the read-only DHCSR/PCSR check read nothing "
+                    "that confirms the reset (the target may be in low power). "
                 )
                 + "If the console shows the new app it booted; otherwise power-cycle the board."
             )

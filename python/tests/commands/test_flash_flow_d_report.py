@@ -594,7 +594,7 @@ def test_the_ambiguous_core_markers_are_not_unreachable_markers():
 def test_strip_reset_tail():
     assert flow_d_report.strip_reset_tail(
         "connect\nloadbin x 0x1\nverifybin x 0x1\nRSetType 2\nr\ng\nexit\n"
-    ) == "connect\nloadbin x 0x1\nverifybin x 0x1\nexit\n"
+    ) == "connect\nloadbin x 0x1\nverifybin x 0x1\nh\nexit\n"
     assert flow_d_report.strip_reset_tail("connect\nexit\n") == "connect\nexit\n"
 
 
@@ -1000,3 +1000,57 @@ def test_the_preflight_dpidr_survives_a_later_refusal(tmp_path, monkeypatch):
     assert rc == 1 and _codes(issues) == ["flash.write-sector-overlap"]
     assert data["entries"][0]["jlink"]["dpidr"] == "0x4C013477"
     assert data["entries"][0]["jlink"]["dpidrSource"] == "preflight"
+
+
+# ── tan-cli#1458: bench follow-ups ──────────────────────────────────────────
+
+
+def test_the_readback_session_halts_the_core_right_after_connect():
+    write = "connect\nloadbin x 0x1\nRSetType 2\nr\ng\nexit\n"
+    assert flow_d_report.readback_script(write, [("0x1", 4, "/t/r")], halt_first=True) == (
+        "connect\nh\nsavebin /t/r 0x1 0x4\nRSetType 2\nr\ng\nexit\n"
+    )
+    assert "\nh\n" not in flow_d_report.readback_script(write, [("0x1", 4, "/t/r")])
+
+
+def test_the_write_session_asks_for_the_core_held_halted_before_exit(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch)
+    write, read = [s for s in fake.scripts if "ShowEmuList" not in s]
+    assert write.splitlines()[-2:] == ["h", "exit"]
+    assert read.splitlines()[read.splitlines().index("connect") + 1] == "h"
+
+
+def test_the_message_names_the_pcsr_witness_not_dhcsr(tmp_path, monkeypatch):
+    out = "E000EDF0 = 01040001\n" + PC_IN * 3
+    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
+    msg = data["entries"][0]["message"]
+    assert "3 PC sample(s) (DWT_PCSR, e.g. 0x80010000) inside the image range 0x80010000-0x80010001" in msg
+    assert "DHCSR" not in msg
+
+
+def test_no_witness_in_a_stop_window_is_info_with_honest_wording(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _run(
+        tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": "E000101C = FFFFFFFF\n" * 3}
+    )
+    found = [i for i in issues if i.code == "flash.jlink-reset-unconfirmed"]
+    assert [i.severity for i in found] == ["info"]
+    assert "no witness" in found[0].message and "low power" in found[0].message
+
+
+def test_every_session_leaves_a_transcript_under_flash_logs(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback_run(
+        tmp_path, monkeypatch, {"read_out": "Failed to halt CPU\n", "probe_out": "E000EDF0 = 03050001\n"}
+    )
+    jl = data["entries"][0]["jlink"]
+    logs = tmp_path / "build" / "flash-logs"
+    paths = [jl["transcriptPath"], jl["readbackSession"]["transcriptPath"], jl["bootProbe"]["transcriptPath"]]
+    assert all(p and Path(p).parent == logs and Path(p).is_file() for p in paths)
+    assert "-readback-" in Path(paths[1]).name and "-bootprobe-" in Path(paths[2]).name
+    assert "-readback-" not in Path(paths[0]).name
+    assert "savebin" in Path(paths[1]).read_text() and "mem32" in Path(paths[2]).read_text()
+
+
+def test_the_reset_only_session_is_saved_too(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_rc=1)
+    tail = data["entries"][0]["jlink"]["resetTail"]["transcriptPath"]
+    assert tail and "RSetType" in Path(tail).read_text()

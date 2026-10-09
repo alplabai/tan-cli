@@ -2,15 +2,15 @@
   "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/commands/flash_cmd.py",
   "kind": "budget",
-  "lines": 5427,
+  "lines": 5462,
   "long_functions": [
+    [
+      51,
+      "_flow_d_readback"
+    ],
     [
       54,
       "_open_console_pty"
-    ],
-    [
-      61,
-      "_flow_d_confirm_boot"
     ],
     [
       61,
@@ -21,11 +21,15 @@
       "_console_lines"
     ],
     [
+      65,
+      "_flow_d_confirm_boot"
+    ],
+    [
       66,
       "_yocto_wic_block_device_refusal"
     ],
     [
-      87,
+      89,
       "_flow_d_readback_session"
     ],
     [
@@ -61,7 +65,7 @@
       "_run"
     ],
     [
-      810,
+      811,
       "_flash_entry_body"
     ]
   ]

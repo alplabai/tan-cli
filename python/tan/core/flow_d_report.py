@@ -245,7 +245,9 @@ def strip_reset_tail(jlink_script: str) -> str:
     lines = [line for line in jlink_script.splitlines() if line.strip()]
     for i, line in enumerate(lines):
         if line.strip().lower().startswith("rsettype"):
-            return "\n".join([*lines[:i], "exit"]) + "\n"
+            # `h` before `exit`: ask for the core to be left halted rather than running the
+            # app while the next (read-back) session is still to connect (tan-cli#1458).
+            return "\n".join([*lines[:i], "h", "exit"]) + "\n"
     return jlink_script
 
 
@@ -253,11 +255,14 @@ def readback_script(
     jlink_script: str,
     regions: Sequence[tuple[str, int, str]],
     reset_after: bool = True,
+    halt_first: bool = False,
 ) -> str:
     """The Commander script of a FRESH read-back session: the same preamble the
     write used (everything up to and including `connect`, so the same probe,
     interface, speed and part-number device), then one `savebin <file>, <addr>,
     <size>` per region and `exit`. `regions` is `(address_hex, size, dest_path)`.
+    `halt_first` halts the core right after `connect`, so the app that the write left
+    running cannot reach a sleep window before the read (tan-cli#1458).
     `reset_after=False` (tan-cli#1446: a raw sector write must not reset or run anything)
     ends at `exit` without the write's reset/run tail.
     Raises `ValueError` if `jlink_script` has no `connect` line."""
@@ -268,6 +273,8 @@ def readback_script(
             break
     else:
         raise ValueError("the write script has no `connect` line to build a read-back from")
+    if halt_first:
+        out.append("h")
     for address, size, dest in regions:
         validate_commander_path(dest, "the read-back destination path")
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
