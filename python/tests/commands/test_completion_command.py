@@ -1043,7 +1043,7 @@ def test_spliced_command_names_match_the_registered_command_surface():
     from tan.cli import _SUBCOMMAND_NAMES
 
     assert set(_COMMAND_NAMES.split()) == set(_SUBCOMMAND_NAMES)
-    assert len(_COMMAND_NAMES.split()) == 32
+    assert len(_COMMAND_NAMES.split()) == 33
 
 
 def test_subcommand_format_overrides_a_leading_root_format():

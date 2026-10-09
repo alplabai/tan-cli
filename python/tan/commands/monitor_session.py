@@ -23,7 +23,7 @@ import threading
 
 from tan.commands.monitor_cmd import DATA_SCHEMA_VERSION, MonitorError, _pyserial_missing
 from tan.core import console_filter as console_filter_mod
-from tan.core import serial_capture, uboot_breakin
+from tan.core import serial_actions, serial_capture, uboot_breakin
 from tan.envelope import Issue
 from tan.exit_codes import ExitCode
 
@@ -418,18 +418,26 @@ def _log_failed(log: str, err: BaseException, data: dict) -> MonitorError:
 
 
 def run_capture(
-    port: str, baud: int, cap: CaptureOpts, opts: BreakOpts | None
+    port: str,
+    baud: int,
+    cap: CaptureOpts,
+    opts: BreakOpts | None,
+    act: "serial_actions.ActionSpec | None" = None,
 ) -> tuple[dict, list[Issue], ExitCode]:
     """Headless capture on one in-process port: optional break-in first, then
     read for the duration / until the regex matches. No TTY is needed. The
     log (`--log`) is opened only after the port is open and any break-in has
     succeeded, and always receives RAW bytes (no console filter), starting
-    with the tail of the break-in output when there was one."""
+    with the tail of the break-in output when there was one. `act`
+    (tan-cli#1451) adds `--send` input and the `--reopen-at` baud switch; a
+    reopen replaces the held port, so the port closed at the end is the
+    actions' current one."""
     pattern, duration, log = cap
     data: dict = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     log_path = check_log_path(log, data) if log is not None else None
     ser = open_port(port, baud, capture=True)
     sink = None
+    actions = None
     try:
         initial = b""
         if opts is not None:
@@ -443,10 +451,18 @@ def run_capture(
                 )
         if log_path is not None:
             sink = _open_log(log_path, data)
+        if act is not None:
+            from tan.commands import monitor_actions  # noqa: PLC0415 (only with actions)
+
+            actions = monitor_actions.build(act, ser, port)
         try:
             res = serial_capture.capture(
-                ser, duration_s=duration, until=pattern, sink=sink, initial=initial
+                ser, duration_s=duration, until=pattern, sink=sink, initial=initial,
+                actions=actions,
             )
+        except serial_actions.ActionError as err:
+            data["capture"] = {"actions": monitor_actions.report(actions)}
+            raise monitor_actions.action_error(err, port, data) from err
         except serial_capture.SinkError as err:
             raise _log_failed(log_path, err, data) from err
         except OSError as err:
@@ -457,7 +473,7 @@ def run_capture(
                 data,
             ) from err
     finally:
-        ser.close()
+        (actions.port if actions is not None else ser).close()
         if sink is not None:
             try:
                 sink.close()
@@ -477,6 +493,8 @@ def run_capture(
         "bytesSeenTail": res.tail,
         "logFile": log_path,
     }
+    if actions is not None:
+        data["capture"]["actions"] = monitor_actions.report(actions)
     if pattern is not None and not res.matched:
         return (
             data,
