@@ -228,6 +228,7 @@ from tan.commands.workspace_patch_check import (
 )
 from tan.core.west_patches import describe_unapplied, patch_fix_text, zephyr_base_note
 from tan.core.venv import find_workspace_venv, venv_bin_dir, west_program, west_workspace_dir
+from tan.core.west_workspace_refusal import unresolved_workspace_verdict
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -2406,23 +2407,33 @@ def zephyr_base_check(env_value: str | None, workspace_dir: str) -> Check | None
     return Check("zephyrBase", "pass", note, scope="project")
 
 
-def workspace_preflight_check(workspace_dir: str | None) -> Check:
+def workspace_preflight_check(
+    workspace_dir: str | None,
+    *,
+    start: str | None = None,
+    sdk_root: str | None = None,
+    zephyr_base: str | None = None,
+) -> Check:
     """`workspace` -- is a Zephyr WORKSPACE (a directory holding `.west/`)
     resolved at all? Mirrors `build_preflight_checks`'s check of the same
     name. Distinct from `hostPrerequisites`/`west` above, which only confirm
     the TOOLS needed to build are on PATH -- neither confirms a Zephyr tree
     exists to build against.
+
+    tan-cli#1432: with `start` and `sdk_root` known, an unresolved workspace
+    is judged by what `tan build` will then do (see `tan.core.
+    west_workspace_refusal.unresolved_workspace_verdict`), not reported as a
+    bare "no Zephyr workspace" when west's own walk still finds one.
     """
     if workspace_dir is not None:
         return Check("workspace", "pass", f"Zephyr workspace at {workspace_dir}", scope="project")
-    return Check(
-        "workspace",
-        "fail",
+    status, detail = "fail", (
         "no Zephyr workspace -- run `tan bootstrap` (reuses a compatible Zephyr, else "
-        "bootstraps one)",
-        "tan bootstrap",
-        scope="project",
+        "bootstraps one)"
     )
+    if start is not None and sdk_root is not None:
+        status, detail = unresolved_workspace_verdict(Path(start), zephyr_base, Path(sdk_root))
+    return Check("workspace", status, detail, "tan bootstrap", scope="project")
 
 
 def zephyr_version_preflight_check(
@@ -4058,7 +4069,12 @@ def _collect(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
     _add(
-        workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
+        workspace_preflight_check(
+            str(workspace_path) if workspace_path is not None else None,
+            start=workspace_root,
+            sdk_root=sdk_root,
+            zephyr_base=os.environ.get("ZEPHYR_BASE"),
+        )
     )
 
     # tan-cli#290: `westResolved`, right after `workspace` -- the same order
