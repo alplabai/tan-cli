@@ -40,6 +40,7 @@ from tan.commands.model_host_cmd import (
     run_empty_data,
 )
 from tan.core.model_device import (
+    NOISE_SIGMA,
     DeviceCaptureError,
     parse_console,
     run_result_from_capture,
@@ -168,14 +169,40 @@ def _row(
 
 def _degraded(row: dict, label: str) -> list[Issue]:
     diag = row["diagnostics"]
-    notes = [*diag["werrLines"], *diag["warnLines"], *diag["skippedPairs"]]
+    unresolved = diag.get("unresolvedEnergy")
+    issues = [] if unresolved is None else [_unresolved_issue(unresolved, label)]
+    # The device's own unresolvable-delta line is the unresolved issue's evidence; not repeated here.
+    warn = [w for w in diag["warnLines"] if unresolved is None or w != unresolved["deviceLine"]]
+    notes = [*diag["werrLines"], *warn, *diag["skippedPairs"]]
     if diag.get("energyNote"):
         notes.append(diag["energyNote"])
     if not diag["npuDispatched"]:
         notes.append("the app reported npu_dispatched=false (NPU did not run the model)")
-    if not notes:
-        return []
-    return [Issue("model.device-capture-degraded", "warning", f"{label}: " + "; ".join(notes[:5]))]
+    if notes:
+        issues.append(
+            Issue("model.device-capture-degraded", "warning", f"{label}: " + "; ".join(notes[:5]))
+        )
+    return issues
+
+
+def _unresolved_issue(unresolved: dict, label: str) -> Issue:
+    """tan-cli#1387: the energy delta is below the rail's noise, so `energy` is null."""
+    spread = unresolved["spreadMj"]
+    spread_text = "no spread (one pair)" if spread is None else f"spread {spread:.6g} mJ"
+    why = (
+        f"the device reported `{unresolved['deviceLine']}`"
+        if unresolved["verdict"] == "device"
+        else f"the mean is not {NOISE_SIGMA:g} standard errors above zero over "
+        f"{unresolved['pairs']} pair(s)"
+    )
+    return Issue(
+        "model.device-energy-unresolved", "warning",
+        f"{label}: energy on rail `{unresolved['rail']}` is not resolvable -- mean "
+        f"{unresolved['valueMjPerInference']:.6g} mJ/inference, {spread_text}; {why}. "
+        "`energy` is null (the raw values are in diagnostics.unresolvedEnergy); "
+        "latency is unaffected. The inference load may be below this rail's noise, "
+        "or the rail may be the wrong one.",
+    )
 
 
 def _device_label(context: ProjectContext, source: str | None) -> str | None | Issue:
