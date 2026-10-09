@@ -25,7 +25,10 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
+
+if TYPE_CHECKING:
+    from tan.core.serial_actions import CaptureActions
 
 TAIL_BYTES = 256
 #: No single `re.search` is given more than this many characters.
@@ -85,6 +88,7 @@ def capture(
     sink: BinaryIO | None = None,
     initial: bytes = b"",
     clock: Callable[[], float] = time.monotonic,
+    actions: "CaptureActions | None" = None,
 ) -> CaptureResult:
     """Read until `until` matches, or `duration_s` elapses.
 
@@ -94,6 +98,12 @@ def capture(
     ended the break-in can satisfy `--until`. At least one read happens even
     with a zero duration. A sink failure raises `SinkError`; a port failure
     propagates as the port's own `OSError`.
+
+    `actions` (tan-cli#1451, `tan.core.serial_actions`): ticked every loop
+    iteration and offered each complete line and the current partial line
+    BEFORE `until` is tested. A reopen replaces the port, so the loop reads
+    `actions.port` rather than `port` when given. Lines are scanned when
+    either `until` or a line-triggered action is present.
     """
     start = clock()
     deadline = start + duration_s
@@ -121,10 +131,14 @@ def capture(
         if first and initial:
             chunk = initial
         else:
-            n = max(1, int(getattr(port, "in_waiting", 0) or 0))
-            chunk = port.read(n) or b""
+            if actions is not None:
+                actions.tick()
+            src = actions.port if actions is not None else port
+            n = max(1, int(getattr(src, "in_waiting", 0) or 0))
+            chunk = src.read(n) or b""
         first = False
-        if chunk and until is None:
+        scan = until is not None or (actions is not None and actions.spec.watches_lines)
+        if chunk and not scan:
             commit(chunk)
         elif chunk:
             before = len(pending)
@@ -134,7 +148,9 @@ def capture(
             for raw in lines:  # each complete line is new data: search it once
                 end += len(raw) + 1
                 line = _text(raw).rstrip("\r")[-MAX_SEARCH_CHARS:]
-                if until.search(line):
+                if actions is not None:
+                    actions.line(line)
+                if until is not None and until.search(line):
                     # Stop at the END OF THE MATCHED LINE: bytes after it in the
                     # same read are neither logged nor reported.
                     commit(chunk[: max(0, end)])
@@ -142,9 +158,21 @@ def capture(
                 if clock() >= deadline:
                     commit(chunk)
                     return done(False, None)
+                if actions is not None and actions.take_flush():
+                    # Baud changed: the rest of this read and the partial line
+                    # are old-baud garbage; keep only up to the matched line.
+                    commit(chunk[: max(0, end)])
+                    pending, flushed = b"", True
+                    break
+            else:
+                flushed = False
+            if flushed:
+                continue
             commit(chunk)
             partial = _text(pending).rstrip("\r")[-MAX_SEARCH_CHARS:]
-            if partial and until.search(partial):
+            if partial and actions is not None:
+                actions.line(partial, partial=True)
+            if partial and until is not None and until.search(partial):
                 return done(True, partial)
         if clock() >= deadline:
             return done(False, None)

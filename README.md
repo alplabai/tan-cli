@@ -358,7 +358,7 @@ move.
 | Remove build output | `tan clean` |
 | Generate configuration files | `tan generate` |
 | Check the host setup | `tan doctor` |
-| Start a serial monitor | `tan monitor` |
+| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
 | Generate debugger settings | `tan debug-config` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |

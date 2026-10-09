@@ -383,6 +383,7 @@ def _run_monitor(
     non_interactive: bool = False,
     console_filter: str = "colors",
     capture_opts: tuple | None = None,
+    action_spec: object | None = None,
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -419,7 +420,7 @@ def _run_monitor(
     if capture_opts is not None:
         from tan.commands import monitor_session  # noqa: PLC0415 (only on --capture)
 
-        return monitor_session.run_capture(port, baud, capture_opts, break_opts)
+        return monitor_session.run_capture(port, baud, capture_opts, break_opts, action_spec)
 
     if break_opts is not None:
         from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
@@ -503,6 +504,29 @@ def monitor(
         "regex cannot be interrupted inside one search. No match in time is an error.",
     ),
     log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),
+    send: list[str] = typer.Option(
+        None, "--send", metavar="TEXT",
+        help="With --capture: write TEXT to the console (repeatable, in order; escapes "
+        "\\xNN \\r \\n \\t \\\\, no newline added). All items go out as one burst, at the "
+        "start unless --send-after or --send-on says when.",
+    ),
+    send_after: float = typer.Option(
+        None, "--send-after", metavar="SECONDS", help="With --send: send the burst this long after the start."
+    ),
+    send_on: str = typer.Option(
+        None, "--send-on", metavar="REGEX",
+        help="With --send: send the burst on the first line (or partial line, e.g. a prompt) "
+        "matching this regex. Excludes --send-after.",
+    ),
+    send_gap: float = typer.Option(
+        None, "--send-gap", metavar="SECONDS", help="With --send: pause between items (default 0.2)."
+    ),
+    reopen_at: int = typer.Option(
+        None, "--reopen-at", metavar="BAUD",
+        help="With --on: change the baud (in place, else close and reopen) on the first complete "
+        "line matching --on, then keep capturing. Works over rfc2217:// and local serial.",
+    ),
+    on: str = typer.Option(None, "--on", metavar="REGEX", help="With --reopen-at: the trigger regex."),
     console_filter: ConsoleFilter = typer.Option(
         None,
         "--filter",
@@ -563,9 +587,14 @@ def monitor(
         cap = monitor_session.capture_opts(
             capture, duration, until, log, console_filter is not None
         )
+        from tan.commands import monitor_actions  # noqa: PLC0415 (validation only)
+
+        spec = monitor_actions.action_opts(
+            capture, send, send_after, send_on, send_gap, reopen_at, on
+        )
         data, issues, exit_code = _run_monitor(
             port, baud, json_mode, opts, non_interactive,
-            console_filter.value if console_filter else "colors", cap
+            console_filter.value if console_filter else "colors", cap, spec
         )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
