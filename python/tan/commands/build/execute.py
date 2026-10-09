@@ -134,6 +134,7 @@ from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SliceRunResult
 from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
+from tan.core.west_workspace_refusal import workspace_unresolved_refusal
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
 from tan.commands.build.link_stale import insert_after_separator, stale_itcm_overlay_reset
@@ -1412,6 +1413,24 @@ def execute_slices(
         if refusal is not None:
             outcomes.append(SliceOutcome(sl.core_id, "failed", None, refusal))
             continue
+        # tan-cli#1429: same placement and reasoning as the #1317 refusal just
+        # above. `cwd` is the spawn cwd here: `_pin_west_workspace` only moves
+        # it when `workspace_dir` resolved, and this refusal needs it not to.
+        if is_west:
+            no_workspace = workspace_unresolved_refusal(
+                workspace_dir, list(sl.command.args), cwd, env.get("ZEPHYR_BASE"), sdk_root_path
+            )
+            if no_workspace is not None:
+                outcomes.append(
+                    SliceOutcome(
+                        sl.core_id,
+                        "failed",
+                        None,
+                        f"slice `{sl.core_id}` refused before build: {no_workspace.message}",
+                        manifest_message=no_workspace.manifest_message,
+                    )
+                )
+                continue
         # MAJOR 1 of the tan-cli#510 review: `None` (never surfaced) whenever
         # resolution landed on the exact string the plan already named --
         # see [`SliceOutcome.resolved_tool`]'s own docstring.

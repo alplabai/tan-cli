@@ -113,6 +113,10 @@ def world(tmp_path):
     west.chmod(west.stat().st_mode | stat.S_IEXEC)
     out = tmp_path / "out"
     out.mkdir()
+    # tan-cli#1429: a real west needs a `.west` above where it runs, or it stops
+    # with `unknown command "build"`; tan now refuses that layout up front.
+    # Inside `out`, not at the sdk parent, so tan's own resolution is unchanged.
+    (out / ".west").mkdir()
     (out / "board.yaml").write_text("version: 1\n", encoding="utf-8")
     plan = out / "plan.json"
     app = tmp_path / "app"

@@ -3619,6 +3619,14 @@
       "note": "tan-cli#1384: the workspace patch-check cache key could not be built in full (the west module list, `zephyr/patches.yml` or a patch it names was unreadable), so nothing is cached and every build re-verifies. The message names the reason. Never changes `ok` or the exit code. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
+      "code": "build.workspace-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#1429: a `west build` slice refused before spawn because west could not find a workspace for it -- `--sdk-root` names a checkout that is not the manifest project of any workspace tan resolved (a sibling worktree), the slice's cwd has no `.west` on any ancestor, and the spawn env's `ZEPHYR_BASE` is unset or has none either. Previously west itself failed with `unknown command \"build\"` under only the generic `build.slice-failed`. Keyed on what west will do, not on tan's own manifest-guarded resolution, so an app inside some workspace tree (west's own ancestor walk) is never refused. Refused by `tan.core.west_workspace_refusal.workspace_unresolved_refusal` in `execute.py`, promoted by `build_cmd._workspace_unresolved_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
       "code": "build.zephyr-base-ignored",
       "status": "reserved",
       "severity": "info",
