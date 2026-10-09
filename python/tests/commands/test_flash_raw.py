@@ -129,6 +129,7 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
     monkeypatch.delenv("TAN_JLINK", raising=False)
     monkeypatch.delenv("ALP_FLASH_REQUIRE_DPIDR", raising=False)
     monkeypatch.setenv(flash_raw.RESERVATION_ENV, "e1m-aen-evk-02")
+    monkeypatch.setenv(flash_raw.WRAPPER_ENV, str(stub))
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_cmd, "_flow_d_preflight", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_raw, "_mram_window", lambda _ctx: (BASE, MRAM))
@@ -284,14 +285,92 @@ def test_the_manifest_confirm_never_arms_a_raw_write(tmp_path, monkeypatch):
     assert data["entries"][0]["status"] == "planned" and jl.scripts == []
 
 
-def test_a_place_paired_with_a_raw_segger_binary_is_refused(tmp_path, monkeypatch):
-    _blobs, paths = _setup(tmp_path, monkeypatch)
-    (tmp_path / "tools" / "JLinkExe").write_bytes(b"\x7fELF\x02\x01\x01 raw segger")
+def _refused(tmp_path, monkeypatch, paths, text):
     jl = FakeJlink(monkeypatch)
     rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
-    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
-    assert "not a reservation-enforcing wrapper" in data["entries"][0]["message"]
-    assert jl.scripts == []
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"], (data, issues)
+    assert text in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_a_look_alike_jlinkexe_on_path_printing_the_marker_is_refused(tmp_path, monkeypatch):
+    """Review: a marker string in whatever is on PATH is not an interlock."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    fake = other / "JLinkExe"
+    fake.write_text("#!/bin/bash\n# JLINK_RUN_STANDIN JLINK_RUN_PLACE\n", encoding="utf-8")
+    os.chmod(fake, 0o755)
+    monkeypatch.setenv("PATH", str(other))  # it is what tan finds
+    _refused(tmp_path, monkeypatch, paths, "is not the configured wrapper")
+
+
+def test_no_configured_wrapper_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    monkeypatch.delenv(flash_raw.WRAPPER_ENV)
+    _refused(tmp_path, monkeypatch, paths, "TAN_JLINK_WRAPPER is not set")
+
+
+def test_a_relative_wrapper_path_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv(flash_raw.WRAPPER_ENV, "tools/JLinkExe")
+    _refused(tmp_path, monkeypatch, paths, "is not an absolute path")
+
+
+def test_a_relative_jlink_override_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(flash_raw.WRAPPER_ENV, str(tmp_path / "tools" / "JLinkExe"))
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths), jlink_path="tools/JLinkExe")
+    assert rc == 1 and jl.scripts == []
+
+
+def test_a_wrapper_under_the_cwd_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    _refused(tmp_path, monkeypatch, paths, "lives under the current directory")
+
+
+def test_a_world_writable_wrapper_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    os.chmod(tmp_path / "tools" / "JLinkExe", 0o777)
+    _refused(tmp_path, monkeypatch, paths, "world-writable")
+
+
+def test_a_symlink_to_an_untrusted_target_is_judged_by_its_target(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "tools" / "JLinkExe")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(flash_raw.WRAPPER_ENV, str(link))
+    _refused(tmp_path, monkeypatch, paths, "lives under the current directory")
+
+
+def test_labgrid_client_is_never_found_through_path(tmp_path, monkeypatch):
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    fake = shadow / "labgrid-client"
+    fake.write_text(f"#!/bin/sh\necho '  acquired: {ME}'\n", encoding="utf-8")
+    os.chmod(fake, 0o755)
+    monkeypatch.setenv("PATH", f"{shadow}:/usr/bin:/bin")
+    monkeypatch.delenv(flash_raw.LABGRID_ENV, raising=False)
+    monkeypatch.setattr(flash_raw, "LABGRID_DIRS", ())
+    assert flash_raw._labgrid_client() is None
+    assert flash_raw._labgrid_show("p") is None
+    monkeypatch.setenv(flash_raw.LABGRID_ENV, str(fake))  # explicitly configured is used
+    assert flash_raw._labgrid_client() == os.path.realpath(fake)
+    assert ME in flash_raw._labgrid_show("p")
+
+
+def test_labgrid_client_from_a_world_writable_dir_is_not_used(tmp_path, monkeypatch):
+    d = tmp_path / "ww"
+    d.mkdir()
+    fake = d / "labgrid-client"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(fake, 0o755)
+    os.chmod(d, 0o777)
+    monkeypatch.setenv(flash_raw.LABGRID_ENV, str(fake))
+    assert flash_raw._labgrid_client() is None
 
 
 @pytest.mark.parametrize("show", [None, "Place 'p':\n  acquired: other-host/someone\n", "Place 'p':\n"])
@@ -325,11 +404,12 @@ def test_readback_compares_against_the_recorded_hash_not_a_rehash(tmp_path, monk
     assert [r["sha256Expected"] for r in regions] == [_sha(b) for b in blobs]
 
 
-def test_the_wrapper_marker_and_lease_parsers():
-    assert raw_write.is_reservation_wrapper(b"...JLINK_RUN_STANDIN=1...")
-    assert not raw_write.is_reservation_wrapper(b"\x7fELF")
+def test_the_lease_parser_is_strict():
     assert raw_write.lease_holder("x\n  acquired: h/u\n  y") == "h/u"
     assert raw_write.lease_holder("  acquired:\n") is None
+    assert raw_write.lease_holder("  acquired: a/b\n  acquired: c/d\n") is None  # ambiguous
+    assert raw_write.lease_holder("  acquired: a/b\n  acquired: a/b\n") == "a/b"
+    assert raw_write.lease_holder("acquired: a/b\n") is None  # not the top-level field
 
 
 def _soc(tmp_path, monkeypatch, variants, base=BASE):

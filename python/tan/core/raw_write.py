@@ -115,22 +115,13 @@ def planned(specs: Sequence[RawSpec], sha256s: Sequence[str]) -> list[dict]:
     ]
 
 
-#: What the board-farm reservation-enforcing J-Link wrapper (a shell shim into its
-#: `jlink-run.sh` stand-in mode) carries in its text, so tan can tell it from a raw
-#: SEGGER binary without knowing where it is installed.
-WRAPPER_MARKERS = (b"JLINK_RUN_STANDIN", b"JLINK_RUN_PLACE")
-
-
-def is_reservation_wrapper(head: bytes) -> bool:
-    """Whether the first bytes of the resolved J-Link program are a reservation-enforcing
-    wrapper script (a binary SEGGER executable carries neither marker)."""
-    return any(marker in head for marker in WRAPPER_MARKERS)
-
-
 def lease_holder(show_text: str) -> str | None:
-    """The `acquired:` holder (`host/user`) in `labgrid-client -p <place> show` output."""
-    for line in show_text.splitlines():
-        if line.startswith("  acquired:"):
-            holder = line.split(":", 1)[1].strip()
-            return holder or None
-    return None
+    """The `acquired:` holder (`host/user`) in `labgrid-client -p <place> show` output,
+    strictly: exactly one distinct, non-empty value across the `  acquired:` lines, else
+    `None` (ambiguity is never a holder)."""
+    holders = {
+        line.split(":", 1)[1].strip()
+        for line in show_text.splitlines()
+        if line.startswith("  acquired:")
+    }
+    return holders.pop() if len(holders) == 1 and next(iter(holders), "x") else None

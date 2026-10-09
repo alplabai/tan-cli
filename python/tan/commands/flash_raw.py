@@ -20,6 +20,7 @@ import getpass
 import json
 import os
 import socket
+import stat
 import subprocess
 from typing import Any
 
@@ -44,13 +45,13 @@ from tan.core.flow_d_report import (
     sha256_of,
 )
 from tan.core.jlink_binary import resolve_jlink
+from tan.core.subprocess_env import spawn_env
 from tan.core.raw_write import (
     CODE_FAILED,
     CODE_INVALID,
     CODE_RESERVATION,
     RawError,
     RawSpec,
-    is_reservation_wrapper,
     lease_holder,
     parse_raw,
     planned,
@@ -63,6 +64,14 @@ METHOD = "mram_raw"
 #: caller that holds the named labgrid place. tan cannot verify the lease itself, so it
 #: refuses a real write when the marker is absent and reports the place it ran under.
 RESERVATION_ENV = "JLINK_RUN_PLACE"
+#: The reservation-enforcing J-Link wrapper, as an EXPLICIT absolute path. The marker text
+#: inside a program found on PATH or in the cwd is spoofable by anything that can put a file
+#: there, so the wrapper is accepted only by identity with this configured path.
+WRAPPER_ENV = "TAN_JLINK_WRAPPER"
+#: Optional absolute path of `labgrid-client`; otherwise only these fixed directories are
+#: searched -- never `$PATH`, which a shadowing binary could front-run.
+LABGRID_ENV = "TAN_LABGRID_CLIENT"
+LABGRID_DIRS = ("~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin")
 
 
 def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
@@ -174,6 +183,9 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     refusal = _reservation_refusal(place, exe)
     if refusal is not None:
         return fail(refusal, CODE_RESERVATION)
+    # From here on spawn the verified wrapper by its resolved identity, not the PATH-found name.
+    exe = os.path.realpath(os.environ[WRAPPER_ENV])
+    report["jlink"]["binary"] = exe
     report["jlink"]["reservation"] = {"env": RESERVATION_ENV, "place": place, "verified": "labgrid"}
 
     # ── the wrong-board guard, exactly as for a Flow D write ──
@@ -243,44 +255,90 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     return 0, entry("ok", 0, message, preflight_unarmed=not armed), lines
 
 
+def _unsafe(path: str) -> str | None:
+    """Why `path` cannot be trusted as an interlock binary, or `None`: it must be absolute,
+    resolve (symlinks followed) to an executable regular file outside the cwd, and neither it
+    nor any parent directory may be world-writable (a sticky directory is allowed)."""
+    if not os.path.isabs(path):
+        return "is not an absolute path"
+    real = os.path.realpath(path)
+    cwd = os.path.realpath(os.getcwd())
+    if real == cwd or real.startswith(cwd + os.sep):
+        return "lives under the current directory"
+    if not (os.path.isfile(real) and os.access(real, os.X_OK)):
+        return "is not an executable file"
+    node = real
+    while True:
+        try:
+            mode = os.stat(node).st_mode
+        except OSError:
+            return "cannot be inspected"
+        if mode & stat.S_IWOTH and not (stat.S_ISDIR(mode) and mode & stat.S_ISVTX):
+            return f"or its directory {node} is world-writable"
+        parent = os.path.dirname(node)
+        if parent == node:
+            return None
+        node = parent
+
+
+def _labgrid_client() -> str | None:
+    """The absolute `labgrid-client` to run: `TAN_LABGRID_CLIENT`, else the first of the fixed
+    directories holding a trustworthy one. Never a `$PATH` search."""
+    configured = os.environ.get(LABGRID_ENV, "").strip()
+    candidates = (
+        [configured] if configured
+        else [os.path.join(os.path.expanduser(d), "labgrid-client") for d in LABGRID_DIRS]
+    )
+    for candidate in candidates:
+        if os.path.exists(candidate) and _unsafe(candidate) is None:
+            return os.path.realpath(candidate)
+    return None
+
+
 def _reservation_refusal(place: str, exe: str | None) -> str | None:
-    """A refusal text unless a bench reservation is provably held: the place is named
-    (`JLINK_RUN_PLACE`), the resolved J-Link program is the reservation-enforcing wrapper
-    (a raw SEGGER binary ignores the variable, so a place paired with one is refused), and
-    labgrid itself says THIS host/user holds the place."""
+    """A refusal text unless a bench reservation is provably held, failing closed on any
+    ambiguity: the place is named (`JLINK_RUN_PLACE`); the J-Link program tan will run IS the
+    wrapper configured in `TAN_JLINK_WRAPPER` (absolute, symlink-resolved, outside the cwd, not
+    world-writable -- a marker string in some binary found on PATH proves nothing); and
+    `labgrid-client` (absolute, resolved from fixed directories) reports THIS host/user as the
+    holder of the place."""
     need = (
-        "Needs: JLINK_RUN_PLACE=<labgrid place you hold>, a reservation-enforcing JLinkExe "
-        "wrapper first on PATH (or --jlink), and `labgrid-client` able to reach the coordinator."
+        f"Needs: {RESERVATION_ENV}=<labgrid place you hold>, {WRAPPER_ENV}=<absolute path of the "
+        "reservation-enforcing JLinkExe wrapper> and tan running THAT program (--jlink "
+        "<that path>, or it first on PATH), and `labgrid-client` able to reach the coordinator."
     )
     if not place:
         return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}"
-    try:
-        with open(exe or "", "rb") as fh:
-            head = fh.read(4096)
-    except OSError:
-        head = b""
-    if not is_reservation_wrapper(head):
+    configured = os.environ.get(WRAPPER_ENV, "").strip()
+    if not configured:
+        return f"{WRAPPER_ENV} is not set, so no J-Link program can be recognised as the reservation wrapper. {need}"
+    why = _unsafe(configured)
+    if why is not None:
+        return f"{WRAPPER_ENV}={configured} {why}. {need}"
+    if not exe or not os.path.isabs(exe) or os.path.realpath(exe) != os.path.realpath(configured):
         return (
-            f"{RESERVATION_ENV}={place} is set but the J-Link program ({exe}) is not a "
-            "reservation-enforcing wrapper -- a raw SEGGER binary ignores it, so nothing would "
-            f"enforce the lease. {need}"
+            f"the J-Link program tan would run ({exe}) is not the configured wrapper "
+            f"({configured}); a raw or look-alike JLinkExe would not enforce the lease. {need}"
         )
     me = f"{socket.gethostname()}/{getpass.getuser()}"
     holder = lease_holder(_labgrid_show(place) or "")
     if holder != me:
         return (
             f"you do not hold the labgrid place {place} (acquired by: "
-            f"{holder or 'nobody / not readable'}; you are {me}). {need}"
+            f"{holder or 'nobody / not readable / ambiguous'}; you are {me}). {need}"
         )
     return None
 
 
 def _labgrid_show(place: str) -> str | None:
     """`labgrid-client -p <place> show` output, or `None` when it cannot be run."""
+    client = _labgrid_client()
+    if client is None:
+        return None
     try:
         done = subprocess.run(
-            ["labgrid-client", "-p", place, "show"], capture_output=True, text=True, timeout=30,
-            check=False,
+            [client, "-p", place, "show"], capture_output=True, text=True, timeout=30,
+            check=False, env=spawn_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
