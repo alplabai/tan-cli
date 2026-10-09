@@ -366,6 +366,8 @@ def test_a_trusted_wrapper_beats_path_when_no_jlink_flag_is_given(env, monkeypat
     rc, data, _, _ = _run(env)  # PATH still holds the raw stub; the wrapper must win
     assert rc == 0 and data["jlink"]["binary"] == str(shim) and data["singleSpawn"] is True
     assert data["wrapper"]["trusted"] is True and jl.reset_scripts()
+    # tan-cli#1467: the program came from TAN_JLINK_WRAPPER, not from a --jlink flag.
+    assert data["jlink"]["binarySource"] == "TAN_JLINK_WRAPPER"
 
 
 def test_an_explicit_jlink_that_is_not_the_wrapper_is_refused_with_a_place(env, monkeypatch, tmp_path):
@@ -502,3 +504,19 @@ def test_a_stuck_drain_means_the_console_is_not_read(env, monkeypatch):
     rc, data, issues, _ = _run(env, confirm=spec)
     assert rc == 1 and issues[0].code == "reset.console-read-failed"
     assert ser.chunks == [b"Zephyr\n"]  # nothing was read beside the stuck reader
+
+
+def test_an_explicit_jlink_flag_keeps_its_own_binary_source_label(env, monkeypatch, tmp_path):
+    """tan-cli#1467: only a TAN_JLINK_WRAPPER default is relabelled; an explicit --jlink
+    naming the same wrapper still reports "the --jlink flag"."""
+    FakeJlink(monkeypatch)
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "JLinkExe"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    os.chmod(shim, 0o755)
+    monkeypatch.setenv("TAN_JLINK_WRAPPER", str(shim))
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, _, _ = reset_cmd._run(100, None, "3-4.2", str(shim), str(env),
+                                    enumerate_probes=lambda: [PROBE])
+    assert rc == 0 and data["jlink"]["binarySource"] == "the --jlink flag"
