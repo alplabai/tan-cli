@@ -290,6 +290,42 @@ def main(argv: list[str] | None = None) -> int:
                 errors += 1
             captured.append((target, body))
 
+    # Synthetic boards live in the fixture (tan-cli#1424), not in the SDK's
+    # examples/, so the error-contract branch of the regression test never
+    # depends on an example alp-sdk may delete. Goldens sit beside the
+    # board.yaml, outside `emits/`, which is rmtree'd below.
+    synthetic = args.out / "synthetic"
+    synthetic_captured: list[tuple[Path, str]] = []
+    synthetic_boards = sorted(synthetic.rglob("board.yaml"))
+    synthetic_errors = 0
+    for board in synthetic_boards:
+        relative = board.parent.relative_to(args.out).as_posix()
+        for mode in MODES:
+            kind, text = render(alp_orchestrate, board, mode)
+            body = normalise(text, sdk)
+            offender = find_volatile(body)
+            if offender is not None:
+                raise SystemExit(
+                    f"refusing to write the fixture: {relative} --emit {mode} still "
+                    f"carries a {offender} after normalisation."
+                )
+            if kind == "ok":
+                target = board.parent / (mode + _EXTENSION[mode])
+                stale = board.parent / (mode + ".error")
+            else:
+                target = board.parent / (mode + ".error")
+                stale = board.parent / (mode + _EXTENSION[mode])
+                body = f"{kind}\n{body}"
+                synthetic_errors += 1
+            # A board that flips between refusing and emitting must not leave
+            # the other-suffix golden behind: the test would pick whichever
+            # it found first.
+            stale.unlink(missing_ok=True)
+            synthetic_captured.append((target, body))
+    for target, body in synthetic_captured:
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+
     emits = args.out / "emits"
     if emits.exists():
         shutil.rmtree(emits)
@@ -304,7 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     total_bytes = sum(len(b.encode("utf-8")) for _, b in captured)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "PROVENANCE.txt").write_text(
-        _provenance(ref, sdk, len(boards), len(captured), errors, total_bytes),
+        _provenance(ref, sdk, len(boards), len(captured), errors, total_bytes,
+                    len(synthetic_boards), len(synthetic_captured),
+                    synthetic_errors),
         encoding="utf-8", newline="",
     )
     print(f"captured {len(captured)} emits over {len(boards)} boards "
@@ -313,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _provenance(ref: str, sdk: Path, boards: int, emits: int,
-                errors: int, total_bytes: int) -> str:
+                errors: int, total_bytes: int, synthetic_boards: int = 0,
+                synthetic_emits: int = 0, synthetic_errors: int = 0) -> str:
     return f"""\
 THE FROZEN alp-sdk PLANNER ORACLE (tan-cli#509)
 ===============================================
@@ -322,6 +361,7 @@ alp-sdk ref   {ref}
 boards        {boards}
 emits         {emits}  ({errors} of them error-contract, captured as .error)
 bytes         {total_bytes:,}
+synthetic     {synthetic_boards} board(s), {synthetic_emits} emits  ({synthetic_errors} of them refusals), under synthetic/ -- carried in the fixture, not from examples/
 modes         {" ".join(MODES)}
 
 WHAT THESE BYTES ARE. The output of alp-sdk's `scripts/alp_orchestrate/` at the

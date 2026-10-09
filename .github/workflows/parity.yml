@@ -974,7 +974,21 @@ env:
   # together. The range holds no change to `scripts/**` or `metadata/**` (the
   # mirror and hand-port hashes were re-computed and are unchanged), so nothing
   # is re-vendored or re-captured beyond the oracle's `alp-sdk ref` line.
-  PINNED_SDK_TAG: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+  # `c4eb27645` -> `0dee99fb5` (alp-sdk `dev`, #2791 `cameras:` + #2784): the
+  # same lockstep sites move together. `cameras.py`/`camera_owner.py` are new
+  # mirror modules; the planner oracle was re-captured and is byte-identical
+  # (no shipped example sets `cameras:`); scaffold parity is 10/10 unchanged.
+  # `0dee99fb5` -> `183b05509` (tan-cli#1393; alp-sdk `dev`, #2736 camera DT
+  # generation): the same lockstep sites and both gate pins move together.
+  # Mirror: `cameras.py` docstring only; hand-port: `validator.py` re-hashed,
+  # nothing to port. Planner oracle re-captured, byte-identical; scaffold
+  # parity 10/10 unchanged (no `examples/**` or `templates/**` change).
+  # `0dee99fb5` -> `a5a137c7b` (alp-sdk `dev`, #2795 SoM power runtime, #2736):
+  # the same lockstep sites move together. `zephyr_board.py` gains the
+  # `pinctrl_som_power` group; the planner oracle was re-captured and is
+  # byte-identical (the oracle modes do not render the Zephyr board); scaffold
+  # parity is 10/10 unchanged.
+  PINNED_SDK_TAG: a5a137c7b594ebb5d451177803c0eb324069e86b
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1301,7 +1315,11 @@ env:
   # `configArtefacts` entries across 100 `build-plan.json` goldens (#2778);
   # (b) the 7 `.error` goldens of `rpmsg-imx93` deleted with the example
   # (E1M-NX9101 removal, #2781/#2782); the plan's `sdkVersion` is unchanged.
-  PINNED_PLANNER_ORACLE_SDK_REF: c4eb2764542cfaaaaaa637113af56af5cd3b2edd
+  #
+  # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
+  # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
+  # moved.
+  PINNED_PLANNER_ORACLE_SDK_REF: a5a137c7b594ebb5d451177803c0eb324069e86b
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

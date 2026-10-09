@@ -128,3 +128,23 @@ def test_execute_refuses_before_spawning_west(tmp_path, monkeypatch):
 def test_an_unrelated_failure_is_not_promoted():
     out = [execute_module.SliceOutcome("c1", "failed", 2, "slice `c1` terminated with exit code: 2")]
     assert _workspace_unresolved_issues(out) == []
+
+
+@pytest.mark.skipif(not hasattr(Path, "symlink_to") or __import__("os").name == "nt", reason="needs symlinks")
+def test_not_refused_when_spawn_cwd_is_a_symlink_into_a_workspace(tmp_path):
+    """west walks from os.getcwd() (real path): a symlinked cwd whose target
+    sits under a `.west` builds today, so it must not be refused."""
+    sdk_root, _ = _layout(tmp_path)
+    (tmp_path / "ws" / ".west").mkdir(parents=True)
+    real = tmp_path / "ws" / "app"
+    real.mkdir()
+    link = tmp_path / "scratch" / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert workspace_unresolved_refusal(None, ["build"], link, None, sdk_root) is None
+
+
+def test_relative_zephyr_base_resolves_against_the_spawn_cwd(tmp_path):
+    sdk_root, app = _layout(tmp_path)
+    (app / "ws" / ".west").mkdir(parents=True)
+    (app / "ws" / "zephyr").mkdir()
+    assert workspace_unresolved_refusal(None, ["build"], app, "ws/zephyr", sdk_root) is None

@@ -202,6 +202,32 @@ def _goldens() -> list[tuple[str, str, Path]]:
 
 GOLDENS = _goldens()
 
+#: tan-cli#1424. Synthetic boards carried in the fixture itself, beside (not
+#: under) `emits/` because `capture_planner_oracle.py` rewrites `emits/`
+#: wholesale. The frozen examples hold no error-contract case since
+#: rpmsg-imx93 left alp-sdk, which left the `.error` branch below unexercised.
+#: A synthetic V2N board on a `status: reserved` hw_rev restores it without
+#: depending on any example alp-sdk may delete again.
+SYNTHETIC = FIXTURE / "synthetic"
+
+
+def _synthetic_goldens() -> list[tuple[str, str, Path]]:
+    found: list[tuple[str, str, Path]] = []
+    for board in sorted(SYNTHETIC.rglob("board.yaml")):
+        board_rel = board.parent.relative_to(FIXTURE).as_posix()
+        for mode, ext in _EXTENSION.items():
+            for suffix in (ext, ".error"):
+                golden = board.parent / (mode + suffix)
+                if golden.is_file():
+                    found.append((board_rel, mode, golden))
+                    break
+            else:
+                raise AssertionError(f"{board_rel} has no golden for {mode}")
+    return found
+
+
+SYNTHETIC_GOLDENS = _synthetic_goldens()
+
 #: Rendering script for the child. Kept as source here rather than as a file
 #: under `scripts/` because it is a test detail, and because a reader comparing
 #: it against `capture_planner_oracle.py::render` should not have to open a
@@ -211,6 +237,7 @@ import json, re, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 modes = sys.argv[2].split(",")
+synthetic = Path(sys.argv[3])
 from tan.planner_root import bind_sdk_root
 bind_sdk_root(root)
 import tan.planner as pkg
@@ -250,6 +277,15 @@ for board in sorted((root / "examples").rglob("board.yaml")):
         text = re.sub(r'("sdkCommit":\s*)(?:"[0-9a-f]+"|null)',
                       r'\1"<SDK_COMMIT>"', text)
         out[f"{rel}::{mode}"] = [kind, text]
+for board in sorted(synthetic.rglob("board.yaml")):
+    rel = board.parent.relative_to(synthetic.parent).as_posix()
+    for mode in modes:
+        kind, text = render(board, mode)
+        for spelling in (root.as_posix(), str(root)):
+            text = text.replace(spelling, "<SDK>")
+        text = re.sub(r'("sdkCommit":\s*)(?:"[0-9a-f]+"|null)',
+                      r'\1"<SDK_COMMIT>"', text)
+        out[f"{rel}::{mode}"] = [kind, text]
 sys.stdout.write(json.dumps(out))
 '''
 
@@ -260,7 +296,8 @@ def rendered() -> dict[str, list[str]]:
     assert ORACLE is not None
     try:
         result = subprocess.run(
-            [sys.executable, "-c", _CHILD, str(ORACLE), ",".join(_EXTENSION)],
+            [sys.executable, "-c", _CHILD, str(ORACLE), ",".join(_EXTENSION),
+             str(SYNTHETIC)],
             capture_output=True, text=True, cwd=str(REPO_PYTHON),
             env={**os.environ, "PYTHONPATH": str(REPO_PYTHON)},
             # A wedged render child (an emitter that hangs rather than raises)
@@ -378,8 +415,8 @@ def test_every_captured_board_still_exists_in_the_bound_checkout():
 
 @pytest.mark.parametrize(
     "board_rel,mode,golden",
-    GOLDENS,
-    ids=[f"{b.split('/')[-1]}-{m}" for b, m, _ in GOLDENS],
+    GOLDENS + SYNTHETIC_GOLDENS,
+    ids=[f"{b.split('/')[-1]}-{m}" for b, m, _ in GOLDENS + SYNTHETIC_GOLDENS],
 )
 def test_the_emit_matches_the_frozen_oracle(rendered, board_rel, mode, golden):
     key = f"{board_rel}::{mode}"
@@ -395,6 +432,10 @@ def test_the_emit_matches_the_frozen_oracle(rendered, board_rel, mode, golden):
             f"{board_rel} --emit {mode}: alp-sdk raised {want_kind}, tan "
             f"{got_kind!r}. Failing IDENTICALLY is part of parity -- a mode "
             "that quietly stopped refusing is not a pass."
+        )
+        assert got == want, (
+            f"{board_rel} --emit {mode}: both refuse with {want_kind}, but "
+            f"the message differs.\n{_first_diff(want, got)}"
         )
         return
 

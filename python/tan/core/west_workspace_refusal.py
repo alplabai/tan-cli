@@ -51,8 +51,10 @@ class WorkspaceRefusal:
 def west_ancestor(start: Path) -> Path | None:
     """The nearest directory at or above `start` holding a `.west` directory,
     or `None`. Mirrors west's own `west_topdir` walk: unguarded, because west
-    does not check which manifest a `.west` belongs to."""
-    start = Path(start).absolute()
+    does not check which manifest a `.west` belongs to. `start` is resolved
+    (symlinks followed) because west walks from `os.getcwd()`, which POSIX
+    reports as the real path."""
+    start = Path(start).resolve()
     for directory in (start, *start.parents):
         if (directory / ".west").is_dir():
             return directory
@@ -76,7 +78,8 @@ def workspace_unresolved_refusal(
         return None
     if west_ancestor(spawn_cwd) is not None:
         return None
-    if zephyr_base and west_ancestor(Path(zephyr_base)) is not None:
+    # A relative ZEPHYR_BASE is resolved by west against the spawn cwd.
+    if zephyr_base and west_ancestor(Path(spawn_cwd) / zephyr_base) is not None:
         return None
     message = (
         f"{WORKSPACE_UNRESOLVED_MSG} -- `west build` would run from `{spawn_cwd}`, "
@@ -95,7 +98,7 @@ def _unresolved_facts(zephyr_base: str | None, sdk_root: Path) -> str:
     sdk_parent = sdk_root.parent
     return (
         f"{zephyr_base_fact}; and neither `{sdk_parent}` nor "
-        f"`{sdk_parent / 'zephyrproject'}` (next to --sdk-root `{sdk_root}`) holds a `.west`"
+        f"`{sdk_parent / 'zephyrproject'}` (next to the SDK root `{sdk_root}`) holds a `.west`"
     )
 
 
@@ -136,18 +139,20 @@ def unresolved_workspace_verdict(
     found = west_ancestor(start)
     lead = f"west will use `{found}`, a `.west` above `{Path(start).absolute()}`"
     if found is None and zephyr_base:
-        found = west_ancestor(Path(zephyr_base))
+        # As `workspace_unresolved_refusal`: west resolves a relative
+        # ZEPHYR_BASE against the cwd it runs in, which is `start`.
+        found = west_ancestor(Path(start) / zephyr_base)
         lead = f"west may fall back to `{found}`, a `.west` above ZEPHYR_BASE `{zephyr_base}`"
     if found is None:
         return "fail", (
-            f"no Zephyr workspace for --sdk-root `{sdk_root}`: `{Path(start).absolute()}` has "
+            f"no Zephyr workspace for the SDK root `{sdk_root}`: `{Path(start).absolute()}` has "
             f"no `.west` on any ancestor; {_unresolved_facts(zephyr_base, sdk_root)}, so "
             f"a `west build` slice is refused as `build.workspace-unresolved`. {_remedies(sdk_root)}"
         )
     names = manifest_project(found)
     manifest = f"names `{names}` as its manifest" if names else "names no manifest project"
     return "warn", (
-        f"no workspace has --sdk-root `{sdk_root}` as its manifest, but {lead}, which "
+        f"no workspace has the SDK root `{sdk_root}` as its manifest, but {lead}, which "
         f"{manifest} -- a build uses that workspace's Zephyr revision and patches, which "
         f"need not match this checkout's `west.yml`. Run `tan bootstrap --sdk-root "
         f"{sdk_root}` for a workspace of its own."

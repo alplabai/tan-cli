@@ -58,13 +58,26 @@ def test_zephyr_base_inside_a_workspace_is_a_may_not_a_will(tmp_path):
     assert f"west may fall back to `{home}`" in detail
 
 
+def test_a_relative_zephyr_base_resolves_against_the_project_as_build_does(tmp_path):
+    # `tan build`'s refusal resolves a relative ZEPHYR_BASE against the spawn
+    # cwd (#1429); doctor's verdict must agree, not resolve it against
+    # wherever `tan doctor` happens to run.
+    home = _foreign_workspace(tmp_path)
+    sdk = _sibling_sdk(tmp_path)
+    project = tmp_path / "scratch" / "app"
+    project.mkdir(parents=True)
+    status, detail = unresolved_workspace_verdict(project, "../../home/zephyr", sdk)
+    assert status == "warn"
+    assert f"west may fall back to `{home.resolve()}`" in detail
+
+
 def test_project_outside_every_workspace_fails_naming_the_candidates(tmp_path):
     sdk = _sibling_sdk(tmp_path)
     project = tmp_path / "scratch" / "app"
     project.mkdir(parents=True)
     status, detail = unresolved_workspace_verdict(project, None, sdk)
     assert status == "fail"
-    assert f"no Zephyr workspace for --sdk-root `{sdk}`" in detail
+    assert f"no Zephyr workspace for the SDK root `{sdk}`" in detail
     assert f"`{project}` has no `.west` on any ancestor" in detail
     assert "ZEPHYR_BASE is unset" in detail
     assert "build.workspace-unresolved" in detail

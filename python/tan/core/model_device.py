@@ -68,6 +68,14 @@ _WERR_RE = re.compile(r"^ENERGY-WERR (\d+) (active|idle) timed_out=(\d)")
 _WARN_WRAP_RE = re.compile(r"^ENERGY-WARN (active|idle) window (\d+) ms exceeds the cycle-counter wrap")
 _PAIR_SKIP_RE = re.compile(r"^ENERGY-PAIR (\d+) SKIPPED")
 
+#: The app's own verdict that its energy delta is noise (tan-cli#1387).
+_DEVICE_UNRESOLVED = "RESULT FAIL: delta not resolvable"
+
+#: aen-inference-energy's `NOISE_SIGMA`: a pair-to-pair mean must clear this
+#: many standard errors of the mean (`spread / sqrt(pairs)`) to be a result.
+#: Used only when the capture carries no device verdict of its own.
+NOISE_SIGMA = 3.0
+
 
 class DeviceCaptureError(Exception):
     """The console capture is missing pieces, malformed or from an older app."""
@@ -92,6 +100,9 @@ class ParsedCapture:
     skipped: frozenset = frozenset()
     wrapped: frozenset = frozenset()
     latency_result: dict[str, Any] | None = None
+    #: The app's `RESULT PASS: ... mJ/inference` or `RESULT FAIL: delta not
+    #: resolvable` line, whichever came last; `None` when it printed neither.
+    energy_verdict: str | None = None
 
 
 def _json_object(text: str, what: str) -> dict[str, Any]:
@@ -164,6 +175,7 @@ def parse_console(text: str) -> ParsedCapture:
     timed_out: set[tuple[int, str]] = set()
     skipped: set[int] = set()
     wrapped: set[tuple[int, str]] = set()
+    energy_verdict: str | None = None
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -201,6 +213,12 @@ def parse_console(text: str) -> ParsedCapture:
             warn.append(line)
         elif line.startswith("RESULT ") and " WARN: " in line:
             warn.append("WARN: " + line.split(" WARN: ", 1)[1])
+        elif line.startswith("RESULT FAIL:"):
+            warn.append(line)
+            if line.startswith(_DEVICE_UNRESOLVED):
+                energy_verdict = line
+        elif line.startswith("RESULT PASS:") and "mJ/inference" in line:
+            energy_verdict = line
         elif line.startswith("ENERGY-PAIR "):
             m = _PAIR_SKIP_RE.match(line)
             if m:
@@ -226,7 +244,8 @@ def parse_console(text: str) -> ParsedCapture:
             if len(points) < 2:
                 raise DeviceCaptureError(f"window {window} phase {phase!r} has {len(points)} sample(s); need >= 2")
     return ParsedCapture(cfg, samples, spans, device_result, werr, warn, pair_skips,
-                         frozenset(timed_out), frozenset(skipped), frozenset(wrapped), latency_result)
+                         frozenset(timed_out), frozenset(skipped), frozenset(wrapped), latency_result,
+                         energy_verdict)
 
 
 def _samples_to_power(points: list[tuple[int, int]], cycles_per_s: float,
@@ -370,6 +389,31 @@ def latency_from_capture(parsed: ParsedCapture) -> tuple[float, int, float]:
     return round(median(per_ms), max(0, math.ceil(-math.log10(resolution_ms)))), total, median(per_cycles)
 
 
+def _unresolved_energy(parsed: ParsedCapture, energy: EnergyMeasurement | None) -> dict | None:
+    """tan-cli#1387: the measurement, kept for diagnostics, when its delta is
+    noise; `None` when it is a result (or there is none). The app's own verdict
+    line wins when it printed one; otherwise the app's rule is applied here:
+    with >= 2 pairs the mean must exceed `NOISE_SIGMA` standard errors of the
+    mean, with one pair it must be > 0."""
+    if energy is None:
+        return None
+    pairs = len(_energy_windows(parsed))
+    value, spread = energy.value_mj_per_inference, energy.spread_mj
+    verdict = parsed.energy_verdict
+    if verdict is not None:
+        if not verdict.startswith(_DEVICE_UNRESOLVED):
+            return None
+        source = "device"
+    elif value > (NOISE_SIGMA * spread / math.sqrt(pairs) if spread is not None else 0.0):
+        return None
+    else:
+        source = "host"
+    return {
+        "valueMjPerInference": value, "spreadMj": spread, "rail": energy.rails[0],
+        "pairs": pairs, "verdict": source, "deviceLine": verdict,
+    }
+
+
 def run_result_from_capture(parsed: ParsedCapture) -> tuple[RunResult, EnergyMeasurement | None, dict]:
     """The `RunResult` (tier-device schema), the labelled energy measurement when
     the capture supports one (else `None`, with the reason in
@@ -383,8 +427,12 @@ def run_result_from_capture(parsed: ParsedCapture) -> tuple[RunResult, EnergyMea
             energy = measurement_from_capture(parsed)
         except (DeviceCaptureError, ArithmeticError) as err:
             note = f"energy not derived: {err}"
+    unresolved = _unresolved_energy(parsed, energy)
+    if unresolved is not None:
+        energy = None
     diagnostics = capture_diagnostics(parsed, energy)
     diagnostics["energyNote"] = note
+    diagnostics["unresolvedEnergy"] = unresolved
     diagnostics["windowLatencyMs"] = latency_ms
     diagnostics["latencyScope"] = LATENCY_SCOPE
     if parsed.latency_result is not None and "ms_per_inference" in parsed.latency_result:

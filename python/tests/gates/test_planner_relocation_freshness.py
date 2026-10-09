@@ -1389,7 +1389,22 @@ from tests.conftest import sdk_root
 #: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
 #: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
 #: at `c4eb27645` and is unchanged, so nothing is ported.
-PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- #2782 merge + docs; no planner change in range (tan-cli#1427)
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0dee99fb5` -> `183b05509` (tan-cli#1393).
+#: One commit, `183b05509` (#2736, camera DT generation): `cameras.py`'s module
+#: docstring now names `scripts/gen_camera_dt.py` as the producer of the sensor
+#: DT include -- re-copied verbatim, no code change. `gen_camera_dt.py` and
+#: `check_camera_parity.py` are new SDK-side scripts with no planner caller.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (mirror / PINNED_HASHES; tan-cli#1393): one
+#: upstream commit, #2795 (`a5a137c7b`, SoM power runtime). No file under
+#: `scripts/alp_orchestrate/` changed, so every mirrored hash re-computes
+#: unchanged at `a5a137c7b`.
+#: RE-MEASURED, not assumed: the planner oracle re-captured at `a5a137c7b`
+#: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
+#: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
+#: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
+PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1431,11 +1446,13 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
-    "buildplan.py": "77c61608769ae5f07cc10f683096568284b8173fab676ce84bfc09a7220c176e",
+    "buildplan.py": "2bccfc11af0c7f03ab16c708df0563bda6d2a8b143b59f8481b1ad1beaeab521",
+    "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
+    "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "321b320bfb72740188ddbbcb0ed710cefadbbaa383d29eaf97975079c9db32d2",
+    "kconfig.py": "9f6d147928917fcedb5004fef10aeaa16c8d77ef3d8025402878bd06594c1274",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
@@ -1448,7 +1465,7 @@ PINNED_HASHES: dict[str, str] = {
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
-    "orchestrator.py": "80e7202bdf430df392b303a1ca70778bcc73fab47207065da7fb9041133f19b0",
+    "orchestrator.py": "d4f6b83d85132a6f5a954104779294dd111771be24028239b7e96caeee1541d7",
     "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
     "partition.py": "837fb76f6a7fe288c863541c98ddcbf1af5ca206f051922d12db06a8670025d8",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
@@ -2419,7 +2436,40 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
 #: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
-HAND_PORT_PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-sdk origin/dev -- no hand-port change in range (tan-cli#1427)
+#:
+#: AUDIT `0dee99fb5` -> `183b05509` (tan-cli#1393): one hand-port source changed,
+#: re-hashed in `HAND_PORT_HASHES`.
+#:   - `scripts/alp_cli/validator.py` (`183b05509`, #2736) -- camera connector
+#:     checks. Nothing to port: tan spawns the SDK validator, and its hand-port
+#:     of this file is only `load_board_schema`/`iter_schema_errors` (in
+#:     `loader.py`), neither of which changed.
+#: Also ported here, from the `c4eb27645` -> `0dee99fb5` range:
+#:   - `scripts/alp_project.py` (`ed57bd025`, #2791) -- `--emit cmake-args`
+#:     turns an `OrchestratorError` (an unbuildable `cameras:` entry) into one
+#:     refusal line. `tan generate --target cmake-args` renders in-process, not
+#:     through the SDK validator, so `planner_emit._render_per_core` maps it to
+#:     `PlannerEmitError` rather than letting `CameraSelectError` escape.
+#:   - `scripts/gen_zephyr_board.py` (#2784) -- the power-node port gains the
+#:     tan-cli#591 floor: a bound checkout without `on-module-links-v2` raises
+#:     `SdkTooOldError` (`aen.som_power_domains`), not the schemaVersion
+#:     authoring error that blames `on-module-links.yaml`.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (tan-cli#1393): two hand-port sources changed.
+#: `scripts/gen_zephyr_board.py` (#2795) -- PORTED: `_aen_som_power_dts` now
+#: emits the `&pinctrl { pinctrl_som_power: ... }` group (`group0` with
+#: `pinmux` = every output control pad of the SKU's present domains, sorted,
+#: `PIN_P<port>_<pin>__LPGPIO` for port 15 else `__GPIO`; `input-enable;`
+#: `input-schmitt-enable;`) ahead of the `/ { som-power }` node, and the node
+#: gains `pinctrl-0 = <&pinctrl_som_power>; pinctrl-names = "default";`.
+#: `scripts/alp_cli/validator.py` -- docstring-only (`camera_connector_problems`
+#: follow-up note); tan spawns the SDK validator, nothing to port. Also in range
+#: and needing no port: `on-module-links.yaml` v2 `power_domains` gains
+#: `dependents[].kind: phy_refclk` (schema enum) and the `deep_power_down_cmd`
+#: -> `hold_reset` default_action change; tan reads that YAML through the
+#: existing `power_domains` loader and the enum is validated by the SDK schema,
+#: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
+#: `"phy_refclk"` on the ethernet-PHY domain.
+HAND_PORT_PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2483,7 +2533,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "c4eb2764542cfaaaaaa637113af56af5cd3b2edd"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "3baa0643ef672573b995e836112851764c4363073439c98d8ec5e3e9e8bbeb66",
+    "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
@@ -2495,8 +2545,8 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
     "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
     "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
-    "scripts/alp_cli/validator.py": "6e9c8f0e8b5c82063b2bc36ee5021781b43374b0403b0a1e16fdce97b7475e47",
-    "scripts/alp_project.py": "cc38d5c4fa1d549e02858179b58cbfb412c6c7295941079718ef82f04bd7237b",
+    "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
+    "scripts/alp_project.py": "c505f9dfad7557715929cbe190830fe21268695891b637b28752c0de65389afd",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
