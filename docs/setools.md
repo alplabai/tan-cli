@@ -339,6 +339,11 @@ section 0.6). `tan flash` and `tan run --flash` read it after `west flash`:
   transcript the verdict names, confirm by hand what is resident, and only
   then reach for `--replace-atoc`. If the runner says the read succeeded but
   the table format was not recognised, file the transcript instead.
+- On either refusal, west's runner-loading warnings (`The module for runner
+  "rtsflash" could not be imported`, `WARNING: runners.alif_flash: ...`) are
+  left out of the refusal's `West reported:` tail and reported verbatim as the
+  warning `flash.runner-setup-warnings`. They describe this host's Python
+  environment, not the write.
 - **No verdict, or one tan cannot read** (missing, malformed, an unknown
   schema or status, or a status/`query_status`/`foreign` combination the
   runner does not produce) after a failure → the ordinary

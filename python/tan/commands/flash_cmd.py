@@ -177,7 +177,11 @@ from tan.core.atoc_guard import (
     UNGUARDED,
     ReplaceAtocDecision,
 )
-from tan.core.atoc_guard_messages import ambiguous_replace_message
+from tan.core.atoc_guard_messages import (
+    ambiguous_replace_message,
+    runner_setup_note,
+    split_runner_setup_noise,
+)
 from tan.core.global_flags import accept_global_flags
 from tan.core.jlink_probe import (
     CODE_NOT_FOUND,
@@ -339,6 +343,10 @@ class _Entry:
     #: `_run` reports `flash.atoc-guard-refused` rather than
     #: `flash.entry-failed`. NOT part of the envelope contract, like the above.
     atoc_guard_refused: bool = False
+    #: tan-cli#1426: west's runner-loading warnings taken out of a refusal's
+    #: message; `_run` reports them as `flash.runner-setup-warnings`. NOT part
+    #: of the envelope contract, like the above.
+    runner_setup_noise: tuple[str, ...] = ()
     #: tan-cli#1267: a `--replace-atoc` / unguarded-runner disclosure and its
     #: `tan.core.atoc_guard` kind, which `_run` maps to an issue code.
     atoc_warning: str | None = None
@@ -1837,12 +1845,22 @@ def _capture_tail(outcome: _Outcome) -> str | None:
     before."""
     if outcome.success:
         return None
+    return _join_tail(_captured_lines(outcome), outcome.returncode)
+
+
+def _captured_lines(outcome: _Outcome) -> list[str]:
+    """The captured transcript as a terminal shows it, stderr preferred (see
+    [`_capture_tail`])."""
     text = outcome.stderr
     if not text.strip():
         text = outcome.stdout
-    tail = _console_lines(text)[-4:]
+    return _console_lines(text)
+
+
+def _join_tail(lines: list[str], returncode: int) -> str:
+    tail = lines[-4:]
     if not tail:
-        return f"exited rc={outcome.returncode}"
+        return f"exited rc={returncode}"
     return " | ".join(tail)
 
 
@@ -2853,6 +2871,7 @@ def _flash_entry_body(
         preflight_unarmed: bool = False,
         atoc_unacknowledged: bool = False,
         atoc_guard_refused: bool = False,
+        runner_setup_noise: tuple[str, ...] = (),
         atoc_sections_written: tuple[str, ...] = (),
         probe_refusal: str | None = None,
         issue_code: str | None = None,
@@ -2863,6 +2882,7 @@ def _flash_entry_body(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
             atoc_unacknowledged=atoc_unacknowledged, atoc_guard_refused=atoc_guard_refused,
+            runner_setup_noise=runner_setup_noise,
             atoc_warning=guard.warning, atoc_warning_kind=guard.warning_kind,
             atoc_sections_written=atoc_sections_written,
             probe=probe_echo, probe_refusal=probe_refusal,
@@ -3570,12 +3590,22 @@ def _flash_entry_body(
         )
     msg = _execute_message(outcome, method, entry_id)
     refused = False
+    noise: list[str] = []
     if guard.guarded:
+        # tan-cli#1426: a refusal's "West reported" tail is read without
+        # west's runner-loading warnings, which otherwise take the tail's
+        # slots and bury the guard's verdict; they are reported separately.
+        # Any other failure keeps them -- there a missing runner may be the cause.
+        kept, noise = split_runner_setup_noise(_captured_lines(outcome))
         msg, refused = guarded_failure_message(
-            msg, entry_id, guard_build_dir, stale, earlier_sections or {}
+            msg, entry_id, guard_build_dir, stale, earlier_sections or {},
+            refused_west_message=f"{method}[{entry_id}]: {_join_tail(kept, outcome.returncode)}",
         )
     lines.append(f"  FAIL: {msg}")
-    return 1, entry(method, "failed", 1, msg, atoc_guard_refused=refused), lines
+    return 1, entry(
+        method, "failed", 1, msg, atoc_guard_refused=refused,
+        runner_setup_noise=tuple(noise) if refused else (),
+    ), lines
 
 
 def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
@@ -4527,6 +4557,10 @@ def _run(
             elif entry.atoc_guard_refused:
                 # tan-cli#1267: the runner's own guard refused, before burning.
                 issues.append(Issue("flash.atoc-guard-refused", "error", entry.message))
+                if entry.runner_setup_noise:
+                    note = runner_setup_note(entry.id, entry.runner_setup_noise)
+                    text_lines.append(note)
+                    issues.append(Issue("flash.runner-setup-warnings", "warning", note))
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
         if entry.ram_watch_incomplete:

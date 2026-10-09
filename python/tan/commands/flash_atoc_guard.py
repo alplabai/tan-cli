@@ -208,16 +208,19 @@ def read_verdict(verdict_dir: str) -> GuardVerdict | str:
 
 def guarded_failure_message(
     west_message: str, entry_id: str, verdict_dir: str, stale: str | None,
-    earlier: Mapping[str, str],
+    earlier: Mapping[str, str], *, refused_west_message: str | None = None,
 ) -> tuple[str, bool]:
     """The message for a failed `west flash` on a guarded runner, and whether
     the guard refused it. `earlier`: ATOC section -> the entry of this run
-    that wrote it."""
+    that wrote it. `refused_west_message`, when given, stands in for
+    `west_message` on a refusal only (tan-cli#1426: west's tail without its
+    runner-loading warnings)."""
     verdict = stale if stale is not None else read_verdict(verdict_dir)
     if isinstance(verdict, str):
         return west_message + unreadable_note(verdict), False
     if verdict.refused:
-        return f"{refusal_message(entry_id, verdict, earlier)} West reported: {west_message}", True
+        reported = west_message if refused_west_message is None else refused_west_message
+        return f"{refusal_message(entry_id, verdict, earlier)} West reported: {reported}", True
     return f"{west_message} ({passed_note(verdict, failed=True)}; the failure came after it)", False
 
 
