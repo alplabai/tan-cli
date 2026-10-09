@@ -28,6 +28,7 @@ from tan.commands import flash_cmd as fc
 from tan.commands import reset_confirm as rc_mod
 from tan.commands.monitor_cmd import MonitorError
 from tan.core import reset_plan as rp
+from tan.core import trusted_path
 from tan.core.flash_plan import FlashPlan, FlashPlanError
 from tan.core.global_flags import accept_global_flags
 from tan.core.jlink_probe import HANDSHAKE_PREFIX, USB_PATH_ENV, parse_handshakes
@@ -122,6 +123,12 @@ def _finish_pulse(data, ser, confirm, pulse_ms) -> _Result:
         return ExitCode.SUCCESS, data, [note], [line + "; boot not confirmed"]
     data["console"] = rc_mod.observe(ser, confirm)
     data["resetObserved"] = bool(data["console"]["observed"])
+    if "error" in data["console"]:
+        data["resetObserved"] = "unknown"
+        issue = Issue("reset.console-read-failed", "error",
+                      f"pulse sent, but reading {confirm.port} failed ({data['console']['error']}): "
+                      "reset not confirmed either way")
+        return _fail(data, issue)
     if not data["resetObserved"]:
         issue = Issue("reset.boot-not-observed", "error",
                       f"pulse sent, but no console line matched --expect within the {confirm.window_s}s "
@@ -155,7 +162,12 @@ def _run(
     data["jlink"] = {"binary": exe, "binarySource": found.source if found else None}
     if exe is None:
         return _fail(data, Issue("reset.failed", "error", fc._NO_TRUSTED_JLINK))
-    fast = bool(data["place"]) and probe_usb_path is not None
+    trusted, why = trusted_path.is_configured_wrapper(exe)
+    data["wrapper"] = {"trusted": trusted, "why": why or None}
+    # Single-spawn mode only when the J-Link program IS the configured wrapper: a real SEGGER
+    # JLinkExe given JLINK_RUN_PLACE would skip ShowEmuList and pulse whichever probe
+    # enumerates first.
+    fast = bool(data["place"]) and probe_usb_path is not None and trusted
     try:
         picked = _select(data, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes)
         if isinstance(picked, tuple) and len(picked) == 4:
@@ -173,19 +185,29 @@ def _run(
             ser = rc_mod.open_console(confirm)
         except MonitorError as err:
             return _fail(data, Issue("reset.console-open-failed", "error", err.message))
-    spawn_started = time.monotonic()
-    out = _spawn(guard, script, exe, probe_usb_path, fast)
-    data["timing"] = {
-        "prepSeconds": round(spawn_started - started, 3),
-        "jlinkSpawnSeconds": round(time.monotonic() - spawn_started, 3),
-        "note": "jlinkSpawnSeconds includes any wrapper preamble before the pulse itself",
-    }
-    problem = _verdict(data, out, guard, fast, probe_usb_path)
-    if problem is not None:
+    drain = rc_mod.Drain(ser) if ser is not None else None
+    try:
+        spawn_started = time.monotonic()
+        out = _spawn(guard, script, exe, probe_usb_path, fast)
+        if drain is not None:
+            drain.stop()
+        data["timing"] = {
+            "prepSeconds": round(spawn_started - started, 3),
+            "jlinkSpawnSeconds": round(time.monotonic() - spawn_started, 3),
+            "note": "jlinkSpawnSeconds includes any wrapper preamble before the pulse itself",
+        }
+        problem = _verdict(data, out, guard, fast, probe_usb_path)
+        if problem is not None:
+            return _fail(data, problem)
+        return _finish_pulse(data, ser, confirm, pulse_ms)
+    finally:
+        if drain is not None:
+            drain.stop()
         if ser is not None:
-            ser.close()
-        return _fail(data, problem)
-    return _finish_pulse(data, ser, confirm, pulse_ms)
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001 -- observe() already closed it
+                pass
 
 
 def reset(

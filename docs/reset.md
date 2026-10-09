@@ -49,12 +49,19 @@ written, erased or flashed. A test holds the generated script to that verb list.
 
 ## One spawn, and what it proves
 
-* With `JLINK_RUN_PLACE` set and `--probe-usb-path` given, `tan reset` makes ONE
-  J-Link spawn (`data.singleSpawn: true`) and does not run the `ShowEmuList`
-  verification pass first: each pass through the board-farm wrapper costs tens of
-  seconds, longer than a STOP window. The wrapper itself refuses a
-  `TAN_PROBE_USB_PATH` that is not its place's port (exit 96) before it opens any
-  probe, and tan checks afterwards that the output carries
+* With `JLINK_RUN_PLACE` set, `--probe-usb-path` given AND the J-Link program being
+  the board-farm wrapper, `tan reset` makes ONE J-Link spawn
+  (`data.singleSpawn: true`) and does not run the `ShowEmuList` verification pass
+  first: each pass through the wrapper costs tens of seconds, longer than a STOP
+  window. "Being the wrapper" means its realpath equals that of the absolute path
+  in `TAN_JLINK_WRAPPER`, which must be outside the cwd and owned by root or you,
+  with no world- or foreign-group-writable node on either path chain (the rule
+  `tan flash --raw` uses; `data.wrapper` says whether it held and why not). A real
+  SEGGER `JLinkExe` (from `--jlink`, `TAN_JLINK`, PATH or `/opt/SEGGER`) never
+  qualifies, even with `JLINK_RUN_PLACE` set, because it would pulse whichever
+  probe enumerates first: it takes the guarded two-pass path with `SelectEmuBySN`.
+  The wrapper itself refuses a `TAN_PROBE_USB_PATH` that is not its place's port
+  (exit 96) before it opens any probe, and tan checks afterwards that the output carries
   `TAN_PROBE_ISOLATED_USB_PATH=<that path>` (`data.probe.isolation:
   wrapper-attested:<path>`); a missing or different handshake is
   `flash.probe-verify-failed`, saying the pulse already ran. In that mode the
@@ -91,3 +98,15 @@ written, erased or flashed. A test holds the generated script to that verb list.
   STOP window; that latency is the wrapper's, not tan's.
 * Under a wrapper the script relies on the wrapper's USB mask (and the
   `TAN_PROBE_ISOLATED_USB_PATH` handshake) instead of a `SelectEmuBySN` line.
+
+* While J-Link runs, the console is read and discarded in the background and the
+  reader is stopped the moment J-Link exits, so stale `rfc2217://` lines still in
+  flight before the pulse cannot confirm it. There is deliberately no fixed
+  discard after exit: a real banner has been seen 0.088 s after J-Link exit.
+* A console that fails while being read is `reset.console-read-failed` (exit 1,
+  `resetObserved: "unknown"`), not "the board did not reboot".
+* `--confirm-console` accepts a local device path or one of pyserial's built-in
+  URL schemes only (`rfc2217://`, `socket://`, `loop://`, `spy://`, `alt://`,
+  `hwgrep://`, `cp2110://`); `rfc2217://` and `socket://` need `HOST:PORT`.
+* TODO(#1461/#1457): `tan reset` should also require the per-session lease nonce,
+  sharing one helper with `tan flash --raw` once #1454 merges.

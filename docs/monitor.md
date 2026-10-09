@@ -14,7 +14,7 @@ tan monitor --port rfc2217://gw:4001 --baud 115200 --capture --duration 60 --log
   --reopen-at 23040 --on 'entering STOP'
 ```
 
-A malformed `--port` URL (`rfc2217://host:` with an empty port, a missing host, a non-numeric or out-of-range port, an unknown scheme) is refused up front as `monitor.bad-port` (exit 2); local device paths are not judged.
+A malformed `--port` URL (`rfc2217://host:` with an empty port, a missing host, a non-numeric or out-of-range port, an unknown scheme) is refused up front as `monitor.bad-port` (exit 2); local device paths are not judged. Only pyserial's built-in URL schemes are accepted (`rfc2217://`, `socket://`, `loop://`, `spy://`, `alt://`, `hwgrep://`, `cp2110://`); `rfc2217://` and `socket://` need `HOST:PORT`.
 
 ## Sending input
 

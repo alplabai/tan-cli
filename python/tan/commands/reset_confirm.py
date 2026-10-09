@@ -13,6 +13,8 @@ reset.
 """
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,6 +69,35 @@ def confirm_spec(
             "--confirm-baud, --confirm-timeout and --confirm-window must be greater than 0"
         )
     return ConfirmSpec(port, pattern, baud, timeout_s, window_s)
+
+
+class Drain:
+    """Reads and discards everything the console delivers while J-Link runs.
+
+    Stale rfc2217 lines still in flight when the pulse is sent would otherwise
+    arrive after J-Link exits and could match `--expect`. `stop()` is called the
+    moment J-Link returns; whatever arrives after that is post-pulse data. (A
+    fixed discard after exit would instead eat a real banner: one measured
+    0.088 s after J-Link exit.)"""
+
+    def __init__(self, ser) -> None:
+        self._ser = ser
+        self._halt = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._halt.is_set():
+            try:
+                got = self._ser.read(max(1, int(getattr(self._ser, "in_waiting", 0) or 0)))
+            except Exception:  # noqa: BLE001 -- observe() reports a dead link
+                return
+            if not got:
+                time.sleep(0.005)
+
+    def stop(self) -> None:
+        self._halt.set()
+        self._thread.join(timeout=1.0)
 
 
 def open_console(spec: ConfirmSpec):

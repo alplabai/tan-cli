@@ -62,6 +62,11 @@ def _run(tmp_path, pulse=100, usb="3-4.2", **kw):
                           enumerate_probes=lambda: [PROBE], **kw)
 
 
+def as_wrapper(env, monkeypatch):
+    """Make the PATH-resolved stub JLinkExe the configured, trusted wrapper."""
+    monkeypatch.setenv("TAN_JLINK_WRAPPER", str(env / "tools" / "JLinkExe"))
+
+
 def codes(issues):
     return [i.code for i in issues]
 
@@ -180,6 +185,7 @@ def test_jlink_argv_is_the_proven_one(env, monkeypatch):
 
 
 def test_with_a_place_there_is_one_spawn_and_no_serial_line(env, monkeypatch):
+    as_wrapper(env, monkeypatch)
     jl = FakeJlink(monkeypatch)
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     rc, data, issues, _ = _run(env)
@@ -191,6 +197,7 @@ def test_with_a_place_there_is_one_spawn_and_no_serial_line(env, monkeypatch):
 
 
 def test_without_the_wrapper_handshake_the_fast_path_fails(env, monkeypatch):
+    as_wrapper(env, monkeypatch)
     FakeJlink(monkeypatch, banner="Script processing completed.\n")
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     rc, _, issues, _ = _run(env)
@@ -198,10 +205,19 @@ def test_without_the_wrapper_handshake_the_fast_path_fails(env, monkeypatch):
 
 
 def test_a_handshake_for_another_path_fails(env, monkeypatch):
+    as_wrapper(env, monkeypatch)
     FakeJlink(monkeypatch, banner="TAN_PROBE_ISOLATED_USB_PATH=3-9\nScript processing completed.\n")
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     rc, _, issues, _ = _run(env)
     assert rc == 1 and issues[0].code == "flash.probe-verify-failed"
+
+
+class _NoDrain:
+    def __init__(self, ser):
+        pass
+
+    def stop(self):
+        pass
 
 
 class _Console:
@@ -221,6 +237,7 @@ class _Console:
 def _confirm(monkeypatch, chunks):
     ser = _Console(chunks)
     monkeypatch.setattr(rc_mod, "open_console", lambda spec: ser)
+    monkeypatch.setattr(rc_mod, "Drain", _NoDrain)  # the canned chunks are post-pulse data
     return ser, rc_mod.confirm_spec("rfc2217://gw:4001", "Zephyr", None, 0.5)
 
 
@@ -306,3 +323,90 @@ def test_a_malformed_confirm_console_url_is_a_bad_port_envelope(env):
 def test_confirm_spec_refuses_bad_urls(url):
     with pytest.raises(rc_mod.BadPort):
         rc_mod.confirm_spec(url, "x", None, None)
+
+
+def test_a_real_jlink_with_a_place_takes_the_guarded_two_pass_path(env, monkeypatch):
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")  # no TAN_JLINK_WRAPPER: not the shim
+    rc, data, _, _ = _run(env)
+    assert rc == 0 and data["singleSpawn"] is False and data["wrapper"]["trusted"] is False
+    assert any("ShowEmuList" in x for x in jl.scripts)
+    assert f"SelectEmuBySN {SERIAL}" in jl.reset_scripts()[0]
+
+
+def test_a_wrapper_path_that_is_not_the_resolved_binary_is_not_trusted(env, monkeypatch, tmp_path):
+    jl = FakeJlink(monkeypatch)
+    other = tmp_path / "other"
+    other.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(other, 0o755)
+    monkeypatch.setenv("TAN_JLINK_WRAPPER", str(other))
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    rc, data, _, _ = _run(env)
+    assert data["singleSpawn"] is False and "not the configured wrapper" in data["wrapper"]["why"]
+    assert any("ShowEmuList" in x for x in jl.scripts)
+
+
+def test_a_world_writable_wrapper_is_not_trusted(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    stub = env / "tools" / "JLinkExe"
+    os.chmod(stub, 0o777)
+    as_wrapper(env, monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    _, data, _, _ = _run(env)
+    assert data["singleSpawn"] is False and "world-writable" in data["wrapper"]["why"]
+
+
+def test_a_relative_wrapper_path_is_not_trusted(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    monkeypatch.setenv("TAN_JLINK_WRAPPER", "JLinkExe")
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    _, data, _, _ = _run(env)
+    assert data["singleSpawn"] is False and "absolute" in data["wrapper"]["why"]
+
+
+class _DeadConsole(_Console):
+    def read(self, n=1):
+        raise OSError("link dropped")
+
+
+def test_a_console_read_error_is_not_reported_as_no_reboot(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser = _DeadConsole([])
+    monkeypatch.setattr(rc_mod, "open_console", lambda spec: ser)
+    monkeypatch.setattr(rc_mod, "Drain", _NoDrain)
+    spec = rc_mod.confirm_spec("rfc2217://gw:4001", "Zephyr", None, 0.5)
+    rc, data, issues, _ = _run(env, confirm=spec)
+    assert rc == 1 and issues[0].code == "reset.console-read-failed"
+    assert data["resetObserved"] == "unknown" and "link dropped" in issues[0].message
+
+
+def test_the_console_is_closed_when_the_spawn_raises(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser, spec = _confirm(monkeypatch, [])
+
+    def boom(*a, **k):
+        raise RuntimeError("spawn blew up")
+
+    monkeypatch.setattr(reset_cmd, "_spawn", boom)
+    with pytest.raises(RuntimeError):
+        _run(env, confirm=spec)
+    assert ser.closed
+
+
+def test_drain_discards_what_arrives_before_stop_and_keeps_what_follows():
+    import time
+
+    class Port:
+        def __init__(self):
+            self.queue = [b"stale line\n"]
+
+        def read(self, n=1):
+            time.sleep(0.01)
+            return self.queue.pop(0) if self.queue else b""
+
+    port = Port()
+    drain = rc_mod.Drain(port)
+    time.sleep(0.1)
+    drain.stop()
+    port.queue.append(b"post-pulse banner\n")
+    assert port.read() == b"post-pulse banner\n" and not any(b"stale" in q for q in port.queue)
