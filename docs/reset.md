@@ -56,7 +56,7 @@ written, erased or flashed. A test holds the generated script to that verb list.
   window. "Being the wrapper" means its realpath equals that of the absolute path
   in `TAN_JLINK_WRAPPER`, which must be outside the cwd and owned by root or you,
   with no world- or foreign-group-writable node on either path chain (the rule
-  `tan flash --raw` uses; `data.wrapper` says whether it held and why not). A real
+  `tan flash --raw` uses; `data.wrapper` says whether it held, see below). A real
   SEGGER `JLinkExe` (from `--jlink`, `TAN_JLINK`, PATH or `/opt/SEGGER`) never
   qualifies, even with `JLINK_RUN_PLACE` set, because it would pulse whichever
   probe enumerates first: it takes the guarded two-pass path with `SelectEmuBySN`.
@@ -99,10 +99,13 @@ written, erased or flashed. A test holds the generated script to that verb list.
 * Under a wrapper the script relies on the wrapper's USB mask (and the
   `TAN_PROBE_ISOLATED_USB_PATH` handshake) instead of a `SelectEmuBySN` line.
 
-* While J-Link runs, the console is read and discarded in the background and the
-  reader is stopped the moment J-Link exits, so stale `rfc2217://` lines still in
-  flight before the pulse cannot confirm it. There is deliberately no fixed
-  discard after exit: a real banner has been seen 0.088 s after J-Link exit.
+* While J-Link runs, one background reader takes the console and time-stamps what
+  it reads. When J-Link exits it is joined (never abandoned, never run beside a
+  second reader) and only chunks stamped at or after the exit are handed to the
+  confirmation, so stale `rfc2217://` lines in flight before the pulse cannot
+  confirm it. Nothing is flushed afterwards, and there is no fixed discard: a real
+  banner has been seen 0.088 s after J-Link exit. If the reader cannot be stopped
+  the console is not read at all (`reset.console-read-failed`).
 * A console that fails while being read is `reset.console-read-failed` (exit 1,
   `resetObserved: "unknown"`), not "the board did not reboot".
 * `--confirm-console` accepts a local device path or one of pyserial's built-in
@@ -110,3 +113,19 @@ written, erased or flashed. A test holds the generated script to that verb list.
   `hwgrep://`, `cp2110://`); `rfc2217://` and `socket://` need `HOST:PORT`.
 * TODO(#1461/#1457): `tan reset` should also require the per-session lease nonce,
   sharing one helper with `tan flash --raw` once #1454 merges.
+
+## `data.wrapper` and what the wrapper trust means
+
+`data.wrapper` is `{"trusted": bool, "reason": string | null}`; `reason` is null when
+trusted, else one of `wrapper-env-unset` (`TAN_JLINK_WRAPPER` not set),
+`wrapper-path-unsafe` (not absolute, under the cwd, not an executable file, or a
+node on the path chain is foreign-owned or world/group-writable),
+`wrapper-not-resolved-binary` (the J-Link program tan resolved is not that file),
+`unsupported-platform` (no `pwd`/`grp`, e.g. Windows: single-spawn mode is never
+used there). No paths appear in it.
+
+The trust is **operator-asserted**: `TAN_JLINK_WRAPPER` attests a path, not that the
+file really masks the other probes. tan checks that the path is safe and that the
+resolved program is that path; after the pulse it checks the wrapper's
+`TAN_PROBE_ISOLATED_USB_PATH` handshake, which a wrapper that does not mask could
+also print. Point the variable only at the board-farm shim.

@@ -216,8 +216,8 @@ class _NoDrain:
     def __init__(self, ser):
         pass
 
-    def stop(self):
-        pass
+    def stop(self, exit_ts=None, timeout=2.0):
+        return []
 
 
 class _Console:
@@ -247,7 +247,7 @@ def test_a_matching_console_line_confirms_the_reset(env, monkeypatch):
     rc, data, issues, _ = _run(env, confirm=spec)
     assert rc == 0 and data["resetObserved"] is True and issues == []
     assert data["console"]["matchedLine"].endswith("Zephyr OS ***")
-    assert ser.flushed and ser.closed
+    assert ser.closed
 
 
 def test_no_console_line_is_not_a_reset(env, monkeypatch):
@@ -342,7 +342,7 @@ def test_a_wrapper_path_that_is_not_the_resolved_binary_is_not_trusted(env, monk
     monkeypatch.setenv("TAN_JLINK_WRAPPER", str(other))
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     rc, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and "not the configured wrapper" in data["wrapper"]["why"]
+    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-not-resolved-binary"
     assert any("ShowEmuList" in x for x in jl.scripts)
 
 
@@ -353,7 +353,7 @@ def test_a_world_writable_wrapper_is_not_trusted(env, monkeypatch):
     as_wrapper(env, monkeypatch)
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     _, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and "world-writable" in data["wrapper"]["why"]
+    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-path-unsafe"
 
 
 def test_a_relative_wrapper_path_is_not_trusted(env, monkeypatch):
@@ -361,7 +361,7 @@ def test_a_relative_wrapper_path_is_not_trusted(env, monkeypatch):
     monkeypatch.setenv("TAN_JLINK_WRAPPER", "JLinkExe")
     monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
     _, data, _, _ = _run(env)
-    assert data["singleSpawn"] is False and "absolute" in data["wrapper"]["why"]
+    assert data["singleSpawn"] is False and data["wrapper"]["reason"] == "wrapper-path-unsafe"
 
 
 class _DeadConsole(_Console):
@@ -393,20 +393,83 @@ def test_the_console_is_closed_when_the_spawn_raises(env, monkeypatch):
     assert ser.closed
 
 
-def test_drain_discards_what_arrives_before_stop_and_keeps_what_follows():
+def test_drain_keeps_a_banner_that_lands_while_it_is_mid_read():
+    import threading
     import time
+
+    ready = threading.Event()
 
     class Port:
         def __init__(self):
             self.queue = [b"stale line\n"]
 
         def read(self, n=1):
-            time.sleep(0.01)
-            return self.queue.pop(0) if self.queue else b""
+            if self.queue:
+                return self.queue.pop(0)
+            if ready.wait(0.1):  # a 0.1 s blocking read, like pyserial's timeout
+                ready.clear()
+                return b"banner\n"
+            return b""
 
     port = Port()
     drain = rc_mod.Drain(port)
     time.sleep(0.1)
-    drain.stop()
-    port.queue.append(b"post-pulse banner\n")
-    assert port.read() == b"post-pulse banner\n" and not any(b"stale" in q for q in port.queue)
+    exit_ts = time.monotonic()
+    threading.Timer(0.05, ready.set).start()  # the banner lands 50 ms after exit, mid-read
+    time.sleep(0.01)
+    kept = drain.stop(exit_ts)
+    # Either the drain's own in-flight read caught it (kept) or it is still queued for the
+    # capture's read: it is never discarded, and the pre-exit stale line is never handed on.
+    left = port.read()
+    assert b"banner\n" in kept + [left]
+    assert b"stale line\n" not in kept
+
+
+def test_drain_that_cannot_stop_is_reported_not_raced():
+    import threading
+
+    block = threading.Event()
+
+    class Port:
+        def read(self, n=1):
+            block.wait(2.0)
+            return b""
+
+    drain = rc_mod.Drain(Port())
+    try:
+        with pytest.raises(rc_mod.DrainStuck):
+            drain.stop(0.0, timeout=0.05)
+    finally:
+        block.set()
+        drain.stop()
+
+
+def test_a_stuck_drain_means_the_console_is_not_read(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser, spec = _confirm(monkeypatch, [b"Zephyr\n"])
+
+    class Stuck(_NoDrain):
+        def stop(self, exit_ts=None, timeout=2.0):
+            raise rc_mod.DrainStuck("stuck")
+
+    monkeypatch.setattr(rc_mod, "Drain", Stuck)
+    rc, data, issues, _ = _run(env, confirm=spec)
+    assert rc == 1 and issues[0].code == "reset.console-read-failed"
+    assert ser.chunks == [b"Zephyr\n"]  # nothing was read beside the stuck reader
+
+
+def test_drain_joins_a_long_blocked_read_and_keeps_the_banner_that_ends_it():
+    import threading
+    import time
+
+    ready = threading.Event()
+
+    class Port:
+        def read(self, n=1):
+            return b"banner\n" if ready.wait(1.0) else b""
+
+    drain = rc_mod.Drain(Port())
+    time.sleep(0.05)
+    exit_ts = time.monotonic()
+    threading.Timer(0.05, ready.set).start()  # 50 ms after exit, while the thread is mid-read
+    assert drain.stop(exit_ts) == [b"banner\n"]

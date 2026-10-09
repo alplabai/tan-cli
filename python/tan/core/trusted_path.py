@@ -16,7 +16,6 @@ code, so this PR does not depend on #1454.
 from __future__ import annotations
 
 import os
-import pwd
 import stat
 
 WRAPPER_ENV = "TAN_JLINK_WRAPPER"
@@ -24,12 +23,15 @@ WRAPPER_ENV = "TAN_JLINK_WRAPPER"
 
 def _current_user() -> str:
     """The account name of the real uid (never `USER`, which the caller controls)."""
+    import pwd  # noqa: PLC0415 (POSIX only: this module must import on Windows)
+
     return pwd.getpwuid(os.getuid()).pw_name
 
 
 def _private_group(gid: int) -> bool:
     """Whether `gid` is a group only the current user belongs to."""
     import grp  # noqa: PLC0415 (POSIX only)
+    import pwd  # noqa: PLC0415
 
     me = _current_user()
     try:
@@ -84,16 +86,37 @@ def unsafe(path: str) -> str | None:
     return _chain_problem(os.path.abspath(path)) or _chain_problem(real)
 
 
-def is_configured_wrapper(exe: str | None) -> tuple[bool, str]:
-    """`(True, '')` only when `exe` IS the wrapper named by `TAN_JLINK_WRAPPER`
-    (absolute, trustworthy, same realpath). Otherwise `(False, why)`: a marker
-    string, a PATH name or a look-alike proves nothing."""
+#: Short reason codes (no paths): the operator's own `TAN_JLINK_WRAPPER` is already known.
+REASON_ENV_UNSET = "wrapper-env-unset"
+REASON_PATH_UNSAFE = "wrapper-path-unsafe"
+REASON_NOT_RESOLVED = "wrapper-not-resolved-binary"
+REASON_UNSUPPORTED = "unsupported-platform"
+
+
+def _supported() -> bool:
+    if not hasattr(os, "getuid"):
+        return False
+    try:
+        import grp  # noqa: F401, PLC0415
+        import pwd  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return True
+
+
+def is_configured_wrapper(exe: str | None) -> tuple[bool, str | None]:
+    """`(True, None)` only when `exe` IS the wrapper named by `TAN_JLINK_WRAPPER`
+    (absolute, trustworthy, same realpath). Otherwise `(False, reason code)`: a
+    marker string, a PATH name or a look-alike proves nothing. The trust is
+    operator-asserted: the variable attests a PATH, not that the file really masks
+    the other probes."""
+    if not _supported():
+        return False, REASON_UNSUPPORTED
     configured = os.environ.get(WRAPPER_ENV, "").strip()
     if not configured:
-        return False, f"{WRAPPER_ENV} is not set"
-    why = unsafe(configured)
-    if why is not None:
-        return False, f"{WRAPPER_ENV}={configured} {why}"
+        return False, REASON_ENV_UNSET
+    if unsafe(configured) is not None:
+        return False, REASON_PATH_UNSAFE
     if not exe or not os.path.isabs(exe) or os.path.realpath(exe) != os.path.realpath(configured):
-        return False, f"the J-Link program ({exe}) is not the configured wrapper ({configured})"
-    return True, ""
+        return False, REASON_NOT_RESOLVED
+    return True, None

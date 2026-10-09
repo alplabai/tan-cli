@@ -114,14 +114,17 @@ def _verdict(data, out, guard, fast, usb_path) -> Issue | None:
     return None
 
 
-def _finish_pulse(data, ser, confirm, pulse_ms) -> _Result:
+def _finish_pulse(data, ser, confirm, pulse_ms, initial=b"", exit_ts=None, stuck=None) -> _Result:
     place = f" on place {data['place']}" if data["place"] else ""
     line = f"reset: nRESET pulsed for {pulse_ms} ms{place}"
     if ser is None:
         note = Issue("reset.boot-not-confirmed", "info",
                      "pulse sent; boot not confirmed (pass --confirm-console PORT --expect REGEX)")
         return ExitCode.SUCCESS, data, [note], [line + "; boot not confirmed"]
-    data["console"] = rc_mod.observe(ser, confirm)
+    if stuck is not None:  # never run a second reader beside a stuck one
+        data["console"] = {"port": confirm.port, "observed": False, "error": str(stuck)}
+    else:
+        data["console"] = rc_mod.observe(ser, confirm, initial, exit_ts)
     data["resetObserved"] = bool(data["console"]["observed"])
     if "error" in data["console"]:
         data["resetObserved"] = "unknown"
@@ -162,8 +165,8 @@ def _run(
     data["jlink"] = {"binary": exe, "binarySource": found.source if found else None}
     if exe is None:
         return _fail(data, Issue("reset.failed", "error", fc._NO_TRUSTED_JLINK))
-    trusted, why = trusted_path.is_configured_wrapper(exe)
-    data["wrapper"] = {"trusted": trusted, "why": why or None}
+    trusted, reason = trusted_path.is_configured_wrapper(exe)
+    data["wrapper"] = {"trusted": trusted, "reason": reason}
     # Single-spawn mode only when the J-Link program IS the configured wrapper: a real SEGGER
     # JLinkExe given JLINK_RUN_PLACE would skip ShowEmuList and pulse whichever probe
     # enumerates first.
@@ -189,8 +192,14 @@ def _run(
     try:
         spawn_started = time.monotonic()
         out = _spawn(guard, script, exe, probe_usb_path, fast)
+        exit_ts = time.monotonic()
+        stuck = None
+        initial: list[bytes] = []
         if drain is not None:
-            drain.stop()
+            try:
+                initial = drain.stop(exit_ts)
+            except rc_mod.DrainStuck as err:
+                stuck = err
         data["timing"] = {
             "prepSeconds": round(spawn_started - started, 3),
             "jlinkSpawnSeconds": round(time.monotonic() - spawn_started, 3),
@@ -199,10 +208,13 @@ def _run(
         problem = _verdict(data, out, guard, fast, probe_usb_path)
         if problem is not None:
             return _fail(data, problem)
-        return _finish_pulse(data, ser, confirm, pulse_ms)
+        return _finish_pulse(data, ser, confirm, pulse_ms, b"".join(initial), exit_ts, stuck)
     finally:
         if drain is not None:
-            drain.stop()
+            try:
+                drain.stop()
+            except rc_mod.DrainStuck:
+                pass
         if ser is not None:
             try:
                 ser.close()

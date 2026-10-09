@@ -71,18 +71,26 @@ def confirm_spec(
     return ConfirmSpec(port, pattern, baud, timeout_s, window_s)
 
 
-class Drain:
-    """Reads and discards everything the console delivers while J-Link runs.
+class DrainStuck(RuntimeError):
+    """The background reader did not return from its read; the console is left alone."""
 
-    Stale rfc2217 lines still in flight when the pulse is sent would otherwise
-    arrive after J-Link exits and could match `--expect`. `stop()` is called the
-    moment J-Link returns; whatever arrives after that is post-pulse data. (A
-    fixed discard after exit would instead eat a real banner: one measured
-    0.088 s after J-Link exit.)"""
+
+class Drain:
+    """The ONLY reader of the console while J-Link runs.
+
+    Everything it reads is time-stamped. Stale rfc2217 lines in flight when the
+    pulse is sent arrive before J-Link exits, so they are dropped; `stop(exit_ts)`
+    hands back only the chunks stamped at or after `exit_ts`, which the caller
+    feeds to the capture as its first data. The thread may be inside a 0.1 s
+    `read()` when `stop()` is called: it is joined, never abandoned, so a banner
+    that arrives (measured: 0.088 s after exit) during that read is kept, and two
+    readers never run at once."""
 
     def __init__(self, ser) -> None:
         self._ser = ser
         self._halt = threading.Event()
+        self._chunks: list[tuple[float, bytes]] = []
+        self._stopped = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -92,12 +100,25 @@ class Drain:
                 got = self._ser.read(max(1, int(getattr(self._ser, "in_waiting", 0) or 0)))
             except Exception:  # noqa: BLE001 -- observe() reports a dead link
                 return
-            if not got:
+            if got:
+                self._chunks.append((time.monotonic(), got))
+            else:
                 time.sleep(0.005)
 
-    def stop(self) -> None:
+    def stop(self, exit_ts: float | None = None, timeout: float = 2.0) -> list[bytes]:
+        """Halt the reader and return the chunks received at/after `exit_ts`
+        (none when `exit_ts` is None). Idempotent. `DrainStuck` if the reader is
+        still inside `read()` after `timeout`."""
+        if self._stopped:
+            return []
         self._halt.set()
-        self._thread.join(timeout=1.0)
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            raise DrainStuck(f"the console reader did not stop within {timeout}s")
+        self._stopped = True
+        if exit_ts is None:
+            return []
+        return [data for ts, data in self._chunks if ts >= exit_ts]
 
 
 def open_console(spec: ConfirmSpec):
@@ -107,26 +128,27 @@ def open_console(spec: ConfirmSpec):
     return monitor_session.open_port(spec.port, spec.baud, capture=True)
 
 
-def observe(ser, spec: ConfirmSpec) -> dict[str, Any]:
-    """After J-Link exited: drop what queued up and wait for `--expect`.
+def observe(ser, spec: ConfirmSpec, initial: bytes = b"", exit_ts: float | None = None) -> dict[str, Any]:
+    """After J-Link exited: wait for `--expect`, starting with `initial` (what the
+    `Drain` stamped at or after `exit_ts`). The queue is NOT flushed here: a flush
+    could discard a banner that is already waiting.
     Closes `ser`. Returns the `data.console` block. The FIRST matching line must arrive within
     `window_s` of J-Link exiting: a later one (e.g. an RTC-alarm wake out of STOP) is recorded as
     `lateMatchAtSeconds` and is not a reset."""
     try:
-        try:
-            ser.reset_input_buffer()
-        except Exception:  # noqa: BLE001 -- a port without it just keeps its queue
-            pass
+        t0 = time.monotonic()
         res = serial_capture.capture(
-            ser, duration_s=max(spec.timeout_s, spec.window_s), until=spec.expect
+            ser, duration_s=max(spec.timeout_s, spec.window_s), until=spec.expect, initial=initial
         )
-        latency = round(res.elapsed_s, 3) if res.matched else None
-        in_window = res.matched and res.elapsed_s <= spec.window_s
+        # Latency from J-Link's exit, not from when this capture began.
+        total = res.elapsed_s + (t0 - exit_ts if exit_ts is not None else 0.0)
+        latency = round(total, 3) if res.matched else None
+        in_window = res.matched and total <= spec.window_s
         block = {
             "port": spec.port, "baud": spec.baud, "observed": in_window,
             "windowSeconds": spec.window_s, "matchLatencySeconds": latency if in_window else None,
             "matchedLine": res.matched_line if in_window else None,
-            "elapsedSeconds": round(res.elapsed_s, 3),
+            "elapsedSeconds": round(total, 3),
             "bytesSeen": res.bytes_seen, "bytesSeenTail": res.tail,
         }
         if res.matched and not in_window:
