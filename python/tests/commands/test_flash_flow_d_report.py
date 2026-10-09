@@ -180,7 +180,7 @@ def test_a_failed_reset_is_a_warning_not_a_claimed_pin_reset(tmp_path, monkeypat
     assert "Reset: Failed" in note.message and "low power" in note.message
     assert any("NOT confirmed" in line for line in lines)
     # The non-halting probe ran and could not confirm either.
-    assert entry["jlink"]["bootProbe"] == {"performed": True, "dhcsr": None}
+    assert entry["jlink"]["bootProbe"] == {"performed": True, "dhcsr": None, "trouble": []}
 
 
 _HALT_FAIL = CLEAN + "****** Error: Failed to halt CPU\n"
@@ -206,12 +206,46 @@ def test_a_failed_halt_is_confirmed_by_dhcsr_without_a_halt(tmp_path, monkeypatc
     assert not any(w in probe for w in ("RSetType", "\nr\n", "\ng\n", "loadbin", "halt"))
 
 
-def test_a_halted_or_idle_dhcsr_does_not_confirm(tmp_path, monkeypatch):
-    for word in ("E000EDF0 = 03020001", "E000EDF0 = 00000001"):  # S_HALT set / nothing sticky
+def test_only_a_reset_bit_confirms_and_a_running_core_alone_keeps_the_issue(tmp_path, monkeypatch):
+    """Review: S_RETIRE_ST / S_SLEEP are the OLD image idling after a failed `r` + `g`."""
+    cases = [
+        ("E000EDF0 = 03020001", False, False),  # halted
+        ("E000EDF0 = 00000001", False, False),  # nothing sticky
+        ("E000EDF0 = 02080001", False, False),  # reset bit but locked up
+        ("E000EDF0 = 01000001", False, True),   # retired only
+        ("E000EDF0 = 00040001", False, True),   # S_SLEEP only
+    ]
+    for word, confirmed, running in cases:
         fake, (rc, data, issues, _l, _s) = _run(
             tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": word + "\n"}
         )
-        assert [i.severity for i in issues if i.code == "flash.jlink-reset-unconfirmed"] == ["info"]
+        found = [i for i in issues if i.code == "flash.jlink-reset-unconfirmed"]
+        assert [i.severity for i in found] == ["info"], word
+        jl = data["entries"][0]["jlink"]
+        assert jl["reset"] == "unconfirmed" and jl["coreRunning"] is running, word
+        assert ("core running, reset not proven" in found[0].message) is running, word
+
+
+def test_a_failed_reset_then_go_with_an_idling_old_image_is_not_confirmed(tmp_path, monkeypatch):
+    """`Reset: Failed` then `g` resumes the old context: retired + sleeping, no reset bit."""
+    out = CLEAN + "****** Error: Reset: Failed\n"
+    fake, (rc, data, issues, _l, _s) = _run(
+        tmp_path, monkeypatch, {"write_out": out, "probe_out": "E000EDF0 = 01050001\n"}
+    )
+    assert rc == 0
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+    assert "resetConfirmedBy" not in data["entries"][0]["jlink"]
+    assert "NOT confirmed" in data["entries"][0]["message"]
+
+
+def test_a_probe_session_that_reset_or_failed_to_halt_cannot_confirm(tmp_path, monkeypatch):
+    for noise in ("Reset: Failed\n", "****** Error: Failed to halt CPU\n"):
+        fake, (rc, data, issues, _l, _s) = _run(
+            tmp_path, monkeypatch,
+            {"write_out": _HALT_FAIL, "probe_out": noise + "E000EDF0 = 03050001\n"},
+        )
+        assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+        assert data["entries"][0]["jlink"]["bootProbe"]["trouble"]
         assert data["entries"][0]["jlink"]["reset"] == "unconfirmed"
 
 
@@ -223,8 +257,13 @@ def test_a_clean_reset_runs_no_boot_probe(tmp_path, monkeypatch):
 def test_dhcsr_helpers():
     assert flow_d_report.dhcsr_in("E000EDF0 = 03050001") == 0x03050001
     assert flow_d_report.dhcsr_in("nothing") is None
-    assert flow_d_report.dhcsr_says_ran(0x01000001)
-    assert not flow_d_report.dhcsr_says_ran(0x01020001) and not flow_d_report.dhcsr_says_ran(None)
+    assert flow_d_report.dhcsr_confirms_reset(0x02000001)
+    for word in (0x01000001, 0x00040001, 0x02020001, 0x02080001, None):
+        assert not flow_d_report.dhcsr_confirms_reset(word)  # no reset / halted / lockup
+    assert flow_d_report.dhcsr_core_running(0x01000001) and flow_d_report.dhcsr_core_running(0x00040001)
+    assert not flow_d_report.dhcsr_core_running(0x01020001)
+    assert not flow_d_report.dhcsr_core_running(0x01080001) and not flow_d_report.dhcsr_core_running(None)
+    assert flow_d_report.probe_trouble("Reset: Failed") and not flow_d_report.probe_trouble("Reset delay: 0 ms")
     script = flow_d_report.nohalt_probe_script("si SWD\ndevice P\nconnect\nloadbin x 0x1\nexit\n")
     assert script == "si SWD\ndevice P\nconnect\nmem32 0xE000EDF0 1\nexit\n"
 

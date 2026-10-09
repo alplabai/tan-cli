@@ -154,11 +154,11 @@ read-only preflight's, with `dpidrSource`), `transcriptPath` (a file under
 `transcriptTail`, `verification`, and `reset` / `resetFailures`. A transcript
 containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU may
 have not been reset` first triggers a read-only, non-halting DHCSR check in a fresh
-session: `S_RESET_ST`, `S_RETIRE_ST` or `S_SLEEP` set with `S_HALT` clear proves the
-image ran (`jlink.resetConfirmedBy: "dhcsr"`, no issue code; an app that enters
-WFI/STOP gates the debug domain, so the halt fails on a healthy boot). Only when
-that cannot confirm it either does the message become `PIN-reset NOT confirmed`
-and `flash.jlink-reset-unconfirmed` (info) appear.
+session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset:`
+or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
+"dhcsr"`, no issue code). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
+proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
 `--readback` re-reads every written region in a **fresh** J-Link session
 (`savebin`), through the same probe-selection guard as the write, and compares

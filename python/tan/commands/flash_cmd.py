@@ -223,7 +223,9 @@ from tan.core.flow_d_report import (
     VERIFICATION_READBACK,
     VERIFICATION_READBACK_NOTE,
     dhcsr_in,
-    dhcsr_says_ran,
+    dhcsr_confirms_reset,
+    dhcsr_core_running,
+    probe_trouble,
     dpidr_in,
     nohalt_probe_script,
     planned_write,
@@ -3809,8 +3811,9 @@ def _flow_d_confirm_boot(
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
     the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
-    sticky S_RESET_ST / S_RETIRE_ST (and S_SLEEP) bits prove the core ran. True, and the
-    `jlink` block says so, only on that proof; any failure to ask leaves the reset
+    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened. True, and
+    the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
+    `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
     unconfirmed. Never raises, never writes."""
     block = report.setdefault("jlink", {})
     if plan.jlink_script is None:
@@ -3823,14 +3826,22 @@ def _flow_d_confirm_boot(
         dataclasses.replace(plan, jlink_script=script),
         True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
     )
-    value = dhcsr_in(f"{probe.stdout}\n{probe.stderr}") if probe.success else None
-    block["bootProbe"] = {"performed": True, "dhcsr": None if value is None else f"0x{value:08X}"}
-    if not dhcsr_says_ran(value):
+    text = f"{probe.stdout}\n{probe.stderr}"
+    value = dhcsr_in(text) if probe.success else None
+    trouble = probe_trouble(text)
+    block["bootProbe"] = {
+        "performed": True, "dhcsr": None if value is None else f"0x{value:08X}",
+        "trouble": list(trouble),
+    }
+    if trouble:
+        return False  # the probe itself reset/halted: its DHCSR says nothing about the flash
+    block["coreRunning"] = dhcsr_core_running(value)
+    if not dhcsr_confirms_reset(value):
         return False
     block.update(
         reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
         resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
-        "the core ran: S_RESET_ST/S_RETIRE_ST/S_SLEEP set and S_HALT clear.",
+        "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
     )
     return True
 
@@ -4733,12 +4744,19 @@ def _run(
             # tan-cli#1453: on Flow D this is `info`: the halt that would confirm the
             # reset fails on an app that already sleeps, so it is not evidence of a
             # failed boot. A RAM load keeps the warning.
+            running = entry.extra.get("jlink", {}).get("coreRunning")
             message = (
                 f"{entry.id}: J-Link reported a failed reset ("
                 + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
-                + "); could not halt to confirm the PIN reset, and a read-only DHCSR check did "
-                "not confirm it either (the target may be in low power) -- if the console "
-                "shows the app, it booted; otherwise power-cycle the board."
+                + "); "
+                + (
+                    "core running, reset not proven: a read-only DHCSR check shows a running "
+                    "core but not a reset since the write -- it may be the old image. "
+                    if running else
+                    "could not halt to confirm the PIN reset, and a read-only DHCSR check did "
+                    "not confirm it either (the target may be in low power). "
+                )
+                + "If the console shows the new app it booted; otherwise power-cycle the board."
             )
             text_lines.append(message)
             issues.append(Issue(

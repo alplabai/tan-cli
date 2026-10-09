@@ -65,16 +65,23 @@ def reset_failures(transcript: str) -> tuple[str, ...]:
     return tuple(m for m in RESET_FAILURE_MARKERS if m in transcript)
 
 
-#: Core-debug DHCSR (0xE000EDF0) bits that prove the core RAN since the last read,
-#: with no halt needed (tan-cli#1453): S_RESET_ST (the reset the PIN reset caused),
-#: S_RETIRE_ST (an instruction retired) and S_SLEEP (it executed WFI/WFE, i.e. the app
-#: is up and idling). S_HALT says the core is stopped, which is not a boot proof.
+#: Core-debug DHCSR (0xE000EDF0) bits (tan-cli#1453). S_RESET_ST and S_RETIRE_ST are
+#: sticky but CLEAR ON READ, and J-Link reads DHCSR itself (a failed halt, the probe's
+#: own `connect`) before tan does -- so only S_RESET_ST (a reset happened since the last
+#: read, with no lockup) counts as proof that THIS reset booted. S_SLEEP / S_RETIRE_ST
+#: alone are also what the OLD image idling looks like, so they prove only that a core is
+#: running, never that the reset took.
 DHCSR_ADDRESS = "0xE000EDF0"
 DHCSR_S_HALT = 1 << 17
 DHCSR_S_SLEEP = 1 << 18
+DHCSR_S_LOCKUP = 1 << 19
 DHCSR_S_RETIRE_ST = 1 << 24
 DHCSR_S_RESET_ST = 1 << 25
 _DHCSR_RAN = DHCSR_S_SLEEP | DHCSR_S_RETIRE_ST | DHCSR_S_RESET_ST
+
+#: Probe-transcript phrasing that means the probe session itself reset or tried to halt
+#: the core, which makes its DHCSR read evidence of that session, not of the flash's reset.
+PROBE_TROUBLE_MARKERS = ("Reset:",)
 
 
 def nohalt_probe_script(jlink_script: str) -> str:
@@ -98,9 +105,27 @@ def dhcsr_in(transcript: str) -> int | None:
     return int(match.group(1), 16) if match else None
 
 
-def dhcsr_says_ran(value: int | None) -> bool:
-    """True when `value` proves the core executed since the reset and is not halted."""
-    return value is not None and bool(value & _DHCSR_RAN) and not value & DHCSR_S_HALT
+def dhcsr_confirms_reset(value: int | None) -> bool:
+    """True only when `value` shows a reset since the last read (S_RESET_ST) on a core
+    that is neither halted nor locked up."""
+    return (
+        value is not None and bool(value & DHCSR_S_RESET_ST)
+        and not value & (DHCSR_S_HALT | DHCSR_S_LOCKUP)
+    )
+
+
+def dhcsr_core_running(value: int | None) -> bool:
+    """True when `value` shows a running core (retired an instruction, slept, or reset)
+    that is not halted or locked up. This does NOT say the reset took."""
+    return (
+        value is not None and bool(value & _DHCSR_RAN)
+        and not value & (DHCSR_S_HALT | DHCSR_S_LOCKUP)
+    )
+
+
+def probe_trouble(transcript: str) -> tuple[str, ...]:
+    """Reset/halt markers in a boot-probe transcript (it must have done neither)."""
+    return tuple(m for m in (*PROBE_TROUBLE_MARKERS, *RESET_FAILURE_MARKERS) if m in transcript)
 
 
 def dpidr_in(transcript: str) -> str | None:
