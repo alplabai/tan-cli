@@ -167,6 +167,36 @@ def reset_tail(jlink_script: str) -> list[str]:
     return ["g"]
 
 
+#: J-Link Commander phrasing for "no debug access to the target right now" -- a gated
+#: debug domain (the app is in STOP/WFI) as much as a bad cable (tan-cli#1450).
+UNREACHABLE_MARKERS = (
+    "Could not read memory",
+    "Cannot read memory",
+    "Cannot connect to target",
+    "Could not connect to target",
+    "Connecting to target failed",
+    "Could not find core",
+    "Failed to attach",
+)
+
+
+def target_unreachable(transcript: str) -> bool:
+    """Whether `transcript` says the target could not be reached for a memory read."""
+    return any(m in transcript for m in UNREACHABLE_MARKERS)
+
+
+def strip_reset_tail(jlink_script: str) -> str:
+    """The write script WITHOUT its reset/run tail (first `RSetType` line up to the final
+    `exit`): the writes, `verifybin`, `exit`. A `--readback` session then ends with that
+    tail ([`readback_script`]), so the read happens BEFORE the new image boots and can
+    put the debug domain to sleep (tan-cli#1450). Unchanged without a `RSetType` line."""
+    lines = [line for line in jlink_script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("rsettype"):
+            return "\n".join([*lines[:i], "exit"]) + "\n"
+    return jlink_script
+
+
 def readback_script(
     jlink_script: str,
     regions: Sequence[tuple[str, int, str]],

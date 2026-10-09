@@ -337,11 +337,91 @@ def test_readback_upgrades_cache_verified_when_the_fresh_session_matches(tmp_pat
     # script (same preamble, no loadbin / reset).
     write, read = [s for s in fake.scripts if "ShowEmuList" not in s]
     assert "loadbin" in write and "savebin" not in write
+    # tan-cli#1450: the write stops BEFORE the PIN reset; the read-back carries it.
+    assert "RSetType" not in write and write.splitlines()[-1] == "exit"
     assert "savebin" in read and "loadbin" not in read
     assert read.splitlines()[-4:] == ["RSetType 2", "r", "g", "exit"]
     assert read.splitlines().index("connect") < read.splitlines().index(
         next(l for l in read.splitlines() if l.startswith("savebin"))
     )
+
+
+def test_readback_reads_the_chip_before_the_post_write_reset(tmp_path, monkeypatch):
+    """tan-cli#1450: the image must not have booted (and entered STOP) when the chip is read."""
+    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch)
+    assert rc == 0, (data, issues)
+    sessions = [s for s in fake.scripts if "ShowEmuList" not in s]
+    assert [("savebin" in s, "RSetType" in s) for s in sessions] == [(False, False), (True, True)]
+    assert data["entries"][0]["jlink"]["reset"] == "pin-reset"
+
+
+def test_a_failed_halt_in_the_readback_sessions_reset_is_still_confirmed_by_dhcsr(
+    tmp_path, monkeypatch
+):
+    fake = FakeJlink(monkeypatch, probe_out="E000EDF0 = 03050001\n")
+    fake.sources = [APP, ATOC]
+    original = fake._spawn
+
+    def _halt_fails(argv, script, *a, **k):
+        out = original(argv, script, *a, **k)
+        if "savebin" in script:
+            out.stdout += "****** Error: Failed to halt CPU\n"
+        return out
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _halt_fails)
+    real = flash_cmd._execute
+    monkeypatch.setattr(
+        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
+    )
+    rc, data, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True}
+    )
+    assert rc == 0, (data, issues)
+    assert data["entries"][0]["jlink"]["resetConfirmedBy"] == "dhcsr"
+    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+    assert any("mem32" in s for s in fake.scripts)
+
+
+def test_short_reads_mean_unreachable_not_mismatch(tmp_path, monkeypatch):
+    """tan-cli#1450: a gated debug domain must not tell the user to re-flash."""
+    fake, (rc, data, issues, _l, _s) = _readback_run(
+        tmp_path, monkeypatch, {"read_back": {0: b"", 1: b""}}
+    )
+    assert rc == 1
+    assert _codes(issues) == ["flash.readback-failed"]
+    msg = data["entries"][0]["message"]
+    assert "target unreachable (low-power?)" in msg and "do not re-flash on it" in msg
+    assert data["entries"][0]["jlink"]["readback"]["reason"] == "target unreachable (low-power?)"
+
+
+def test_a_session_that_says_it_could_not_read_memory_is_unreachable(tmp_path, monkeypatch):
+    fake = FakeJlink(monkeypatch)
+    fake.sources = [APP, ATOC]
+    original = fake._spawn
+
+    def _unreachable(argv, script, *a, **k):
+        out = original(argv, script, *a, **k)
+        if "savebin" in script:
+            out.stdout += "Could not read memory.\n"
+        return out
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _unreachable)
+    real = flash_cmd._execute
+    monkeypatch.setattr(
+        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
+    )
+    rc, data, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True}
+    )
+    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
+    assert "target unreachable (low-power?)" in data["entries"][0]["message"]
+
+
+def test_strip_reset_tail():
+    assert flow_d_report.strip_reset_tail(
+        "connect\nloadbin x 0x1\nverifybin x 0x1\nRSetType 2\nr\ng\nexit\n"
+    ) == "connect\nloadbin x 0x1\nverifybin x 0x1\nexit\n"
+    assert flow_d_report.strip_reset_tail("connect\nexit\n") == "connect\nexit\n"
 
 
 def test_a_readback_that_differs_fails_the_entry_with_its_code(tmp_path, monkeypatch):

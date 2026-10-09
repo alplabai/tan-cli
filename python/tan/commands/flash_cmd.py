@@ -230,6 +230,8 @@ from tan.core.flow_d_report import (
     readback_script,
     reset_failures,
     sha256_of,
+    strip_reset_tail,
+    target_unreachable,
     transcript_tail,
 )
 from tan.core.setools_scratch import cleanup_scratch, family_mismatch, resolve_device_config
@@ -1917,8 +1919,8 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
 #: `flow_d_report.RESET_FAILURE_MARKERS` (tan-cli#522, #1321).
 _FLOW_D_VERIFIED_AND_RESET = "; cache-verified and PIN-reset"
 _FLOW_D_VERIFIED_ONLY = (
-    "; cache-verified; PIN-reset NOT confirmed (reset requested, but J-Link could not halt "
-    "the core to confirm it; the app may be in low power)"
+    "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
+    "did not halt)"
 )
 #: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
 _FLOW_D_VERIFIED_NOHALT = (
@@ -3533,8 +3535,14 @@ def _flash_entry_body(
             return 1, entry(method, "failed", 1, refusal), lines
 
     stale = clear_stale_verdict(guard_build_dir) if guard.guarded else None
+    # tan-cli#1450: under `--readback` the write session stops before the PIN reset; the
+    # read-back session carries the reset/run tail instead, so the chip is read BEFORE
+    # the new image boots (and may put the debug domain to sleep).
+    exec_plan = plan
+    if method == FLOW_D_METHOD and ctx.readback and plan.jlink_script:
+        exec_plan = replace(plan, jlink_script=strip_reset_tail(plan.jlink_script))
     outcome = _execute(
-        plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe
+        exec_plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe
     )
     if not outcome.success and probe_guard is not None and probe_guard.tripped:
         lines.append(f"  FAIL: {probe_guard.tripped}")
@@ -3547,13 +3555,17 @@ def _flash_entry_body(
     reset_unconfirmed = False
     readback_failure: tuple[str, str] | None = None
     if method == FLOW_D_METHOD:
-        reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
-        if reset_unconfirmed and _flow_d_confirm_boot(plan, ctx, report, probe_guard, jlink_exe):
-            reset_unconfirmed = False
+        reset_unconfirmed = _flow_d_record(
+            exec_plan, outcome, ctx, entry_id, report, preflight_facts,
+            reset_deferred=exec_plan is not plan,
+        )
         if outcome.success and ctx.readback:
             readback_failure = _flow_d_readback(
                 plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
             )
+            reset_unconfirmed = report["jlink"].get("reset") == "unconfirmed"
+        if reset_unconfirmed and _flow_d_confirm_boot(plan, ctx, report, probe_guard, jlink_exe):
+            reset_unconfirmed = False
     if readback_failure is not None:
         code, text = readback_failure
         msg = f"{method}[{entry_id}]: {text}"
@@ -3580,6 +3592,8 @@ def _flash_entry_body(
                 ok_message = ok_message.replace(
                     _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
                         dhcsr=report["jlink"]["dhcsr"]), 1)
+            elif report.get("jlink", {}).get("reset") == "unconfirmed":
+                ok_message = ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY, 1)
             else:
                 ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
             if report.get("jlink", {}).get("verification") == VERIFICATION_READBACK:
@@ -3741,6 +3755,7 @@ def _flow_d_record(
     entry_id: str,
     report: dict[str, Any],
     preflight_facts: dict[str, Any],
+    reset_deferred: bool = False,
 ) -> bool:
     """tan-cli#1321: put what the J-Link write ACTUALLY said into the envelope's
     `jlink` block -- the SW-DP ID read, the transcript (a file under the build
@@ -3759,7 +3774,10 @@ def _flow_d_record(
         "dpidrSource": source,
         "verification": VERIFICATION_CACHE,
         "verificationNote": VERIFICATION_NOTE,
-        "reset": "unconfirmed" if failures else ("pin-reset" if outcome.success else "not-reached"),
+        "reset": "unconfirmed" if failures else (
+            "deferred-to-readback" if reset_deferred and outcome.success
+            else "pin-reset" if outcome.success else "not-reached"
+        ),
         "resetFailures": list(failures),
         "transcriptTail": transcript_tail(transcript),
     }
@@ -3815,6 +3833,23 @@ def _flow_d_confirm_boot(
     return True
 
 
+def _flow_d_readback_unreachable(
+    block: dict[str, Any], why: str, regions: list[dict[str, Any]] | None = None
+) -> tuple[str, str]:
+    """tan-cli#1450: the read-back could not READ the chip, which says nothing about what
+    the chip holds -- so it is `flash.readback-failed` ("nothing was compared"), never a
+    mismatch that advises a re-flash."""
+    block["readback"] = {"performed": False, "reason": "target unreachable (low-power?)"}
+    if regions is not None:
+        block["readback"]["regions"] = regions
+    return (
+        "flash.readback-failed",
+        f"target unreachable (low-power?): {why}, so nothing was compared. This is NOT "
+        "evidence the write failed -- do not re-flash on it. Wake the target (reset or "
+        "power-cycle it) and read the regions back again.",
+    )
+
+
 def _flow_d_readback(
     plan: FlashPlan,
     outcome: _Outcome,
@@ -3857,6 +3892,14 @@ def _flow_d_readback(
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
             return f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped
+        read_text = f"{read.stdout}\n{read.stderr}"
+        if target_unreachable(read_text):
+            return _flow_d_readback_unreachable(block, "the session could not read memory")
+        if read.success:
+            # The reset/run tail rides this session (tan-cli#1450): report its outcome.
+            failures = reset_failures(read_text)
+            block["resetFailures"] = list(failures)
+            block["reset"] = "unconfirmed" if failures else "pin-reset"
         if not read.success:
             block["readback"] = {"performed": False, "reason": _capture_tail(read) or "session failed"}
             return (
@@ -3879,6 +3922,11 @@ def _flow_d_readback(
             )
         ok = all(r["match"] for r in results)
         block["readback"] = {"performed": True, "ok": ok, "regions": results}
+        if not ok and any(
+            str(r["sha256Actual"]).startswith("short-read:") or r["sha256Actual"] == "missing"
+            for r in results
+        ):
+            return _flow_d_readback_unreachable(block, "J-Link returned no data", results)
         if not ok:
             bad = [r["address"] for r in results if not r["match"]]
             return (
