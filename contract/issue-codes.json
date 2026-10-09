@@ -3651,6 +3651,30 @@
       "note": "tan-cli#1376: `$ZEPHYR_BASE` is set to a tree other than the resolved west workspace's zephyr; tan ignores it and builds with the workspace's zephyr. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
+      "code": "reset.bad-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `tan reset --pulse-ms` is outside 1..10000 milliseconds. Refused before any J-Link spawn (exit 2). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "reset.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `tan reset` could not pulse nRESET: no trusted J-Link binary, a bad `--device`/probe serial token, or the J-Link Commander run failed or did not report `Script processing completed`. Probe-selection refusals reuse `flash.probe-*`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "reset.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1452: `tan reset` hit an unexpected exception (a tan bug). Exit 5. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "probe.read-too-large",
       "status": "reserved",
       "severity": "error",

@@ -41,6 +41,7 @@ from tan.commands.explain_cmd import explain
 from tan.commands.faultdecode_cmd import faultdecode
 from tan.commands.flash_cmd import flash
 from tan.commands.probe_cmd import probe
+from tan.commands.reset_cmd import reset
 from tan.commands.generate_cmd import generate
 from tan.commands.image_cmd import image
 from tan.commands.init_cmd import init
@@ -166,6 +167,7 @@ app.command("new-som", rich_help_panel="Inspect & author")(new_som)
 app.command("pinmux", rich_help_panel="Inspect & author")(pinmux)
 app.command("presets", rich_help_panel="Start a project")(presets)
 app.command("probe", rich_help_panel="Hardware")(probe)
+app.command("reset", rich_help_panel="Hardware")(reset)
 app.command(
     "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
 )(quality)

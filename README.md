@@ -353,6 +353,7 @@ move.
 | Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write; a Flow A slice refused by the `alif_flash` runner's ATOC guard takes `--replace-atoc` instead — see [SETOOLS setup](docs/setools.md)) |
 | RAM-run an AEN image over J-Link (no MRAM write) | `tan flash --ram --core m55_he --confirm` (see the note below on `DEMCR.TRCENA`) |
 | Read the attached SW-DP / core, or a few words of memory (read-only J-Link) | `tan probe identify`, `tan probe read 0x80010000 4` (see [`tan probe`](docs/setools.md#tan-probe-read-only-j-link-identity-and-memory-read-tan-cli1406)) |
+| Pulse nRESET once through J-Link (no flash, no halt) | `tan reset --probe-usb-path 3-4.2` (see [`tan reset`](docs/reset.md)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |
