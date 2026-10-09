@@ -158,8 +158,9 @@ session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset
 or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
 "dhcsr"`, no issue code). Because J-Link's own reads usually clear it, a second non-halting
 witness also confirms: three `DWT_PCSR` (0xE000101C) PC samples that all fall inside the
-image just flashed (`resetConfirmedBy: "pcsr"`; `0xFFFFFFFF` is no sample, any sample
-outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+image just flashed (`resetConfirmedBy: "pcsr"`, `jlink.reset: "new-image-running"` -- PCSR proves the new code
+runs, not that the Secure Enclave pin reset took; the ranges are the PF_X LOAD segments of the
+app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
@@ -168,13 +169,20 @@ proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jli
 (tan-cli#1458: J-Link's `exit` resumes the core even after `h`, so a separate read-back session let
 the app run on stale state first, and the chip is read before the new image can boot and put the
 debug domain to sleep). Same probe-selection guard as the write; sha256 compared with the source
-files: `readback-verified` (`jlink.readbackMode: "in-session"`) on a match, `flash.readback-mismatch`
-on a full-length difference. This is stronger than verifybin's cache compare but is **not** a
-fresh-session or cold-power-cycle proof (alp-sdk#2233). A read-back that cannot read the chip is
-`flash.readback-failed` ("target unreachable (low-power?)"), never a mismatch that advises a
-re-flash; a session that dies in the halt/read steps is reported as the entry failure with a hint
-(check `verifybin` in `jlink.transcriptPath`). `--raw --readback` and the no-tail fallback use a
-fresh session without a reset.
+files. A match is reported as `jlink.verification: "insession-readback"` (`jlink.readbackMode:
+"in-session"`), **not** `readback-verified`: J-Link may serve an in-session read from its flash
+cache. Afterwards a short **fresh** `savebin` session runs; a match upgrades the value to
+`readback-verified` (`jlink.freshReadback.state: "verified"`). It never fails the entry: if the
+target cannot be read after the reset (low power) the value stays `insession-readback` with the
+info issue `flash.readback-fresh-unconfirmed`; a full-length difference there is the same code as a
+warning (garbage from a gated debug domain, or a real fault: power-cycle and read again). A
+full-length difference in the in-session read is `flash.readback-mismatch`; a read that cannot read
+the chip is `flash.readback-failed` ("target unreachable (low-power?)"), never a mismatch that
+advises a re-flash. A session that dies in the halt/read steps is reported as the entry failure with
+what J-Link echoed: whether the `verifybin`s passed (did the write land?) and whether the reset tail
+started ("the board was NOT reset: reset or power-cycle it"). `--raw --readback` and the no-tail
+fallback use a fresh session without a reset. With `--no-reset` the wording says "after a halt; no
+reset command was sent", never "before the reset".
 
 `--no-reset` (tan-cli#1445) sends **no** reset/run commands: the session ends after the
 write, `verifybin` and (with `--readback`) the in-session read-back, at `exit`, so tan does

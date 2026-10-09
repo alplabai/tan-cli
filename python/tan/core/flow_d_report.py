@@ -90,6 +90,8 @@ PROBE_TROUBLE_MARKERS = ("Reset:",)
 #: returns 0xFFFFFFFF, which is no sample at all.
 DWT_PCSR_ADDRESS = "0xE000101C"
 PCSR_NO_SAMPLE = 0xFFFFFFFF
+#: 0x00000000 is not a sample either (a gated or unpowered DWT reads as zero).
+PCSR_NO_SAMPLES = (PCSR_NO_SAMPLE, 0x00000000)
 PCSR_SAMPLES = 3
 
 
@@ -146,7 +148,7 @@ def pcsr_in_ranges(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) ->
     sample outside the ranges (old image, loader, ROM) vetoes. The old image is not known to
     tan, so an old image linked into the same range is not excluded -- that residual is why
     S_RESET_ST stays the stronger witness."""
-    real = [x for x in samples if x != PCSR_NO_SAMPLE]
+    real = [x for x in samples if x not in PCSR_NO_SAMPLES]
     return bool(real) and bool(ranges) and all(
         any(lo <= x < hi for lo, hi in ranges) for x in real
     )
@@ -224,11 +226,20 @@ def reset_tail(jlink_script: str) -> list[str]:
 #: What an in-session read-back proves (tan-cli#1458): the chip's bytes were read back after a
 #: halt, in the write's own session, before the reset -- NOT a fresh session, so J-Link's
 #: flash cache may sit between the read and the cells.
+VERIFICATION_INSESSION = "insession-readback"
 VERIFICATION_INSESSION_NOTE = (
     "the written regions were read back with savebin in the SAME J-Link session as the write, "
     "after a halt and before the PIN reset (a separate session would let the app run in "
-    "between); their sha256 matches the source files. Stronger than verifybin's cache compare "
-    "but not a fresh-session or cold-power-cycle proof (alp-sdk#2233)."
+    "between); their sha256 matches the source files. J-Link may serve that read from its flash "
+    "cache, so this is NOT a fresh-session or cold-power-cycle proof (alp-sdk#2233); "
+    "`readback-verified` is reserved for a fresh-session match."
+)
+VERIFICATION_INSESSION_NORESET_NOTE = (
+    "the written regions were read back with savebin in the SAME J-Link session as the write, "
+    "after a halt; no reset command was sent (--no-reset); their sha256 matches the source "
+    "files. J-Link may serve that read from its flash cache, so this is NOT a fresh-session or "
+    "cold-power-cycle proof (alp-sdk#2233); `readback-verified` is reserved for a fresh-session "
+    "match."
 )
 
 #: J-Link Commander phrasing for "no debug access to the target right now" -- a gated

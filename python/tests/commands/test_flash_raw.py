@@ -639,3 +639,26 @@ def test_a_symlinks_own_0777_mode_is_not_a_finding(tmp_path, monkeypatch):
     link = tmp_path / "ok-link"
     link.symlink_to(tmp_path / "tools" / "JLinkExe")
     assert flash_raw._unsafe(str(link)) is None
+
+
+def test_no_reset_is_refused_up_front_when_any_entry_is_not_flow_d(tmp_path, monkeypatch):
+    """tan-cli#1445 review: refused before anything is flashed, not after the first entry."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    manifest = tmp_path / "build" / "system-manifest.yaml"
+    manifest.write_text(
+        manifest.read_text().replace(
+            "slices:\n",
+            "slices:\n- {core_id: m55_hp, os: zephyr, output_artefact: b.bin, status: ok,\n"
+            "   flash_method: yocto_wic, flash_args: {}}\n",
+            1,
+        ),
+        encoding="utf-8", newline="",
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(tmp_path), confirm_flag=True, no_reset=True,
+    )
+    assert rc == 1 and _codes(issues) == ["flash.no-reset-invalid"]
+    assert "m55_hp" in issues[0].message and jl.scripts == []
