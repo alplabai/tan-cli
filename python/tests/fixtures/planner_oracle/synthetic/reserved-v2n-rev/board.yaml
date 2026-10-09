@@ -1,0 +1,16 @@
+# Synthetic planner-oracle input (tan-cli#1424): a V2N board whose hw_rev is
+# `status: reserved` in the family hw-revisions table, so every planner mode
+# must refuse it with SdkRevisionNotBuildable. Carried in the fixture, not
+# read from alp-sdk's examples/, so no example deletion can remove the case.
+#
+# r5 is deliberately NOT the next real revision (r3): when v2n r3 ships and
+# turns `production`, this case would silently stop refusing. Whoever re-pins
+# the oracle: if r5 has become buildable in v2n/hw-revisions.yaml, move this
+# to the highest remaining `status: reserved` slot and recapture.
+som:
+  sku: E1M-V2N101
+  hw_rev: r5
+preset: e1m-x-evk
+cores:
+  m33_sm:
+    app: ./src

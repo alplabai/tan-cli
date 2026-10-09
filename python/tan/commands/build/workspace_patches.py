@@ -48,6 +48,15 @@ def workspace_patch_issues(
                     f"ALP_ERR_NOSUPPORT). Fix: {patch_fix_text(result.modules, str(workspace))}.",
                 )
             )
+        if result.cache_note:
+            issues.append(
+                Issue(
+                    "build.workspace-patches-uncached",
+                    "info",
+                    "the workspace patch check is not cached, so every build "
+                    f"re-verifies it: {result.cache_note}.",
+                )
+            )
         note = zephyr_base_note(os.environ.get("ZEPHYR_BASE"), str(workspace / "zephyr"))
         if note is not None:
             issues.append(Issue("build.zephyr-base-ignored", "info", note))

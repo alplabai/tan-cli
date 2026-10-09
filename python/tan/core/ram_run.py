@@ -323,16 +323,19 @@ def preamble(serial: str | None, speed: int, device: str) -> list[str]:
     return [*lines, "si SWD", f"speed {speed}", f"device {device}", "connect"]
 
 
-def load_script(pre: Sequence[str], binary_path: str, image: RamImage) -> str:
+def load_script(
+    pre: Sequence[str], binary_path: str, image: RamImage, after_go: Sequence[str] = ()
+) -> str:
     # Every address below is an `int` rendered with `0x%X`, never a string; the
     # caller passes only a path it staged itself (and already validated).
     """`connect; halt; loadbin; setpc; go` -- the proven Flow C load session.
     `loadbin` resets the core and re-reads the vector table (SP); `setpc` enters
-    the reset handler. No MRAM address appears anywhere."""
+    the reset handler. No MRAM address appears anywhere. `after_go` are extra read-only
+    lines run in the same session once the image is going (`tan.core.ram_watch`)."""
     if any(c in binary_path for c in "\r\n\0"):
         raise RamRunError("the image path carries a control character")
     return "\n".join(
-        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", "exit"]
+        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", *after_go, "exit"]
     ) + "\n"
 
 
