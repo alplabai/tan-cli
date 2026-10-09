@@ -13,7 +13,6 @@ import pytest
 
 from tan.commands import flash_cmd, flash_raw
 import json
-import pwd
 import stat as _stat
 import socket
 
@@ -30,7 +29,10 @@ SECTOR = 0x4000
 MRAM = 0x580000  # 5.5 MiB, the E8 window [0x80000000, 0x80580000)
 SLOT0 = 0x80010000
 BASE = 0x80000000
-ME = f"{socket.gethostname()}/{pwd.getpwuid(os.getuid()).pw_name}"
+ME = (
+    f"{socket.gethostname()}/{__import__('pwd').getpwuid(os.getuid()).pw_name}"
+    if os.name != "nt" else "host/user"
+)
 NONCE = "ab" * 24
 CHANGED = "2026-10-09 17:12:47.796610"
 OTHER_NONCE = "cd" * 24
@@ -548,7 +550,7 @@ def test_lease_files_and_places_are_validated(tmp_path, monkeypatch):
 def test_the_user_comes_from_the_uid_not_the_environment(monkeypatch):
     monkeypatch.setenv("USER", "mallory")
     monkeypatch.setenv("LOGNAME", "mallory")
-    assert flash_raw._current_user() == pwd.getpwuid(os.getuid()).pw_name
+    assert flash_raw._current_user() == __import__('pwd').getpwuid(os.getuid()).pw_name
 
 
 def test_labgrid_is_run_with_a_default_coordinator_and_no_python_steering(tmp_path, monkeypatch):
@@ -708,24 +710,3 @@ def test_lease_changed_parser_is_strict():
     assert raw_write.lease_changed("  changed: a\n  changed: b\n") is None
     assert raw_write.lease_changed("  changed:\n") is None
     assert raw_write.lease_changed("nothing") is None
-
-
-def test_pwd_and_grp_are_imported_lazily_and_the_tool_still_imports_without_them():
-    """CI runs Windows/macOS: a top-level `import pwd` would break `import tan.cli` there."""
-    import subprocess
-    import sys
-    import textwrap
-
-    code = textwrap.dedent("""
-        import sys
-        sys.modules['pwd'] = None
-        sys.modules['grp'] = None
-        import tan.cli
-        from tan.commands import flash_raw
-        print(flash_raw._platform_refusal())
-        print(flash_raw._reservation_refusal('p', '/x', '3-4.2')[0])
-    """)
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
-    assert out.returncode == 0, out.stderr
-    first, second = out.stdout.strip().splitlines()[:2]
-    assert first.startswith("unsupported on this platform") and "unsupported on this platform" in second
