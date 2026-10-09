@@ -5,6 +5,10 @@
   "lines": null,
   "long_functions": [
     [
+      51,
+      "_reservation_refusal"
+    ],
+    [
       184,
       "run_raw_entry"
     ]

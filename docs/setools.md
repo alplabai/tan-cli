@@ -187,6 +187,11 @@ and non-overlapping, or `flash.raw-invalid` (previews included). tan derives no
 address, so an ATOC/STOC is only written where you name it. A real write needs the
 CLI `--confirm` (never a manifest's `flash_args.confirm`) and a provably held bench
 reservation (`flash.raw-reservation-required` otherwise, failing closed):
+`TAN_LEASE_NONCE` set to the nonce in your own `~/.cache/alplab-leases/<place>.lease`
+(tan-cli#1457: labgrid's holder is `<host>/<user>` for every session of a user, so the
+holder alone cannot tell sessions apart; acquire with
+`eval "$(scripts/bench/tan-lease.sh acquire <place>)"`, release with
+`scripts/bench/tan-lease.sh release <place>`);
 `JLINK_RUN_PLACE` set; the J-Link program tan runs resolves to the wrapper named by
 an absolute `TAN_JLINK_WRAPPER` (outside the cwd, not world-writable; a marker string
 inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolute,

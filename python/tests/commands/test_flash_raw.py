@@ -14,6 +14,7 @@ import pytest
 from tan.commands import flash_cmd, flash_raw
 import json
 import pwd
+import stat as _stat
 import socket
 
 from tan.commands import build_output
@@ -30,10 +31,19 @@ MRAM = 0x580000  # 5.5 MiB, the E8 window [0x80000000, 0x80580000)
 SLOT0 = 0x80010000
 BASE = 0x80000000
 ME = f"{socket.gethostname()}/{pwd.getpwuid(os.getuid()).pw_name}"
+NONCE = "ab" * 24
+OTHER_NONCE = "cd" * 24
 SERIAL = "000999000001"
 USB = "3-4.3"
 WRAPPER = '#!/bin/bash\nJLINK_RUN_STANDIN=1 exec jlink-run.sh "$@"\n'
 ATOC = 0x8057C000
+
+
+def _lease(directory, place, nonce, mode=0o600):
+    path = directory / f"{place}.lease"
+    path.write_text(f"place={place}\nnonce={nonce}\n", encoding="utf-8")
+    os.chmod(path, mode)
+    return path
 
 
 def _show(holder=ME, path=USB):
@@ -141,6 +151,12 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
     monkeypatch.setenv(flash_raw.WRAPPER_ENV, str(stub))
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_cmd, "_flow_d_preflight", lambda *_a, **_k: None)
+    leases = tmp_path / "leases"
+    leases.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(leases, 0o700)
+    _lease(leases, "e1m-aen-evk-02", NONCE)
+    monkeypatch.setattr(flash_raw, "LEASE_DIR", str(leases))
+    monkeypatch.setenv(flash_raw.NONCE_ENV, NONCE)
     monkeypatch.setattr(flash_raw, "_mram_window", lambda _ctx: (BASE, MRAM))
     monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (_show(), ""))
     data = blobs or [os.urandom(2 * SECTOR), os.urandom(SECTOR)]
@@ -183,7 +199,7 @@ def test_a_raw_write_loads_verifies_hashes_and_never_resets(tmp_path, monkeypatc
     assert [w["sectorSpan"]["count"] for w in entry["raw"]["writes"]] == [2, 1]
     assert entry["raw"]["resetCommands"] is False
     assert entry["jlink"]["reservation"] == {
-        "env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02", "verified": "labgrid",
+        "env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02", "verified": "labgrid+session-lease",
         "usbPath": USB}
     assert jl.kinds() == ["write"]
     script = jl.scripts[-1]
@@ -417,9 +433,9 @@ def test_a_probe_that_is_not_the_leased_places_swd_port_is_refused(tmp_path, mon
 def test_an_unknown_selected_usb_path_cannot_be_matched_to_the_lease(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     wrapper = os.environ[flash_raw.WRAPPER_ENV]
-    refusal, verified = flash_raw._reservation_refusal("p", wrapper, None)
+    refusal, verified = flash_raw._reservation_refusal("e1m-aen-evk-02", wrapper, None)
     assert verified is None and "not the leased place's swd port" in refusal
-    assert flash_raw._reservation_refusal("p", wrapper, USB) == (None, os.path.realpath(wrapper))
+    assert flash_raw._reservation_refusal("e1m-aen-evk-02", wrapper, USB) == (None, os.path.realpath(wrapper))
 
 
 def test_the_verified_path_is_what_every_spawn_uses(tmp_path, monkeypatch):
@@ -461,6 +477,71 @@ def test_a_symlinks_own_directory_chain_is_checked_too(tmp_path, monkeypatch):
     link.symlink_to(tmp_path / "tools" / "JLinkExe")
     os.chmod(linkdir, 0o777)
     assert "world-writable" in flash_raw._unsafe(str(link))
+
+
+def test_a_session_that_is_the_same_user_but_never_acquired_the_place_is_refused(tmp_path, monkeypatch):
+    """tan-cli#1457: labgrid says `host/user` holds the place -- true for every session of that
+    user. Without THIS session's nonce the write is refused."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.delenv(flash_raw.NONCE_ENV)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "tan-lease.sh acquire" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_another_sessions_nonce_is_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setenv(flash_raw.NONCE_ENV, OTHER_NONCE)  # the lease file holds NONCE
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "does not match the lease" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_a_nonce_for_a_different_place_does_not_cover_this_one(tmp_path, monkeypatch):
+    """The evk-03 incident: a valid lease for evk-02 must not authorise evk-03."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "e1m-aen-evk-03")
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "no lease file" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_the_matching_session_nonce_is_allowed(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 0, (data, issues)
+    assert data["entries"][0]["jlink"]["reservation"]["verified"] == "labgrid+session-lease"
+    assert jl.kinds() == ["write"]
+
+
+@pytest.mark.parametrize("bad", ["short", "ZZ" * 24, "", "ab" * 24 + "\n; x"])
+def test_a_malformed_nonce_is_refused(tmp_path, monkeypatch, bad):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv(flash_raw.NONCE_ENV, bad)
+    assert flash_raw._lease_refusal("e1m-aen-evk-02")
+
+
+def test_lease_files_and_places_are_validated(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    leases = tmp_path / "leases"
+    assert flash_raw._lease_refusal("e1m-aen-evk-02") is None
+    os.chmod(leases / "e1m-aen-evk-02.lease", 0o644)
+    assert "mode 0600" in flash_raw._lease_refusal("e1m-aen-evk-02")
+    os.chmod(leases / "e1m-aen-evk-02.lease", 0o600)
+    os.chmod(leases, 0o770)
+    assert "mode 0700" in flash_raw._lease_refusal("e1m-aen-evk-02")
+    os.chmod(leases, 0o700)
+    (leases / "x.lease").symlink_to(leases / "e1m-aen-evk-02.lease")
+    assert "regular file" in flash_raw._lease_refusal("x")
+    for place in ("../e1m", "a/b", "", "-x"):
+        assert "plain labgrid place name" in flash_raw._lease_refusal(place)
+    (leases / "e1m-aen-evk-02.lease").write_text(f"place=other\nnonce={NONCE}\n")
+    os.chmod(leases / "e1m-aen-evk-02.lease", 0o600)
+    assert "does not match" in flash_raw._lease_refusal("e1m-aen-evk-02")
 
 
 def test_the_user_comes_from_the_uid_not_the_environment(monkeypatch):

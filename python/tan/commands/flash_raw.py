@@ -16,9 +16,11 @@ or a map, so an ATOC/STOC is only ever written where the user said.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import pwd
+import re
 import socket
 import stat
 import subprocess
@@ -72,6 +74,16 @@ WRAPPER_ENV = "TAN_JLINK_WRAPPER"
 #: Optional absolute path of `labgrid-client`; otherwise only these fixed directories are
 #: searched -- never `$PATH`, which a shadowing binary could front-run.
 LABGRID_ENV = "TAN_LABGRID_CLIENT"
+#: Per-SESSION lease (tan-cli#1457). labgrid's holder name is `<host>/<user>`, identical for
+#: every session of one user, so "the place is acquired by me" cannot tell this session from
+#: another. `scripts/bench/tan-lease.sh acquire <place>` records a random nonce in
+#: `LEASE_DIR/<place>.lease` (0600) and prints `export TAN_LEASE_NONCE=<nonce>` for ONLY the
+#: acquiring shell; the gate needs the two to match. (labgrid reservation tokens would also
+#: separate sessions but only exist for `reserve`-allocated places, not for `acquire`.)
+NONCE_ENV = "TAN_LEASE_NONCE"
+LEASE_DIR = "~/.cache/alplab-leases"
+_PLACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_NONCE_RE = re.compile(r"[0-9a-f]{32,128}")
 LABGRID_DIRS = ("~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin")
 
 
@@ -191,7 +203,7 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     exe = verified
     report["jlink"]["binary"] = exe
     report["jlink"]["reservation"] = {
-        "env": RESERVATION_ENV, "place": place, "verified": "labgrid", "usbPath": selection.usb_path,
+        "env": RESERVATION_ENV, "place": place, "verified": "labgrid+session-lease", "usbPath": selection.usb_path,
     }
 
     # ── the wrong-board guard, exactly as for a Flow D write ──
@@ -348,6 +360,46 @@ def _labgrid_client() -> str | None:
     return None
 
 
+def _lease_refusal(place: str) -> str | None:
+    """Refusal text unless THIS session proves it acquired `place`: `TAN_LEASE_NONCE` is set,
+    well-formed, and equals the nonce in this user's own 0600 lease file for exactly that
+    place. Any missing, unreadable, mis-owned, mis-moded or mismatching piece refuses."""
+    how = (
+        f"Acquire the place from this shell with `eval \"$(scripts/bench/tan-lease.sh acquire "
+        f"{place})\"` so {NONCE_ENV} and {LEASE_DIR}/{place}.lease agree; a place held by another "
+        "session of the same labgrid user is not yours to write."
+    )
+    if not _PLACE_RE.fullmatch(place):
+        return f"the place name {place!r} is not a plain labgrid place name. {how}"
+    nonce = os.environ.get(NONCE_ENV, "").strip()
+    if not _NONCE_RE.fullmatch(nonce):
+        return f"{NONCE_ENV} is not set to a lease nonce, so this session has not acquired {place}. {how}"
+    directory = os.path.expanduser(LEASE_DIR)
+    path = os.path.join(directory, f"{place}.lease")
+    try:
+        dst, fst = os.lstat(directory), os.lstat(path)
+    except OSError:
+        return f"there is no lease file {path}: this session never acquired {place} with the lease helper. {how}"
+    if not stat.S_ISDIR(dst.st_mode) or dst.st_uid != os.getuid() or dst.st_mode & 0o077:
+        return f"the lease directory {directory} must be a directory owned by you with mode 0700. {how}"
+    if not stat.S_ISREG(fst.st_mode) or fst.st_uid != os.getuid() or fst.st_mode & 0o077:
+        return f"the lease file {path} must be a regular file owned by you with mode 0600. {how}"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(4096)
+    except (OSError, UnicodeDecodeError):
+        return f"the lease file {path} cannot be read. {how}"
+    fields = dict(
+        line.split("=", 1) for line in text.splitlines() if "=" in line
+    )
+    if fields.get("place") != place or not hmac.compare_digest(fields.get("nonce", ""), nonce):
+        return (
+            f"{NONCE_ENV} does not match the lease on {place} -- another session holds that lease, "
+            f"not this one. {how}"
+        )
+    return None
+
+
 def _reservation_refusal(
     place: str, exe: str | None, usb_path: str | None
 ) -> tuple[str | None, str | None]:
@@ -366,6 +418,9 @@ def _reservation_refusal(
     )
     if not place:
         return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}", None
+    lease = _lease_refusal(place)
+    if lease is not None:
+        return lease, None
     configured = os.environ.get(WRAPPER_ENV, "").strip()
     if not configured:
         return f"{WRAPPER_ENV} is not set, so no J-Link program can be recognised as the reservation wrapper. {need}", None
