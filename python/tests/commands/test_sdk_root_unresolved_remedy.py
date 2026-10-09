@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#1423: a project outside every alp-sdk checkout gets `build.sdk-root-
-unresolved` / `flash.sdk-root-not-found` naming where tan looked and the
-`--sdk-root` flag that fixes it, not a bare "Cannot locate alp-sdk root."."""
+"""tan-cli#1423, #1444: a project outside every alp-sdk checkout gets
+`build.sdk-root-unresolved` / `flash.sdk-root-not-found` /
+`clean.sdk-root-not-found` naming where tan looked and the `--sdk-root` flag
+that fixes it, not a bare "Cannot locate alp-sdk root."."""
 
 from pathlib import Path
 
@@ -74,3 +75,28 @@ def test_flash_bad_sdk_root_flag_names_the_path_not_the_ladder(tmp_path):
     message = _message(doc, "flash.sdk-root-not-found")
     assert str(bad) in message
     assert "the project pin" not in message
+
+
+def test_clean_names_where_it_looked_and_the_flag(tmp_path):
+    project, env = _scratch(tmp_path)
+    doc = envelope_of(run_tan("--format", "json", "clean", cwd=project, env_overrides=env))
+    message = _message(doc, "clean.sdk-root-not-found")
+    assert message.startswith("Cannot locate alp-sdk root. Neither `--sdk-root`")
+    assert f"`{(project / '.alp' / 'sdk-path').as_posix()}`" in message
+    assert "To fix it, get an alp-sdk checkout" in message
+    assert "`--sdk-root <path>`" in message
+
+
+def test_clean_with_a_bad_flag_names_the_flag_not_the_ladder(tmp_path):
+    # `--sdk-root` is terminal: no other tier was tried, so the refusal must
+    # not claim the ladder was searched.
+    project, env = _scratch(tmp_path)
+    bogus = tmp_path / "not-an-sdk"
+    bogus.mkdir()
+    doc = envelope_of(run_tan("--format", "json", "clean", "--sdk-root", str(bogus),
+                              cwd=project, env_overrides=env))
+    message = _message(doc, "clean.sdk-root-not-found")
+    assert message == (
+        f"Cannot locate alp-sdk root. `--sdk-root {bogus}` is not an alp-sdk "
+        "checkout (no `scripts/alp_project.py` under it)."
+    )
