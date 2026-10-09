@@ -948,3 +948,66 @@ def test_the_combined_session_and_the_boot_probe_each_leave_a_transcript(tmp_pat
     text = write_log.read_text()
     assert "savebin" in text and "loadbin" in text  # the read-back is in the write's log
     assert "mem32" in probe_log.read_text()
+
+
+# ── tan-cli#1445: --no-reset ────────────────────────────────────────────────
+
+_NO_TAIL = ("RSetType", "\nr\n", "\ng\n")
+
+
+def test_no_reset_sends_no_reset_or_run_and_says_so(tmp_path, monkeypatch):
+    fake = FakeJlink(monkeypatch)
+    fake.sources = [APP, ATOC]
+    rc, data, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"no_reset": True})
+    assert rc == 0, (data, issues)
+    write = [s for s in fake.scripts if "ShowEmuList" not in s][0]
+    assert "loadbin" in write and "verifybin" in write and write.splitlines()[-1] == "exit"
+    assert not any(t in write for t in _NO_TAIL)
+    jl = data["entries"][0]["jlink"]
+    assert jl["reset"] == "not-sent" and "may still resume" in jl["resetNote"]
+    msg = data["entries"][0]["message"]
+    assert "no reset command was sent" in msg and "may resume the core" in msg and "PIN-reset" not in msg
+    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+    assert not any("mem32" in s for s in fake.scripts)  # nothing to confirm
+
+
+def test_no_reset_with_readback_reads_in_session_and_ends_at_exit(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch, no_reset=True)
+    assert rc == 0, (data, issues)
+    session = [s for s in fake.scripts if "ShowEmuList" not in s]
+    assert len(session) == 1 and not any(t in session[0] for t in _NO_TAIL)
+    lines = session[0].splitlines()
+    assert lines[-1] == "exit" and lines.count("exit") == 1
+    assert lines.index("h") < next(i for i, l in enumerate(lines) if l.startswith("savebin"))
+    jl = data["entries"][0]["jlink"]
+    assert jl["verification"] == "readback-verified" and jl["reset"] == "not-sent"
+
+
+def test_a_no_reset_preview_shows_a_script_without_the_reset_tail(tmp_path, monkeypatch):
+    fake = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_ARGS, dry_run=True, probe_kwargs={"no_reset": True}
+    )
+    script = "\n".join(data["entries"][0]["plan"]["jlinkScript"])
+    assert "loadbin" in script and not any(t in script for t in _NO_TAIL)
+    assert fake.scripts == []
+
+
+def test_no_reset_helpers():
+    write = "connect\nloadbin x 0x1\nverifybin x 0x1\nRSetType 2\nr\ng\nexit\n"
+    assert flow_d_report.drop_reset_tail(write) == "connect\nloadbin x 0x1\nverifybin x 0x1\nexit\n"
+    assert flow_d_report.drop_reset_tail("connect\nexit\n") == "connect\nexit\n"
+    assert flow_d_report.combined_script(
+        "connect\nloadbin x 0x1\nverifybin x 0x1\nexit\n", [("0x1", 4, "/t/r")], tail=False
+    ) == "connect\nloadbin x 0x1\nverifybin x 0x1\nh\nsavebin /t/r 0x1 0x4\nexit\n"
+
+
+def test_no_reset_cannot_be_combined_with_ram_or_raw():
+    from typer.testing import CliRunner
+
+    from tan.cli import app
+
+    for extra in (["--ram"], ["--raw", "x.bin@0x80010000"]):
+        result = CliRunner().invoke(app, ["flash", "--no-reset", *extra, "."])
+        assert result.exit_code != 0
+        assert "--no-reset only applies" in (result.output or "") + str(result.exception or "")

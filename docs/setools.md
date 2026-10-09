@@ -176,6 +176,17 @@ re-flash; a session that dies in the halt/read steps is reported as the entry fa
 (check `verifybin` in `jlink.transcriptPath`). `--raw --readback` and the no-tail fallback use a
 fresh session without a reset.
 
+`--no-reset` (tan-cli#1445) sends **no** reset/run commands: the session ends after the
+write, `verifybin` and (with `--readback`) the in-session read-back, at `exit`, so tan does
+not start the new image and you can attach a console first. The honest limit: J-Link's `exit`
+has been seen to resume the core on its own (bench, tan-cli#1458) and the board is not held in
+reset, so this means "no reset command is sent", not "the core is stopped". The envelope says
+`jlink.reset: "not-sent"` with a `resetNote`, and the message says so. No boot probe runs (there
+is no reset to confirm). Reset or power-cycle when ready. Holding nRESET across `exit` (J-Link
+`r0`) was considered and is not implemented: its behaviour could not be verified, an nRESET pulse
+does not wake an Alif E8 that is in a correctly configured STOP, and a board left in reset until
+`tan reset` or a power cycle is a worse default. Not valid with `--ram` or `--raw`.
+
 ### `--raw <file>@<addr>`: byte-exact sector restore
 
 `tan flash --core <id> --raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000

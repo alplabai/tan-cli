@@ -247,25 +247,42 @@ def target_unreachable(transcript: str) -> bool:
     return any(m in transcript for m in UNREACHABLE_MARKERS)
 
 
-def combined_script(jlink_script: str, regions: Sequence[tuple[str, int, str]]) -> str:
+def drop_reset_tail(jlink_script: str) -> str:
+    """The write script WITHOUT its reset/run tail (`RSetType` .. final `exit`): connect,
+    loadbin, verifybin, `exit`. For `--no-reset` (tan-cli#1445): no reset command is sent. J-Link's
+    `exit` may still resume the core (bench, tan-cli#1458), which is why the envelope says so."""
+    lines = [line for line in jlink_script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("rsettype"):
+            return "\n".join([*lines[:i], "exit"]) + "\n"
+    return jlink_script
+
+
+def combined_script(
+    jlink_script: str, regions: Sequence[tuple[str, int, str]], tail: bool = True
+) -> str:
     """The write session WITH the read-back inside it (tan-cli#1458, bench): everything up to
     the first `RSetType` (connect, loadbin, verifybin), then `h`, one `savebin` per region,
     the write's own reset/run tail, `exit`. There is NO `exit` between the write and the read:
     J-Link's `exit` resumes the core even after `h`, so a separate read-back session let the
     app run on stale state before it connected. `regions` is `(address_hex, size, dest)`.
-    Raises `ValueError` without a `RSetType` tail to keep (nothing to run after the read)."""
+    `tail=False` (`--no-reset`) ends after the read with `exit` and no reset/run commands; the
+    script then needs no `RSetType`. Otherwise raises `ValueError` without a `RSetType` tail to
+    keep (nothing to run after the read)."""
     lines = [line for line in jlink_script.splitlines() if line.strip()]
     for i, line in enumerate(lines):
         if line.strip().lower().startswith("rsettype"):
             break
     else:
-        raise ValueError("the write script has no reset tail to run after the read-back")
-    tail = reset_tail(jlink_script)
+        if tail:
+            raise ValueError("the write script has no reset tail to run after the read-back")
+        i = len(lines) - 1 if lines and lines[-1].strip().lower() == "exit" else len(lines)
+    tail_lines = reset_tail(jlink_script) if tail else []
     out = [*lines[:i], "h"]
     for address, size, dest in regions:
         validate_commander_path(dest, "the read-back destination path")
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
-    return "\n".join([*out, *tail, "exit"]) + "\n"
+    return "\n".join([*out, *tail_lines, "exit"]) + "\n"
 
 
 def readback_script(

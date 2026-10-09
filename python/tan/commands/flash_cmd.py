@@ -238,6 +238,7 @@ from tan.core.flow_d_report import (
     reset_failures,
     sha256_of,
     combined_script,
+    drop_reset_tail,
     VERIFICATION_INSESSION_NOTE,
     target_unreachable,
     transcript_tail,
@@ -1930,6 +1931,12 @@ _FLOW_D_VERIFIED_ONLY = (
     "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
     "did not halt)"
 )
+#: tan-cli#1445: `--no-reset`. Honest about what tan can and cannot promise: J-Link's `exit`
+#: has been seen to resume the core even without a reset command (bench, tan-cli#1458).
+_FLOW_D_NO_RESET = (
+    "; cache-verified; --no-reset: no reset command was sent, but J-Link's exit may resume the "
+    "core (the board is not held in reset)"
+)
 #: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
 _FLOW_D_VERIFIED_NOHALT = "; cache-verified and PIN-reset (boot confirmed without a halt: {witness})"
 
@@ -2251,6 +2258,8 @@ class _Context:
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
+    #: `--no-reset` (tan-cli#1445): Flow D sends no reset/run commands after the write.
+    no_reset: bool = False
     #: `--jlink PATH` (tan-cli#1336): the explicit J-Link binary, a CLI input.
     jlink_path: str | None = None
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
@@ -3439,6 +3448,14 @@ def _flash_entry_body(
         # After `meta.build`, before the preview below, so `--dry-run` shows it.
         plan = replace(plan, argv=(*plan.argv, REPLACE_ATOC_FLAG))
 
+    if method == FLOW_D_METHOD and ctx.no_reset and plan.jlink_script:
+        # tan-cli#1445: no RSetType / r / g. The message and script shown by a preview match.
+        plan = replace(
+            plan,
+            jlink_script=drop_reset_tail(plan.jlink_script),
+            ok_message=plan.ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_NO_RESET, 1),
+        )
+
     if method == FLOW_D_METHOD:
         report["plan"] = _flow_d_plan_block(plan, flow_d_writes, report)
 
@@ -3551,7 +3568,7 @@ def _flash_entry_body(
     exec_plan = plan
     inline: _InlineReadback | None = None
     if method == FLOW_D_METHOD and ctx.readback and plan.jlink_script:
-        inline = _flow_d_inline_readback(plan, flow_d_writes)
+        inline = _flow_d_inline_readback(plan, flow_d_writes, tail=not ctx.no_reset)
         if inline is not None:
             exec_plan = replace(plan, jlink_script=inline.script)
     outcome = _execute(
@@ -3571,6 +3588,13 @@ def _flash_entry_body(
         reset_unconfirmed = _flow_d_record(
             exec_plan, outcome, ctx, entry_id, report, preflight_facts
         )
+        if ctx.no_reset:
+            reset_unconfirmed = False
+            report["jlink"].update(
+                reset="not-sent",
+                resetNote="--no-reset: no reset command was sent. J-Link's exit may still resume "
+                "the core; the board is not held in reset. Reset or power-cycle when ready.",
+            )
         if outcome.success and ctx.readback:
             if inline is not None:
                 readback_failure = _flow_d_inline_verdict(report.setdefault("jlink", {}), outcome, inline)
@@ -3954,7 +3978,9 @@ class _InlineReadback:
     tmp: str
 
 
-def _flow_d_inline_readback(plan: FlashPlan, writes: list[dict[str, Any]]) -> "_InlineReadback | None":
+def _flow_d_inline_readback(
+    plan: FlashPlan, writes: list[dict[str, Any]], tail: bool = True
+) -> "_InlineReadback | None":
     """Build the combined write + halt + savebin + reset session, or `None` (nothing to read
     back, or the script has no reset tail) so the caller falls back to a fresh-session read."""
     regions = [(w["address"], w["size"], w["path"], w.get("sha256")) for w in writes if w.get("size")]
@@ -3964,7 +3990,7 @@ def _flow_d_inline_readback(plan: FlashPlan, writes: list[dict[str, Any]]) -> "_
     dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
     try:
         script = combined_script(
-            plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)]
+            plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)], tail
         )
     except (ValueError, FlashPlanError):
         shutil.rmtree(tmp, ignore_errors=True)
@@ -4414,6 +4440,7 @@ def _run(
     enumerate_probes: Callable[[], Any] | None = None,
     no_device_config: bool = False,
     readback: bool = False,
+    no_reset: bool = False,
     jlink_path: str | None = None,
     ram: bool = False,
     ram_console: bool = False,
@@ -4643,6 +4670,7 @@ def _run(
         no_device_config=no_device_config,
         project_dir=app_dir,
         readback=readback,
+        no_reset=no_reset,
         jlink_path=jlink_path,
         ram=ram,
         ram_console=ram_console,
@@ -5292,6 +5320,16 @@ def flash(
         "probe listing, the DPIDR preflight, the write and --readback alike, and "
         "reported as jlink.binary.",
     ),
+    no_reset: bool = typer.Option(
+        False,
+        "--no-reset",
+        help="Flow D (tan-cli#1445): send NO reset/run commands after the write, verify and "
+        "(with --readback) read-back, so the new image is not started by tan and a console can be "
+        "attached first. HONEST LIMIT: J-Link's `exit` has been seen to resume the core on its own "
+        "(bench), and the board is not held in reset, so this is 'no reset command is sent', not "
+        "'the core is guaranteed stopped'. The envelope says `jlink.reset: not-sent`. Reset or "
+        "power-cycle when ready. Not valid with --ram or --raw.",
+    ),
     readback: bool = typer.Option(
         False,
         "--readback",
@@ -5393,6 +5431,8 @@ def flash(
         raise typer.BadParameter("--watch only means something with --ram")
     if isinstance(raw, list) and raw and ram is True:
         raise typer.BadParameter("--raw writes MRAM; it cannot be combined with --ram")
+    if no_reset is True and (ram is True or (isinstance(raw, list) and raw)):
+        raise typer.BadParameter("--no-reset only applies to a Flow D write, not --ram or --raw")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -5432,6 +5472,7 @@ def flash(
             probe_usb_path=probe_usb_path,
             no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
             readback=readback if isinstance(readback, bool) else False,
+            no_reset=no_reset if isinstance(no_reset, bool) else False,
             jlink_path=jlink if isinstance(jlink, str) else None,
             ram=ram if isinstance(ram, bool) else False,
             ram_console=ram_console if isinstance(ram_console, bool) else False,
