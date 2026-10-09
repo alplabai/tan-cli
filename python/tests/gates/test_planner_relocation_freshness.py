@@ -1389,7 +1389,18 @@ from tests.conftest import sdk_root
 #: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
 #: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
 #: at `c4eb27645` and is unchanged, so nothing is ported.
-PINNED_SDK_COMMIT = "0dee99fb519b511e0a7fe4da63b333b9246040b4"  # alp-sdk origin/dev -- #2791 cameras: (cameras.py + camera_owner.py + the _cameras hooks), #2784 power node ported (this change)
+#: AUDIT `0dee99fb` -> `a5a137c7` (mirror / PINNED_HASHES; tan-cli#1393): two
+#: upstream commits, #2736 (`183b05509`, camera DT generator) and #2795
+#: (`a5a137c7b`, SoM power runtime). Only `alp_orchestrate/cameras.py` moved
+#: in the mirror, and only in its docstring (the Yocto-owner paragraph now names
+#: `scripts/gen_camera_dt.py`), so the 3-way merge took it with no behaviour
+#: change and its `PINNED_HASHES` entry re-hashes. Every other mirror hash
+#: re-computed unchanged at `a5a137c7b`.
+#: RE-MEASURED, not assumed: the planner oracle re-captured at `a5a137c7b`
+#: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
+#: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
+#: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
+PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1433,7 +1444,7 @@ PINNED_HASHES: dict[str, str] = {
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
     "buildplan.py": "2bccfc11af0c7f03ab16c708df0563bda6d2a8b143b59f8481b1ad1beaeab521",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
-    "cameras.py": "639d355dea42d8dca6caaf943ea6ea7b50f9b27abd4acae74939f4208ac6e938",
+    "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -1441,10 +1452,6 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
-    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
-    # that refusal: tan's `link_target.apply_link_target` (called at the end of
-    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
@@ -2421,7 +2428,22 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
 #: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
-HAND_PORT_PINNED_SDK_COMMIT = "0dee99fb519b511e0a7fe4da63b333b9246040b4"  # alp-sdk origin/dev -- gen_zephyr_board.py #2784 power node ported; validator.py/alp_project.py moved but tan spawns the SDK validator (#2791)
+#: AUDIT `0dee99fb` -> `a5a137c7` (tan-cli#1393): two hand-port sources changed.
+#: `scripts/gen_zephyr_board.py` (#2795) -- PORTED: `_aen_som_power_dts` now
+#: emits the `&pinctrl { pinctrl_som_power: ... }` group (`group0` with
+#: `pinmux` = every output control pad of the SKU's present domains, sorted,
+#: `PIN_P<port>_<pin>__LPGPIO` for port 15 else `__GPIO`; `input-enable;`
+#: `input-schmitt-enable;`) ahead of the `/ { som-power }` node, and the node
+#: gains `pinctrl-0 = <&pinctrl_som_power>; pinctrl-names = "default";`.
+#: `scripts/alp_cli/validator.py` -- docstring-only (`camera_connector_problems`
+#: follow-up note); tan spawns the SDK validator, nothing to port. Also in range
+#: and needing no port: `on-module-links.yaml` v2 `power_domains` gains
+#: `dependents[].kind: phy_refclk` (schema enum) and the `deep_power_down_cmd`
+#: -> `hold_reset` default_action change; tan reads that YAML through the
+#: existing `power_domains` loader and the enum is validated by the SDK schema,
+#: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
+#: `"phy_refclk"` on the ethernet-PHY domain.
+HAND_PORT_PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2485,7 +2507,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "0dee99fb519b511e0a7fe4da63b333b9246040b4"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "89c30a8c29d9ac055fda77f37befe50397a5484989dc2254d519e852af697315",
+    "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
@@ -2497,7 +2519,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
     "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
     "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
-    "scripts/alp_cli/validator.py": "57fe745febeb0109f4ec8553fac522584a5d122379ca06795c0bb2cc744b5c74",
+    "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
     "scripts/alp_project.py": "c505f9dfad7557715929cbe190830fe21268695891b637b28752c0de65389afd",
 }
 

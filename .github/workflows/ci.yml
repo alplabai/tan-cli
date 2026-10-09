@@ -652,7 +652,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 0dee99fb519b511e0a7fe4da63b333b9246040b4
+          ref: a5a137c7b594ebb5d451177803c0eb324069e86b
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

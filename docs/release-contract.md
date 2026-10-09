@@ -667,6 +667,13 @@ path requires an SDK that carries it; the rest is the E1M-NX9101 removal
 `dev` `c4eb2764542cfaaaaaa637113af56af5cd3b2edd` (docs-only for `scripts/**` and
 `metadata/**` over `6159a7b1a`). The floor does NOT move: it stays `b04bb0f7a`.
 
+**Addendum (2026-10-09, tan-cli#1393).** The planner mirror moved to alp-sdk
+`dev` `a5a137c7b594ebb5d451177803c0eb324069e86b` (over `0dee99fb5`). The floor
+does NOT move: it stays `b04bb0f7a`. The planner change in range is alp-sdk#2795
+(the AEN `alp,som-power` node gains a `pinctrl_som_power` group), which tan's own
+in-process planner renders itself, so no tan code path requires an SDK that
+carries it.
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
 contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision
