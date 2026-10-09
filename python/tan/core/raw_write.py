@@ -125,3 +125,24 @@ def lease_holder(show_text: str) -> str | None:
         if line.startswith("  acquired:")
     }
     return holders.pop() if len(holders) == 1 and next(iter(holders), "x") else None
+
+
+def lease_swd_path(show_text: str) -> str | None:
+    """The USB path of the `swd` resource in `labgrid-client -p <place> show` output (the
+    `'path': '3-4.2'` entry of the `Acquired|Matching resource 'swd'` block), or `None`.
+    The `matches:` list at the top names the same resource without a path, so only the
+    resource block counts."""
+    import re
+
+    inside = False
+    for line in show_text.splitlines():
+        if re.match(r"^(Acquired|Matching) resource 'swd'", line):
+            inside = True
+            continue
+        if inside:
+            if line and not line[0].isspace():
+                return None
+            found = re.search(r"'path': '([^']+)'", line)
+            if found:
+                return found.group(1)
+    return None

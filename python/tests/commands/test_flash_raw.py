@@ -12,12 +12,13 @@ from pathlib import Path
 import pytest
 
 from tan.commands import flash_cmd, flash_raw
-import getpass
 import json
+import pwd
 import socket
 
 from tan.commands import build_output
 from tan.core import raw_write
+from tan.core.jlink_probe import JLinkProbe
 from tan.core.raw_write import RawError, RawSpec
 
 _real_window = flash_raw._mram_window
@@ -28,9 +29,16 @@ SECTOR = 0x4000
 MRAM = 0x580000  # 5.5 MiB, the E8 window [0x80000000, 0x80580000)
 SLOT0 = 0x80010000
 BASE = 0x80000000
-ME = f"{socket.gethostname()}/{getpass.getuser()}"
+ME = f"{socket.gethostname()}/{pwd.getpwuid(os.getuid()).pw_name}"
+SERIAL = "000999000001"
+USB = "3-4.3"
 WRAPPER = '#!/bin/bash\nJLINK_RUN_STANDIN=1 exec jlink-run.sh "$@"\n'
 ATOC = 0x8057C000
+
+
+def _show(holder=ME, path=USB):
+    block = f"Acquired resource 'swd' (e/p/NetworkUSBDebugger/swd):\n  {{'path': '{path}'}}\n" if path else ""
+    return f"Place 'p':\n  matches:\n    e/NetworkUSBDebugger/swd\n  acquired: {holder}\n{block}"
 
 
 def _sha(data: bytes) -> str:
@@ -95,7 +103,8 @@ class FakeJlink:
     def _spawn(self, argv, script, *a, **k):
         self.scripts.append(script)
         if "ShowEmuList" in script:
-            return flash_cmd._Outcome(success=True, stdout="", returncode=0)
+            line = f"J-Link[0]: Connection: USB, Serial number: {SERIAL}, ProductName: J-Link"
+            return flash_cmd._Outcome(success=True, stdout=line, returncode=0)
         if "savebin" in script:
             for n, m in enumerate(re.finditer(r'savebin\s+("[^"]+"|\S+)\s+', script)):
                 Path(m.group(1).strip('"')).write_bytes(self.read_back.get(n, self.blobs[n]))
@@ -133,7 +142,7 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_cmd, "_flow_d_preflight", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_raw, "_mram_window", lambda _ctx: (BASE, MRAM))
-    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: f"Place '{place}':\n  acquired: {ME}\n")
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (_show(), ""))
     data = blobs or [os.urandom(2 * SECTOR), os.urandom(SECTOR)]
     paths = []
     for i, blob in enumerate(data):
@@ -145,6 +154,8 @@ def _setup(tmp_path, monkeypatch, *, blobs=None):
 
 def _run(tmp_path, raw, **kw):
     kw.setdefault("confirm_flag", True)
+    kw.setdefault("probe_usb_path", USB)
+    kw.setdefault("enumerate_probes", lambda: [JLinkProbe(USB, SERIAL)])
     return flash_cmd._run(
         app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"), board_yaml=None,
         core="m55_he", helper=None, dry_run=kw.pop("dry_run", False), skip_missing_tools=False,
@@ -172,7 +183,8 @@ def test_a_raw_write_loads_verifies_hashes_and_never_resets(tmp_path, monkeypatc
     assert [w["sectorSpan"]["count"] for w in entry["raw"]["writes"]] == [2, 1]
     assert entry["raw"]["resetCommands"] is False
     assert entry["jlink"]["reservation"] == {
-        "env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02", "verified": "labgrid"}
+        "env": "JLINK_RUN_PLACE", "place": "e1m-aen-evk-02", "verified": "labgrid",
+        "usbPath": USB}
     assert jl.kinds() == ["write"]
     script = jl.scripts[-1]
     assert f"loadbin {paths[0]} 0x80010000" in script and f"verifybin {paths[1]} 0x8057C000" in script
@@ -356,10 +368,10 @@ def test_labgrid_client_is_never_found_through_path(tmp_path, monkeypatch):
     monkeypatch.delenv(flash_raw.LABGRID_ENV, raising=False)
     monkeypatch.setattr(flash_raw, "LABGRID_DIRS", ())
     assert flash_raw._labgrid_client() is None
-    assert flash_raw._labgrid_show("p") is None
+    assert flash_raw._labgrid_show("p")[0] is None
     monkeypatch.setenv(flash_raw.LABGRID_ENV, str(fake))  # explicitly configured is used
     assert flash_raw._labgrid_client() == os.path.realpath(fake)
-    assert ME in flash_raw._labgrid_show("p")
+    assert ME in flash_raw._labgrid_show("p")[0]
 
 
 def test_labgrid_client_from_a_world_writable_dir_is_not_used(tmp_path, monkeypatch):
@@ -373,14 +385,117 @@ def test_labgrid_client_from_a_world_writable_dir_is_not_used(tmp_path, monkeypa
     assert flash_raw._labgrid_client() is None
 
 
-@pytest.mark.parametrize("show", [None, "Place 'p':\n  acquired: other-host/someone\n", "Place 'p':\n"])
-def test_a_lease_labgrid_does_not_show_as_ours_is_refused(tmp_path, monkeypatch, show):
+@pytest.mark.parametrize(
+    "show,text",
+    [
+        ((None, "labgrid-client exited 1: no coordinator"), "no coordinator"),
+        ((_show("other-host/someone"), ""), "do not hold the labgrid place"),
+        (("Place 'p':\n", ""), "do not hold the labgrid place"),
+        ((_show() + "  acquired: other/x\n", ""), "do not hold the labgrid place"),  # ambiguous
+    ],
+)
+def test_a_lease_labgrid_does_not_show_as_ours_is_refused(tmp_path, monkeypatch, show, text):
     _blobs, paths = _setup(tmp_path, monkeypatch)
     jl = FakeJlink(monkeypatch)
     monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: show)
     rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
     assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
-    assert "do not hold the labgrid place" in data["entries"][0]["message"] and jl.scripts == []
+    assert text in data["entries"][0]["message"] and jl.scripts == []
+
+
+@pytest.mark.parametrize("usb", ["3-4.2", None])
+def test_a_probe_that_is_not_the_leased_places_swd_port_is_refused(tmp_path, monkeypatch, usb):
+    """Review: the lease must cover the probe actually selected."""
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (_show(path=usb), ""))
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths))
+    assert rc == 1 and _codes(issues) == ["flash.raw-reservation-required"]
+    assert "not the leased place's swd port" in data["entries"][0]["message"] and jl.scripts == []
+
+
+def test_an_unknown_selected_usb_path_cannot_be_matched_to_the_lease(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    wrapper = os.environ[flash_raw.WRAPPER_ENV]
+    refusal, verified = flash_raw._reservation_refusal("p", wrapper, None)
+    assert verified is None and "not the leased place's swd port" in refusal
+    assert flash_raw._reservation_refusal("p", wrapper, USB) == (None, os.path.realpath(wrapper))
+
+
+def test_the_verified_path_is_what_every_spawn_uses(tmp_path, monkeypatch):
+    """Review: the env var is not re-read after verification."""
+    blobs, paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    seen = []
+    real = flash_cmd._execute
+    wrapper = os.path.realpath(os.environ[flash_raw.WRAPPER_ENV])
+
+    def _spy(plan, *a, **k):
+        seen.append(k.get("jlink_exe"))
+        monkeypatch.setenv(flash_raw.WRAPPER_ENV, "/nonexistent/elsewhere")  # swapped after the check
+        return real(plan, *a, **k)
+
+    monkeypatch.setattr(flash_cmd, "_execute", _spy)
+    jl.blobs = blobs
+    rc, data, issues, _l, _s = _run(tmp_path, _specs(paths), readback=True)
+    assert rc == 0, (data, issues)
+    assert seen and set(seen) == {wrapper}
+
+
+def test_group_writable_by_a_shared_group_and_foreign_owners_are_refused(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    tool = tmp_path / "tools" / "JLinkExe"
+    monkeypatch.setattr(flash_raw, "_private_group", lambda gid: False)
+    os.chmod(tool, 0o775)
+    assert "group-writable" in flash_raw._unsafe(str(tool))
+    os.chmod(tool, 0o755)
+    monkeypatch.setattr(flash_raw.os, "getuid", lambda: os.stat(tool).st_uid + 12345)
+    assert "owned by uid" in flash_raw._unsafe(str(tool))
+
+
+def test_a_symlinks_own_directory_chain_is_checked_too(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    linkdir = tmp_path / "linkdir"
+    linkdir.mkdir()
+    link = linkdir / "JLinkExe"
+    link.symlink_to(tmp_path / "tools" / "JLinkExe")
+    os.chmod(linkdir, 0o777)
+    assert "world-writable" in flash_raw._unsafe(str(link))
+
+
+def test_the_user_comes_from_the_uid_not_the_environment(monkeypatch):
+    monkeypatch.setenv("USER", "mallory")
+    monkeypatch.setenv("LOGNAME", "mallory")
+    assert flash_raw._current_user() == pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_labgrid_is_run_with_a_default_coordinator_and_no_python_steering(tmp_path, monkeypatch):
+    fake = tmp_path / "labgrid-client"
+    fake.write_text("#!/bin/sh\necho \"$LG_COORDINATOR|$PYTHONPATH|$PYTHONHOME\"\n", encoding="utf-8")
+    os.chmod(fake, 0o755)
+    monkeypatch.setenv(flash_raw.LABGRID_ENV, str(fake))
+    monkeypatch.delenv("LG_COORDINATOR", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "/evil")
+    monkeypatch.setenv("PYTHONHOME", "/evil")
+    out, why = flash_raw._labgrid_show("p")
+    assert out.strip() == "100.64.0.1:20408||" and why == ""
+    monkeypatch.setenv("LG_COORDINATOR", "10.0.0.1:1")
+    assert flash_raw._labgrid_show("p")[0].startswith("10.0.0.1:1|")
+
+
+def test_a_failing_labgrid_client_explains_itself(tmp_path, monkeypatch):
+    fake = tmp_path / "labgrid-client"
+    fake.write_text("#!/bin/sh\necho 'no route to coordinator' >&2\nexit 1\n", encoding="utf-8")
+    os.chmod(fake, 0o755)
+    monkeypatch.setenv(flash_raw.LABGRID_ENV, str(fake))
+    out, why = flash_raw._labgrid_show("p")
+    assert out is None and "exited 1: no route to coordinator" in why
+
+
+def test_the_swd_path_is_read_from_the_resource_block_not_the_matches_list():
+    assert raw_write.lease_swd_path(_show(path="3-4.2")) == "3-4.2"
+    assert raw_write.lease_swd_path(_show(path=None)) is None
+    assert raw_write.lease_swd_path("Place 'p':\n  matches:\n    e/NetworkUSBDebugger/swd\n") is None
 
 
 def test_readback_compares_against_the_recorded_hash_not_a_rehash(tmp_path, monkeypatch):
@@ -436,3 +551,10 @@ def test_an_unresolved_variant_or_missing_base_is_refused_not_defaulted(tmp_path
     ctx = _soc(tmp_path / "b", monkeypatch, [{"order_code": "ORDER", "mram_mb": 5.5}], base=0)
     with pytest.raises(RawError, match="soc_flash_base"):
         _real_window(ctx)
+
+
+def test_a_symlinks_own_0777_mode_is_not_a_finding(tmp_path, monkeypatch):
+    _blobs, paths = _setup(tmp_path, monkeypatch)
+    link = tmp_path / "ok-link"
+    link.symlink_to(tmp_path / "tools" / "JLinkExe")
+    assert flash_raw._unsafe(str(link)) is None

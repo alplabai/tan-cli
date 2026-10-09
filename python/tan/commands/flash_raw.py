@@ -16,9 +16,9 @@ or a map, so an ATOC/STOC is only ever written where the user said.
 """
 from __future__ import annotations
 
-import getpass
 import json
 import os
+import pwd
 import socket
 import stat
 import subprocess
@@ -34,7 +34,7 @@ from tan.core.flash_plan import (
     _DEFAULT_JLINK_SPEED,
     confirm_gate_note,
     dpidr_preflight_unarmed,
-        fa_int_checked,
+    fa_int_checked,
     fa_str_checked,
     validate_identifier,
 )
@@ -53,6 +53,7 @@ from tan.core.raw_write import (
     RawError,
     RawSpec,
     lease_holder,
+    lease_swd_path,
     parse_raw,
     planned,
     raw_script,
@@ -180,13 +181,18 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
         return 0, entry("planned", 0, msg), lines
 
     place = os.environ.get(RESERVATION_ENV, "").strip()
-    refusal = _reservation_refusal(place, exe)
-    if refusal is not None:
-        return fail(refusal, CODE_RESERVATION)
-    # From here on spawn the verified wrapper by its resolved identity, not the PATH-found name.
-    exe = os.path.realpath(os.environ[WRAPPER_ENV])
+    refusal, verified = _reservation_refusal(
+        place, exe, selection.usb_path if selection is not None else None
+    )
+    if refusal is not None or verified is None:
+        return fail(refusal or "reservation could not be verified", CODE_RESERVATION)
+    # Every later spawn (guard, DPIDR preflight, write, read-back) uses exactly the path that
+    # was verified here -- the env var is not read again.
+    exe = verified
     report["jlink"]["binary"] = exe
-    report["jlink"]["reservation"] = {"env": RESERVATION_ENV, "place": place, "verified": "labgrid"}
+    report["jlink"]["reservation"] = {
+        "env": RESERVATION_ENV, "place": place, "verified": "labgrid", "usbPath": selection.usb_path,
+    }
 
     # ── the wrong-board guard, exactly as for a Flow D write ──
     armed = not dpidr_preflight_unarmed(FLOW_D_METHOD, flash_args, None)
@@ -255,10 +261,61 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     return 0, entry("ok", 0, message, preflight_unarmed=not armed), lines
 
 
+def _current_user() -> str:
+    """The account name of the real uid (never `USER`/`LOGNAME`, which the caller controls)."""
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _private_group(gid: int) -> bool:
+    """Whether `gid` is a group only the current user belongs to (a user-private group)."""
+    import grp
+
+    me = _current_user()
+    try:
+        members = set(grp.getgrgid(gid).gr_mem)
+    except KeyError:
+        return False
+    return members <= {me} and all(u.pw_name == me for u in pwd.getpwall() if u.pw_gid == gid)
+
+
+def _node_problem(node: str, st: os.stat_result) -> str | None:
+    mode = st.st_mode
+    sticky_dir = stat.S_ISDIR(mode) and bool(mode & stat.S_ISVTX)
+    if st.st_uid not in (0, os.getuid()):
+        return f"{node} is owned by uid {st.st_uid}, not root or you"
+    if stat.S_ISLNK(mode):
+        return None  # a symlink's own mode bits are always 0777 and mean nothing
+    if mode & stat.S_IWOTH and not sticky_dir:
+        return f"{node} is world-writable"
+    if mode & stat.S_IWGRP and not sticky_dir and not (
+        st.st_gid == os.getgid() and _private_group(st.st_gid)
+    ):
+        return f"{node} is group-writable by a group others belong to"
+    return None
+
+
+def _chain_problem(start: str) -> str | None:
+    node = start
+    while True:
+        try:
+            st = os.lstat(node)
+        except OSError:
+            return f"{node} cannot be inspected"
+        problem = _node_problem(node, st)
+        if problem:
+            return problem
+        parent = os.path.dirname(node)
+        if parent == node:
+            return None
+        node = parent
+
+
 def _unsafe(path: str) -> str | None:
-    """Why `path` cannot be trusted as an interlock binary, or `None`: it must be absolute,
-    resolve (symlinks followed) to an executable regular file outside the cwd, and neither it
-    nor any parent directory may be world-writable (a sticky directory is allowed)."""
+    """Why `path` cannot be trusted as an interlock binary, or `None`. It must be absolute,
+    resolve (symlinks followed) to an executable regular file outside the cwd, and BOTH chains
+    -- the given path itself and its directories as written (where a symlink lives), and the
+    resolved target with its parents -- must be owned by root or the current user and not
+    writable by others or by a group anyone else belongs to (a sticky directory is allowed)."""
     if not os.path.isabs(path):
         return "is not an absolute path"
     real = os.path.realpath(path)
@@ -267,18 +324,14 @@ def _unsafe(path: str) -> str | None:
         return "lives under the current directory"
     if not (os.path.isfile(real) and os.access(real, os.X_OK)):
         return "is not an executable file"
-    node = real
-    while True:
-        try:
-            mode = os.stat(node).st_mode
-        except OSError:
-            return "cannot be inspected"
-        if mode & stat.S_IWOTH and not (stat.S_ISDIR(mode) and mode & stat.S_ISVTX):
-            return f"or its directory {node} is world-writable"
-        parent = os.path.dirname(node)
-        if parent == node:
-            return None
-        node = parent
+    return _chain_problem(os.path.abspath(path)) or _chain_problem(real)
+
+
+# What the shim defaults to so `labgrid-client` finds the coordinator (bin/JLinkExe, jlink-run.sh).
+_DEFAULT_COORDINATOR = "100.64.0.1:20408"
+#: Interpreter-steering variables a hostile environment could use to run its own code inside
+#: a Python `labgrid-client`.
+_PYTHON_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONEXECUTABLE")
 
 
 def _labgrid_client() -> str | None:
@@ -295,54 +348,79 @@ def _labgrid_client() -> str | None:
     return None
 
 
-def _reservation_refusal(place: str, exe: str | None) -> str | None:
-    """A refusal text unless a bench reservation is provably held, failing closed on any
-    ambiguity: the place is named (`JLINK_RUN_PLACE`); the J-Link program tan will run IS the
-    wrapper configured in `TAN_JLINK_WRAPPER` (absolute, symlink-resolved, outside the cwd, not
-    world-writable -- a marker string in some binary found on PATH proves nothing); and
-    `labgrid-client` (absolute, resolved from fixed directories) reports THIS host/user as the
-    holder of the place."""
+def _reservation_refusal(
+    place: str, exe: str | None, usb_path: str | None
+) -> tuple[str | None, str | None]:
+    """`(refusal, verified_path)`: a refusal text, or `None` plus the REAL path of the wrapper
+    to spawn from here on. Fails closed on any ambiguity. Needs: the place named
+    (`JLINK_RUN_PLACE`); the J-Link program tan will run IS the wrapper configured in
+    `TAN_JLINK_WRAPPER` (absolute, symlink-resolved, outside the cwd, trustworthy ownership and
+    modes on both chains -- a marker string in a binary found on PATH proves nothing);
+    `labgrid-client` (absolute, fixed directories) reports THIS uid's host/user as the single
+    holder of the place; and the probe tan selected IS the leased place's `swd` USB path."""
     need = (
         f"Needs: {RESERVATION_ENV}=<labgrid place you hold>, {WRAPPER_ENV}=<absolute path of the "
         "reservation-enforcing JLinkExe wrapper> and tan running THAT program (--jlink "
-        "<that path>, or it first on PATH), and `labgrid-client` able to reach the coordinator."
+        "<that path>, or it first on PATH), --probe-usb-path <the place's swd port>, and "
+        "`labgrid-client` able to reach the coordinator."
     )
     if not place:
-        return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}"
+        return f"refusing to overwrite MRAM without a held bench reservation: {RESERVATION_ENV} is not set. {need}", None
     configured = os.environ.get(WRAPPER_ENV, "").strip()
     if not configured:
-        return f"{WRAPPER_ENV} is not set, so no J-Link program can be recognised as the reservation wrapper. {need}"
+        return f"{WRAPPER_ENV} is not set, so no J-Link program can be recognised as the reservation wrapper. {need}", None
     why = _unsafe(configured)
     if why is not None:
-        return f"{WRAPPER_ENV}={configured} {why}. {need}"
-    if not exe or not os.path.isabs(exe) or os.path.realpath(exe) != os.path.realpath(configured):
+        return f"{WRAPPER_ENV}={configured}: {why}. {need}", None
+    real = os.path.realpath(configured)
+    if not exe or not os.path.isabs(exe) or os.path.realpath(exe) != real:
         return (
             f"the J-Link program tan would run ({exe}) is not the configured wrapper "
             f"({configured}); a raw or look-alike JLinkExe would not enforce the lease. {need}"
-        )
-    me = f"{socket.gethostname()}/{getpass.getuser()}"
-    holder = lease_holder(_labgrid_show(place) or "")
+        ), None
+    text, why_show = _labgrid_show(place)
+    me = f"{socket.gethostname()}/{_current_user()}"
+    holder = lease_holder(text or "")
     if holder != me:
         return (
             f"you do not hold the labgrid place {place} (acquired by: "
-            f"{holder or 'nobody / not readable / ambiguous'}; you are {me}). {need}"
-        )
-    return None
+            f"{holder or 'nobody / not readable / ambiguous'}; you are {me}"
+            + (f"; labgrid-client: {why_show}" if why_show else "")
+            + f"). {need}"
+        ), None
+    leased = lease_swd_path(text or "")
+    if leased is None or usb_path is None or leased != usb_path:
+        return (
+            f"the selected probe (--probe-usb-path {usb_path or 'not given'}) is not the leased "
+            f"place's swd port ({leased or 'not reported by labgrid'}) -- refusing to write to a "
+            f"probe the reservation does not cover. {need}"
+        ), None
+    return None, real
 
 
-def _labgrid_show(place: str) -> str | None:
-    """`labgrid-client -p <place> show` output, or `None` when it cannot be run."""
+def _labgrid_show(place: str) -> tuple[str | None, str]:
+    """`(output, why)` of `labgrid-client -p <place> show`: the output, or `None` with a reason
+    it could not be had."""
     client = _labgrid_client()
     if client is None:
-        return None
+        return None, (
+            f"no trustworthy labgrid-client found (set {LABGRID_ENV}=<absolute path>, or install "
+            f"it in {', '.join(LABGRID_DIRS)})"
+        )
+    env = spawn_env({"LG_COORDINATOR": os.environ.get("LG_COORDINATOR") or _DEFAULT_COORDINATOR})
+    for name in _PYTHON_ENV:
+        env.pop(name, None)
     try:
         done = subprocess.run(
             [client, "-p", place, "show"], capture_output=True, text=True, timeout=30,
-            check=False, env=spawn_env(),
+            check=False, env=env,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.stdout if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as err:
+        return None, f"could not run {client}: {err}"
+    if done.returncode != 0:
+        tail = (done.stderr or done.stdout).strip().splitlines()[-1:] or ["no output"]
+        return None, f"{client} exited {done.returncode}: {tail[0]}"
+    return done.stdout, ""
 
 
 def _mram_window(ctx: Any) -> tuple[int, int]:
