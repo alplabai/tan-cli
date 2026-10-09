@@ -49,8 +49,10 @@ class WorkspaceRefusal:
 def west_ancestor(start: Path) -> Path | None:
     """The nearest directory at or above `start` holding a `.west` directory,
     or `None`. Mirrors west's own `west_topdir` walk: unguarded, because west
-    does not check which manifest a `.west` belongs to."""
-    start = Path(start).absolute()
+    does not check which manifest a `.west` belongs to. `start` is resolved
+    (symlinks followed) because west walks from `os.getcwd()`, which POSIX
+    reports as the real path."""
+    start = Path(start).resolve()
     for directory in (start, *start.parents):
         if (directory / ".west").is_dir():
             return directory
@@ -74,7 +76,8 @@ def workspace_unresolved_refusal(
         return None
     if west_ancestor(spawn_cwd) is not None:
         return None
-    if zephyr_base and west_ancestor(Path(zephyr_base)) is not None:
+    # A relative ZEPHYR_BASE is resolved by west against the spawn cwd.
+    if zephyr_base and west_ancestor(Path(spawn_cwd) / zephyr_base) is not None:
         return None
     zephyr_base_fact = (
         f"ZEPHYR_BASE `{zephyr_base}` has no `.west` above it either"
@@ -85,7 +88,7 @@ def workspace_unresolved_refusal(
     message = (
         f"{WORKSPACE_UNRESOLVED_MSG} -- `west build` would run from `{spawn_cwd}`, "
         f"which has no `.west` on any ancestor; {zephyr_base_fact}; and neither "
-        f"`{sdk_parent}` nor `{sdk_parent / 'zephyrproject'}` (next to --sdk-root "
+        f"`{sdk_parent}` nor `{sdk_parent / 'zephyrproject'}` (next to the SDK root "
         f"`{sdk_root}`) holds a `.west`. west would stop with `unknown command \"build\"`. "
         f"Run `tan bootstrap --sdk-root {sdk_root}` to create a workspace for this "
         f"checkout, or set ZEPHYR_BASE to an existing workspace's `zephyr/` -- that "
