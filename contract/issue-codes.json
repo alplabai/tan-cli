@@ -2140,6 +2140,30 @@
       "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram --ram-console` on an ELF with no ram_console_buf symbol -- the build selected the UART console (the customer default since alp-sdk#389), so there is nothing to read over SWD. Deliberately a WARNING, not an error: an empty RAM console on a UART-console build is expected, the run itself succeeded, and ramConsole.selected in the envelope says \"uart\". Read the console where it is (`tan monitor`, UART5), or rebuild with CONFIG_RAM_CONSOLE (alp-sdk aen-bench-shared.conf) to read it over SWD. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.ram-watch-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch <addr>[:<words>][@<period-ms>]` spec is malformed or out of range: not that grammar, an address that is not 4-byte aligned (mem32), beyond 32 bits, a word count of 0 or above 64, a period outside 10..60000 ms, more than 8 --watch options, or more than 2000 scheduled samples over the --wait window. Refused before any J-Link spawn, under --dry-run too. Answered by fixing the spec, raising the period or shortening --wait. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-watch-unsafe-address",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: a `tan flash --ram --watch` read overlaps the HP TCM windows (ITCM + DTCM globals) 0x50000000..0x57FFFFFF. A RAM-run attaches to the M55 HE only, and reading the HP window from an HE attach is the bench's known-bad read (round 8, 2026-10-07): the read itself succeeds but the core then cannot be halted until a PIN reset. Refused before any J-Link spawn, under --dry-run too. Deliberately DISTINCT from flash.ram-watch-invalid: this one is not answered by fixing a typo, the address must not be read from this attach at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-watch-incomplete",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1436. EMISSION CONDITION: `tan flash --ram --watch` ran, but the J-Link transcript carries no mem32 dump for some scheduled samples, so those data.watch[] entries have `values: null`. A WARNING: the image is running and the remaining samples are valid; when NO sample returned data the message says so. Note --watch reads are read-only on memory, but a register read (FIFO, clear-on-read, clock-gated block) may have side effects. Sample times are the scheduled Sleep offsets, not measurements. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.ram-failed",
       "status": "reserved",
       "severity": "error",
@@ -3569,6 +3593,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/workspace_patches.py",
       "note": "tan-cli#1376: before dispatch of a plan with a Zephyr slice, alp-sdk's `zephyr/patches.yml` is not applied in the resolved workspace (verifier result cached positively in `<project>/build/.tan-workspace-patches.json`, keyed by workspace HEADs + patches.yml + the patched files' mtime/size). Warning only: never changes `ok` or the exit code. Could be promoted to an error later. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "build.workspace-patches-uncached",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/workspace_patches.py",
+      "note": "tan-cli#1384: the workspace patch-check cache key could not be built in full (the west module list, `zephyr/patches.yml` or a patch it names was unreadable), so nothing is cached and every build re-verifies. The message names the reason. Never changes `ok` or the exit code. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "build.zephyr-base-ignored",

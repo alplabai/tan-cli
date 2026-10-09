@@ -1066,3 +1066,42 @@ def test_ospi0_storage_banner_omits_an_undeclared_device_block():
     assert "OSPI0 NOR (TEST-NOR-PART) is populated" in flat
     assert "HyperRAM" not in flat
     assert "not populated" not in flat
+
+
+# ======================================================================
+# tan-cli#1393: the AEN `alp,som-power` node (alp-sdk#2784, `4b206c8a6`)
+# ======================================================================
+
+ON_MODULE_LINKS = "e1m_modules/aen/on-module-links.yaml"
+
+
+def test_the_aen_board_carries_the_som_power_node():
+    with _MutatedMetadata() as mm:
+        dts = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "\tsom_power: som-power {" in dts
+    assert '\t\tcompatible = "alp,som-power";' in dts
+    assert 'compatible = "alp,som-power-domain";' in dts
+
+
+def test_a_pre_power_domain_checkout_names_the_alp_sdk_vintage():
+    """A checkout from before alp-sdk#2784 has an `on-module-links-v1` file
+    and no `power_domains` property in the v2 schema -- an SDK floor, not a
+    gap in this SoM's metadata."""
+    with _MutatedMetadata() as mm:
+        mm.drop_schema_property("on-module-links-v2.schema.json", "power_domains")
+        mm.sub(ON_MODULE_LINKS, "schemaVersion: on-module-links-v2",
+               "schemaVersion: on-module-links-v1")
+        with pytest.raises(_sdk_too_old_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "this alp-sdk predates the AEN SoM `power_domains:` block" in message
+    assert "alp-sdk#2784" in message
+
+
+def test_a_wrong_schema_version_on_a_new_checkout_is_an_authoring_gap():
+    with _MutatedMetadata() as mm:
+        mm.sub(ON_MODULE_LINKS, "schemaVersion: on-module-links-v2",
+               "schemaVersion: on-module-links-v1")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    assert "expected 'on-module-links-v2'" in str(excinfo.value)

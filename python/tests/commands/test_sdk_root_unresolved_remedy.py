@@ -51,7 +51,8 @@ def test_flash_names_where_it_looked_and_the_flag(tmp_path):
     message = _message(doc, "flash.sdk-root-not-found")
     assert message.startswith("Cannot locate alp-sdk root. Neither `--sdk-root`")
     assert f"`{(project / '.alp' / 'sdk-path').as_posix()}`" in message
-    assert "Pass `--sdk-root <path to an alp-sdk checkout>`" in message
+    assert "To fix it, get an alp-sdk checkout" in message
+    assert "`--sdk-root <path>`" in message
 
 
 def test_build_names_where_it_looked(tmp_path):
@@ -62,3 +63,14 @@ def test_build_names_where_it_looked(tmp_path):
     assert "pass `--sdk-root <PATH>`" in message
     assert f"`{(project / '.alp' / 'sdk-path').as_posix()}`" in message
     assert "in a directory above" in message
+
+
+def test_flash_bad_sdk_root_flag_names_the_path_not_the_ladder(tmp_path):
+    project, env = _scratch(tmp_path)
+    bad = tmp_path / "not-an-sdk"
+    bad.mkdir()
+    doc = envelope_of(run_tan("--format", "json", "flash", "--ram", "--build-root", str(project),
+                              "--sdk-root", str(bad), cwd=project, env_overrides=env))
+    message = _message(doc, "flash.sdk-root-not-found")
+    assert str(bad) in message
+    assert "the project pin" not in message

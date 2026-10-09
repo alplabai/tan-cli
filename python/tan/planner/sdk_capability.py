@@ -175,6 +175,15 @@ AEN_ZEPHYR_PERIPHERALS_DTSI = SdkCapability(
     ),
 )
 
+AEN_SOM_POWER_DOMAINS = SdkCapability(
+    id="aen.som_power_domains",
+    issue="alp-sdk#2784",
+    description="the AEN SoM `power_domains:` block (on-module-links-v2)",
+    probe=schema_declares_property(
+        "on-module-links-v2.schema.json", "power_domains"
+    ),
+)
+
 
 def require_capability(metadata_root: Path, capability: SdkCapability) -> None:
     """No-op when the bound checkout carries *capability*; raises
