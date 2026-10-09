@@ -20,6 +20,7 @@ size, and the operator needs it before arming.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -62,6 +63,44 @@ RESET_FAILURE_MARKERS = (
 def reset_failures(transcript: str) -> tuple[str, ...]:
     """Every reset-failure marker present in `transcript`, in marker order."""
     return tuple(m for m in RESET_FAILURE_MARKERS if m in transcript)
+
+
+#: Core-debug DHCSR (0xE000EDF0) bits that prove the core RAN since the last read,
+#: with no halt needed (tan-cli#1453): S_RESET_ST (the reset the PIN reset caused),
+#: S_RETIRE_ST (an instruction retired) and S_SLEEP (it executed WFI/WFE, i.e. the app
+#: is up and idling). S_HALT says the core is stopped, which is not a boot proof.
+DHCSR_ADDRESS = "0xE000EDF0"
+DHCSR_S_HALT = 1 << 17
+DHCSR_S_SLEEP = 1 << 18
+DHCSR_S_RETIRE_ST = 1 << 24
+DHCSR_S_RESET_ST = 1 << 25
+_DHCSR_RAN = DHCSR_S_SLEEP | DHCSR_S_RETIRE_ST | DHCSR_S_RESET_ST
+
+
+def nohalt_probe_script(jlink_script: str) -> str:
+    """A fresh, read-only, NON-halting session: the write's preamble up to and including
+    `connect`, one `mem32` of DHCSR, `exit` (tan-cli#1453). Raises `ValueError` without a
+    `connect` line."""
+    out: list[str] = []
+    for line in jlink_script.splitlines():
+        out.append(line)
+        if line.strip().lower() == "connect":
+            break
+    else:
+        raise ValueError("the write script has no `connect` line to build a probe from")
+    out += [f"mem32 {DHCSR_ADDRESS} 1", "exit"]
+    return "\n".join(out) + "\n"
+
+
+def dhcsr_in(transcript: str) -> int | None:
+    """The DHCSR word a `mem32 0xE000EDF0 1` printed (`E000EDF0 = 03050001`), or `None`."""
+    match = re.search(r"E000EDF0\s*=\s*([0-9A-Fa-f]{8})", transcript)
+    return int(match.group(1), 16) if match else None
+
+
+def dhcsr_says_ran(value: int | None) -> bool:
+    """True when `value` proves the core executed since the reset and is not halted."""
+    return value is not None and bool(value & _DHCSR_RAN) and not value & DHCSR_S_HALT
 
 
 def dpidr_in(transcript: str) -> str | None:

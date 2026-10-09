@@ -222,7 +222,10 @@ from tan.core.flow_d_report import (
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
     VERIFICATION_READBACK_NOTE,
+    dhcsr_in,
+    dhcsr_says_ran,
     dpidr_in,
+    nohalt_probe_script,
     planned_write,
     readback_script,
     reset_failures,
@@ -1914,8 +1917,12 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
 #: `flow_d_report.RESET_FAILURE_MARKERS` (tan-cli#522, #1321).
 _FLOW_D_VERIFIED_AND_RESET = "; cache-verified and PIN-reset"
 _FLOW_D_VERIFIED_ONLY = (
-    "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
-    "did not halt)"
+    "; cache-verified; PIN-reset NOT confirmed (reset requested, but J-Link could not halt "
+    "the core to confirm it; the app may be in low power)"
+)
+#: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
+_FLOW_D_VERIFIED_NOHALT = (
+    "; cache-verified and PIN-reset (boot confirmed without a halt: DHCSR {dhcsr})"
 )
 
 
@@ -3541,6 +3548,8 @@ def _flash_entry_body(
     readback_failure: tuple[str, str] | None = None
     if method == FLOW_D_METHOD:
         reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
+        if reset_unconfirmed and _flow_d_confirm_boot(plan, ctx, report, probe_guard, jlink_exe):
+            reset_unconfirmed = False
         if outcome.success and ctx.readback:
             readback_failure = _flow_d_readback(
                 plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
@@ -3567,7 +3576,12 @@ def _flash_entry_body(
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
-            ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+            if report.get("jlink", {}).get("resetConfirmedBy"):
+                ok_message = ok_message.replace(
+                    _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
+                        dhcsr=report["jlink"]["dhcsr"]), 1)
+            else:
+                ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
             if report.get("jlink", {}).get("verification") == VERIFICATION_READBACK:
                 ok_message += "; read back in a fresh J-Link session (sha256 match)"
         sections: tuple[str, ...] = ()
@@ -3763,6 +3777,42 @@ def _flow_d_record(
         block["transcriptError"] = str(err)
     report.setdefault("jlink", {}).update(block)
     return bool(failures) and outcome.success
+
+
+def _flow_d_confirm_boot(
+    plan: FlashPlan,
+    ctx: _Context,
+    report: dict[str, Any],
+    probe_guard: "_ProbeGuard | None",
+    jlink_exe: str | None = None,
+) -> bool:
+    """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
+    quickly enters WFI/STOP gates the debug domain), which says nothing about whether
+    the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
+    sticky S_RESET_ST / S_RETIRE_ST (and S_SLEEP) bits prove the core ran. True, and the
+    `jlink` block says so, only on that proof; any failure to ask leaves the reset
+    unconfirmed. Never raises, never writes."""
+    block = report.setdefault("jlink", {})
+    if plan.jlink_script is None:
+        return False
+    try:
+        script = nohalt_probe_script(plan.jlink_script)
+    except ValueError:
+        return False
+    probe = _execute(
+        dataclasses.replace(plan, jlink_script=script),
+        True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
+    )
+    value = dhcsr_in(f"{probe.stdout}\n{probe.stderr}") if probe.success else None
+    block["bootProbe"] = {"performed": True, "dhcsr": None if value is None else f"0x{value:08X}"}
+    if not dhcsr_says_ran(value):
+        return False
+    block.update(
+        reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
+        resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
+        "the core ran: S_RESET_ST/S_RETIRE_ST/S_SLEEP set and S_HALT clear.",
+    )
+    return True
 
 
 def _flow_d_readback(
@@ -4604,14 +4654,20 @@ def _run(
             # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
             # not land, so the freshly written image was not necessarily started.
             # A warning, not an error: the write and its cache verify succeeded.
+            # tan-cli#1453: on Flow D this is `info`: the halt that would confirm the
+            # reset fails on an app that already sleeps, so it is not evidence of a
+            # failed boot. A RAM load keeps the warning.
             message = (
                 f"{entry.id}: J-Link reported a failed reset ("
                 + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
-                + "); the PIN reset that starts the new image is NOT confirmed -- "
-                "power-cycle the board and check it booted."
+                + "); could not halt to confirm the PIN reset, and a read-only DHCSR check did "
+                "not confirm it either (the target may be in low power) -- if the console "
+                "shows the app, it booted; otherwise power-cycle the board."
             )
             text_lines.append(message)
-            issues.append(Issue("flash.jlink-reset-unconfirmed", "warning", message))
+            issues.append(Issue(
+                "flash.jlink-reset-unconfirmed",
+                "info" if entry.method == FLOW_D_METHOD else "warning", message))
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))

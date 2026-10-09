@@ -42,10 +42,11 @@ class FakeJlink:
     index -> the bytes `savebin` writes (default: the true source bytes)."""
 
     def __init__(self, monkeypatch, *, write_out=CLEAN, write_rc=0, read_back=None,
-                 read_rc=0, emulators=()):
+                 read_rc=0, emulators=(), probe_out="", probe_rc=0):
         self.write_out, self.write_rc = write_out, write_rc
         self.read_back, self.read_rc = read_back, read_rc
         self.emulators = list(emulators)
+        self.probe_out, self.probe_rc = probe_out, probe_rc
         self.scripts: list[str] = []
         monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
 
@@ -57,6 +58,10 @@ class FakeJlink:
                 for i, sn in enumerate(self.emulators)
             ]
             return flash_cmd._Outcome(success=True, stdout="\n".join(lines), returncode=0)
+        if "mem32" in script:
+            return flash_cmd._Outcome(
+                success=self.probe_rc == 0, stdout=self.probe_out, returncode=self.probe_rc
+            )
         if "savebin" in script:
             for n, match in enumerate(re.finditer(r'savebin\s+("[^"]+"|\S+)\s+(\S+)\s+(\S+)', script)):
                 dest = match.group(1).strip('"')
@@ -169,10 +174,59 @@ def test_a_failed_reset_is_a_warning_not_a_claimed_pin_reset(tmp_path, monkeypat
     assert "and PIN-reset" not in entry["message"]
     assert entry["jlink"]["reset"] == "unconfirmed"
     assert entry["jlink"]["resetFailures"] == ["Reset: Failed", "CPU may have not been reset"]
-    warning = next(i for i in issues if i.code == "flash.jlink-reset-unconfirmed")
-    assert warning.severity == "warning"
-    assert "Reset: Failed" in warning.message
+    note = next(i for i in issues if i.code == "flash.jlink-reset-unconfirmed")
+    # tan-cli#1453: a failed halt is not a failed boot, so Flow D reports it as info.
+    assert note.severity == "info"
+    assert "Reset: Failed" in note.message and "low power" in note.message
     assert any("NOT confirmed" in line for line in lines)
+    # The non-halting probe ran and could not confirm either.
+    assert entry["jlink"]["bootProbe"] == {"performed": True, "dhcsr": None}
+
+
+_HALT_FAIL = CLEAN + "****** Error: Failed to halt CPU\n"
+
+
+def test_a_failed_halt_is_confirmed_by_dhcsr_without_a_halt(tmp_path, monkeypatch):
+    """tan-cli#1453: the app went to WFI/STOP so the post-reset halt failed, but DHCSR
+    (S_RESET_ST | S_RETIRE_ST | S_SLEEP) proves the image ran: no failure-class code."""
+    fake, (rc, data, issues, lines, _s) = _run(
+        tmp_path, monkeypatch,
+        {"write_out": _HALT_FAIL, "probe_out": "E000EDF0 = 03050001\n"},
+    )
+    assert rc == 0, (data, issues)
+    entry = data["entries"][0]
+    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+    assert entry["jlink"]["reset"] == "pin-reset"
+    assert entry["jlink"]["resetConfirmedBy"] == "dhcsr" and entry["jlink"]["dhcsr"] == "0x03050001"
+    assert "NOT confirmed" not in entry["message"]
+    assert "boot confirmed without a halt: DHCSR 0x03050001" in entry["message"]
+    # The probe never halts or resets: connect, one mem32, exit.
+    probe = next(s for s in fake.scripts if "mem32" in s)
+    assert "mem32 0xE000EDF0 1" in probe
+    assert not any(w in probe for w in ("RSetType", "\nr\n", "\ng\n", "loadbin", "halt"))
+
+
+def test_a_halted_or_idle_dhcsr_does_not_confirm(tmp_path, monkeypatch):
+    for word in ("E000EDF0 = 03020001", "E000EDF0 = 00000001"):  # S_HALT set / nothing sticky
+        fake, (rc, data, issues, _l, _s) = _run(
+            tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": word + "\n"}
+        )
+        assert [i.severity for i in issues if i.code == "flash.jlink-reset-unconfirmed"] == ["info"]
+        assert data["entries"][0]["jlink"]["reset"] == "unconfirmed"
+
+
+def test_a_clean_reset_runs_no_boot_probe(tmp_path, monkeypatch):
+    fake, (rc, *_rest) = _run(tmp_path, monkeypatch)
+    assert rc == 0 and not any("mem32" in s for s in fake.scripts)
+
+
+def test_dhcsr_helpers():
+    assert flow_d_report.dhcsr_in("E000EDF0 = 03050001") == 0x03050001
+    assert flow_d_report.dhcsr_in("nothing") is None
+    assert flow_d_report.dhcsr_says_ran(0x01000001)
+    assert not flow_d_report.dhcsr_says_ran(0x01020001) and not flow_d_report.dhcsr_says_ran(None)
+    script = flow_d_report.nohalt_probe_script("si SWD\ndevice P\nconnect\nloadbin x 0x1\nexit\n")
+    assert script == "si SWD\ndevice P\nconnect\nmem32 0xE000EDF0 1\nexit\n"
 
 
 def test_a_failed_write_still_leaves_its_transcript(tmp_path, monkeypatch):

@@ -2054,10 +2054,10 @@
     {
       "code": "flash.jlink-reset-unconfirmed",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "info",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "Added closing tan-cli#1321 / #522. EMISSION CONDITION: a Flow D (alif_mram_jlink) write whose J-Link transcript carries a reset-failure marker -- \"Failed to halt CPU\", \"CPU is not halted\", \"Reset: Failed\" or \"CPU may have not been reset\" -- after the write and its verifybin succeeded. JLinkExe still exits 0 in that case, so the exit code cannot tell it from a clean PIN reset; the entry stays ok with its message downgraded to \"cache-verified; PIN-reset NOT confirmed\" and this warning names the markers found (also data.entries[].jlink.resetFailures). Deliberately a warning: the image was written. The consumer-visible meaning is that the freshly written image was not necessarily started -- power-cycle and check the console. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added closing tan-cli#1321 / #522. EMISSION CONDITION: a Flow D (alif_mram_jlink) write whose J-Link transcript carries a reset-failure marker -- \"Failed to halt CPU\", \"CPU is not halted\", \"Reset: Failed\" or \"CPU may have not been reset\" -- after the write and its verifybin succeeded. JLinkExe still exits 0 in that case, so the exit code cannot tell it from a clean PIN reset; the entry stays ok with its message downgraded to \"cache-verified; PIN-reset NOT confirmed\" and this warning names the markers found (also data.entries[].jlink.resetFailures). tan-cli#1453: before this is raised on Flow D, tan asks WITHOUT halting -- a fresh read-only session reads DHCSR (0xE000EDF0) -- and when S_RESET_ST, S_RETIRE_ST or S_SLEEP is set with S_HALT clear the boot is confirmed (data.entries[].jlink.resetConfirmedBy = \"dhcsr\") and this code is NOT emitted. Only when that cannot confirm either is it raised, as INFO on Flow D (an app that quickly enters WFI/STOP gates the debug domain, so a failed halt is not evidence of a failed boot; a `--ram` load keeps it as a warning): the freshly written image was not necessarily confirmed started -- check the console, else power-cycle. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.readback-mismatch",
