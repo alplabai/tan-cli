@@ -23,7 +23,7 @@ from tan.core.atoc_guard import (
     parse_verdict,
     runner_has_guard,
 )
-from tan.core.atoc_guard_messages import passed_note, refusal_message
+from tan.core.atoc_guard_messages import passed_note, refusal_message, split_runner_setup_noise
 
 GUARDED = RunnerFacts(runner="alif_flash", source="src.py", origin="o", has_guard=True)
 
@@ -263,3 +263,28 @@ def test_the_ambiguous_flag_message_names_every_entry_and_the_narrowing_option()
     assert "Nothing was flashed." in message
     assert "Narrow the run to one entry with --core CORE_ID (or --helper NAME)" in message
     assert "flash-run-dualcore.sh" in message
+
+
+# ── tan-cli#1426: runner setup noise ─────────────────────────────────────────
+
+
+def test_runner_setup_noise_is_matched_by_wording_not_by_logger():
+    """Only the two host-setup notices move out. Any OTHER `runners.*`
+    warning stays in the refusal: the runner's own guard could log one, and
+    calling it unrelated could send an operator to --replace-atoc."""
+    noise = [
+        'The module for runner "rtsflash" could not be imported (No module named \'usb\')',
+        'WARNING: The module for runner "jlink" could not be imported (No module named \'pylink\')',
+        "WARNING: runners.alif_flash: the 'fdt' Python package (needed by app-gen-toc) "
+        "was not found; if app-gen-toc fails, run: pip install fdt",
+    ]
+    kept_in = [
+        "WARNING: runners.alif_flash: resident ATOC table format not recognised",
+        "WARNING: runners.alif_flash: the 'fdt' Python package version is too old",
+        "FATAL ERROR: refusing to burn",
+        "  The module for runner \"x\" was loaded",
+    ]
+    kept, moved = split_runner_setup_noise([kept_in[0], noise[0], kept_in[1], noise[1],
+                                            kept_in[2], noise[2], kept_in[3]])
+    assert moved == noise
+    assert kept == kept_in
