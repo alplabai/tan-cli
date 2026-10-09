@@ -163,18 +163,18 @@ outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
-`--readback` re-reads every written region in a **fresh** J-Link session
-(`savebin`), through the same probe-selection guard as the write, and compares
-sha256: `readback-verified` on a match, `flash.readback-mismatch` on a
-difference. A fresh session is stronger than the cache but still weaker than
-reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
-on the bench.
-
-With `--readback` the write session stops **before** the PIN reset and the
-read-back session carries the reset/run tail, so the chip is read before the new
-image can boot and put the debug domain to sleep. A read-back that cannot read the
-chip at all is `flash.readback-failed` ("target unreachable (low-power?)"), never a
-mismatch that advises a re-flash.
+`--readback` (Flow D) reads every written region back **inside the write session**: connect,
+`loadbin`, `verifybin`, `h`, `savebin` per region, then the reset/run tail and a single `exit`
+(tan-cli#1458: J-Link's `exit` resumes the core even after `h`, so a separate read-back session let
+the app run on stale state first, and the chip is read before the new image can boot and put the
+debug domain to sleep). Same probe-selection guard as the write; sha256 compared with the source
+files: `readback-verified` (`jlink.readbackMode: "in-session"`) on a match, `flash.readback-mismatch`
+on a full-length difference. This is stronger than verifybin's cache compare but is **not** a
+fresh-session or cold-power-cycle proof (alp-sdk#2233). A read-back that cannot read the chip is
+`flash.readback-failed` ("target unreachable (low-power?)"), never a mismatch that advises a
+re-flash; a session that dies in the halt/read steps is reported as the entry failure with a hint
+(check `verifybin` in `jlink.transcriptPath`). `--raw --readback` and the no-tail fallback use a
+fresh session without a reset.
 
 ### `--raw <file>@<addr>`: byte-exact sector restore
 

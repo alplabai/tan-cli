@@ -65,13 +65,15 @@ class FakeJlink:
             return flash_cmd._Outcome(
                 success=self.probe_rc == 0, stdout=self.probe_out, returncode=self.probe_rc
             )
+        if "savebin" in script and "loadbin" in script:  # the combined write + read-back session
+            self._dump(script)
+            ok = self.write_rc == 0 and self.read_rc == 0
+            return flash_cmd._Outcome(
+                success=ok, stdout=self.write_out + "Reading 1 byte...\n" + self.read_out,
+                returncode=0 if ok else 1,
+            )
         if "savebin" in script:
-            for n, match in enumerate(re.finditer(r'savebin\s+("[^"]+"|\S+)\s+(\S+)\s+(\S+)', script)):
-                dest = match.group(1).strip('"')
-                data = (self.read_back or {}).get(n, [APP, ATOC][n] if False else None)
-                if data is None:
-                    data = self.sources[n]
-                Path(dest).write_bytes(data)
+            self._dump(script)
             return flash_cmd._Outcome(
                 success=self.read_rc == 0, stdout="Reading 1 byte...\nO.K.\n" + self.read_out,
                 returncode=self.read_rc,
@@ -79,6 +81,12 @@ class FakeJlink:
         return flash_cmd._Outcome(
             success=self.write_rc == 0, stdout=self.write_out, returncode=self.write_rc
         )
+
+    def _dump(self, script):
+        for n, match in enumerate(re.finditer(r'savebin\s+("[^"]+"|\S+)\s+(\S+)\s+(\S+)', script)):
+            dest = match.group(1).strip('"')
+            data = (self.read_back or {}).get(n)
+            Path(dest).write_bytes(self.sources[n] if data is None else data)
 
     sources: list[bytes] = []
 
@@ -138,10 +146,23 @@ def test_the_readback_script_reuses_the_write_preamble_and_ends_at_exit():
     script = flow_d_report.readback_script(write, [("0x80010000", 15, "/tmp/r0.bin")])
     assert script == (
         "SelectEmuBySN 000999000001\nsi SWD\nspeed 4000\ndevice PART\nconnect\n"
-        "savebin /tmp/r0.bin 0x80010000 0xF\nRSetType 2\nr\ng\nexit\n"
+        "savebin /tmp/r0.bin 0x80010000 0xF\nexit\n"
     )
-    # Ends like the write did (reset + run), so the app is not left halted.
-    assert "loadbin" not in script and "verifybin" not in script
+    # A fresh read-back (used by --raw and as Flow D's fallback) resets and runs nothing.
+    assert "loadbin" not in script and "verifybin" not in script and "RSetType" not in script
+
+
+def test_the_combined_script_reads_back_inside_the_write_session_with_no_exit_between():
+    write = (
+        "SelectEmuBySN 000999000001\nsi SWD\nspeed 4000\ndevice PART\nconnect\n"
+        "loadbin x 0x1\nverifybin x 0x1\nRSetType 2\nr\ng\nexit\n"
+    )
+    assert flow_d_report.combined_script(write, [("0x1", 4, "/t/r0")]) == (
+        "SelectEmuBySN 000999000001\nsi SWD\nspeed 4000\ndevice PART\nconnect\n"
+        "loadbin x 0x1\nverifybin x 0x1\nh\nsavebin /t/r0 0x1 0x4\nRSetType 2\nr\ng\nexit\n"
+    )
+    with pytest.raises(ValueError):
+        flow_d_report.combined_script("connect\nloadbin x 0x1\nexit\n", [("0x1", 4, "/t/r0")])
 
 
 # ── the envelope ────────────────────────────────────────────────────────────
@@ -426,60 +447,42 @@ def _readback_run(tmp_path, monkeypatch, fake_kwargs=None, **extra):
     return fake, out
 
 
-def test_readback_upgrades_cache_verified_when_the_fresh_session_matches(tmp_path, monkeypatch):
+def _readback(tmp_path, monkeypatch, **fake_kwargs):
+    return _readback_run(tmp_path, monkeypatch, fake_kwargs)
+
+
+def _lines(script):
+    return script.splitlines()
+
+
+def test_readback_runs_inside_the_write_session_with_no_exit_between(tmp_path, monkeypatch):
+    """tan-cli#1458 (bench): J-Link's `exit` resumes the core even after `h`, so the read is
+    done in the write session -- connect, loadbin, verifybin, h, savebin, reset tail, exit."""
     fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch)
     assert rc == 0, (data, issues)
     entry = data["entries"][0]
+    sessions = [s for s in fake.scripts if "ShowEmuList" not in s]
+    assert len(sessions) == 1
+    lines = _lines(sessions[0])
+    pos = {k: next(i for i, l in enumerate(lines) if l.startswith(k))
+           for k in ("connect", "loadbin", "verifybin", "h", "savebin", "RSetType")}
+    assert list(pos) == sorted(pos, key=pos.get)  # in that order
+    assert lines.count("exit") == 1 and lines[-4:] == ["RSetType 2", "r", "g", "exit"]
     rb = entry["jlink"]["readback"]
     assert rb["performed"] is True and rb["ok"] is True
     assert [r["address"] for r in rb["regions"]] == ["0x80010000", "0x8057F5B0"]
     assert rb["regions"][0]["sha256Expected"] == _sha(APP) == rb["regions"][0]["sha256Actual"]
     assert rb["regions"][1]["sha256Actual"] == _sha(ATOC)
-    assert entry["jlink"]["verification"] == "readback-verified"
-    assert "not a cold-power-cycle proof" in entry["jlink"]["verificationNote"]
-    assert "read back in a fresh J-Link session (sha256 match)" in entry["message"]
-    # Two spawns: the write, then the read-back -- and the read-back is a FRESH
-    # script (same preamble, no loadbin / reset).
-    write, read = [s for s in fake.scripts if "ShowEmuList" not in s]
-    assert "loadbin" in write and "savebin" not in write
-    # tan-cli#1450: the write stops BEFORE the PIN reset; the read-back carries it.
-    assert "RSetType" not in write and write.splitlines()[-1] == "exit"
-    assert "savebin" in read and "loadbin" not in read
-    assert read.splitlines()[-4:] == ["RSetType 2", "r", "g", "exit"]
-    assert read.splitlines().index("connect") < read.splitlines().index(
-        next(l for l in read.splitlines() if l.startswith("savebin"))
-    )
+    jl = entry["jlink"]
+    assert jl["verification"] == "readback-verified" and jl["readbackMode"] == "in-session"
+    assert "SAME J-Link session" in jl["verificationNote"]
+    assert "read back in the write session, after a halt and before the reset" in entry["message"]
+    assert jl["reset"] == "pin-reset"
 
 
-def test_readback_reads_the_chip_before_the_post_write_reset(tmp_path, monkeypatch):
-    """tan-cli#1450: the image must not have booted (and entered STOP) when the chip is read."""
-    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch)
-    assert rc == 0, (data, issues)
-    sessions = [s for s in fake.scripts if "ShowEmuList" not in s]
-    assert [("savebin" in s, "RSetType" in s) for s in sessions] == [(False, False), (True, True)]
-    assert data["entries"][0]["jlink"]["reset"] == "pin-reset"
-
-
-def test_a_failed_halt_in_the_readback_sessions_reset_is_still_confirmed_by_dhcsr(
-    tmp_path, monkeypatch
-):
-    fake = FakeJlink(monkeypatch, probe_out="E000EDF0 = 03050001\n")
-    fake.sources = [APP, ATOC]
-    original = fake._spawn
-
-    def _halt_fails(argv, script, *a, **k):
-        out = original(argv, script, *a, **k)
-        if "savebin" in script:
-            out.stdout += "****** Error: Failed to halt CPU\n"
-        return out
-
-    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _halt_fails)
-    real = flash_cmd._execute
-    monkeypatch.setattr(
-        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
-    )
-    rc, data, issues, _l, _s = _flow_d_run(
-        tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True}
+def test_a_failed_halt_in_the_combined_session_is_still_confirmed_by_dhcsr(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_out="Failed to halt CPU\n", probe_out="E000EDF0 = 03050001\n"
     )
     assert rc == 0, (data, issues)
     assert data["entries"][0]["jlink"]["resetConfirmedBy"] == "dhcsr"
@@ -489,119 +492,22 @@ def test_a_failed_halt_in_the_readback_sessions_reset_is_still_confirmed_by_dhcs
 
 def test_short_reads_mean_unreachable_not_mismatch(tmp_path, monkeypatch):
     """tan-cli#1450: a gated debug domain must not tell the user to re-flash."""
-    fake, (rc, data, issues, _l, _s) = _readback_run(
-        tmp_path, monkeypatch, {"read_back": {0: b"", 1: b""}}
-    )
-    assert rc == 1
-    assert _codes(issues) == ["flash.readback-failed"]
+    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_back={0: b"", 1: b""})
+    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
     msg = data["entries"][0]["message"]
     assert "target unreachable (low-power?)" in msg and "do not re-flash on it" in msg
     assert data["entries"][0]["jlink"]["readback"]["reason"] == "target unreachable (low-power?)"
 
 
-def _readback(tmp_path, monkeypatch, **fake_kwargs):
-    fake = FakeJlink(monkeypatch, **fake_kwargs)
-    fake.sources = [APP, ATOC]
-    real = flash_cmd._execute
-    monkeypatch.setattr(
-        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
-    )
-    out = _flow_d_run(tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True})
-    return fake, out
-
-
-def test_a_failed_session_that_could_not_read_memory_is_unreachable_and_reset_afterwards(
-    tmp_path, monkeypatch
-):
-    fake, (rc, data, issues, _l, _s) = _readback(
-        tmp_path, monkeypatch, read_rc=1, read_out="Could not read memory.\n"
-    )
-    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
-    msg = data["entries"][0]["message"]
-    assert "target unreachable (low-power?)" in msg and "PIN reset was run afterwards" in msg
-    assert data["entries"][0]["jlink"]["reset"] == "pin-reset"
-    # savebin session, then a reset-only session (preamble + tail, no savebin/loadbin).
-    sessions = [s for s in fake.scripts if "ShowEmuList" not in s]
-    assert "savebin" in sessions[1] and "RSetType" in sessions[1]
-    assert "savebin" not in sessions[2] and sessions[2].splitlines()[-4:] == ["RSetType 2", "r", "g", "exit"]
-
-
-def test_a_read_session_failure_with_a_failing_tail_says_the_board_was_not_reset(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_rc=1, tail_rc=1)
-    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
-    assert "board was NOT reset" in data["entries"][0]["message"]
-    assert data["entries"][0]["jlink"]["reset"] == "not-run"
-
-
-def test_a_probe_guard_refusal_before_the_readback_says_the_board_was_not_reset(tmp_path, monkeypatch):
-    calls = {"n": 0}
-    fake = FakeJlink(monkeypatch, emulators=["000999000001"])
-    fake.sources = [APP, ATOC]
-    original = fake._spawn
-
-    def _flaky(argv, script, *args, **kwargs):
-        if "ShowEmuList" in script:
-            calls["n"] += 1
-            if calls["n"] >= 3:
-                fake.emulators = ["000999000001", "000999000001"]
-        return original(argv, script, *args, **kwargs)
-
-    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _flaky)
-    real = flash_cmd._execute
-    monkeypatch.setattr(
-        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
-    )
-    rc, data, issues, _l, _s = _flow_d_run(
-        tmp_path, monkeypatch, flash_args=_ARGS,
-        probe_kwargs={"readback": True, **_probes(A, C), "probe_usb_path": "3-4.3"},
-    )
-    assert rc == 1 and _codes(issues) == ["flash.probe-ambiguous"]
-    assert "board was NOT reset" in data["entries"][0]["message"]
-    assert data["entries"][0]["jlink"]["reset"] == "not-run"
-    assert not any("RSetType" in s and "savebin" not in s for s in fake.scripts)
-
-
 def test_a_full_length_mismatch_wins_over_a_short_region(tmp_path, monkeypatch):
-    """Review: 'unreachable' must not hide a real mismatch in another region."""
-    fake, (rc, data, issues, _l, _s) = _readback(
-        tmp_path, monkeypatch, read_back={0: b"", 1: b"\xff"}
-    )
+    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_back={0: b"", 1: b"\xff"})
     assert rc == 1 and _codes(issues) == ["flash.readback-mismatch"]
     assert "0x8057F5B0" in data["entries"][0]["message"]
     assert "0x80010000" not in data["entries"][0]["message"].split("DIFFERENT bytes")[1]
 
 
-def test_unreachable_needs_that_no_region_came_back_full_length(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_back={0: b"", 1: b""})
-    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
-    assert "target unreachable (low-power?)" in data["entries"][0]["message"]
-
-
-def test_a_marker_only_in_the_reset_tail_does_not_hide_a_good_readback(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback(
-        tmp_path, monkeypatch, read_out="RSetType 2\nCould not read memory.\n"
-    )
-    assert rc == 0, (data, issues)
-    assert data["entries"][0]["jlink"]["verification"] == "readback-verified"
-
-
-def test_the_ambiguous_core_markers_are_not_unreachable_markers():
-    for text in ("Could not find core", "Failed to attach"):
-        assert not flow_d_report.target_unreachable(text)
-    assert flow_d_report.target_unreachable("Could not read memory.")
-
-
-def test_strip_reset_tail():
-    assert flow_d_report.strip_reset_tail(
-        "connect\nloadbin x 0x1\nverifybin x 0x1\nRSetType 2\nr\ng\nexit\n"
-    ) == "connect\nloadbin x 0x1\nverifybin x 0x1\nh\nexit\n"
-    assert flow_d_report.strip_reset_tail("connect\nexit\n") == "connect\nexit\n"
-
-
 def test_a_readback_that_differs_fails_the_entry_with_its_code(tmp_path, monkeypatch):
-    fake, (rc, data, issues, lines, _s) = _readback_run(
-        tmp_path, monkeypatch, {"read_back": {1: b"\xff"}}
-    )
+    fake, (rc, data, issues, lines, _s) = _readback(tmp_path, monkeypatch, read_back={1: b"\xff"})
     assert rc == 1
     entry = data["entries"][0]
     assert entry["status"] == "failed"
@@ -613,11 +519,13 @@ def test_a_readback_that_differs_fails_the_entry_with_its_code(tmp_path, monkeyp
     assert entry["jlink"]["verification"] == "cache-verified"  # never upgraded
 
 
-def test_a_readback_session_that_fails_is_its_own_code(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch, {"read_rc": 1})
-    assert rc == 1
-    assert _codes(issues) == ["flash.readback-failed"]
-    assert "write landed and cache-verified" in data["entries"][0]["message"]
+def test_a_combined_session_that_fails_is_an_entry_failure_with_a_hint(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_rc=1, read_out="Could not read memory.\n"
+    )
+    assert rc == 1 and _codes(issues) == ["flash.entry-failed"]
+    msg = data["entries"][0]["message"]
+    assert "runs the read inside the write session" in msg and "jlink.transcriptPath" in msg
 
 
 def test_without_the_flag_there_is_no_readback_spawn(tmp_path, monkeypatch):
@@ -625,28 +533,20 @@ def test_without_the_flag_there_is_no_readback_spawn(tmp_path, monkeypatch):
     assert rc == 0
     assert [s for s in fake.scripts if "savebin" in s] == []
     assert "readback" not in data["entries"][0]["jlink"]
+    assert "\nh\n" not in fake.scripts[-1]
 
 
-def test_a_readback_goes_through_the_same_probe_guard_as_the_write(tmp_path, monkeypatch):
-    """The read-back is a J-Link spawn like any other: the ShowEmuList probe
-    verification runs again right before it, so it cannot reach a probe the
-    write did not."""
+def test_the_combined_session_goes_through_the_probe_guard(tmp_path, monkeypatch):
     fake, (rc, data, issues, _l, _s) = _readback_run(
         tmp_path, monkeypatch, {"emulators": ["000999000001"]},
         **{**_probes(A, C), "probe_usb_path": "3-4.3"},
     )
     assert rc == 0, (data, issues)
-    kinds = ["list" if "ShowEmuList" in s else "read" if "savebin" in s else "write"
-             for s in fake.scripts]
-    # Verification precedes the write AND the read-back.
-    assert kinds[-1] == "read" and kinds[-2] == "list"
-    assert kinds.index("write") < len(kinds) - 1
-    assert kinds[kinds.index("write") - 1] == "list"
+    kinds = ["list" if "ShowEmuList" in s else "write" for s in fake.scripts]
+    assert kinds[-1] == "write" and kinds[-2] == "list"
 
 
-def test_a_probe_that_changes_before_the_readback_refuses_it(tmp_path, monkeypatch):
-    """The listing run right before the read-back sees TWO emulators sharing the
-    serial: the read-back refuses instead of reading some other board."""
+def test_a_probe_that_changes_before_the_combined_session_refuses_it(tmp_path, monkeypatch):
     calls = {"n": 0}
     fake = FakeJlink(monkeypatch, emulators=["000999000001"])
     fake.sources = [APP, ATOC]
@@ -655,25 +555,40 @@ def test_a_probe_that_changes_before_the_readback_refuses_it(tmp_path, monkeypat
     def _flaky(argv, script, *args, **kwargs):
         if "ShowEmuList" in script:
             calls["n"] += 1
-            if calls["n"] >= 3:  # gate, write, then the read-back's own listing
+            if calls["n"] >= 2:  # the pre-sign gate, then the listing right before the write
                 fake.emulators = ["000999000001", "000999000001"]
         return original(argv, script, *args, **kwargs)
 
     monkeypatch.setattr(flash_cmd, "_spawn_jlink", _flaky)
     real_execute = flash_cmd._execute
-
-    def _restoring_execute(plan, *a, **k):
-        _rewrite_sources(tmp_path)
-        return real_execute(plan, *a, **k)
-
-    monkeypatch.setattr(flash_cmd, "_execute", _restoring_execute)
+    monkeypatch.setattr(
+        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real_execute(plan, *a, **k))[1]
+    )
     rc, data, issues, _l, _s = _flow_d_run(
         tmp_path, monkeypatch, flash_args=_ARGS,
         probe_kwargs={"readback": True, **_probes(A, C), "probe_usb_path": "3-4.3"},
     )
-    assert rc == 1
-    assert _codes(issues) == ["flash.probe-ambiguous"]
-    assert [s for s in fake.scripts if "savebin" in s] == []
+    assert rc == 1 and _codes(issues) == ["flash.probe-ambiguous"]
+    assert [s for s in fake.scripts if "savebin" in s or "loadbin" in s] == []
+
+
+def test_the_inline_readback_falls_back_when_it_cannot_be_built():
+    plan = flash_cmd.FlashPlan(argv=("x",), ok_message="", jlink_script="connect\nloadbin a 0x1\nexit\n")
+    writes = [{"address": "0x1", "size": 4, "path": "a"}]
+    assert flash_cmd._flow_d_inline_readback(plan, writes) is None  # no reset tail
+    plan = flash_cmd.FlashPlan(argv=("x",), ok_message="", jlink_script="connect\nRSetType 2\nr\ng\nexit\n")
+    assert flash_cmd._flow_d_inline_readback(plan, [{"address": "0x1", "size": None, "path": "a"}]) is None
+    inline = flash_cmd._flow_d_inline_readback(plan, writes)
+    assert inline is not None and "savebin" in inline.script
+    import shutil
+
+    shutil.rmtree(inline.tmp, ignore_errors=True)
+
+
+def test_the_ambiguous_core_markers_are_not_unreachable_markers():
+    for text in ("Could not find core", "Failed to attach"):
+        assert not flow_d_report.target_unreachable(text)
+    assert flow_d_report.target_unreachable("Could not read memory.")
 
 
 # ── tan-cli#1336: the J-Link binary is never taken from the project venv ───
@@ -1005,21 +920,6 @@ def test_the_preflight_dpidr_survives_a_later_refusal(tmp_path, monkeypatch):
 # ── tan-cli#1458: bench follow-ups ──────────────────────────────────────────
 
 
-def test_the_readback_session_halts_the_core_right_after_connect():
-    write = "connect\nloadbin x 0x1\nRSetType 2\nr\ng\nexit\n"
-    assert flow_d_report.readback_script(write, [("0x1", 4, "/t/r")], halt_first=True) == (
-        "connect\nh\nsavebin /t/r 0x1 0x4\nRSetType 2\nr\ng\nexit\n"
-    )
-    assert "\nh\n" not in flow_d_report.readback_script(write, [("0x1", 4, "/t/r")])
-
-
-def test_the_write_session_asks_for_the_core_held_halted_before_exit(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback_run(tmp_path, monkeypatch)
-    write, read = [s for s in fake.scripts if "ShowEmuList" not in s]
-    assert write.splitlines()[-2:] == ["h", "exit"]
-    assert read.splitlines()[read.splitlines().index("connect") + 1] == "h"
-
-
 def test_the_message_names_the_pcsr_witness_not_dhcsr(tmp_path, monkeypatch):
     out = "E000EDF0 = 01040001\n" + PC_IN * 3
     fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
@@ -1037,20 +937,14 @@ def test_no_witness_in_a_stop_window_is_info_with_honest_wording(tmp_path, monke
     assert "no witness" in found[0].message and "low power" in found[0].message
 
 
-def test_every_session_leaves_a_transcript_under_flash_logs(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback_run(
-        tmp_path, monkeypatch, {"read_out": "Failed to halt CPU\n", "probe_out": "E000EDF0 = 03050001\n"}
+def test_the_combined_session_and_the_boot_probe_each_leave_a_transcript(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_out="Failed to halt CPU\n", probe_out="E000EDF0 = 03050001\n"
     )
     jl = data["entries"][0]["jlink"]
     logs = tmp_path / "build" / "flash-logs"
-    paths = [jl["transcriptPath"], jl["readbackSession"]["transcriptPath"], jl["bootProbe"]["transcriptPath"]]
-    assert all(p and Path(p).parent == logs and Path(p).is_file() for p in paths)
-    assert "-readback-" in Path(paths[1]).name and "-bootprobe-" in Path(paths[2]).name
-    assert "-readback-" not in Path(paths[0]).name
-    assert "savebin" in Path(paths[1]).read_text() and "mem32" in Path(paths[2]).read_text()
-
-
-def test_the_reset_only_session_is_saved_too(tmp_path, monkeypatch):
-    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_rc=1)
-    tail = data["entries"][0]["jlink"]["resetTail"]["transcriptPath"]
-    assert tail and "RSetType" in Path(tail).read_text()
+    write_log, probe_log = Path(jl["transcriptPath"]), Path(jl["bootProbe"]["transcriptPath"])
+    assert write_log.parent == probe_log.parent == logs and "-bootprobe-" in probe_log.name
+    text = write_log.read_text()
+    assert "savebin" in text and "loadbin" in text  # the read-back is in the write's log
+    assert "mem32" in probe_log.read_text()

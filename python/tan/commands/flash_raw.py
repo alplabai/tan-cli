@@ -257,7 +257,7 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
             for w in report["raw"]["writes"]
         ]
         failure = fc._flow_d_readback(
-            plan, outcome, ctx, writes, report, guard, exe, reset_after=False, entry_id=entry_id
+            plan, outcome, ctx, writes, report, guard, exe, entry_id=entry_id
         )
         if failure is not None:
             code, text = failure
