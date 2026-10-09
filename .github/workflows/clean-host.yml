@@ -291,7 +291,25 @@ jobs:
           CONTAINER_IMAGE: ${{ matrix.container }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/src" -w /src/python "${CONTAINER_IMAGE}" bash -euc '
+          # Pull through a registry mirror first: anonymous Docker Hub pulls from
+          # shared GitHub runners hit "toomanyrequests" and ejected merge-queue
+          # entries on 2026-10-09. The image is pinned by digest, so whichever
+          # registry serves it, the bytes are the same verified image.
+          IMG=""
+          for ref in "mirror.gcr.io/library/${CONTAINER_IMAGE}" \
+                     "public.ecr.aws/docker/library/${CONTAINER_IMAGE}" \
+                     "${CONTAINER_IMAGE}"; do
+            for attempt in 1 2 3; do
+              if docker pull --quiet "$ref"; then IMG="$ref"; break 2; fi
+              sleep $((attempt * 15))
+            done
+          done
+          if [ -z "$IMG" ]; then
+            echo "::error::could not pull ${CONTAINER_IMAGE} from any registry"
+            exit 1
+          fi
+          echo "pulled ${IMG}"
+          docker run --rm -v "$PWD:/src" -w /src/python "${IMG}" bash -euc '
             bash /src/scripts/ci/apt-bounded.sh update -qq
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
