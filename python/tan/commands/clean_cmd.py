@@ -88,6 +88,7 @@ import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.dir_removal import (
     is_link,
     os_error_text,
@@ -100,6 +101,7 @@ from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_root_ladder,
+    sdk_search_summary,
 )
 from tan.core.shapes import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -617,6 +619,22 @@ def _cli_workspace_root(project_arg: str | None) -> Path:
     return Path(cwd if project_arg is None else _rust_join(cwd, project_arg))
 
 
+def _sdk_root_refusal(sdk_root_arg: str | None, workspace_root: Path) -> str:
+    """`clean.sdk-root-not-found`'s message (tan-cli#1444): where tan looked
+    and the flag that fixes it, the same shape as `flash.sdk-root-not-found`
+    (#1423). `--sdk-root` is terminal (I-31): no other tier was tried, so that
+    branch does not claim the ladder was searched."""
+    if sdk_root_arg is not None:
+        return (
+            f"Cannot locate alp-sdk root. `--sdk-root {sdk_root_arg}` is not an "
+            "alp-sdk checkout (no `scripts/alp_project.py` under it)."
+        )
+    return (
+        f"Cannot locate alp-sdk root. {sdk_search_summary(workspace_root)} "
+        f"To fix it, {NO_SDK_NEXT_STEPS}."
+    )
+
+
 def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
     """Whether `tan.core.sdk_discovery.resolve_sdk_root_ladder` would resolve a checkout --
     the guard behind `clean.sdk-root-not-found`.
@@ -733,9 +751,12 @@ def _run(
 
     # SDK-root guard -- faithful to `alp_clean.py`'s `log.die('Cannot locate
     # alp-sdk root.')`. Arguably YAGNI (removing a build dir needs no SDK), but
-    # the oracle keeps it, so the port keeps it.
-    if not sdk_root_resolves(sdk_root_arg, _cli_workspace_root(project_arg)):
-        message = "Cannot locate alp-sdk root."
+    # the oracle keeps it, so the port keeps it. tan-cli#1444: the message
+    # names where tan looked and the flag that fixes it, as flash's does
+    # (#1423); `test_clean_parity.json` is history only, nothing replays it.
+    guard_root = _cli_workspace_root(project_arg)
+    if not sdk_root_resolves(sdk_root_arg, guard_root):
+        message = _sdk_root_refusal(sdk_root_arg, guard_root)
         return _Outcome(
             exit_code=ExitCode.RUNTIME_FAILURE,
             data=_report("", dry_run, [], 0),
