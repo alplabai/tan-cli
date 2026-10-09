@@ -200,8 +200,6 @@ UNREACHABLE_MARKERS = (
     "Cannot connect to target",
     "Could not connect to target",
     "Connecting to target failed",
-    "Could not find core",
-    "Failed to attach",
 )
 
 

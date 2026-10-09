@@ -3882,23 +3882,64 @@ def _flow_d_readback(
     the probe-selection verification (ShowEmuList, TOCTOU re-check, shared-serial
     isolation) runs again immediately before this spawn -- a read-back that went
     to a different probe than the write would be a green light for the wrong
-    board. A guard refusal comes back as its own `flash.probe-*` code."""
-    regions = [(w["address"], w["size"], w["path"]) for w in writes if w.get("size")]
+    board. A guard refusal comes back as its own `flash.probe-*` code.
+
+    tan-cli#1450 review: with `reset_after` the PIN reset rides the read-back
+    session, so on EVERY non-success return where that session did not run to its
+    tail, a reset-only session runs through the same guard; if it cannot, the
+    block says `reset: "not-run"` and the message says the board was NOT reset."""
     block = report.setdefault("jlink", {})
+    result, carried = _flow_d_readback_session(
+        plan, ctx, writes, block, probe_guard, jlink_exe, reset_after
+    )
+    if result is None or not reset_after or carried:
+        return result
+    code, text = result
+    if not (probe_guard is not None and probe_guard.tripped) and plan.jlink_script:
+        tail = _execute(
+            dataclasses.replace(plan, jlink_script=readback_script(plan.jlink_script, [])),
+            True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
+        )
+        if tail.success and not (probe_guard is not None and probe_guard.tripped):
+            failures = reset_failures(f"{tail.stdout}\n{tail.stderr}")
+            block["resetFailures"] = list(failures)
+            block["reset"] = "unconfirmed" if failures else "pin-reset"
+            return code, text + " The PIN reset was run afterwards in a separate session."
+    block["reset"] = "not-run"
+    return code, (
+        text + " The board was NOT reset (the PIN reset that boots the new image did not "
+        "run): reset or power-cycle it."
+    )
+
+
+def _flow_d_readback_session(
+    plan: FlashPlan,
+    ctx: _Context,
+    writes: list[dict[str, Any]],
+    block: dict[str, Any],
+    probe_guard: "_ProbeGuard | None",
+    jlink_exe: str | None,
+    reset_after: bool,
+) -> tuple[tuple[str, str] | None, bool]:
+    """The read-back proper: `(result, carried)`, `carried` meaning the session ran to
+    the end of its script (so a reset tail in it ran)."""
+    regions = [
+        (w["address"], w["size"], w["path"], w.get("sha256")) for w in writes if w.get("size")
+    ]
     if not regions or plan.jlink_script is None:
         block["readback"] = {"performed": False, "reason": "no readable written region"}
-        return "flash.readback-failed", "no written region to read back"
+        return ("flash.readback-failed", "no written region to read back"), False
     tmp = tempfile.mkdtemp(prefix="tan-readback-")
     try:
         dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
         try:
             script = readback_script(
-                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)],
+                plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)],
                 reset_after=reset_after,
             )
         except (ValueError, FlashPlanError) as err:
             block["readback"] = {"performed": False, "reason": str(err)}
-            return "flash.readback-failed", f"could not build the read-back session: {err}"
+            return ("flash.readback-failed", f"could not build the read-back session: {err}"), False
         read = _execute(
             dataclasses.replace(plan, jlink_script=script),
             True, ctx.venv_bin, ctx.workspace, probe_guard,
@@ -3906,27 +3947,30 @@ def _flow_d_readback(
         )
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
-            return f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped
+            return (f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped), False
         read_text = f"{read.stdout}\n{read.stderr}"
-        if target_unreachable(read_text):
-            return _flow_d_readback_unreachable(block, "the session could not read memory")
-        if read.success and reset_after:
-            # The reset/run tail rides this session (tan-cli#1450): report its outcome.
-            failures = reset_failures(read_text)
-            block["resetFailures"] = list(failures)
-            block["reset"] = "unconfirmed" if failures else "pin-reset"
+        # Markers count only BEFORE the reset tail: the tail's own errors say nothing
+        # about whether memory could be read.
+        before_tail = read_text.split("RSetType", 1)[0]
         if not read.success:
             block["readback"] = {"performed": False, "reason": _capture_tail(read) or "session failed"}
+            if target_unreachable(before_tail):
+                return _flow_d_readback_unreachable(block, "the session could not read memory"), False
             return (
                 "flash.readback-failed",
                 "the write landed and cache-verified, but the fresh read-back session "
                 f"failed: {_capture_tail(read) or 'no output'}",
-            )
+            ), False
+        if reset_after:
+            # The reset/run tail rides this session (tan-cli#1450): report its outcome.
+            failures = reset_failures(read_text)
+            block["resetFailures"] = list(failures)
+            block["reset"] = "unconfirmed" if failures else "pin-reset"
         results = []
-        for (address, size, path), dest in zip(regions, dests):
-            expected = sha256_of(path)
+        for (address, size, path, known), dest in zip(regions, dests):
+            expected = known or sha256_of(path)
             try:
-                actual = sha256_of(dest)[:] if os.path.getsize(dest) == size else None
+                actual = sha256_of(dest) if os.path.getsize(dest) == size else None
                 if actual is None:
                     actual = f"short-read:{os.path.getsize(dest)}"
             except OSError:
@@ -3937,22 +3981,22 @@ def _flow_d_readback(
             )
         ok = all(r["match"] for r in results)
         block["readback"] = {"performed": True, "ok": ok, "regions": results}
-        if not ok and any(
-            str(r["sha256Actual"]).startswith("short-read:") or r["sha256Actual"] == "missing"
-            for r in results
-        ):
-            return _flow_d_readback_unreachable(block, "J-Link returned no data", results)
-        if not ok:
-            bad = [r["address"] for r in results if not r["match"]]
+        short = [r for r in results if str(r["sha256Actual"]).startswith("short-read:")
+                 or r["sha256Actual"] == "missing"]
+        # A full-length dump that differs is a real mismatch, whatever else happened.
+        mismatched = [r["address"] for r in results if not r["match"] and r not in short]
+        if mismatched:
             return (
                 "flash.readback-mismatch",
                 "the write cache-verified but a fresh J-Link session read DIFFERENT bytes "
-                f"back at {', '.join(bad)} -- the chip does not hold the image. Do not "
+                f"back at {', '.join(mismatched)} -- the chip does not hold the image. Do not "
                 "trust this board's slot0; re-flash.",
-            )
+            ), True
+        if short:
+            return _flow_d_readback_unreachable(block, "J-Link returned no data", results), True
         block["verification"] = VERIFICATION_READBACK
         block["verificationNote"] = VERIFICATION_READBACK_NOTE
-        return None
+        return None, True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

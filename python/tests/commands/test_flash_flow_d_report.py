@@ -42,11 +42,12 @@ class FakeJlink:
     index -> the bytes `savebin` writes (default: the true source bytes)."""
 
     def __init__(self, monkeypatch, *, write_out=CLEAN, write_rc=0, read_back=None,
-                 read_rc=0, emulators=(), probe_out="", probe_rc=0):
+                 read_rc=0, emulators=(), probe_out="", probe_rc=0, tail_rc=0, read_out=""):
         self.write_out, self.write_rc = write_out, write_rc
         self.read_back, self.read_rc = read_back, read_rc
         self.emulators = list(emulators)
         self.probe_out, self.probe_rc = probe_out, probe_rc
+        self.tail_rc, self.read_out = tail_rc, read_out
         self.scripts: list[str] = []
         monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
 
@@ -58,6 +59,8 @@ class FakeJlink:
                 for i, sn in enumerate(self.emulators)
             ]
             return flash_cmd._Outcome(success=True, stdout="\n".join(lines), returncode=0)
+        if "RSetType" in script and "savebin" not in script and "loadbin" not in script:
+            return flash_cmd._Outcome(success=self.tail_rc == 0, stdout="", returncode=self.tail_rc)
         if "mem32" in script:
             return flash_cmd._Outcome(
                 success=self.probe_rc == 0, stdout=self.probe_out, returncode=self.probe_rc
@@ -70,7 +73,7 @@ class FakeJlink:
                     data = self.sources[n]
                 Path(dest).write_bytes(data)
             return flash_cmd._Outcome(
-                success=self.read_rc == 0, stdout="Reading 1 byte...\nO.K.\n",
+                success=self.read_rc == 0, stdout="Reading 1 byte...\nO.K.\n" + self.read_out,
                 returncode=self.read_rc,
             )
         return flash_cmd._Outcome(
@@ -433,27 +436,96 @@ def test_short_reads_mean_unreachable_not_mismatch(tmp_path, monkeypatch):
     assert data["entries"][0]["jlink"]["readback"]["reason"] == "target unreachable (low-power?)"
 
 
-def test_a_session_that_says_it_could_not_read_memory_is_unreachable(tmp_path, monkeypatch):
-    fake = FakeJlink(monkeypatch)
+def _readback(tmp_path, monkeypatch, **fake_kwargs):
+    fake = FakeJlink(monkeypatch, **fake_kwargs)
+    fake.sources = [APP, ATOC]
+    real = flash_cmd._execute
+    monkeypatch.setattr(
+        flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
+    )
+    out = _flow_d_run(tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True})
+    return fake, out
+
+
+def test_a_failed_session_that_could_not_read_memory_is_unreachable_and_reset_afterwards(
+    tmp_path, monkeypatch
+):
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_rc=1, read_out="Could not read memory.\n"
+    )
+    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
+    msg = data["entries"][0]["message"]
+    assert "target unreachable (low-power?)" in msg and "PIN reset was run afterwards" in msg
+    assert data["entries"][0]["jlink"]["reset"] == "pin-reset"
+    # savebin session, then a reset-only session (preamble + tail, no savebin/loadbin).
+    sessions = [s for s in fake.scripts if "ShowEmuList" not in s]
+    assert "savebin" in sessions[1] and "RSetType" in sessions[1]
+    assert "savebin" not in sessions[2] and sessions[2].splitlines()[-4:] == ["RSetType 2", "r", "g", "exit"]
+
+
+def test_a_read_session_failure_with_a_failing_tail_says_the_board_was_not_reset(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_rc=1, tail_rc=1)
+    assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
+    assert "board was NOT reset" in data["entries"][0]["message"]
+    assert data["entries"][0]["jlink"]["reset"] == "not-run"
+
+
+def test_a_probe_guard_refusal_before_the_readback_says_the_board_was_not_reset(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    fake = FakeJlink(monkeypatch, emulators=["000999000001"])
     fake.sources = [APP, ATOC]
     original = fake._spawn
 
-    def _unreachable(argv, script, *a, **k):
-        out = original(argv, script, *a, **k)
-        if "savebin" in script:
-            out.stdout += "Could not read memory.\n"
-        return out
+    def _flaky(argv, script, *args, **kwargs):
+        if "ShowEmuList" in script:
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                fake.emulators = ["000999000001", "000999000001"]
+        return original(argv, script, *args, **kwargs)
 
-    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _unreachable)
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", _flaky)
     real = flash_cmd._execute
     monkeypatch.setattr(
         flash_cmd, "_execute", lambda plan, *a, **k: (_rewrite_sources(tmp_path), real(plan, *a, **k))[1]
     )
     rc, data, issues, _l, _s = _flow_d_run(
-        tmp_path, monkeypatch, flash_args=_ARGS, probe_kwargs={"readback": True}
+        tmp_path, monkeypatch, flash_args=_ARGS,
+        probe_kwargs={"readback": True, **_probes(A, C), "probe_usb_path": "3-4.3"},
     )
+    assert rc == 1 and _codes(issues) == ["flash.probe-ambiguous"]
+    assert "board was NOT reset" in data["entries"][0]["message"]
+    assert data["entries"][0]["jlink"]["reset"] == "not-run"
+    assert not any("RSetType" in s and "savebin" not in s for s in fake.scripts)
+
+
+def test_a_full_length_mismatch_wins_over_a_short_region(tmp_path, monkeypatch):
+    """Review: 'unreachable' must not hide a real mismatch in another region."""
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_back={0: b"", 1: b"\xff"}
+    )
+    assert rc == 1 and _codes(issues) == ["flash.readback-mismatch"]
+    assert "0x8057F5B0" in data["entries"][0]["message"]
+    assert "0x80010000" not in data["entries"][0]["message"].split("DIFFERENT bytes")[1]
+
+
+def test_unreachable_needs_that_no_region_came_back_full_length(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(tmp_path, monkeypatch, read_back={0: b"", 1: b""})
     assert rc == 1 and _codes(issues) == ["flash.readback-failed"]
     assert "target unreachable (low-power?)" in data["entries"][0]["message"]
+
+
+def test_a_marker_only_in_the_reset_tail_does_not_hide_a_good_readback(tmp_path, monkeypatch):
+    fake, (rc, data, issues, _l, _s) = _readback(
+        tmp_path, monkeypatch, read_out="RSetType 2\nCould not read memory.\n"
+    )
+    assert rc == 0, (data, issues)
+    assert data["entries"][0]["jlink"]["verification"] == "readback-verified"
+
+
+def test_the_ambiguous_core_markers_are_not_unreachable_markers():
+    for text in ("Could not find core", "Failed to attach"):
+        assert not flow_d_report.target_unreachable(text)
+    assert flow_d_report.target_unreachable("Could not read memory.")
 
 
 def test_strip_reset_tail():
