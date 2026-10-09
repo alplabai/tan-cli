@@ -49,3 +49,24 @@ def test_pinmux_lists_sorted_unique_output_pads():
     keys = [(int(a), int(b)) for a, b, _ in pads]
     assert keys == sorted(set(keys))
     assert all((kind == "LPGPIO") == (port == "15") for port, _, kind in pads)
+
+
+_BOARDS = [("E1M-AEN801", "m55_he", "e1m_aen801_m55_he"),
+           ("E1M-AEN801", "m55_hp", "e1m_aen801_m55_hp"),
+           ("E1M-AEN803", "m55_he", "e1m_aen803_m55_he"),
+           ("E1M-AEN803", "m55_hp", "e1m_aen803_m55_hp")]
+
+
+@pytest.mark.parametrize("sku,core,board", _BOARDS)
+def test_emitted_dts_equals_the_sdk_committed_dts(sku, core, board):
+    """Output-level fidelity of the `gen_zephyr_board.py` hand-port."""
+    from tan.planner.zephyr_board import emit_zephyr_board
+
+    files = emit_zephyr_board(sku, core, Path(SDK) / "metadata")
+    dts = {r: c for r, c in files.items() if r.endswith(".dts")}
+    assert dts, "no .dts emitted"
+    for rel, content in dts.items():
+        committed = (Path(SDK) / "zephyr" / "boards" / "alp" / board
+                     / Path(rel).name)
+        assert committed.is_file(), committed
+        assert content == committed.read_text(encoding="utf-8"), rel
