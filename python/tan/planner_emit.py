@@ -543,8 +543,18 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
     wanted = _CONFIG_ARTEFACT_FILE[mode]
     artefact_of = getattr(buildplan, _CONFIG_ARTEFACT_HELPER[mode])
 
+    from tan.planner.models import OrchestratorError  # noqa: PLC0415
+
     def slice_renderer(proj, sl):
-        artefact = artefact_of(proj, sl)
+        try:
+            artefact = artefact_of(proj, sl)
+        except OrchestratorError as err:
+            if mode != "cmake-args":
+                raise
+            # alp-sdk ed57bd025 (#2791): `alp_project._run_v2_per_core_emit`
+            # turns a cmake-args OrchestratorError -- e.g. a `cameras:` entry
+            # unbuildable for this core -- into one clean refusal line.
+            raise PlannerEmitError(str(err)) from err
         if artefact is None or artefact[0] != wanted:
             # Unreachable in practice: `allowed_os` above already confines
             # each mode to the one OS whose artefact IS `wanted`. A coded

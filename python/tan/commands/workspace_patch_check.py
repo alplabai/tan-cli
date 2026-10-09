@@ -31,11 +31,12 @@ import json
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from tan.core.atomic_write import atomic_write_text
 from tan.core.host_python import probe_host_python
+from tan.core.patch_paths import patch_paths
 from tan.core.subprocess_env import spawn_env
 from tan.core.venv import venv_python, west_program
 from tan.core.west_patches import (
@@ -65,6 +66,9 @@ class PatchCheck:
     #: Why `unchecked`, or the applied count line; empty for `missing`.
     note: str = ""
     cached: bool = False
+    #: Why `tan build` re-verifies on every build: the cache key could not be
+    #: built in full, so nothing is cached. Empty when caching was in play.
+    cache_note: str = ""
 
 
 def _run(argv: list[str], cwd: str, timeout: int = _TIMEOUT_S) -> tuple[int | None, str, str]:
@@ -117,19 +121,27 @@ def _workspace_heads(west: str, workspace: Path) -> dict[str, str] | None:
 _PATCH_ENTRY = re.compile(r"^\s*-?\s*path:\s*['\"]?([^'\"#\s]+)", re.MULTILINE)
 
 
-def _patched_files(sdk: Path) -> list[str]:
-    """Repo-relative paths every `patches.yml` patch writes (`+++ b/<path>`)."""
+def _patched_files(sdk: Path) -> list[str] | None:
+    """Repo-relative paths every `patches.yml` patch touches, or `None`.
+
+    Every path a patch touches counts, deletions, renames and binary patches
+    included (`tan.core.patch_paths`), so a revert that restores a deleted
+    file moves the fingerprint.
+
+    `None` when the list cannot be trusted to be complete: `patches.yml` or
+    any named patch is unreadable, or no path was found at all. A partial
+    list would silently weaken the cache key towards HEAD-only, reopening the
+    revert hole for the dropped files, so the caller skips caching instead.
+    """
     rels: set[str] = set()
     try:
         entries = _PATCH_ENTRY.findall((sdk / _PATCHES_YML).read_text(encoding="utf-8"))
         for entry in entries:
             text = (sdk / "zephyr" / "patches" / entry).read_text(encoding="utf-8", errors="replace")
-            rels.update(
-                ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")
-            )
-    except OSError:
-        pass
-    return sorted(rels)
+            rels.update(patch_paths(text))
+    except (OSError, ValueError):
+        return None
+    return sorted(rels) or None
 
 
 def _tree_fingerprint(module_dirs: list[str], rels: list[str]) -> dict[str, str]:
@@ -144,6 +156,25 @@ def _tree_fingerprint(module_dirs: list[str], rels: list[str]) -> dict[str, str]
                 continue
             out[str(f)] = f"{st.st_mtime_ns}:{st.st_size}"
     return out
+
+
+def _cache_key(west: str, workspace: Path, sdk: Path, why: list[str]) -> str | None:
+    """The cache key, or `None` after appending the reason to `why` when it
+    cannot be built in full (nothing is then cached)."""
+    heads = _workspace_heads(west, workspace)
+    if heads is None:
+        why.append("the west workspace modules could not be listed")
+        return None
+    try:
+        rels = _patched_files(sdk)
+        if rels is None:
+            why.append("zephyr/patches.yml or a patch it names could not be read in full")
+            return None
+        tree = _tree_fingerprint(list(heads), rels)
+        return cache_key((sdk / _PATCHES_YML).read_bytes(), {**heads, **tree})
+    except OSError:
+        why.append("zephyr/patches.yml could not be read")
+        return None
 
 
 def _interpreter(workspace: Path, sdk_root: str) -> str | None:
@@ -164,6 +195,15 @@ def _read_cache(path: Path, key: str) -> str | None:
         return None
     if isinstance(doc, dict) and doc.get("key") == key and doc.get("state") in (APPLIED, UNCHECKED):
         return doc["state"]
+    return None
+
+
+def _cache_hit(cache_dir: Path, key: str | None) -> PatchCheck | None:
+    cached = _read_cache(cache_dir / CACHE_FILE, key) if key is not None else None
+    if cached == APPLIED:
+        return PatchCheck(APPLIED, note="verified applied (cached)", cached=True)
+    if cached == UNCHECKED:
+        return PatchCheck(UNCHECKED, note=_PARTIAL_NOTE, cached=True)
     return None
 
 
@@ -190,14 +230,19 @@ def check_workspace_patches(
 ) -> PatchCheck:
     """Verify `<sdk_root>/zephyr/patches.yml` against `workspace`. Read-only,
     and never raises: anything unexpected is `unchecked`."""
+    why: list[str] = []
     try:
-        return _check(workspace, sdk_root, cache_dir, timeout)
+        result = _check(workspace, sdk_root, cache_dir, timeout, why)
+        if why and result.state != MISSING:
+            result = replace(result, cache_note=why[0])
+        return result
     except Exception:  # noqa: BLE001 -- an advisory check must never break its caller
         return PatchCheck(UNCHECKED, note="the patch check failed unexpectedly")
 
 
 def _check(
-    workspace: Path, sdk_root: str | None, cache_dir: Path | None, timeout: int
+    workspace: Path, sdk_root: str | None, cache_dir: Path | None, timeout: int,
+    why: list[str],
 ) -> PatchCheck:
     if sdk_root is None:
         return PatchCheck(UNCHECKED, note="no alp-sdk checkout resolved")
@@ -212,18 +257,10 @@ def _check(
     west = west_program(str(workspace), sdk_root)
     key = None
     if cache_dir is not None:
-        heads = _workspace_heads(west, workspace)
-        if heads is not None:
-            try:
-                tree = _tree_fingerprint(list(heads), _patched_files(sdk))
-                key = cache_key(patches_yml.read_bytes(), {**heads, **tree})
-            except OSError:
-                key = None
-        cached = _read_cache(cache_dir / CACHE_FILE, key) if key is not None else None
-        if cached == APPLIED:
-            return PatchCheck(APPLIED, note="verified applied (cached)", cached=True)
-        if cached == UNCHECKED:
-            return PatchCheck(UNCHECKED, note=_PARTIAL_NOTE, cached=True)
+        key = _cache_key(west, workspace, sdk, why)
+        hit = _cache_hit(cache_dir, key)
+        if hit is not None:
+            return hit
 
     python = _interpreter(workspace, sdk_root)
     if python is None:

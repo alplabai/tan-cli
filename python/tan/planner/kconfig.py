@@ -44,6 +44,7 @@ from typing import Any, Optional
 
 import yaml
 
+from . import cameras as _cameras
 from . import libraries as _library_layer
 from . import sdk_compat as _sdk_compat
 from .link_target import applies_to as link_applies_to
@@ -2307,6 +2308,9 @@ def _slice_local_conf(project: BoardProject, slice_: Slice) -> str:
     iot_lines = _yocto_iot_lines(project, slice_)
     if iot_lines:
         lines.extend(iot_lines)
+    # `cameras:` -> ALP_CAMERA_CAM<n>, the variable the kernel bbappend keys
+    # the sensor devicetree include on (same resolver as Zephyr's -DSHIELD).
+    lines.extend(_cameras.yocto_camera_lines(project, slice_))
     # Curated third-party libraries (top-level `libraries:`, ADR 0018) with a
     # Yocto integration section -- BOTH the project-wide entries and the ones
     # scoped to this core.  Every recipe name comes from the library's own
@@ -2408,6 +2412,10 @@ def _slice_cmake_args(project: BoardProject, slice_: Slice) -> str:
         lines.append(f"-DALP_BOARD_{_board_define_slug(project.board_name)}")
     if slice_.toolchain:
         lines.append(f"-DALP_TOOLCHAIN={slice_.toolchain}")
+    # `cameras:` -> the same -DSHIELD the build command carries.
+    shield = _cameras.shield_define_for_build(project, slice_)
+    if shield:
+        lines.append(f"-D{shield}")
     if capabilities.get("drp_ai"):
         # Must match the option name in src/yocto/CMakeLists.txt
         # (ALP_SDK_USE_DRPAI_V2N -- compiles inference_drpai.cpp).

@@ -379,6 +379,9 @@ class _Entry:
     #: (a UART-console build). `_run` appends a `flash.ram-console-symbol-missing`
     #: warning. Never emitted by `as_dict()`.
     ram_console_missing: bool = False
+    #: tan-cli#1436: the warning text when the `--watch` transcript lacked some samples.
+    #: `_run` appends `flash.ram-watch-incomplete`. Never emitted by `as_dict()`.
+    ram_watch_incomplete: str | None = None
     #: tan-cli#1372: a `--ram` run that loaded (or, under --dry-run, would load) the image.
     #: `_run` appends an `info` `flash.ram-debugger-detach-clears-trcena`. Never emitted
     #: by `as_dict()`.
@@ -1593,6 +1596,7 @@ def _execute(
     probe_guard: "_ProbeGuard | None" = None,
     jlink_exe: str | None = None,
     script_prefix: str | None = None,
+    timeout_s: float | None = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1668,7 +1672,8 @@ def _execute(
         if script_prefix:
             extra["script_prefix"] = script_prefix
         return _spawn_jlink(
-            argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S, None, workspace, exe, **extra,
+            argv, plan.jlink_script, capture, timeout_s or _FLASH_TIMEOUT_S, None, workspace, exe,
+            **extra,
         )
     # `spawned` is what the child's own `argv` will be -- the oracle's argv,
     # venv rewrite included. `resolved` is the same list with each PROGRAM
@@ -2216,6 +2221,8 @@ class _Context:
     ram: bool = False
     ram_console: bool = False
     ram_wait: float = 1.5
+    #: `--watch` specs (tan-cli#1436), raw; parsed and refused in `flash_ram`.
+    ram_watch: tuple[str, ...] = ()
     #: `--assume-he` (tan-cli#1354): proceed when the attached-core check cannot confirm
     #: the M55-HE (ambiguous/unreadable ITCM). A documented risk, never the default.
     assume_he: bool = False
@@ -4153,6 +4160,7 @@ def _run(
     ram_console: bool = False,
     ram_wait: float = 1.5,
     assume_he: bool = False,
+    ram_watch: tuple[str, ...] = (),
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4366,6 +4374,7 @@ def _run(
         ram=ram,
         ram_console=ram_console,
         ram_wait=ram_wait,
+        ram_watch=ram_watch,
         assume_he=assume_he,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
@@ -4411,6 +4420,7 @@ def _run(
             return ExitCode.RUNTIME_FAILURE, _data(build_root, entries), issues, text_lines, sdk
     # ATOC section -> the entry of this run that wrote it (tan-cli#1267).
     written_by: dict[str, str] = {}
+    watch_samples: list[dict[str, Any]] = []
     for target in plan.targets:
         if ram:
             from tan.commands.flash_ram import run_ram_entry
@@ -4497,6 +4507,10 @@ def _run(
                 issues.append(Issue("flash.ram-core-unsupported", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-mismatch":
                 issues.append(Issue("flash.ram-core-mismatch", "error", entry.message))
+            elif entry.issue_code == "flash.ram-watch-invalid":
+                issues.append(Issue("flash.ram-watch-invalid", "error", entry.message))
+            elif entry.issue_code == "flash.ram-watch-unsafe-address":
+                issues.append(Issue("flash.ram-watch-unsafe-address", "error", entry.message))
             elif entry.issue_code == "flash.ram-failed":
                 issues.append(Issue("flash.ram-failed", "error", entry.message))
             elif entry.issue_code == "flash.setools-untrusted-source":
@@ -4531,6 +4545,9 @@ def _run(
                     issues.append(Issue("flash.runner-setup-warnings", "warning", note))
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.ram_watch_incomplete:
+            text_lines.append(entry.ram_watch_incomplete)
+            issues.append(Issue("flash.ram-watch-incomplete", "warning", entry.ram_watch_incomplete))
         if entry.ram_console_missing:
             message = (
                 f"{entry.id}: --ram-console asked for the RAM console but this ELF has no "
@@ -4619,6 +4636,9 @@ def _run(
             else:
                 issues.append(Issue("flash.atoc-guard-unavailable", "warning", entry.atoc_warning))
         entries.append(entry.as_dict())
+        if "watch" in entry.extra:
+            # tan-cli#1436: the samples ride in `data.watch[]`, not in the entry.
+            watch_samples.extend(entries[-1].pop("watch"))
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything
         flashed_anything = True
@@ -4718,7 +4738,10 @@ def _run(
     text_lines.append(f"flash: {failed} failure(s).")
 
     exit_code = ExitCode.RUNTIME_FAILURE if failed > 0 else ExitCode.SUCCESS
-    return exit_code, _data(build_root, entries), issues, text_lines, sdk
+    data = _data(build_root, entries)
+    if ram and watch_samples:
+        data["watch"] = watch_samples
+    return exit_code, data, issues, text_lines, sdk
 
 
 def _read(path: str) -> str:
@@ -4893,6 +4916,21 @@ def flash(
         "build has no such symbol: nothing is read, the envelope says which console the "
         "build selected, and flash.ram-console-symbol-missing is a warning, not an error.",
     ),
+    watch: list[str] = typer.Option(
+        None,
+        "--watch",
+        metavar="ADDR[:WORDS][@PERIOD-MS]",
+        help="With --ram (tan-cli#1436; repeatable): sample target memory in the SAME "
+        "J-Link session that starts the image, with read-only mem32 reads (read-only on memory; a register read -- FIFO, clear-on-read, "
+        "clock-gated block -- may have side effects) every PERIOD-MS "
+        "(default 100, 10..60000) of WORDS 32-bit words (default 1, max 64) until --wait "
+        "expires. The samples are data.watch[] (address, words, index, elapsedMs, values); "
+        "elapsedMs is the SCHEDULED offset after `go`, not a measurement. Refused before any "
+        "spawn: an unaligned address, a zero or excessive word count, an out-of-range "
+        "period, and the HP TCM windows 0x50000000..0x57FFFFFF (ITCM + DTCM), whose read from an "
+        "HE attach leaves the core unhaltable (flash.ram-watch-invalid / "
+        "flash.ram-watch-unsafe-address).",
+    ),
     assume_he: bool = typer.Option(
         False,
         "--assume-he",
@@ -4914,7 +4952,8 @@ def flash(
         min=0.0,
         max=3600.0,
         help="With --ram --ram-console: how long the image runs before the console is read "
-        "(default 1.5).",
+        "(default 1.5). With --watch: how long the watch samples (tan-cli#1436); the "
+        "load session's timeout grows to cover it.",
     ),
     jlink: str = typer.Option(
         None,
@@ -5024,6 +5063,8 @@ def flash(
         or (isinstance(wait, (int, float)) and wait != 1.5)
     ) and ram is not True:
         raise typer.BadParameter("--ram-console / --wait / --assume-he only mean something with --ram")
+    if isinstance(watch, list) and watch and ram is not True:
+        raise typer.BadParameter("--watch only means something with --ram")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -5068,6 +5109,7 @@ def flash(
             ram_console=ram_console if isinstance(ram_console, bool) else False,
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
             assume_he=assume_he if isinstance(assume_he, bool) else False,
+            ram_watch=tuple(watch) if isinstance(watch, list) else (),
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

@@ -253,3 +253,119 @@ def test_build_cache_lands_in_the_build_dir_not_the_project_root(world, monkeypa
     workspace_patch_issues(project, str(world.sdk), has_zephyr_slice=True)
     assert (project / "build" / wpc.CACHE_FILE).is_file()
     assert not (project / wpc.CACHE_FILE).exists()
+
+
+def test_patched_files_collects_written_and_deleted_paths(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0002-del.patch\n    module: mod\n"
+    )
+    (world.sdk / "zephyr" / "patches" / "mod" / "0002-del.patch").write_text(
+        "--- a/src/gone.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+    )
+    assert wpc._patched_files(world.sdk) == ["src/f.c", "src/gone.c"]
+
+
+def test_a_deleted_file_reappearing_misses_the_cache(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0002-del.patch\n    module: mod\n"
+    )
+    (world.sdk / "zephyr" / "patches" / "mod" / "0002-del.patch").write_text(
+        "--- a/src/gone.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+    )
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache).cached
+    # `git checkout -- .` restores the file the patch deleted; HEAD is untouched.
+    (world.moddir / "src" / "gone.c").write_text("a\n")
+    world.mode("missing")
+    r = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not r.cached and r.state == wpc.MISSING
+
+
+def test_an_unreadable_patch_means_no_fingerprint_and_no_cache(world):
+    patch = world.sdk / "zephyr" / "patches" / "mod" / "0001-x.patch"
+    patch.unlink()  # patches.yml still names it: OSError mid-loop
+    assert wpc._patched_files(world.sdk) is None
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not (cache / wpc.CACHE_FILE).exists()
+    second = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not second.cached and len(world.calls()) == 2
+
+
+def test_a_partially_unreadable_patch_list_is_not_returned(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text(
+        "patches:\n  - path: mod/0001-x.patch\n    module: mod\n"
+        "  - path: mod/0009-missing.patch\n    module: mod\n"
+    )
+    assert wpc._patched_files(world.sdk) is None
+
+
+def test_an_empty_patch_list_is_not_cached(world):
+    (world.sdk / "zephyr" / "patches.yml").write_text("patches: []\n")
+    assert wpc._patched_files(world.sdk) is None
+    cache = world.tmp / "build"
+    wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=cache)
+    assert not (cache / wpc.CACHE_FILE).exists()
+
+
+def test_a_disabled_cache_says_why_in_the_build_issues(world, monkeypatch):
+    monkeypatch.setattr(
+        "tan.commands.build.workspace_patches.west_workspace_dir", lambda s, sdk: world.ws
+    )
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    (world.sdk / "zephyr" / "patches" / "mod" / "0001-x.patch").unlink()
+    r = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=world.tmp / "b")
+    assert r.cache_note and not r.cached
+    issues = workspace_patch_issues(world.tmp / "b", str(world.sdk), has_zephyr_slice=True)
+    assert [(i.code, i.severity) for i in issues] == [("build.workspace-patches-uncached", "info")]
+    assert "re-verifies" in issues[0].message and "patch it names" in issues[0].message
+
+
+def test_a_working_cache_adds_no_note(world):
+    r = wpc.check_workspace_patches(world.ws, str(world.sdk), cache_dir=world.tmp / "b")
+    assert r.cache_note == ""
+
+
+def _patch(world, name, body):
+    yml = world.sdk / "zephyr" / "patches.yml"
+    yml.write_text(yml.read_text() + f"  - path: mod/{name}\n    module: mod\n")
+    (world.sdk / "zephyr" / "patches" / "mod" / name).write_text(body)
+
+
+def test_a_pure_rename_a_binary_patch_and_a_dev_null_source_are_fingerprinted(world):
+    _patch(world, "0002-rename.patch",
+           "diff --git a/old/n.c b/new/n.c\nsimilarity index 100%\n"
+           "rename from old/n.c\nrename to new/n.c\n")
+    _patch(world, "0003-bin.patch",
+           "diff --git a/img/x.png b/img/x.png\nindex 1..2 100644\n"
+           "Binary files a/img/x.png and b/img/x.png differ\n")
+    _patch(world, "0004-new.patch",
+           "diff --git a/n/created.c b/n/created.c\nnew file mode 100644\n"
+           "--- /dev/null\n+++ b/n/created.c\n@@ -0,0 +1 @@\n+x\n")
+    assert wpc._patched_files(world.sdk) == [
+        "img/x.png", "n/created.c", "new/n.c", "old/n.c", "src/f.c",
+    ]
+
+
+def test_a_mode_only_change_is_fingerprinted(world):
+    _patch(world, "0002-mode.patch",
+           "diff --git a/scripts/run.sh b/scripts/run.sh\n"
+           "old mode 100644\nnew mode 100755\n")
+    assert "scripts/run.sh" in wpc._patched_files(world.sdk)
+
+
+def test_gnu_diff_timestamps_quoted_paths_and_hunk_content_are_handled(world):
+    from tan.core.patch_paths import patch_paths
+
+    assert patch_paths("--- a/p.c\t2020-01-01 00:00:00\n+++ b/p.c\t2020-01-01\n@@ -1 +1 @@\n-a\n+b\n") == {"p.c"}
+    quoted = (
+        'diff --git "a/caf\\303\\251.c" "b/caf\\303\\251.c"\n'
+        '--- "a/caf\\303\\251.c"\n+++ "b/caf\\303\\251.c"\n@@ -1 +1 @@\n-a\n+b\n'
+    )
+    assert patch_paths(quoted) == {"caf\u00e9.c"}
+    # `--- `/`+++ ` inside a hunk are content, not headers.
+    body = "diff --git a/k.c b/k.c\n--- a/k.c\n+++ b/k.c\n@@ -1,2 +1,2 @@\n--- a/fake\n+++ b/fake\n"
+    assert patch_paths(body) == {"k.c"}
