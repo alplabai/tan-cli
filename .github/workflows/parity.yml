@@ -983,7 +983,12 @@ env:
   # Mirror: `cameras.py` docstring only; hand-port: `validator.py` re-hashed,
   # nothing to port. Planner oracle re-captured, byte-identical; scaffold
   # parity 10/10 unchanged (no `examples/**` or `templates/**` change).
-  PINNED_SDK_TAG: 183b05509b37b44c25d3b8ae64c1aa1a10523ffd
+  # `0dee99fb5` -> `a5a137c7b` (alp-sdk `dev`, #2795 SoM power runtime, #2736):
+  # the same lockstep sites move together. `zephyr_board.py` gains the
+  # `pinctrl_som_power` group; the planner oracle was re-captured and is
+  # byte-identical (the oracle modes do not render the Zephyr board); scaffold
+  # parity is 10/10 unchanged.
+  PINNED_SDK_TAG: a5a137c7b594ebb5d451177803c0eb324069e86b
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1311,10 +1316,10 @@ env:
   # (b) the 7 `.error` goldens of `rpmsg-imx93` deleted with the example
   # (E1M-NX9101 removal, #2781/#2782); the plan's `sdkVersion` is unchanged.
   #
-  # `0dee99fb5` -> `183b05509` (tan-cli#1393). Re-captured with the same
+  # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: 183b05509b37b44c25d3b8ae64c1aa1a10523ffd
+  PINNED_PLANNER_ORACLE_SDK_REF: a5a137c7b594ebb5d451177803c0eb324069e86b
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

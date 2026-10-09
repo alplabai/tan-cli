@@ -687,6 +687,13 @@ A tag that ships this mirror therefore needs an alp-sdk release containing
 `183b05509`. The decision below already waits for a stable alp-sdk release cut
 from `dev`, so it is unchanged.
 
+**Addendum (2026-10-09, tan-cli#1393, second step).** The planner mirror then moved to alp-sdk
+`dev` `a5a137c7b594ebb5d451177803c0eb324069e86b` (over `183b05509`). The floor
+does NOT move: it stays `b04bb0f7a`. The planner change in range is alp-sdk#2795
+(the AEN `alp,som-power` node gains a `pinctrl_som_power` group), which tan's own
+in-process planner renders itself, so no tan code path requires an SDK that
+carries it.
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
 contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision

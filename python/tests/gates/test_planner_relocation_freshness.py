@@ -1395,7 +1395,16 @@ from tests.conftest import sdk_root
 #: docstring now names `scripts/gen_camera_dt.py` as the producer of the sensor
 #: DT include -- re-copied verbatim, no code change. `gen_camera_dt.py` and
 #: `check_camera_parity.py` are new SDK-side scripts with no planner caller.
-PINNED_SDK_COMMIT = "183b05509b37b44c25d3b8ae64c1aa1a10523ffd"  # alp-sdk origin/dev -- #2736 cameras.py docstring (tan-cli#1393)
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (mirror / PINNED_HASHES; tan-cli#1393): one
+#: upstream commit, #2795 (`a5a137c7b`, SoM power runtime). No file under
+#: `scripts/alp_orchestrate/` changed, so every mirrored hash re-computes
+#: unchanged at `a5a137c7b`.
+#: RE-MEASURED, not assumed: the planner oracle re-captured at `a5a137c7b`
+#: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
+#: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
+#: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
+PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2444,7 +2453,23 @@ PINNED_HASHES: dict[str, str] = {
 #:     tan-cli#591 floor: a bound checkout without `on-module-links-v2` raises
 #:     `SdkTooOldError` (`aen.som_power_domains`), not the schemaVersion
 #:     authoring error that blames `on-module-links.yaml`.
-HAND_PORT_PINNED_SDK_COMMIT = "183b05509b37b44c25d3b8ae64c1aa1a10523ffd"  # alp-sdk origin/dev -- #2736 validator.py re-hashed; cmake-args refusal + power-domain SDK floor (tan-cli#1393)
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (tan-cli#1393): two hand-port sources changed.
+#: `scripts/gen_zephyr_board.py` (#2795) -- PORTED: `_aen_som_power_dts` now
+#: emits the `&pinctrl { pinctrl_som_power: ... }` group (`group0` with
+#: `pinmux` = every output control pad of the SKU's present domains, sorted,
+#: `PIN_P<port>_<pin>__LPGPIO` for port 15 else `__GPIO`; `input-enable;`
+#: `input-schmitt-enable;`) ahead of the `/ { som-power }` node, and the node
+#: gains `pinctrl-0 = <&pinctrl_som_power>; pinctrl-names = "default";`.
+#: `scripts/alp_cli/validator.py` -- docstring-only (`camera_connector_problems`
+#: follow-up note); tan spawns the SDK validator, nothing to port. Also in range
+#: and needing no port: `on-module-links.yaml` v2 `power_domains` gains
+#: `dependents[].kind: phy_refclk` (schema enum) and the `deep_power_down_cmd`
+#: -> `hold_reset` default_action change; tan reads that YAML through the
+#: existing `power_domains` loader and the enum is validated by the SDK schema,
+#: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
+#: `"phy_refclk"` on the ethernet-PHY domain.
+HAND_PORT_PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2508,7 +2533,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "183b05509b37b44c25d3b8ae64c1aa1a10523ffd"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "89c30a8c29d9ac055fda77f37befe50397a5484989dc2254d519e852af697315",
+    "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",

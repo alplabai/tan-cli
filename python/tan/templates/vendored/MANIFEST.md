@@ -95,16 +95,22 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`183b05509`**
+- **Current vendor point (all templates):** **`a5a137c7b`**
+  (`a5a137c7b594ebb5d451177803c0eb324069e86b`, alp-sdk `dev`) — the
+  `0dee99fb5` -> `a5a137c7b` planner re-sync (alp-sdk#2795 `pinctrl_som_power`,
+  #2736 in range). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <a5a137c7b>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+  unchanged. The pin moves in the same change as `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Prior vendor point (all templates):** **`183b05509`**
   (`183b05509b37b44c25d3b8ae64c1aa1a10523ffd`, alp-sdk `dev`) — the
   `0dee99fb5` -> `183b05509` planner re-sync (tan-cli#1393; alp-sdk#2736). The
   range changes no `examples/**` or `templates/**` file, so nothing was
   re-vendored and `scaffold_byte_parity.py --sdk <183b05509>` is rc 0,
-  **10/10** (template, sku) pairs PASS against the tree unchanged. The pin
-  moves in the same change as `parity.yml`'s
-  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
-  `ref:` and `test_planner_relocation_freshness.py`'s
-  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+  **10/10** (template, sku) pairs PASS against the tree unchanged.
 
 - **Prior vendor point (all templates):** **`0dee99fb5`**
   (`0dee99fb519b511e0a7fe4da63b333b9246040b4`, alp-sdk `dev`) — the
@@ -662,8 +668,8 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`183b05509`** (alp-sdk `dev`, full sha
-  `183b05509b37b44c25d3b8ae64c1aa1a10523ffd`) — the checkout the emit was RUN
+- Commit: **`a5a137c7b`** (alp-sdk `dev`, full sha
+  `a5a137c7b594ebb5d451177803c0eb324069e86b`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
