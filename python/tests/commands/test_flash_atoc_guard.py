@@ -109,12 +109,13 @@ def _project(tmp_path, *, runner_source=GUARDED_RUNNER, flash_runner="alif_flash
 
 def _flash(tmp_path, monkeypatch, *, rc=0, verdict=None, raw=None, dry_run=False,
            replace_atoc=False, atoc_unqueryable=False, spawned=None, steps=None,
-           core=None, workspace=None, cwd=None):
+           core=None, workspace=None, cwd=None, stderr=None):
     """`flash_cmd._run` with `west` on a fake PATH and `_spawn` faked. The fake
     writes `verdict` (a dict) or `raw` (text) where the runner would -- under
     the `--build-dir` it was given. `steps`, when set, is one `(rc, verdict)`
     per spawn, in order, for a multi-entry run. `workspace` fakes the west
-    topdir `west flash` is spawned in."""
+    topdir `west flash` is spawned in. `stderr` replaces the failing spawn's
+    one-line stderr."""
     tools = tmp_path / "faketools"
     tools.mkdir(exist_ok=True)
     for name in ("west", "JLinkExe"):
@@ -149,7 +150,7 @@ def _flash(tmp_path, monkeypatch, *, rc=0, verdict=None, raw=None, dry_run=False
                 handle.write(text)
         return flash_cmd._Outcome(
             success=step_rc == 0, returncode=step_rc, captured=True,
-            stderr="" if step_rc == 0 else "FATAL ERROR: command exited with status 1",
+            stderr="" if step_rc == 0 else (stderr or "FATAL ERROR: command exited with status 1"),
         )
 
     monkeypatch.setattr(flash_cmd, "_spawn", fake_spawn)
@@ -257,6 +258,55 @@ def test_a_refused_foreign_verdict_is_its_own_code_naming_every_entry(tmp_path, 
     ), message
     assert data["entries"][0]["status"] == "failed"
     assert any(line.startswith("  FAIL: zephyr_west_flash[m55_he]: the alif_flash") for line in text)
+
+
+#: What the E1M-AEN803 bench printed around a real refusal (tan-cli#1426):
+#: two runner-loading warnings that say nothing about the ATOC guard.
+_RUNNER_NOISE_LINES = (
+    'The module for runner "rtsflash" could not be imported (No module named \'usb\')',
+    "WARNING: runners.alif_flash: the 'fdt' Python package (needed by app-gen-toc) was not found",
+)
+_NOISY_STDERR = "\n".join(
+    (_RUNNER_NOISE_LINES[0], "-- west flash: using runner alif_flash", _RUNNER_NOISE_LINES[1],
+     "ERROR: ATOC guard refused the burn", "FATAL ERROR: command exited with status 1")
+) + "\n"
+
+
+def test_a_refusal_keeps_runner_setup_warnings_out_of_its_message(tmp_path, monkeypatch):
+    _project(tmp_path)
+    _exit, _data, issues, text, _sdk = _flash(
+        tmp_path, monkeypatch, rc=1, stderr=_NOISY_STDERR,
+        verdict=_verdict("refused-foreign", ["A32_APP"]),
+    )
+    assert _codes(issues) == ["flash.atoc-guard-refused", "flash.runner-setup-warnings"], issues
+    refusal, note = issues[0].message, issues[1].message
+    assert refusal.endswith(
+        "West reported: zephyr_west_flash[m55_he]: -- west flash: using runner alif_flash | "
+        "ERROR: ATOC guard refused the burn | FATAL ERROR: command exited with status 1"
+    ), refusal
+    assert "rtsflash" not in refusal and "fdt" not in refusal, refusal
+    assert issues[1].severity == "warning"
+    assert note.endswith(" | ".join(_RUNNER_NOISE_LINES)), note
+    assert note in text
+
+
+def test_a_refusal_with_no_runner_noise_adds_no_warning(tmp_path, monkeypatch):
+    _project(tmp_path)
+    _exit, _data, issues, _text, _sdk = _flash(
+        tmp_path, monkeypatch, rc=1, verdict=_verdict("refused-foreign", ["A32_APP"]),
+    )
+    assert _codes(issues) == ["flash.atoc-guard-refused"], issues
+
+
+def test_a_failure_the_guard_did_not_refuse_keeps_the_runner_warnings(tmp_path, monkeypatch):
+    """Past a `clear` verdict the warnings may be the cause: a runner that
+    could not be imported is exactly why a burn fails. They stay put."""
+    _project(tmp_path)
+    _exit, _data, issues, _text, _sdk = _flash(
+        tmp_path, monkeypatch, rc=1, stderr=_NOISY_STDERR, verdict=_verdict("clear"),
+    )
+    assert _codes(issues) == ["flash.entry-failed"], issues
+    assert "WARNING: runners.alif_flash: the 'fdt' Python package" in issues[0].message
 
 
 def test_a_refused_unverified_verdict_says_the_read_could_not_be_verified(tmp_path, monkeypatch):
