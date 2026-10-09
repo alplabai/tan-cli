@@ -1389,13 +1389,17 @@ from tests.conftest import sdk_root
 #: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
 #: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
 #: at `c4eb27645` and is unchanged, so nothing is ported.
-#: AUDIT `0dee99fb` -> `a5a137c7` (mirror / PINNED_HASHES; tan-cli#1393): two
-#: upstream commits, #2736 (`183b05509`, camera DT generator) and #2795
-#: (`a5a137c7b`, SoM power runtime). Only `alp_orchestrate/cameras.py` moved
-#: in the mirror, and only in its docstring (the Yocto-owner paragraph now names
-#: `scripts/gen_camera_dt.py`), so the 3-way merge took it with no behaviour
-#: change and its `PINNED_HASHES` entry re-hashes. Every other mirror hash
-#: re-computed unchanged at `a5a137c7b`.
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0dee99fb5` -> `183b05509` (tan-cli#1393).
+#: One commit, `183b05509` (#2736, camera DT generation): `cameras.py`'s module
+#: docstring now names `scripts/gen_camera_dt.py` as the producer of the sensor
+#: DT include -- re-copied verbatim, no code change. `gen_camera_dt.py` and
+#: `check_camera_parity.py` are new SDK-side scripts with no planner caller.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (mirror / PINNED_HASHES; tan-cli#1393): one
+#: upstream commit, #2795 (`a5a137c7b`, SoM power runtime). No file under
+#: `scripts/alp_orchestrate/` changed, so every mirrored hash re-computes
+#: unchanged at `a5a137c7b`.
 #: RE-MEASURED, not assumed: the planner oracle re-captured at `a5a137c7b`
 #: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
 #: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
@@ -2432,7 +2436,25 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
 #: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
-#: AUDIT `0dee99fb` -> `a5a137c7` (tan-cli#1393): two hand-port sources changed.
+#:
+#: AUDIT `0dee99fb5` -> `183b05509` (tan-cli#1393): one hand-port source changed,
+#: re-hashed in `HAND_PORT_HASHES`.
+#:   - `scripts/alp_cli/validator.py` (`183b05509`, #2736) -- camera connector
+#:     checks. Nothing to port: tan spawns the SDK validator, and its hand-port
+#:     of this file is only `load_board_schema`/`iter_schema_errors` (in
+#:     `loader.py`), neither of which changed.
+#: Also ported here, from the `c4eb27645` -> `0dee99fb5` range:
+#:   - `scripts/alp_project.py` (`ed57bd025`, #2791) -- `--emit cmake-args`
+#:     turns an `OrchestratorError` (an unbuildable `cameras:` entry) into one
+#:     refusal line. `tan generate --target cmake-args` renders in-process, not
+#:     through the SDK validator, so `planner_emit._render_per_core` maps it to
+#:     `PlannerEmitError` rather than letting `CameraSelectError` escape.
+#:   - `scripts/gen_zephyr_board.py` (#2784) -- the power-node port gains the
+#:     tan-cli#591 floor: a bound checkout without `on-module-links-v2` raises
+#:     `SdkTooOldError` (`aen.som_power_domains`), not the schemaVersion
+#:     authoring error that blames `on-module-links.yaml`.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (tan-cli#1393): two hand-port sources changed.
 #: `scripts/gen_zephyr_board.py` (#2795) -- PORTED: `_aen_som_power_dts` now
 #: emits the `&pinctrl { pinctrl_som_power: ... }` group (`group0` with
 #: `pinmux` = every output control pad of the SKU's present domains, sorted,

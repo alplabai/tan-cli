@@ -978,6 +978,11 @@ env:
   # same lockstep sites move together. `cameras.py`/`camera_owner.py` are new
   # mirror modules; the planner oracle was re-captured and is byte-identical
   # (no shipped example sets `cameras:`); scaffold parity is 10/10 unchanged.
+  # `0dee99fb5` -> `183b05509` (tan-cli#1393; alp-sdk `dev`, #2736 camera DT
+  # generation): the same lockstep sites and both gate pins move together.
+  # Mirror: `cameras.py` docstring only; hand-port: `validator.py` re-hashed,
+  # nothing to port. Planner oracle re-captured, byte-identical; scaffold
+  # parity 10/10 unchanged (no `examples/**` or `templates/**` change).
   # `0dee99fb5` -> `a5a137c7b` (alp-sdk `dev`, #2795 SoM power runtime, #2736):
   # the same lockstep sites move together. `zephyr_board.py` gains the
   # `pinctrl_som_power` group; the planner oracle was re-captured and is
@@ -1310,6 +1315,10 @@ env:
   # `configArtefacts` entries across 100 `build-plan.json` goldens (#2778);
   # (b) the 7 `.error` goldens of `rpmsg-imx93` deleted with the example
   # (E1M-NX9101 removal, #2781/#2782); the plan's `sdkVersion` is unchanged.
+  #
+  # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
+  # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
+  # moved.
   PINNED_PLANNER_ORACLE_SDK_REF: a5a137c7b594ebb5d451177803c0eb324069e86b
 
 permissions:

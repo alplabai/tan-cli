@@ -105,7 +105,24 @@ from an un-revendored SDK change.
   `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
 
-- **Prior vendor point (all templates):** **`6159a7b1a`**
+- **Prior vendor point (all templates):** **`183b05509`**
+  (`183b05509b37b44c25d3b8ae64c1aa1a10523ffd`, alp-sdk `dev`) — the
+  `0dee99fb5` -> `183b05509` planner re-sync (tan-cli#1393; alp-sdk#2736). The
+  range changes no `examples/**` or `templates/**` file, so nothing was
+  re-vendored and `scaffold_byte_parity.py --sdk <183b05509>` is rc 0,
+  **10/10** (template, sku) pairs PASS against the tree unchanged.
+
+- **Prior vendor point (all templates):** **`0dee99fb5`**
+  (`0dee99fb519b511e0a7fe4da63b333b9246040b4`, alp-sdk `dev`) — the
+  `c4eb27645` -> `0dee99fb5` planner re-sync (alp-sdk#2791 `cameras:`, with
+  #2784 in range). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <0dee99fb5>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+  unchanged. The pin moves in the same change as `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Earlier vendor point (all templates):** **`6159a7b1a`**
   (`6159a7b1a50c3267b98fed17c0e17d084143d22b`, alp-sdk `dev`) — the
   `030de105d` -> `6159a7b1a` planner re-sync (tan-cli#1216; alp-sdk#2778, with
   the E1M-NX9101 removal #2782 in range), the same change that moves

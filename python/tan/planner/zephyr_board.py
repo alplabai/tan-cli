@@ -125,6 +125,7 @@ from .loader import _load_yaml
 from .project_loader import _resolve_sku
 from .sdk_capability import (
     AEN_ATOC_RESERVATION,
+    AEN_SOM_POWER_DOMAINS,
     AEN_ZEPHYR_PERIPHERALS_DTSI,
     require_capability,
 )
@@ -2206,6 +2207,9 @@ def _load_aen_power_domains(metadata_root: Path) -> dict[str, Any]:
     path = metadata_root / "e1m_modules" / "aen" / "on-module-links.yaml"
     doc = _load_yaml(path)
     if doc.get("schemaVersion") != "on-module-links-v2":
+        # tan-side (tan-cli#591 pattern): a bound checkout that predates
+        # alp-sdk#2784 is an SDK floor, not this file's authoring gap.
+        require_capability(metadata_root, AEN_SOM_POWER_DOMAINS)
         raise ZephyrBoardEmitError(
             f"{path} schemaVersion is {doc.get('schemaVersion')!r}, expected "
             "'on-module-links-v2' (the `power_domains:` block, alp-sdk#2784)")
