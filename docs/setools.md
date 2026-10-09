@@ -167,6 +167,26 @@ difference. A fresh session is stronger than the cache but still weaker than
 reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
 on the bench.
 
+With `--readback` the write session stops **before** the PIN reset and the
+read-back session carries the reset/run tail, so the chip is read before the new
+image can boot and put the debug domain to sleep. A read-back that cannot read the
+chip at all is `flash.readback-failed` ("target unreachable (low-power?)"), never a
+mismatch that advises a re-flash.
+
+### `--raw <file>@<addr>`: byte-exact sector restore
+
+`tan flash --core <id> --raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000
+--confirm [--readback]` puts `savebin` backups back exactly. One slice's J-Link
+part profile and the Flow D probe guard, `loadbin` + `verifybin` per blob, **no
+reset**, no signing. Every address is an explicit `0x` literal, 16 KiB
+sector-aligned; every blob a whole number of sectors; all inside the SKU's MRAM
+and non-overlapping, or `flash.raw-invalid` (previews included). tan derives no
+address, so an ATOC/STOC is only written where you name it. A real write also
+needs a held bench reservation, `JLINK_RUN_PLACE` set
+(`flash.raw-reservation-required`). The envelope's `raw.writes[]` carries each
+blob's `sha256`, address and sector span. Power-cycle afterwards so the Secure
+Enclave boots the restored contents.
+
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
 On a bench carrying more than one J-Link, `flash_args.jlink_serial` picks a

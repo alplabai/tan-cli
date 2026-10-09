@@ -2076,6 +2076,30 @@
       "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write that landed and cache-verified but whose fresh read-back session could not be run to completion -- the J-Link process failed or timed out, the read-back script could not be built, or there was no readable written region. Nothing was compared, so the write is neither confirmed nor refuted; data.entries[].jlink.readback.reason says why. An error, because a requested confirmation did not happen. A probe-guard refusal before the read-back is reported as its own flash.probe-* code instead. tan-cli#1450: also raised, with the message \"target unreachable (low-power?)\" and jlink.readback.reason set to it, when the read-back session could not READ the chip (J-Link says it could not read memory / connect, or returned short or no data) -- a gated debug domain says nothing about what the chip holds, so it is never reported as flash.readback-mismatch and never advises a re-flash. Under --readback the write session now stops before the PIN reset and the read-back session carries the reset/run tail, so the chip is read before the new image can boot into STOP. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.raw-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1446. EMISSION CONDITION: `tan flash --raw <file>@<addr>` refused an input before any J-Link spawn, under --dry-run too -- an address that is not an explicit 0x literal or not 16 KiB sector-aligned, a blob that is empty, unreadable or not a whole number of sectors (the loader fills a short tail with 0xFF, so it would not be byte-exact), a range outside the SKU's MRAM aperture [0x80000000, +variants[].mram_mb), overlapping ranges, a missing flash_args.jlink_flash_device, SoC metadata that states no MRAM size, --raw with --ram, or not exactly one slice (--core). Nothing was written. tan derives no address, so an ATOC/STOC is only ever written where the user named it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.raw-reservation-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1446. EMISSION CONDITION: a confirmed `tan flash --raw` write with the bench reservation marker JLINK_RUN_PLACE unset or empty. tan cannot verify a labgrid lease itself; it requires the marker the bench J-Link wrapper keys on and reports it as data.entries[].jlink.reservation.place. Nothing was written. Answered by acquiring the place and running under it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.raw-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1446. EMISSION CONDITION: a `tan flash --raw` write session that was spawned and failed -- J-Link exited non-zero (loadbin or verifybin failed, the probe could not connect) or reported a halt/reset failure in a write that must not reset. The MRAM sectors named may be partially written: re-run the same --raw set, or restore from the backup, before power-cycling the board. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.preview-sign-skipped",
       "status": "reserved",
       "severity": "info",

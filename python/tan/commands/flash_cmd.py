@@ -2237,6 +2237,8 @@ class _Context:
     ram_wait: float = 1.5
     #: `--watch` specs (tan-cli#1436), raw; parsed and refused in `flash_ram`.
     ram_watch: tuple[str, ...] = ()
+    #: `--raw <file>@<addr>` specs (tan-cli#1446), raw; parsed and refused in `flash_raw`.
+    raw: tuple[str, ...] = ()
     #: `--assume-he` (tan-cli#1354): proceed when the attached-core check cannot confirm
     #: the M55-HE (ambiguous/unreadable ITCM). A documented risk, never the default.
     assume_he: bool = False
@@ -3858,6 +3860,7 @@ def _flow_d_readback(
     report: dict[str, Any],
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None = None,
+    reset_after: bool = True,
 ) -> tuple[str, str] | None:
     """`--readback` (tan-cli#1321): re-read every written region in a FRESH
     J-Link session (`savebin`) and compare sha256 with the source file. `None`
@@ -3879,7 +3882,8 @@ def _flow_d_readback(
         dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
         try:
             script = readback_script(
-                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)]
+                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)],
+                reset_after=reset_after,
             )
         except (ValueError, FlashPlanError) as err:
             block["readback"] = {"performed": False, "reason": str(err)}
@@ -3895,7 +3899,7 @@ def _flow_d_readback(
         read_text = f"{read.stdout}\n{read.stderr}"
         if target_unreachable(read_text):
             return _flow_d_readback_unreachable(block, "the session could not read memory")
-        if read.success:
+        if read.success and reset_after:
             # The reset/run tail rides this session (tan-cli#1450): report its outcome.
             failures = reset_failures(read_text)
             block["resetFailures"] = list(failures)
@@ -4264,6 +4268,7 @@ def _run(
     ram_wait: float = 1.5,
     assume_he: bool = False,
     ram_watch: tuple[str, ...] = (),
+    raw: tuple[str, ...] = (),
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4491,9 +4496,22 @@ def _run(
         ram_console=ram_console,
         ram_wait=ram_wait,
         ram_watch=ram_watch,
+        raw=raw,
         assume_he=assume_he,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
+    if ram and raw:
+        return _error(build_root, "flash.raw-invalid", "--raw writes MRAM; it cannot be combined with --ram.", sdk)
+    if raw:
+        # tan-cli#1446: a raw sector write targets exactly ONE slice (its J-Link part profile).
+        slices = [t for t in plan.targets if t.kind == "slice"]
+        if helper is not None or len(slices) != 1:
+            return _error(
+                build_root, "flash.raw-invalid",
+                "tan flash --raw writes through exactly one slice's J-Link part profile: pick it "
+                f"with --core <id> (and no --helper); {len(slices)} slice(s) matched.", sdk,
+            )
+        plan = dataclasses.replace(plan, targets=tuple(slices))
     if ram:
         # tan-cli#1313: Flow C RAM-runs exactly ONE slice; helpers are never RAM-run.
         slices = [t for t in plan.targets if t.kind == "slice"]
@@ -4538,7 +4556,11 @@ def _run(
     written_by: dict[str, str] = {}
     watch_samples: list[dict[str, Any]] = []
     for target in plan.targets:
-        if ram:
+        if raw:
+            from tan.commands.flash_raw import run_raw_entry
+
+            rc, entry, lines = run_raw_entry(target, ctx)
+        elif ram:
             from tan.commands.flash_ram import run_ram_entry
 
             rc, entry, lines = run_ram_entry(target, ctx)
@@ -4629,6 +4651,12 @@ def _run(
                 issues.append(Issue("flash.ram-watch-unsafe-address", "error", entry.message))
             elif entry.issue_code == "flash.ram-failed":
                 issues.append(Issue("flash.ram-failed", "error", entry.message))
+            elif entry.issue_code == "flash.raw-invalid":
+                issues.append(Issue("flash.raw-invalid", "error", entry.message))
+            elif entry.issue_code == "flash.raw-reservation-required":
+                issues.append(Issue("flash.raw-reservation-required", "error", entry.message))
+            elif entry.issue_code == "flash.raw-failed":
+                issues.append(Issue("flash.raw-failed", "error", entry.message))
             elif entry.issue_code == "flash.setools-untrusted-source":
                 issues.append(Issue("flash.setools-untrusted-source", "error", entry.message))
             elif entry.issue_code == "flash.write-sector-overlap":
@@ -5053,6 +5081,22 @@ def flash(
         "HE attach leaves the core unhaltable (flash.ram-watch-invalid / "
         "flash.ram-watch-unsafe-address).",
     ),
+    raw: list[str] = typer.Option(
+        None,
+        "--raw",
+        metavar="FILE@ADDR",
+        help="Byte-exact MRAM sector write for bench backup/restore (tan-cli#1446; repeatable), "
+        "e.g. --raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000. Goes through ONE slice's "
+        "J-Link part profile (--core) and the same probe-selection guard, DPIDR preflight and "
+        "trusted J-Link binary as a Flow D write: loadbin + verifybin per blob, NO reset, no "
+        "signing, no SETOOLS. Refused (flash.raw-invalid) before any spawn: an address that is "
+        "not an explicit 0x literal or not 16 KiB sector-aligned, a blob that is empty or not a "
+        "whole number of sectors, a range outside the SKU's MRAM, overlapping ranges. tan never "
+        "derives an address, so an ATOC/STOC is only ever written where YOU said. Needs "
+        "--confirm and a held bench reservation (JLINK_RUN_PLACE set: "
+        "flash.raw-reservation-required). --readback re-reads each blob in a fresh session "
+        "(no reset) and compares sha256; the envelope carries each blob's sha256.",
+    ),
     assume_he: bool = typer.Option(
         False,
         "--assume-he",
@@ -5187,6 +5231,8 @@ def flash(
         raise typer.BadParameter("--ram-console / --wait / --assume-he only mean something with --ram")
     if isinstance(watch, list) and watch and ram is not True:
         raise typer.BadParameter("--watch only means something with --ram")
+    if isinstance(raw, list) and raw and ram is True:
+        raise typer.BadParameter("--raw writes MRAM; it cannot be combined with --ram")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -5232,6 +5278,7 @@ def flash(
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
             assume_he=assume_he if isinstance(assume_he, bool) else False,
             ram_watch=tuple(watch) if isinstance(watch, list) else (),
+            raw=tuple(raw) if isinstance(raw, list) else (),
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

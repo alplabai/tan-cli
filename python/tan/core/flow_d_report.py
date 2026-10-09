@@ -200,11 +200,14 @@ def strip_reset_tail(jlink_script: str) -> str:
 def readback_script(
     jlink_script: str,
     regions: Sequence[tuple[str, int, str]],
+    reset_after: bool = True,
 ) -> str:
     """The Commander script of a FRESH read-back session: the same preamble the
     write used (everything up to and including `connect`, so the same probe,
     interface, speed and part-number device), then one `savebin <file>, <addr>,
     <size>` per region and `exit`. `regions` is `(address_hex, size, dest_path)`.
+    `reset_after=False` (tan-cli#1446: a raw sector write must not reset or run anything)
+    ends at `exit` without the write's reset/run tail.
     Raises `ValueError` if `jlink_script` has no `connect` line."""
     out: list[str] = []
     for line in jlink_script.splitlines():
@@ -216,7 +219,8 @@ def readback_script(
     for address, size, dest in regions:
         validate_commander_path(dest, "the read-back destination path")
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
-    out.extend(reset_tail(jlink_script))
+    if reset_after:
+        out.extend(reset_tail(jlink_script))
     out.append("exit")
     return "\n".join(out) + "\n"
 
