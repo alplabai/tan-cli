@@ -16,10 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from tan.core import serial_capture
+from tan.core import serial_capture, serial_url
 
 DEFAULT_BAUD = 115200
 DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_WINDOW_S = 3.0
 
 
 class ConfirmError(ValueError):
@@ -32,23 +33,40 @@ class ConfirmSpec:
     expect: Any  # compiled regex
     baud: int
     timeout_s: float
+    window_s: float = DEFAULT_WINDOW_S
 
 
-def confirm_spec(port: str | None, expect: str | None, baud: int | None, timeout_s: float | None):
+class BadPort(ConfirmError):
+    """`--confirm-console` is a malformed serial URL."""
+
+
+def confirm_spec(
+    port: str | None,
+    expect: str | None,
+    baud: int | None,
+    timeout_s: float | None,
+    window_s: float | None = None,
+):
     """`None` when no confirmation was asked for; `ConfirmError` on a bad combination."""
-    if port is None and expect is None and baud is None and timeout_s is None:
+    if all(v is None for v in (port, expect, baud, timeout_s, window_s)):
         return None
     if port is None or expect is None:
         raise ConfirmError("--confirm-console and --expect must be given together")
+    problem = serial_url.port_url_problem(port)
+    if problem is not None:
+        raise BadPort(f"bad --confirm-console: {problem}")
     try:
         pattern = serial_capture.compile_until(expect)
     except ValueError as err:
         raise ConfirmError(str(err).replace("--until", "--expect")) from err
     baud = DEFAULT_BAUD if baud is None else baud
     timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
-    if baud <= 0 or not timeout_s > 0:
-        raise ConfirmError("--confirm-baud and --confirm-timeout must be greater than 0")
-    return ConfirmSpec(port, pattern, baud, timeout_s)
+    window_s = DEFAULT_WINDOW_S if window_s is None else window_s
+    if baud <= 0 or not timeout_s > 0 or not window_s > 0:
+        raise ConfirmError(
+            "--confirm-baud, --confirm-timeout and --confirm-window must be greater than 0"
+        )
+    return ConfirmSpec(port, pattern, baud, timeout_s, window_s)
 
 
 def open_console(spec: ConfirmSpec):
@@ -60,18 +78,30 @@ def open_console(spec: ConfirmSpec):
 
 def observe(ser, spec: ConfirmSpec) -> dict[str, Any]:
     """After J-Link exited: drop what queued up and wait for `--expect`.
-    Closes `ser`. Returns the `data.console` block."""
+    Closes `ser`. Returns the `data.console` block. The FIRST matching line must arrive within
+    `window_s` of J-Link exiting: a later one (e.g. an RTC-alarm wake out of STOP) is recorded as
+    `lateMatchAtSeconds` and is not a reset."""
     try:
         try:
             ser.reset_input_buffer()
         except Exception:  # noqa: BLE001 -- a port without it just keeps its queue
             pass
-        res = serial_capture.capture(ser, duration_s=spec.timeout_s, until=spec.expect)
-        return {
-            "port": spec.port, "baud": spec.baud, "observed": res.matched,
-            "matchedLine": res.matched_line, "elapsedSeconds": round(res.elapsed_s, 3),
+        res = serial_capture.capture(
+            ser, duration_s=max(spec.timeout_s, spec.window_s), until=spec.expect
+        )
+        latency = round(res.elapsed_s, 3) if res.matched else None
+        in_window = res.matched and res.elapsed_s <= spec.window_s
+        block = {
+            "port": spec.port, "baud": spec.baud, "observed": in_window,
+            "windowSeconds": spec.window_s, "matchLatencySeconds": latency if in_window else None,
+            "matchedLine": res.matched_line if in_window else None,
+            "elapsedSeconds": round(res.elapsed_s, 3),
             "bytesSeen": res.bytes_seen, "bytesSeenTail": res.tail,
         }
+        if res.matched and not in_window:
+            block["lateMatchAtSeconds"] = latency
+            block["lateMatchedLine"] = res.matched_line
+        return block
     except OSError as err:
         return {"port": spec.port, "baud": spec.baud, "observed": False, "error": str(err)}
     finally:

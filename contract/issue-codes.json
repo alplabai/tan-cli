@@ -1404,6 +1404,14 @@
       "note": "`tan monitor --break-uboot` sent the interrupt key until `--break-timeout` expired without seeing `--prompt`; `data.breakIn.caught` is false and no interactive session is started. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
+      "code": "monitor.bad-port",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "note": "tan-cli#1448: `--port` is a malformed serial URL (empty or non-numeric or out-of-range port, missing host, unknown scheme). Refused before any open, exit 2; the message names what is wrong. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "monitor.capture-bad-option",
       "status": "reserved",
       "severity": "error",
@@ -3681,6 +3689,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/reset_cmd.py",
       "note": "tan-cli#1452: `--confirm-console` could not be opened (or pyserial is missing: install `tan-cli[monitor]`). Refused before the pulse. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "reset.bad-port",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/reset_cmd.py",
+      "note": "tan-cli#1448: `tan reset --confirm-console` is a malformed serial URL. Refused before the pulse, exit 2. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
       "code": "reset.failed",

@@ -251,3 +251,58 @@ def test_confirm_options_must_come_together():
 def test_cli_rejects_a_malformed_usb_path(env):
     r = CliRunner().invoke(app, ["reset", "--probe-usb-path", "nope", "--project", str(env)])
     assert r.exit_code == 2
+
+
+class _LateConsole(_Console):
+    """Says nothing for `delay` seconds, then the banner."""
+
+    def __init__(self, delay):
+        super().__init__([])
+        import time as _t
+        self._t, self._due = _t, _t.monotonic() + delay
+
+    def read(self, n=1):
+        if self._t.monotonic() >= self._due and not self.chunks:
+            self.chunks = [b"RTC alarm wake: Zephyr\n"]
+        self._t.sleep(0.02)
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def test_a_match_after_the_window_is_not_a_reset(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    ser = _LateConsole(0.4)
+    monkeypatch.setattr(rc_mod, "open_console", lambda spec: ser)
+    spec = rc_mod.confirm_spec("rfc2217://gw:4001", "Zephyr", None, 2.0, 0.2)
+    rc, data, issues, _ = _run(env, confirm=spec)
+    assert rc == 1 and data["resetObserved"] is False
+    assert issues[0].code == "reset.boot-not-observed"
+    assert data["console"]["lateMatchAtSeconds"] >= 0.4
+    assert data["console"]["matchLatencySeconds"] is None and data["console"]["matchedLine"] is None
+
+
+def test_a_match_inside_the_window_records_its_latency(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    _, spec = _confirm(monkeypatch, [b"Zephyr\n"])
+    rc, data, _, _ = _run(env, confirm=spec)
+    assert rc == 0 and data["console"]["matchLatencySeconds"] <= spec.window_s
+    assert "lateMatchAtSeconds" not in data["console"]
+
+
+def test_timing_is_recorded(env, monkeypatch):
+    FakeJlink(monkeypatch)
+    _, data, _, _ = _run(env)
+    assert data["timing"]["jlinkSpawnSeconds"] >= 0 and "prepSeconds" in data["timing"]
+
+
+def test_a_malformed_confirm_console_url_is_a_bad_port_envelope(env):
+    r = CliRunner().invoke(
+        app, ["reset", "--probe-usb-path", "3-4.2", "--project", str(env), "--format", "json",
+              "--confirm-console", "rfc2217://gw:", "--expect", "x"])
+    assert r.exit_code == 2
+    assert json.loads(r.stdout)["issues"][0]["code"] == "reset.bad-port"
+
+
+@pytest.mark.parametrize("url", ["socket://host", "rfc2217://:1", "ftp://x:1", "rfc2217://h:99999"])
+def test_confirm_spec_refuses_bad_urls(url):
+    with pytest.raises(rc_mod.BadPort):
+        rc_mod.confirm_spec(url, "x", None, None)

@@ -14,6 +14,8 @@ tan monitor --port rfc2217://gw:4001 --baud 115200 --capture --duration 60 --log
   --reopen-at 23040 --on 'entering STOP'
 ```
 
+A malformed `--port` URL (`rfc2217://host:` with an empty port, a missing host, a non-numeric or out-of-range port, an unknown scheme) is refused up front as `monitor.bad-port` (exit 2); local device paths are not judged.
+
 ## Sending input
 
 * `--send TEXT` (repeatable) queues console input. Escapes `\xNN`, `\r`, `\n`,

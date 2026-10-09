@@ -5,7 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      68,
+      54,
+      "_run"
+    ],
+    [
+      81,
       "reset"
     ]
   ]

@@ -164,3 +164,16 @@ def test_a_failed_send_keeps_the_actions_in_the_error_envelope(monkeypatch):
     assert body["issues"][0]["code"] == "monitor.capture-send-failed"
     event = body["data"]["capture"]["actions"]["events"][0]
     assert event["action"] == "send" and event["failed"] is True
+
+
+@pytest.mark.parametrize(
+    "url", ["rfc2217://100.64.0.1:", "rfc2217://host", "socket://host:abc", "rfc2217://:4001",
+            "telnet://host:23"],
+)
+def test_a_malformed_port_url_is_refused_up_front(monkeypatch, url):
+    opened = _fake_serial(monkeypatch, [[b"x\n"]])
+    r = runner.invoke(app, ["--port", url, "--format", "json", "--capture", "--duration", "1"])
+    assert r.exit_code == 2
+    issue = data(r)["issues"][0]
+    assert issue["code"] == "monitor.bad-port" and url in issue["message"]
+    assert opened == []

@@ -3,7 +3,7 @@
 
 ```sh
 tan reset [--pulse-ms 100] [--probe-usb-path 3-4.2 | --probe-serial SN] [--jlink PATH] \
-          [--confirm-console PORT --expect REGEX [--confirm-baud 115200] [--confirm-timeout 30]] \
+          [--confirm-console PORT --expect REGEX [--confirm-baud 115200] [--confirm-timeout 30] [--confirm-window 3]] \
           [--format json]
 JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2
 ```
@@ -71,3 +71,23 @@ written, erased or flashed. A test holds the generated script to that verb list.
   reset. `--confirm-console` needs pyserial: install `tan-cli[monitor]`
   (`pip install -e "./python[monitor]"` for a checkout; a bare editable install
   lacks it and the error says so).
+
+## Confirmation window, and what an nRESET pulse cannot do
+
+* The FIRST `--expect` match must arrive within `--confirm-window` (default 3 s)
+  of J-Link exiting; `data.console.matchLatencySeconds` records it. A later match
+  is **not** a reset: it is recorded as `data.console.lateMatchAtSeconds` and the
+  run is `reset.boot-not-observed` (exit 1). `--confirm-timeout` is only the
+  overall read limit. `--confirm-console` is validated up front: a malformed URL
+  (empty or non-numeric port, no host, unknown scheme) is `reset.bad-port`, exit 2.
+* **Hardware fact:** on an Alif E8 in a correctly configured STOP, an nRESET pulse
+  does not reboot the SoC; use a power cycle. Bench evidence (alp-sdk #2798 U8,
+  e1m-aen-evk-02, 2026-10-09): the raw bench script `r0`, `sleep 100`, `r1`, `q`
+  behaves the same, and a 30 s confirm window falsely accepted the RV-3028
+  alarm-wake banner that arrived 9.4 s after J-Link exit, which is why the window
+  exists.
+* `data.timing` records `prepSeconds` and `jlinkSpawnSeconds`. Under the board-farm
+  wrapper the spawn includes a 39-50 s preamble before the pulse, longer than a
+  STOP window; that latency is the wrapper's, not tan's.
+* Under a wrapper the script relies on the wrapper's USB mask (and the
+  `TAN_PROBE_ISOLATED_USB_PATH` handshake) instead of a `SelectEmuBySN` line.

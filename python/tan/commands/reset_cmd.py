@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import sys
 from typing import Any, Callable
 
@@ -123,8 +124,10 @@ def _finish_pulse(data, ser, confirm, pulse_ms) -> _Result:
     data["resetObserved"] = bool(data["console"]["observed"])
     if not data["resetObserved"]:
         issue = Issue("reset.boot-not-observed", "error",
-                      f"pulse sent, but no console line matched --expect within {confirm.timeout_s}s on "
-                      f"{confirm.port}: the board did not visibly reboot")
+                      f"pulse sent, but no console line matched --expect within the {confirm.window_s}s "
+                      f"confirm window on {confirm.port}: the board did not visibly reboot"
+                      + (f" (a late match at {data['console']['lateMatchAtSeconds']}s is not a reset)"
+                         if "lateMatchAtSeconds" in data["console"] else ""))
         return _fail(data, issue)
     return ExitCode.SUCCESS, data, [], [line + "; boot observed"]
 
@@ -164,12 +167,19 @@ def _run(
     data["script"] = fc._DISABLE_FW_UPDATE.splitlines() + script.splitlines()
     data["singleSpawn"] = fast
     ser = None
+    started = time.monotonic()
     if confirm is not None:
         try:
             ser = rc_mod.open_console(confirm)
         except MonitorError as err:
             return _fail(data, Issue("reset.console-open-failed", "error", err.message))
+    spawn_started = time.monotonic()
     out = _spawn(guard, script, exe, probe_usb_path, fast)
+    data["timing"] = {
+        "prepSeconds": round(spawn_started - started, 3),
+        "jlinkSpawnSeconds": round(time.monotonic() - spawn_started, 3),
+        "note": "jlinkSpawnSeconds includes any wrapper preamble before the pulse itself",
+    }
     problem = _verdict(data, out, guard, fast, probe_usb_path)
     if problem is not None:
         if ser is not None:
@@ -199,7 +209,11 @@ def reset(
         "J-Link exits count."),
     confirm_baud: int = typer.Option(None, "--confirm-baud", metavar="BAUD", help="Console baud (default 115200)."),
     confirm_timeout: float = typer.Option(
-        None, "--confirm-timeout", metavar="SECONDS", help="How long to wait for --expect (default 30)."),
+        None, "--confirm-timeout", metavar="SECONDS", help="Overall read limit for --expect (default 30)."),
+    confirm_window: float = typer.Option(
+        None, "--confirm-window", metavar="SECONDS",
+        help="The FIRST --expect match must arrive this soon after J-Link exits (default 3); a later "
+        "one is recorded as lateMatchAtSeconds and is not a reset."),
     jlink: str = typer.Option(
         None, "--jlink", metavar="PATH",
         help=f"The J-Link Commander binary (otherwise {JLINK_ENV}, PATH, then a SEGGER install root; "
@@ -224,17 +238,26 @@ def reset(
             f"{probe_usb_path!r} is not a USB port path like 3-4.2 (<bus>-<port>[.<port>...])",
             param_hint="--probe-usb-path",
         )
+    bad_port = None
+    confirm = None
     try:
-        confirm = rc_mod.confirm_spec(confirm_console, expect, confirm_baud, confirm_timeout)
+        confirm = rc_mod.confirm_spec(confirm_console, expect, confirm_baud, confirm_timeout, confirm_window)
+    except rc_mod.BadPort as err:
+        bad_port = err
     except rc_mod.ConfirmError as err:
         raise typer.BadParameter(str(err)) from err
     cwd = fc.workspace_root(project)
     project_obj = fc._resolve_project(cwd, None)
     try:
-        exit_code, data, issues, lines = _run(
-            pulse_ms, probe_serial, probe_usb_path,
-            jlink if isinstance(jlink, str) else None, cwd, confirm=confirm,
-        )
+        if bad_port is not None:
+            exit_code, data, issues, lines = _fail(
+                {"schemaVersion": _SCHEMA_VERSION, "port": confirm_console},
+                Issue("reset.bad-port", "error", str(bad_port)), ExitCode.VALIDATION_FAILURE)
+        else:
+            exit_code, data, issues, lines = _run(
+                pulse_ms, probe_serial, probe_usb_path,
+                jlink if isinstance(jlink, str) else None, cwd, confirm=confirm,
+            )
     except Exception as err:  # noqa: BLE001 -- a tan bug is reported as one, with an envelope
         exit_code = ExitCode.INTERNAL_FAILURE
         data = {"schemaVersion": _SCHEMA_VERSION}

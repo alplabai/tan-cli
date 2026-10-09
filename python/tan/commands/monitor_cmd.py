@@ -77,6 +77,7 @@ import typer
 
 from tan.core.sdk_discovery import _planner_python
 from tan.core import console_filter as console_filter_mod
+from tan.core import serial_url
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -414,6 +415,14 @@ def _run_monitor(
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
+    problem = serial_url.port_url_problem(port)
+    if problem is not None:
+        raise MonitorError(
+            "monitor.bad-port",
+            f"bad --port: {problem}",
+            ExitCode.VALIDATION_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port},
+        )
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
