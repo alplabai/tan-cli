@@ -667,6 +667,26 @@ path requires an SDK that carries it; the rest is the E1M-NX9101 removal
 `dev` `c4eb2764542cfaaaaaa637113af56af5cd3b2edd` (docs-only for `scripts/**` and
 `metadata/**` over `6159a7b1a`). The floor does NOT move: it stays `b04bb0f7a`.
 
+**Addendum (2026-10-09, tan-cli#1440 + tan-cli#1393).** The planner mirror
+moved to alp-sdk `dev` `183b05509b37b44c25d3b8ae64c1aa1a10523ffd` (#1440 took it
+to `0dee99fb5`, #1393 the rest). One new SDK requirement is in range, plus one behaviour change that depends on SDK metadata:
+
+- The AEN `zephyr-board` emit (`tan generate --target zephyr-board`) now
+  renders the `alp,som-power` node from `power_domains:` in
+  `metadata/e1m_modules/aen/on-module-links.yaml` (`on-module-links-v2`,
+  alp-sdk#2784, `4b206c8a6`). Against an SDK checkout that predates it, that
+  emit refuses with `SdkTooOldError` (`aen.som_power_domains`).
+- A board.yaml `cameras:` entry now selects the camera for its owner core
+  (alp-sdk#2791, `ed57bd025`). Ownership reads the connector's
+  `zephyr_shields:` / `linux:`, which no older SDK declares, so against an older
+  checkout a project WITH `cameras:` gets a `camera-select-failed` plan warning
+  and no slice command for the cores that could own the camera. A project with
+  no `cameras:` is unaffected.
+
+A tag that ships this mirror therefore needs an alp-sdk release containing
+`183b05509`. The decision below already waits for a stable alp-sdk release cut
+from `dev`, so it is unchanged.
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
 contains `b04bb0f7a` (superseding the `20fec7a7` floor this decision

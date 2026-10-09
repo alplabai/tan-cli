@@ -95,7 +95,18 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`0dee99fb5`**
+- **Current vendor point (all templates):** **`183b05509`**
+  (`183b05509b37b44c25d3b8ae64c1aa1a10523ffd`, alp-sdk `dev`) — the
+  `0dee99fb5` -> `183b05509` planner re-sync (tan-cli#1393; alp-sdk#2736). The
+  range changes no `examples/**` or `templates/**` file, so nothing was
+  re-vendored and `scaffold_byte_parity.py --sdk <183b05509>` is rc 0,
+  **10/10** (template, sku) pairs PASS against the tree unchanged. The pin
+  moves in the same change as `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Prior vendor point (all templates):** **`0dee99fb5`**
   (`0dee99fb519b511e0a7fe4da63b333b9246040b4`, alp-sdk `dev`) — the
   `c4eb27645` -> `0dee99fb5` planner re-sync (alp-sdk#2791 `cameras:`, with
   #2784 in range). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
@@ -105,7 +116,7 @@ from an un-revendored SDK change.
   `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
 
-- **Prior vendor point (all templates):** **`6159a7b1a`**
+- **Earlier vendor point (all templates):** **`6159a7b1a`**
   (`6159a7b1a50c3267b98fed17c0e17d084143d22b`, alp-sdk `dev`) — the
   `030de105d` -> `6159a7b1a` planner re-sync (tan-cli#1216; alp-sdk#2778, with
   the E1M-NX9101 removal #2782 in range), the same change that moves
@@ -651,14 +662,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`0dee99fb5`** (alp-sdk `dev`, full sha
-  `0dee99fb519b511e0a7fe4da63b333b9246040b4`) — the checkout the emit was RUN
+- Commit: **`183b05509`** (alp-sdk `dev`, full sha
+  `183b05509b37b44c25d3b8ae64c1aa1a10523ffd`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `c4eb27645` (tan-cli#1427), and before that
+  This line used to say `0dee99fb5` (tan-cli#1440), and before that
+  `c4eb27645` (tan-cli#1427), and before that
   `030de105d` (tan-cli#1401), and before that
   `2d2a85333` (tan-cli#1216), and before that
   `ac0e2a5e0` (tan-cli#1309), and before that

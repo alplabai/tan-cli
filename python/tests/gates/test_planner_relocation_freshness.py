@@ -1389,7 +1389,13 @@ from tests.conftest import sdk_root
 #: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
 #: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
 #: at `c4eb27645` and is unchanged, so nothing is ported.
-PINNED_SDK_COMMIT = "0dee99fb519b511e0a7fe4da63b333b9246040b4"  # alp-sdk origin/dev -- #2791 cameras: (cameras.py + camera_owner.py + the _cameras hooks), #2784 power node ported (this change)
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0dee99fb5` -> `183b05509` (tan-cli#1393).
+#: One commit, `183b05509` (#2736, camera DT generation): `cameras.py`'s module
+#: docstring now names `scripts/gen_camera_dt.py` as the producer of the sensor
+#: DT include -- re-copied verbatim, no code change. `gen_camera_dt.py` and
+#: `check_camera_parity.py` are new SDK-side scripts with no planner caller.
+PINNED_SDK_COMMIT = "183b05509b37b44c25d3b8ae64c1aa1a10523ffd"  # alp-sdk origin/dev -- #2736 cameras.py docstring (tan-cli#1393)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1433,7 +1439,7 @@ PINNED_HASHES: dict[str, str] = {
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
     "buildplan.py": "2bccfc11af0c7f03ab16c708df0563bda6d2a8b143b59f8481b1ad1beaeab521",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
-    "cameras.py": "639d355dea42d8dca6caaf943ea6ea7b50f9b27abd4acae74939f4208ac6e938",
+    "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -2421,7 +2427,24 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
 #: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
-HAND_PORT_PINNED_SDK_COMMIT = "0dee99fb519b511e0a7fe4da63b333b9246040b4"  # alp-sdk origin/dev -- gen_zephyr_board.py #2784 power node ported; validator.py/alp_project.py moved but tan spawns the SDK validator (#2791)
+#:
+#: AUDIT `0dee99fb5` -> `183b05509` (tan-cli#1393): one hand-port source changed,
+#: re-hashed in `HAND_PORT_HASHES`.
+#:   - `scripts/alp_cli/validator.py` (`183b05509`, #2736) -- camera connector
+#:     checks. Nothing to port: tan spawns the SDK validator, and its hand-port
+#:     of this file is only `load_board_schema`/`iter_schema_errors` (in
+#:     `loader.py`), neither of which changed.
+#: Also ported here, from the `c4eb27645` -> `0dee99fb5` range:
+#:   - `scripts/alp_project.py` (`ed57bd025`, #2791) -- `--emit cmake-args`
+#:     turns an `OrchestratorError` (an unbuildable `cameras:` entry) into one
+#:     refusal line. `tan generate --target cmake-args` renders in-process, not
+#:     through the SDK validator, so `planner_emit._render_per_core` maps it to
+#:     `PlannerEmitError` rather than letting `CameraSelectError` escape.
+#:   - `scripts/gen_zephyr_board.py` (#2784) -- the power-node port gains the
+#:     tan-cli#591 floor: a bound checkout without `on-module-links-v2` raises
+#:     `SdkTooOldError` (`aen.som_power_domains`), not the schemaVersion
+#:     authoring error that blames `on-module-links.yaml`.
+HAND_PORT_PINNED_SDK_COMMIT = "183b05509b37b44c25d3b8ae64c1aa1a10523ffd"  # alp-sdk origin/dev -- #2736 validator.py re-hashed; cmake-args refusal + power-domain SDK floor (tan-cli#1393)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2497,7 +2520,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
     "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
     "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
-    "scripts/alp_cli/validator.py": "57fe745febeb0109f4ec8553fac522584a5d122379ca06795c0bb2cc744b5c74",
+    "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
     "scripts/alp_project.py": "c505f9dfad7557715929cbe190830fe21268695891b637b28752c0de65389afd",
 }
 

@@ -203,11 +203,11 @@ consistency).
 A byte MISMATCH (fixture present upstream, content differs) fails, and so
 does an ABSENT upstream fixture. There is no "predates the feature" branch,
 close to the rule `toolchain_lock_parity.py` states, and on a measurement
-rather than a generalisation: of the 36 distinct values `PINNED_SDK_TAG` has
-held across `parity.yml`'s history, the fixture is present at 34. The two
+rather than a generalisation: of the 41 distinct values `PINNED_SDK_TAG` has
+held across `parity.yml`'s history, the fixture is present at 39. The two
 exceptions, `df312cec` and `f04ea42e`, are July-2026 pins predating the
 fixture upstream — `f04ea42e` was the pin in force when this script was first
-written (tan-cli `ca34090e`, #40). Every pin since carries it, `c4eb27645`
+written (tan-cli `ca34090e`, #40). Every pin since carries it, `183b05509`
 (the current one), the released `v0.16.0` and alp-sdk `origin/dev` included,
 so an absent upstream fixture is a removal, not a legitimate skip.
 

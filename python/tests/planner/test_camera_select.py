@@ -113,3 +113,19 @@ def test_sysbuild_scopes_the_shield_to_the_app_image(tmp_path) -> None:
     assert "--sysbuild" in args
     assert f"-D{tmp_path.name}_SHIELD={SHIELD}" in args
     assert not any(a.startswith("-DSHIELD=") for a in args)
+
+
+def test_cmake_args_refuses_an_unbuildable_camera(tmp_path) -> None:
+    # alp-sdk#2791's `alp_project.py --emit cmake-args` refuses in one line;
+    # tan renders cmake-args in-process (tan-cli#1393), so the planner's
+    # CameraSelectError must surface as PlannerEmitError, not escape raw.
+    from tan import planner_emit
+
+    board = tmp_path / "board.yaml"
+    board.write_text(textwrap.dedent(AEN).lstrip("\n").format(
+        module="raspberry_pi_camera_module_2"), encoding="utf-8")
+    with pytest.raises(planner_emit.PlannerEmitError) as excinfo:
+        planner_emit.render("cmake-args", sdk_root=SDK, board_yaml=board,
+                            core="m55_he")
+    assert "raspberry_pi_camera_module_2" in str(excinfo.value)
+    assert "has no `zephyr_shield:`" in str(excinfo.value)
