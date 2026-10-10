@@ -830,3 +830,12 @@ purpose:
 6. Explain the *intentional* shape change in the commit message — a golden
    update with no explanation of why the wire format changed is exactly the
    drift this gate exists to catch.
+
+`contract/fixtures/build-workspace-issues/` holds one golden `issues[]` entry
+per workspace-shaped `tan build` code (`build.workspace-unresolved`,
+`build.workspace-patches-missing`, `build.workspace-patches-uncached`;
+tan-cli#1466), diffed by
+`python/tests/conformance/test_build_workspace_issue_goldens.py`. They are not
+envelope cases (each needs host state a hermetic subprocess cannot pin); the
+scratch directory is spelled `__WORKDIR__`. Re-record with
+`TAN_RECORD_GOLDENS=1`.

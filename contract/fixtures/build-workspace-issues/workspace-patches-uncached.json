@@ -1,0 +1,5 @@
+{
+  "code": "build.workspace-patches-uncached",
+  "severity": "info",
+  "message": "the workspace patch check is not cached, so every build re-verifies it: zephyr/patches.yml or a patch it names could not be read in full."
+}

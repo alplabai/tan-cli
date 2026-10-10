@@ -99,3 +99,25 @@ def test_the_check_uses_the_verdict_only_when_start_and_sdk_root_are_known(tmp_p
     assert (check.name, check.status) == ("workspace", "warn")
     assert doctor_cmd.workspace_preflight_check(None).status == "fail"
     assert doctor_cmd.workspace_preflight_check("/ws", start=str(home), sdk_root=str(sdk)).status == "pass"
+
+
+@pytest.mark.parametrize(
+    ("setup", "status", "severity"), [("foreign", "warn", "warning"), ("none", "fail", "error")]
+)
+def test_the_unresolved_verdict_surfaces_as_the_literal_doctor_workspace_code(
+    tmp_path, setup, status, severity
+):
+    """tan-cli#1466: the `workspace` check carrying `unresolved_workspace_verdict`
+    reaches the envelope as the literal registered code `doctor.workspace`
+    (derived via `kebab_check_name`), at the verdict's own severity."""
+    sdk = _sibling_sdk(tmp_path)
+    if setup == "foreign":
+        project = _foreign_workspace(tmp_path) / "proj"
+    else:
+        project = tmp_path / "scratch" / "app"
+    project.mkdir(parents=True)
+    check = doctor_cmd.workspace_preflight_check(None, start=str(project), sdk_root=str(sdk))
+    assert check.status == status
+    issues = doctor_cmd.checks_to_issues([check])
+    assert [(i.code, i.severity) for i in issues] == [("doctor.workspace", severity)]
+    assert issues[0].message == check.detail
