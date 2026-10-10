@@ -88,6 +88,9 @@ METHOD = "ram_run"
 #: Default `--wait` (seconds the app runs before the console is read) -- the raw
 #: script's `sleep_ms` default of 1500.
 DEFAULT_WAIT_S = 1.5
+#: Experimental (tan-cli#1372 ask 2, pending bench A/B): keep the load session open for
+#: the `--wait` window after `go` and skip the separate pre-read wait.
+HOLD_ENV = "TAN_FLASH_RAM_HOLD"
 #: J-Link's own attach profile for a live core (the script's `JLINK_DEVICE_READ`).
 _DEFAULT_ATTACH_DEVICE = "Cortex-M55"
 
@@ -229,8 +232,13 @@ def _run_ram_entry(
         return fail(f"cannot prepare the RAM-run ({err})")
     # `image.base`/`entry` and the console address/size are ints rendered with
     # `0x%X` by `ram_run`; the symbol NAME never reaches a script at all.
-    load = load_script(pre, commander_path(staged), image, watch_script)
     console = image.console
+    # A watch session already spans the whole --wait window, so it needs no extra Sleep.
+    hold = (
+        os.environ.get(HOLD_ENV) == "1" and bool(ctx.ram_console) and console is not None
+    )
+    hold_ms = watch_ms if hold and not watches else 0
+    load = load_script(pre, commander_path(staged), image, watch_script, hold_ms)
     argv = (
         "JLinkExe", "-device", device, "-if", "SWD", "-speed", str(speed),
         "-ExitOnError", "1", "-NoGui", "1", "-CommanderScript",
@@ -250,6 +258,7 @@ def _run_ram_entry(
         "initialSp": f"0x{image.initial_sp:08X}",
         "spNote": "from the vector table; applied by loadbin's reset, not written by tan",
         "wait": ctx.ram_wait, "writesMram": False,
+        "holdSession": hold,
     }
     if watches:
         report["ram"]["watch"] = {
@@ -280,7 +289,7 @@ def _run_ram_entry(
     if ctx.dry_run:
         msg = f"{METHOD}[{entry_id}]: would run -- {summary}; no MRAM write; nothing spawned"
         lines.append(f"  {msg}")
-        return 0, entry("ok", 0, msg, trcena_note=True, **warn_missing), lines
+        return 0, entry("ok", 0, msg, trcena_note=True, trcena_hold=hold, **warn_missing), lines
 
     # ── the confirm gate (bench round 7) ──
     # `loadbin` resets the core through AIRCR.SYSRESETREQ, a full-device reset that also
@@ -398,7 +407,10 @@ def _run_ram_entry(
         plan, ctx.capture, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
         timeout_s=(
             max(fc._FLASH_TIMEOUT_S, ram_watch.session_timeout_s(watches, watch_ms))
-            if watches else None
+            if watches
+            else max(fc._FLASH_TIMEOUT_S, hold_ms / 1000 + ram_watch.TIMEOUT_MARGIN_S)
+            if hold_ms
+            else None
         ),
     )
     spawn_ms = int(round((time.monotonic() - started) * 1000))
@@ -482,7 +494,7 @@ def _run_ram_entry(
                 "(read it on the console, e.g. `tan monitor`); nothing to read over SWD"
             )
         else:
-            if not watches:  # a watch session already ran for the whole --wait window
+            if not watches and not hold:  # a watch/hold session already ran the whole --wait window
                 time.sleep(max(ctx.ram_wait, 0.0))
             read = fc._execute(
                 FlashPlan(argv=argv, ok_message="", jlink_script=read_script(pre, *console)),
@@ -507,7 +519,7 @@ def _run_ram_entry(
     return (
         0,
         entry("ok", 0, message, preflight_unarmed=unarmed,
-              reset_unconfirmed=bool(trouble or check_trouble), trcena_note=True,
+              reset_unconfirmed=bool(trouble or check_trouble), trcena_note=True, trcena_hold=hold,
               ram_watch_incomplete=watch_note, **warn_missing),
         lines,
     )
