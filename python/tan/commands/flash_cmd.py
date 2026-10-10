@@ -124,6 +124,7 @@ from tan.core.flash_plan import (
     FAIL,
     FLASH_POLICY_RECOVERY_ONLY,
     FLOW_D_METHOD,
+    LINUX_MTD_METHOD,
     PIPE,
     SKIP,
     FlashInputs,
@@ -2266,6 +2267,10 @@ class _Context:
     readback: bool = False
     #: `--no-reset` (tan-cli#1445): Flow D sends no reset/run commands after the write.
     no_reset: bool = False
+    #: `--target-host` / `--partition` (tan-cli#1314): the `linux_mtd` backend's ssh host
+    #: override and the partition the operator expects (must agree with the manifest).
+    target_host: str | None = None
+    target_partition: str | None = None
     #: `--jlink PATH` (tan-cli#1336): the explicit J-Link binary, a CLI input.
     jlink_path: str | None = None
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
@@ -3149,6 +3154,15 @@ def _flash_entry_body(
     # The absolutised `build_dir` only matters where the guard reads files under
     # it; an entry the guard does not cover keeps the manifest's own argv.
     flash_args = entry_flash_args if guard.guarded else target.flash_args
+    if method == LINUX_MTD_METHOD:
+        # tan-cli#1314: a multi-step ssh/scp deploy, not one argv; see flash_linux_mtd.
+        from tan.commands.flash_linux_mtd import run_linux_mtd_entry
+
+        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+        return run_linux_mtd_entry(
+            target, ctx, artefact_path=artefact_path, flash_args=flash_args,
+            entry=entry, lines=lines, report=report,
+        )
     # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
     # run's own sign actually ran -- carried past the `if` block so the
     # eventual success message (tan-cli#373) can name which SETOOLS install
@@ -4532,6 +4546,8 @@ def _run(
     readback: bool = False,
     no_reset: bool = False,
     jlink_path: str | None = None,
+    target_host: str | None = None,
+    target_partition: str | None = None,
     ram: bool = False,
     ram_console: bool = False,
     ram_wait: float = 1.5,
@@ -4762,6 +4778,8 @@ def _run(
         readback=readback,
         no_reset=no_reset,
         jlink_path=jlink_path,
+        target_host=target_host,
+        target_partition=target_partition,
         ram=ram,
         ram_console=ram_console,
         ram_wait=ram_wait,
@@ -4815,6 +4833,13 @@ def _run(
             [f"flash: {m}" for _, m in unsupported],
             sdk,
         )
+    if target_host or target_partition:
+        from tan.commands.flash_linux_mtd import ignored_options_note
+
+        note = ignored_options_note(plan.targets, select_flash_method)
+        if note:
+            text_lines.append(note)
+            issues.append(Issue("flash.linux-mtd-option-ignored", "warning", note))
     if replace_atoc and ram:
         # tan-cli#1267: a RAM-run writes nothing to MRAM, so there is no ATOC for
         # the override to apply to. Said out loud rather than dropped, the same
@@ -4887,6 +4912,13 @@ def _run(
             )
             text_lines.append(required)
             issues.append(Issue("flash.probe-isolation-required", "warning", required))
+        if entry.extra.get("linuxMtd", {}).get("tempFileRemoved") is False:
+            message = (
+                f"{entry.id}: the temp files {', '.join(entry.extra['linuxMtd']['tempFiles'])} "
+                "could not be removed from the target's /tmp; delete them by hand."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.linux-mtd-cleanup-failed", "warning", message))
         if entry.recovery_armed:
             # tan-cli#611. Emitted BEFORE the entry's own outcome lines are
             # counted, and to both channels for the same reason `flash.dpidr-
@@ -4945,6 +4977,9 @@ def _run(
                 issues.append(Issue("flash.setools-untrusted-source", "error", entry.message))
             elif entry.issue_code == "flash.write-sector-overlap":
                 issues.append(Issue("flash.write-sector-overlap", "error", entry.message))
+            elif entry.issue_code and entry.issue_code.startswith("flash.linux-mtd-"):
+                # tan-cli#1314: the literals live in `tan.core.flash_linux_mtd`.
+                issues.append(Issue(entry.issue_code, "error", entry.message))
             elif entry.issue_code == "flash.readback-mismatch":
                 issues.append(Issue("flash.readback-mismatch", "error", entry.message))
             elif entry.issue_code == "flash.readback-failed":
@@ -5434,6 +5469,22 @@ def flash(
         "probe listing, the DPIDR preflight, the write and --readback alike, and "
         "reported as jlink.binary.",
     ),
+    target_host: str = typer.Option(
+        None,
+        "--target-host",
+        metavar="HOST",
+        help="linux_mtd (tan-cli#1314): the V2N / V2N-M1 board's ssh host, overriding "
+        "flash_args.host. ssh/scp run with BatchMode=yes (key auth only, no password prompt).",
+    ),
+    partition: str = typer.Option(
+        None,
+        "--partition",
+        metavar="MTDN",
+        help="linux_mtd (tan-cli#1314): the MTD partition you expect to be written (e.g. mtd1). "
+        "Never a default and never an override: it must equal the manifest's "
+        "flash_args.flash_partition, else the run refuses "
+        "(flash.linux-mtd-partition-mismatch). mtd0 is always refused.",
+    ),
     no_reset: bool = typer.Option(
         False,
         "--no-reset",
@@ -5588,6 +5639,8 @@ def flash(
             readback=readback if isinstance(readback, bool) else False,
             no_reset=no_reset if isinstance(no_reset, bool) else False,
             jlink_path=jlink if isinstance(jlink, str) else None,
+            target_host=target_host if isinstance(target_host, str) else None,
+            target_partition=partition if isinstance(partition, str) else None,
             ram=ram if isinstance(ram, bool) else False,
             ram_console=ram_console if isinstance(ram_console, bool) else False,
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
