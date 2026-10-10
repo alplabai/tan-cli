@@ -1404,7 +1404,21 @@ from tests.conftest import sdk_root
 #: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
 #: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
 #: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
-PINNED_SDK_COMMIT = "5a612e24ad895f35a1365792f9e52ee929926d2d"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `5a612e24` -> `1d20103b`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/carveout.py: merged
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 1d20103ba fix(orchestrate): stop aliasing mailbox channel 0 for unreserved ipc entries; parse leading-zero RAM console size (Refs alplabai/tan-cli#1487) (#2822)
+PINNED_SDK_COMMIT = "1d20103ba367668ab4ed9b139dc69c246198d2f1"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1449,17 +1463,13 @@ PINNED_HASHES: dict[str, str] = {
     "buildplan.py": "61cab4c1f88a29039b1da8be380917cc11453edc919c4b87b71b998ec4899c59",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
     "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
-    "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
+    "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
-    "kconfig.py": "9f6d147928917fcedb5004fef10aeaa16c8d77ef3d8025402878bd06594c1274",
+    "kconfig.py": "6acdf0b879afd080676bbd2afebe75a61b763d02a8f50e75b5e382b22529f00b",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
-    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
-    # that refusal: tan's `link_target.apply_link_target` (called at the end of
-    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
@@ -2471,7 +2481,20 @@ PINNED_HASHES: dict[str, str] = {
 #: existing `power_domains` loader and the enum is validated by the SDK schema,
 #: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
 #: `"phy_refclk"` on the ethernet-PHY domain.
-HAND_PORT_PINNED_SDK_COMMIT = "5a612e24ad895f35a1365792f9e52ee929926d2d"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
+#: AUTOMATED RE-SYNC (hand-port / HAND_PORT_HASHES): `5a612e24` -> `1d20103b`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+HAND_PORT_PINNED_SDK_COMMIT = "1d20103ba367668ab4ed9b139dc69c246198d2f1"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
