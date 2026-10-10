@@ -246,7 +246,8 @@ jobs:
       - name: freeze tan from this checkout in python:3.12-slim-bullseye (python/scripts/build_binary.sh) and swap it in
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src python:3.12-slim-bullseye bash -euc '
+          IMG=$(bash scripts/ci/docker-pull.sh python:3.12-slim-bullseye)
+          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src "${IMG}" bash -euc '
             bash /scripts/ci/apt-bounded.sh update -qq
             bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv

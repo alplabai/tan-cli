@@ -260,14 +260,17 @@ jobs:
       - name: build (${{ matrix.libc }})
         run: |
           if [ "${{ matrix.libc }}" = musl ]; then
-            docker run --rm -v "$PWD/python:/w" -w /w "$MUSL_IMAGE" sh -c '
+            # Mirror first: Docker Hub rate-limits anonymous runner pulls.
+            img=$(bash scripts/ci/docker-pull.sh "$MUSL_IMAGE")
+            docker run --rm -v "$PWD/python:/w" -w /w "$img" sh -c '
               set -e
               apk add --no-cache binutils bash
               python -m venv /tmp/v
               /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'
           else
-            docker run --rm -v "$PWD/python:/w" -v "$PWD/scripts:/scripts:ro" -w /w "$GNU_IMAGE" bash -c '
+            img=$(bash scripts/ci/docker-pull.sh "$GNU_IMAGE")
+            docker run --rm -v "$PWD/python:/w" -v "$PWD/scripts:/scripts:ro" -w /w "$img" bash -c '
               set -e
               bash /scripts/ci/apt-bounded.sh update -qq
               bash /scripts/ci/apt-bounded.sh install -qq -y binutils
@@ -284,6 +287,7 @@ jobs:
         run: |
           image=debian:bullseye-slim
           [ "${{ matrix.libc }}" = musl ] && image=alpine:3.20
+          image=$(bash scripts/ci/docker-pull.sh "$image")
           docker run --rm -v "$PWD:/w" -w /w "$image" \
             sh python/scripts/verify_binary.sh "/w/python/dist/tan/tan" /w/alp-sdk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
