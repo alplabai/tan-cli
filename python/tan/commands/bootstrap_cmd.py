@@ -2139,6 +2139,22 @@ def toolchain_phase(
         )
         return
 
+    # tan-cli#1498: an adopted root's canonical dir that is present but NOT
+    # verified can never be installed over (`_finish_toolchain_install`
+    # refuses to delete it). Refuse HERE, before the multi-minute download,
+    # with the accurate reason -- not after, with a stamp message that
+    # blames the wrong thing.
+    if root_adopted and _is_dir(store_dir):
+        log.warn(
+            "toolchain-install",
+            f"{_native(store_dir)} already exists but is not a verified tan "
+            f"toolchain (no valid verification stamp, or its compiler is missing) "
+            f"-- ALP_TOOLCHAIN_ROOT points at an adopted directory tan does not "
+            f"delete or repair on your behalf, so nothing was downloaded. Remove "
+            f"it yourself, or unset ALP_TOOLCHAIN_ROOT, then re-run `tan bootstrap`.",
+        )
+        return
+
     if is_windows and not any(on_path(program) for program in SEVEN_ZIP_PROGRAMS):
         log.warn(
             "toolchain-install",

@@ -2614,3 +2614,52 @@ def test_remove_refuses_an_ancestor_of_a_registered_sdk_without_force(
     assert refused["ok"] is False
     assert refused["issues"][0]["code"] == "sdk.remove-active"
     assert target.exists()
+
+
+def test_forced_subtree_remove_reports_the_registry_entry_that_contains_it(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1498: a forced removal of a directory INSIDE a registered
+    install damages that entry without deleting it. It is not pruned (the
+    install it names still exists) but must not stay silent either."""
+    install = make_sdk_root(cache_with_canary / "v0.31.0", version="0.31.0")
+    subtree = install / "scripts"
+    assert subtree.is_dir()
+    project = tmp_path / "project-a"
+    project.mkdir()
+    write_registry(isolated_home, {project: install}, dated=True)
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", str(subtree), "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    damaged = [i for i in forced["issues"] if i["code"] == "sdk.remove-registry-entry-damaged"]
+    assert len(damaged) == 1
+    assert str(project) in damaged[0]["message"]
+    registry = json.loads((isolated_home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8"))
+    assert str(project) in registry, "the install it names still exists, so it is not pruned"
+
+
+def test_forced_remove_of_an_unrelated_dir_raises_no_damaged_warning(
+    tmp_path, isolated_home, cache_with_canary
+):
+    kept = make_sdk_root(cache_with_canary / "v0.32.0", version="0.32.0")
+    gone = make_sdk_root(cache_with_canary / "v0.33.0", version="0.33.0")
+    project = tmp_path / "project-a"
+    project.mkdir()
+    write_registry(isolated_home, {project: kept}, dated=True)
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.33.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert not gone.exists()
+    assert not [i for i in forced["issues"] if i["code"] == "sdk.remove-registry-entry-damaged"]

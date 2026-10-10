@@ -1234,6 +1234,23 @@ def _toolchain_store_dir(
     return Path(root.path_str) / toolchain_provision.store_dir_name(manifest.version)
 
 
+def _toolchain_root_adopted() -> bool:
+    """`$ALP_TOOLCHAIN_ROOT` is set: tan did not necessarily create that root
+    and `tan bootstrap` never deletes or repairs an unverified store
+    directory in it (tan-cli#1498)."""
+    return toolchain_provision.resolve_toolchain_root(
+        os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    ).adopted
+
+
+def _adopted_store_remedy(store_dir: Path) -> str:
+    return (
+        f"ALP_TOOLCHAIN_ROOT is an adopted root, so `tan bootstrap` will not repair "
+        f"it -- remove {store_dir} yourself (or unset ALP_TOOLCHAIN_ROOT), then run "
+        f"`tan bootstrap`."
+    )
+
+
 def _host_toolchain_matching_pin(
     manifest: toolchain_provision.ToolchainManifest,
 ) -> Path | None:
@@ -1366,8 +1383,18 @@ def toolchain_check(sdk_root: str | None) -> Check:
     store_dir = _toolchain_store_dir(manifest)
     stamp_text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
     stamp = toolchain_provision.parse_stamp(stamp_text) if stamp_text is not None else None
+    adopted = _toolchain_root_adopted()
     if toolchain_provision.stamp_matches_pin(stamp, manifest):
         if not toolchain_provision.store_compiler_present(store_dir, is_windows=os.name == "nt"):
+            if adopted:
+                return Check(
+                    "toolchain",
+                    "fail",
+                    f"{store_dir} carries a verification stamp for {manifest.version} "
+                    f"but its arm-zephyr-eabi-gcc is gone -- "
+                    f"{_adopted_store_remedy(store_dir)}",
+                    scope="project",
+                )
             return Check(
                 "toolchain",
                 "fail",
@@ -1394,6 +1421,15 @@ def toolchain_check(sdk_root: str | None) -> Check:
             scope="project",
         )
     if stamp is not None:
+        if adopted:
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for a different pin (this "
+                f"checkout now pins {manifest.version}) -- "
+                f"{_adopted_store_remedy(store_dir)}",
+                scope="project",
+            )
         return Check(
             "toolchain",
             "fail",
@@ -1401,6 +1437,14 @@ def toolchain_check(sdk_root: str | None) -> Check:
             f"checkout now pins {manifest.version}) -- run `tan bootstrap` to "
             f"acquire the current pin.",
             "tan bootstrap",
+            scope="project",
+        )
+    if adopted and store_dir.is_dir():
+        return Check(
+            "toolchain",
+            "fail",
+            f"no verified arm-zephyr-eabi {manifest.version} toolchain at {store_dir} "
+            f"-- {_adopted_store_remedy(store_dir)}",
             scope="project",
         )
     return Check(

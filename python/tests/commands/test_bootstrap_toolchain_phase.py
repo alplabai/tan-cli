@@ -1604,3 +1604,36 @@ def test_the_tripwire_records_what_it_cannot_see_rather_than_implying_full_cover
     assert uncovered.strip(), "the heading is there with no paragraph under it"
     for named in ("urllib", "PARTIAL", "not evidence"):
         assert named in uncovered, named
+
+
+def test_an_unstamped_dir_under_an_adopted_root_refuses_before_any_download(tmp_path, monkeypatch):
+    """tan-cli#1498: the adopted-root refusal used to fire only AFTER the
+    multi-minute `west sdk install`, with a message blaming the stamp."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    adopted_root = tmp_path / "bench-cache"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted_root))
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    manifest, _ = bootstrap_cmd.load_toolchain_manifest(sdk_root)
+    store_dir = adopted_root / tp.store_dir_name(manifest.version)
+    store_dir.mkdir(parents=True)
+    (store_dir / "keep.txt").write_text("mine", encoding="utf-8")
+
+    spawned = []
+
+    def fake_run(self, argv, *a, **kw):
+        spawned.append(list(argv))
+
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_run)
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(
+        _workspace(tmp_path), log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False
+    )
+
+    assert not any("sdk" in a and "install" in a for a in spawned), "nothing may be downloaded"
+    assert log.blocking() == ["toolchain-install"]
+    message = log.warnings[0][1]
+    assert "nothing was downloaded" in message
+    assert "ALP_TOOLCHAIN_ROOT" in message
+    assert (store_dir / "keep.txt").read_text(encoding="utf-8") == "mine"

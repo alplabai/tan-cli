@@ -312,7 +312,15 @@ def test_bootstrap_probe_never_spawns_a_bare_name(monkeypatch):
         return None
 
     monkeypatch.setattr(hp, "probe", fake_probe)
-    monkeypatch.setattr(os, "name", "nt")
+    # tan-cli#1498: pretend "nt" for the module under test ONLY. Patching the
+    # global `os.name` leaks into pathlib, subprocess and pytest itself.
+    class _NtOs:
+        name = "nt"
+
+        def __getattr__(self, attr):
+            return getattr(os, attr)
+
+    monkeypatch.setattr(hp, "os", _NtOs())
     monkeypatch.setattr(
         hp, "resolve_tool", lambda name, env=None: type("R", (), {"resolved": f"C:\\trusted\\{name}.exe"})()
     )
