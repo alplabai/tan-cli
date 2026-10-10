@@ -249,7 +249,7 @@ def _global_default_fix_hint() -> str:
 #: phase exists to move up front.
 WORKSPACE_BLOCKING: tuple[str, ...] = (
     "zephyr-requirements", "sdk-extras", "editable-install", "toolchain-install",
-    "west-patches-failed",
+    "west-patches-failed", "toolchain-pin-mismatch", "toolchain-pin-unverified",
 )
 
 
@@ -1959,6 +1959,39 @@ def _run_west_sdk_install_with_retries(
     return detail
 
 
+def _toolchain_pin_agrees(
+    log: Log, manifest: toolchain_provision.ToolchainManifest, *, is_windows: bool
+) -> bool:
+    """tan-cli#1496: compare alp-sdk's per-artifact sha256 pins with the release's
+    `sha256.sum` BEFORE `west sdk install` runs. False = refused (warned, blocking).
+    An unreachable sum file is a refusal, not a pass: the install needs the same
+    network, so failing here costs nothing and never stamps an unchecked archive."""
+    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    host_key = toolchain_provision.toolchain_host_key(sys.platform, platform.machine())
+    if isinstance(host_key, toolchain_provision.UnsupportedHost):
+        return True
+    artifacts = manifest.artifacts_for_host(host_key)
+    url = toolchain_pin.sum_url(manifest)
+    text, why = fetch_sum_text(url)
+    if text is None:
+        log.warn(
+            "toolchain-pin-unverified",
+            f"cannot acquire the cross toolchain: could not fetch {url} to check the "
+            f"archives against alp-sdk's sha256 pins ({why}). Nothing was downloaded. "
+            f"Check ALL_PROXY/HTTPS_PROXY/NO_PROXY or retry on a network that reaches "
+            f"github.com; `--no-toolchain` skips this phase.",
+        )
+        return False
+    findings = toolchain_pin.pin_findings(artifacts, toolchain_pin.parse_sum_file(text))
+    if findings:
+        log.warn("toolchain-pin-mismatch", toolchain_pin.refusal_message(findings, url))
+        return False
+    log.line(f"Release {toolchain_pin.SUM_FILENAME} matches alp-sdk's sha256 pins for {len(artifacts)} artifact(s)")
+    return True
+
+
 def _acquire_toolchain(
     ws: Workspace,
     log: Log,
@@ -1989,6 +2022,8 @@ def _acquire_toolchain(
             log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
             return
         _reclaim_toolchain_wreckage(root, leaf)
+    if not runner.dry_run and not _toolchain_pin_agrees(log, manifest, is_windows=is_windows):
+        return
     tmp_dir = root / f"{leaf}{toolchain_provision.TMP_SUFFIX_PREFIX}{os.getpid()}"
     argv = toolchain_provision.west_sdk_install_argv(
         west, version=manifest.version, install_dir=_native(tmp_dir)
@@ -2135,7 +2170,7 @@ def toolchain_phase(
     ) and toolchain_provision.store_compiler_present(store_dir, is_windows=is_windows):
         log.line(
             f"Cross toolchain already installed and stamped: {_native(store_dir)} "
-            f"(archive sha256 vs the alp-sdk pin was never checked)"
+            f"(its archives were checked against the alp-sdk pin via the release sha256.sum at install time, if installed by this tan)"
         )
         return
 

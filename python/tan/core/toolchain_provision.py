@@ -97,17 +97,19 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
         return False
 
 
-#: What a stamp does NOT establish. `west sdk install` downloads each archive
-#: into a private temp directory it deletes before exiting, so tan never has
-#: the archive bytes to hash against the sha256 alp-sdk pins in
-#: `metadata/toolchains.json` (west's own archive check, if any, compares against the release's
-#: `sha256.sum`, fetched from the same source, never against alp-sdk's pin). The stamp therefore means "the
-#: SDK version file matches the pin and the compiler runs", never "the bytes
-#: match alp-sdk's pinned sha256" -- every message that says "verified" says so.
+#: What a stamp does and does NOT establish about the archive bytes. `west sdk
+#: install` deletes its downloads, so tan never holds an archive to hash. What
+#: tan does instead (tan-cli#1496): BEFORE the install it fetches the release's
+#: `sha256.sum` and refuses unless every pinned artifact's entry there equals
+#: alp-sdk's `metadata/toolchains.json` pin; west then verifies each archive
+#: against that same sum. So an install tan stamped means "the archives matched
+#: the pin through the release sum", NOT "tan re-hashed the files on disk" -- and
+#: it says nothing for a toolchain installed before that check existed.
 ARCHIVE_SHA256_NOTE = (
-    "the archive's sha256 was NOT compared against the alp-sdk pin "
-    "(`west sdk install` discards the archive; any check west does is against "
-    "the release's own sha256.sum, not the pin)"
+    "the archive's sha256 was not re-hashed from disk (`west sdk install` discards "
+    "the archive); at install time `tan bootstrap` checked alp-sdk's pin against "
+    "the release's sha256.sum, which west checks the archive against, so a toolchain "
+    "installed by an older tan was never compared with the pin"
 )
 
 
@@ -592,7 +594,7 @@ def augment_acquisition_failure(detail: str) -> str:
     applied to THIS download) when `detail` -- the captured `west sdk
     install` failure text -- names a checksum mismatch. `west` itself
     compares downloads against the release's own published `sha256.sum`
-    (never against alp-sdk's pin) and raises `sha256 mismatched: <want>:<got>` on a
+    (tan checks alp-sdk's pin against that sum BEFORE the install) and raises `sha256 mismatched: <want>:<got>` on a
     disagreement -- which reads exactly like "the upstream archive is
     corrupt" unless a reader is told a TLS-terminating middlebox rewriting
     the byte stream produces the identical symptom.
