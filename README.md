@@ -418,6 +418,13 @@ after start, or the cycle counts it prints are wrong. Every successful `--ram`
 run (and its `--dry-run`) carries the info issue
 `flash.ram-debugger-detach-clears-trcena` as a reminder.
 
+Experimental (tan-cli#1372, off by default, pending a bench A/B): with `--ram-console`,
+setting `TAN_FLASH_RAM_HOLD=1` keeps the load session open for the `--wait` window
+(`... go; Sleep <wait_ms>; exit`, no halt after `go`, no DEMCR/DWT write) and the
+following `ram_console_buf` reread session does not wait again. The session timeout
+covers the wait, the envelope reports `ram.holdSession: true`, and the TRCENA info
+issue then says the clear happens at session close, after the wait.
+
 `--watch <addr>[:<words>][@<period-ms>]` (repeatable, `--ram` only) samples target
 memory in the same J-Link session that starts the image, for the `--wait` window,
 for example `tan flash --ram --core m55_he --confirm --wait 5 --watch 0x42002000@50`.

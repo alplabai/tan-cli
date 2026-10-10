@@ -1161,3 +1161,89 @@ def test_watch_with_ram_console_skips_the_pre_sleep_but_still_reads(tmp_path, mo
     assert slept == []
     assert [jl.kind(s) for s in jl.scripts] == ["check", "load", "read"]
     assert data["entries"][0]["ramConsole"]["text"]
+
+
+# ── tan-cli#1372 ask 2: the experimental hold session (TAN_FLASH_RAM_HOLD=1) ──
+def _recording_timeouts(monkeypatch, jl):
+    seen = []
+    inner = jl._spawn
+
+    def spy(argv, script, capture, timeout, *a, **kw):
+        seen.append((jl.kind(script), timeout))
+        return inner(argv, script, capture, timeout, *a, **kw)
+
+    monkeypatch.setattr(flash_cmd, "_spawn_jlink", spy)
+    return seen
+
+
+def _load_lines(jl):
+    return next(x for x in jl.scripts if jl.kind(x) == "load").splitlines()
+
+
+def test_the_default_load_script_has_no_sleep_and_waits_before_the_read(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("TAN_FLASH_RAM_HOLD", raising=False)
+    sleeps = []
+    monkeypatch.setattr(flash_cmd.time, "sleep", sleeps.append)
+    jl = FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path, ram_console=True, ram_wait=2.5)
+    assert rc == 0
+    load = _load_lines(jl)
+    assert load[-3:] == ["setpc 0x100", "go", "exit"] and not any(l.startswith("Sleep") for l in load)
+    assert sleeps == [2.5]
+    assert data["entries"][0]["ram"]["holdSession"] is False
+
+
+def test_the_hold_load_script_sleeps_after_go_and_the_read_does_not_wait(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("TAN_FLASH_RAM_HOLD", "1")
+    sleeps = []
+    monkeypatch.setattr(flash_cmd.time, "sleep", sleeps.append)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_console=True, ram_wait=2.5)
+    assert rc == 0, (data, issues)
+    load = _load_lines(jl)
+    assert load[-4:] == ["setpc 0x100", "go", "Sleep 2500", "exit"]
+    assert not any("DEMCR" in l.upper() or "0XE000" in l.upper() for l in load)
+    assert sleeps == []  # no second wait before the reread
+    assert [jl.kind(s) for s in jl.scripts] == ["check", "load", "read"]
+    entry = data["entries"][0]
+    assert entry["ram"]["holdSession"] is True
+    assert entry["ramConsole"]["text"] == "hello\n\nRESULT PASS\n"
+    assert "Sleep 2500" in entry["plan"]["jlinkScript"]
+    found = _trcena(issues)
+    assert len(found) == 1 and "session close" in found[0].message and "after the wait" in found[0].message
+
+
+def test_the_hold_session_timeout_covers_the_wait(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("TAN_FLASH_RAM_HOLD", "1")
+    jl = FakeJlink(monkeypatch)
+    timeouts = _recording_timeouts(monkeypatch, jl)
+    rc, *_ = _run(tmp_path, ram_console=True, ram_wait=2000.0)
+    assert rc == 0
+    (load_timeout,) = [t for k, t in timeouts if k == "load"]
+    assert load_timeout >= 2000.0 + 60.0
+
+
+def test_hold_needs_a_console_read_and_otherwise_stays_off(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("TAN_FLASH_RAM_HOLD", "1")
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_console=False, ram_wait=2.5)
+    assert rc == 0
+    assert not any(l.startswith("Sleep") for l in _load_lines(jl))
+    assert data["entries"][0]["ram"]["holdSession"] is False
+    assert "session close" not in _trcena(issues)[0].message
+
+
+def test_hold_dry_run_shows_the_sleep_script(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("TAN_FLASH_RAM_HOLD", "1")
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, dry_run=True, ram_console=True, ram_wait=1.5)
+    assert rc == 0 and jl.scripts == []
+    entry = data["entries"][0]
+    assert entry["ram"]["holdSession"] is True
+    assert entry["plan"]["jlinkScript"][-3:] == ["go", "Sleep 1500", "exit"]
+    assert "session close" in _trcena(issues)[0].message

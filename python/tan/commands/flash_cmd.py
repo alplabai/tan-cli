@@ -407,6 +407,9 @@ class _Entry:
     #: `_run` appends an `info` `flash.ram-debugger-detach-clears-trcena`. Never emitted
     #: by `as_dict()`.
     trcena_note: bool = False
+    #: tan-cli#1372: the experimental hold session ran (`TAN_FLASH_RAM_HOLD=1`); the TRCENA
+    #: info issue then says the clear happens at session close, after the wait.
+    trcena_hold: bool = False
     #: tan-cli#1343 review: the device configuration names another Alif family than
     #: this slice's J-Link part profile (the warning text). `_run` appends a
     #: `flash.device-config-mismatch` warning.
@@ -4984,7 +4987,18 @@ def _run(
             )
             text_lines.append(message)
             issues.append(Issue("flash.ram-console-symbol-missing", "warning", message))
-        if entry.trcena_note:
+        if entry.trcena_note and entry.trcena_hold:
+            message = (
+                f"{entry.id}: hold session (TAN_FLASH_RAM_HOLD=1): the load session stayed "
+                "open for the --wait window, and closing it clears DEMCR.TRCENA (bit 24), "
+                "which stops the DWT cycle counter (CYCCNT) and any ITM/trace output; the "
+                "clear now happens at session close, after the wait. Firmware that uses "
+                "DWT/ITM must set TRCENA again after start, or a cycle count it reports "
+                "is wrong."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.ram-debugger-detach-clears-trcena", "info", message))
+        elif entry.trcena_note:
             message = (
                 f"{entry.id}: detaching the debugger clears DEMCR.TRCENA (bit 24), which stops "
                 "the DWT cycle counter (CYCCNT) and any ITM/trace output in the running image "
