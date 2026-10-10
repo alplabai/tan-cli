@@ -1404,7 +1404,7 @@ from tests.conftest import sdk_root
 #: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
 #: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
 #: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
-PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
+PINNED_SDK_COMMIT = "5a612e24ad895f35a1365792f9e52ee929926d2d"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1446,12 +1446,12 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
-    "buildplan.py": "2bccfc11af0c7f03ab16c708df0563bda6d2a8b143b59f8481b1ad1beaeab521",
+    "buildplan.py": "61cab4c1f88a29039b1da8be380917cc11453edc919c4b87b71b998ec4899c59",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
     "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "ede7cbb26986b507e5717afa75789205c6ee21ebd86b8a2f8bc002f5a4beaff2",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
-    "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
+    "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
     "kconfig.py": "9f6d147928917fcedb5004fef10aeaa16c8d77ef3d8025402878bd06594c1274",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
@@ -2469,7 +2469,7 @@ PINNED_HASHES: dict[str, str] = {
 #: existing `power_domains` loader and the enum is validated by the SDK schema,
 #: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
 #: `"phy_refclk"` on the ethernet-PHY domain.
-HAND_PORT_PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
+HAND_PORT_PINNED_SDK_COMMIT = "5a612e24ad895f35a1365792f9e52ee929926d2d"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

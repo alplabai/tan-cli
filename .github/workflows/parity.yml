@@ -988,7 +988,7 @@ env:
   # `pinctrl_som_power` group; the planner oracle was re-captured and is
   # byte-identical (the oracle modes do not render the Zephyr board); scaffold
   # parity is 10/10 unchanged.
-  PINNED_SDK_TAG: a5a137c7b594ebb5d451177803c0eb324069e86b
+  PINNED_SDK_TAG: 5a612e24ad895f35a1365792f9e52ee929926d2d
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1319,7 +1319,7 @@ env:
   # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: a5a137c7b594ebb5d451177803c0eb324069e86b
+  PINNED_PLANNER_ORACLE_SDK_REF: 5a612e24ad895f35a1365792f9e52ee929926d2d
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

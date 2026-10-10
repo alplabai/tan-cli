@@ -26,7 +26,13 @@ from typing import Any, Callable, Optional
 from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
-from .headers import emit_dts_partitions, emit_dts_reservations, emit_ipc_contract_h
+from .headers import (
+    emit_dts_partitions,
+    emit_dts_reservations,
+    emit_ipc_contract_h,
+    emit_storage_mounts_c,
+    has_storage_mounts,
+)
 from .kconfig import (
     _resolve_console,
     _slice_alp_conf,
@@ -381,6 +387,17 @@ def _slice_west_libs_artefact(
     return (WEST_LIBS_ARTEFACT, _slice_west_libraries(project, slice_))
 
 
+def _emit_storage_mount_table(project: BoardProject) -> str:
+    """The `storage_mount_table.c` contents, or "" when board.yaml `storage:`
+    declares no mountable partition.  The standalone emit prints an empty
+    table for that case, which the plan has no reason to carry, so the
+    conditional-artefact rule (empty -> absent) keys off `has_storage_mounts`
+    rather than off the text, which is never empty (alp-sdk#2820)."""
+    if not has_storage_mounts(project):
+        return ""
+    return emit_storage_mounts_c(project)
+
+
 #: Every shared generated artefact: `(path under the build root, emitter,
 #: conditional)`.  ONE call site per artefact: `_shared_artefacts` (the plan)
 #: and `_shared_artefact` (the standalone `--emit`) both run the emitter from
@@ -401,6 +418,7 @@ _SHARED_EMITTERS: tuple[tuple[str, Callable[[BoardProject], str], bool], ...] = 
     ("generated/dts-partitions.dtsi", emit_dts_partitions, False),
     ("alp_sysbuild.conf", emit_sysbuild_conf, True),
     ("sysbuild/tfm/tfm.conf", emit_tfm_sysbuild_conf, True),
+    ("generated/storage_mount_table.c", _emit_storage_mount_table, True),
 )
 
 
