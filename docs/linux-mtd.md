@@ -19,7 +19,7 @@ window `[xspi_offset, xspi_offset + ceil(image/erasesize) * erasesize)`.
 
 The four numbers that bound the window come from the SoC metadata's `cm33_boot`
 (`metadata/socs/renesas/rzv2n/n44.json`: `sram_base`, `image_pad`, `image_max`,
-`xspi_offset`), read from the bound alp-sdk (`--sdk-root`). **A real write needs them from
+`xspi_offset`, plus `mtd_name`), read from the bound alp-sdk (`--sdk-root`). **A real write needs them from
 the SDK**: a manifest is checkout-controlled and never chooses a flash offset. The same four
 keys may be given in `flash_args`, but only as a cross-check — a disagreement with the SDK
 refuses (`flash.linux-mtd-invalid`). If the SDK metadata cannot be read, the run refuses
@@ -41,15 +41,18 @@ slices:
     user: root                    # optional
     port: 22                      # optional
     flash_partition: mtd1         # REQUIRED, never defaulted; mtdN or a /proc/mtd name
-    partition_name: fip           # REQUIRED: the /proc/mtd NAME the device must carry
+    partition_name: fip           # optional cross-check of the SDK's cm33_boot.mtd_name
     confirm: true                 # or --confirm / ALP_FLASH_FORCE=1, like every writing backend
 ```
 
-`partition_name` is required (unless the SoC metadata's `cm33_boot` itself carries `mtd_name`,
-which it does not today; the two must agree when both exist). Without a name nothing would
-stop `flash_partition: mtd2` from being erased at the FIP's CM33 offset, so a missing name
-refuses with `flash.linux-mtd-partition-required`; the `/proc/mtd` NAME of the resolved
-device must equal it.
+The partition is not chosen by the manifest. The SoC metadata's `cm33_boot.mtd_name` (`"fip"`
+in n44.json since alp-sdk #2821) is the `/proc/mtd` NAME the resolved device must carry, and a
+real write **requires** it from the SDK like the offset facts (missing:
+`flash.linux-mtd-boot-facts-unavailable`, with the reason). A manifest that names
+`flash_partition` and `partition_name` consistently wrong therefore cannot redirect the erase.
+`partition_name` is optional and only cross-checks the SDK's name (disagreement refuses with
+`flash.linux-mtd-partition-mismatch`). Without SDK metadata `--dry-run` falls back to the
+manifest's name, labelled not authoritative.
 
 ## The image must be padded
 
@@ -64,7 +67,7 @@ has the Thumb bit and lies in `0x08003000..0x08033000`. A raw `zephyr.bin` is re
 
 1. `ssh … cat /proc/mtd` — find the partition (by `mtdN` or by name), take its size and erase
    size. Refuse when it is absent, is `mtd0` (also when a name resolves there), its NAME
-   differs from `partition_name`, `xspi_offset` is not a multiple of the erase size, or the
+   differs from the SDK's `mtd_name`, `xspi_offset` is not a multiple of the erase size, or the
    erase would end past the partition or past `xspi_offset + image_max`.
 2. `scp` the image to a fresh `/tmp/tan-linux-mtd-<random>.bin`. The file is read once
    when the run starts; size, sha256, the image checks and the bytes scp sends (a private 0600
@@ -86,9 +89,9 @@ needs `flash_erase`, `mtd_debug` (mtd-utils), `sha256sum` and `rm`.
 | Refusal | Code |
 |---|---|
 | neither `flash_args.host` nor `--target-host` | `flash.linux-mtd-no-host` |
-| `flash_args.flash_partition` or `partition_name` absent | `flash.linux-mtd-partition-required` |
+| `flash_args.flash_partition` absent | `flash.linux-mtd-partition-required` |
 | partition is `mtd0` (any spelling, or a name that resolves there) | `flash.linux-mtd-partition-refused` |
-| `--partition` differs from the manifest; `/proc/mtd` NAME differs from `partition_name` | `flash.linux-mtd-partition-mismatch` |
+| `--partition` differs from the manifest; `/proc/mtd` NAME differs from the SDK's `mtd_name`; `partition_name` disagrees with it | `flash.linux-mtd-partition-mismatch` |
 | partition not in the target's `/proc/mtd` | `flash.linux-mtd-partition-absent` |
 | erase window past the partition or `image_max` | `flash.linux-mtd-image-too-large` |
 | no SDK `cm33_boot` facts (real write) | `flash.linux-mtd-boot-facts-unavailable` |

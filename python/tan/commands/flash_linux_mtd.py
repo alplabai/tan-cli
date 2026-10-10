@@ -119,8 +119,13 @@ class _Deploy:
             self.facts, self.authoritative = core.resolve_facts(
                 self.flash_args, soc, why, dry_run=bool(self.ctx.dry_run)
             )
-            self.unavailable = "" if self.authoritative else why
-            self.want_name = core.expected_name(self.spec, soc)
+            self.want_name, name_from_sdk = core.expected_name(
+                self.spec, soc, why, dry_run=bool(self.ctx.dry_run)
+            )
+            self.authoritative = self.authoritative and name_from_sdk
+            self.unavailable = "" if self.authoritative else (
+                why or "the SDK's cm33_boot has no mtd_name"
+            )
             self.read_image()
         except core.LinuxMtdError as err:
             return self.fail(err.message, err.code)
@@ -158,7 +163,8 @@ class _Deploy:
         """The private copy of the snapshot that scp sends (mode 0600, removed afterwards)."""
         self.snapshot_dir = tempfile.mkdtemp(prefix="tan-linux-mtd-")
         path = os.path.join(self.snapshot_dir, "image.bin")
-        with open(path, "wb") as fh:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
             fh.write(self.data)
         return path
 
@@ -174,7 +180,7 @@ class _Deploy:
             shown = "; ".join(f"{p['step']}: {' '.join(p['argv'])}" for p in self.planned())
             note = (
                 "" if self.authoritative else
-                " [SDK cm33_boot facts UNAVAILABLE -- the offset below is NOT authoritative and "
+                " [SDK cm33_boot facts UNAVAILABLE -- the offset and partition below are NOT authoritative and "
                 f"a real run would refuse: {self.unavailable}]"
             )
             return self.done(

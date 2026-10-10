@@ -281,27 +281,32 @@ def resolve_facts(
     return sdk, True
 
 
-def expected_name(spec: Spec, soc_cm33_boot: Any) -> str:
-    """The /proc/mtd NAME the partition must carry. REQUIRED: the SoC metadata's
-    `cm33_boot.mtd_name` if it has one, else the manifest's `partition_name`, which must agree
-    with the metadata when both exist. Without it nothing stops `flash_partition: mtd2` being
-    erased at the FIP's CM33 offset, so the run refuses."""
+def expected_name(
+    spec: Spec, soc_cm33_boot: Any, unavailable: str, *, dry_run: bool = False
+) -> tuple[str, bool]:
+    """`(name, from_sdk)`: the /proc/mtd NAME the partition must carry. For a real write it is
+    the SDK's `cm33_boot.mtd_name`, REQUIRED like the offset facts -- a manifest that names both
+    `flash_partition` and `partition_name` consistently wrong must not be able to pick the
+    target. The manifest's `partition_name` only cross-checks (disagreement refuses). A
+    `--dry-run` without the SDK name falls back to the manifest's (or none) with
+    `from_sdk=False`, so the plan is labelled unverified."""
     meta = soc_cm33_boot.get("mtd_name") if isinstance(soc_cm33_boot, dict) else None
     if isinstance(meta, str) and meta:
         if spec.expect_name is not None and spec.expect_name != meta:
             raise LinuxMtdError(
                 f"flash_args.partition_name {spec.expect_name!r} disagrees with the SoC "
-                f"metadata's {meta!r}", code="flash.linux-mtd-partition-mismatch",
+                f"metadata's cm33_boot.mtd_name {meta!r}",
+                code="flash.linux-mtd-partition-mismatch",
             )
-        return meta
-    if spec.expect_name is None:
+        return meta, True
+    if not dry_run:
         raise LinuxMtdError(
-            "flash_args.partition_name is required (e.g. `partition_name: fip`): the CM33 image "
-            "sits inside one specific partition, and only its /proc/mtd NAME proves "
-            f"{spec.partition} is it; nothing was written",
-            code="flash.linux-mtd-partition-required",
+            "no CM33 partition name: the bound SDK's SoC metadata has no cm33_boot.mtd_name"
+            f" ({unavailable or 'the object carries no mtd_name'}). The partition is never "
+            "chosen by the manifest -- flash_args.partition_name only cross-checks; nothing was "
+            "written", code="flash.linux-mtd-boot-facts-unavailable",
         )
-    return spec.expect_name
+    return spec.expect_name or "", False
 
 
 # ── the stored image ────────────────────────────────────────────────────────

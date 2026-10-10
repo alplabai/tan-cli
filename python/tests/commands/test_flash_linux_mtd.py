@@ -81,8 +81,10 @@ OFFSET = 0x1A0000
 SOC = {
     "cm33_boot": {
         "sram_base": 0x08000000, "image_pad": 0x3000, "image_max": 0x30000, "xspi_offset": OFFSET,
+        "mtd_name": "fip",
     }
 }
+SOC_NO_NAME = {"cm33_boot": {k: v for k, v in SOC["cm33_boot"].items() if k != "mtd_name"}}
 BODY = b"cm33-body" * 600  # 5400 bytes
 
 
@@ -343,17 +345,56 @@ def test_soc_lookup_failures_name_their_cause(tmp_path):
     assert fm.soc_cm33_boot(str(tmp_path / "ok" / "sdk"), "E1M-V2N101") == (SOC["cm33_boot"], "")
 
 
-def test_the_partition_name_is_required(tmp_path):
+def test_the_sdk_name_alone_is_enough_and_the_manifest_name_is_optional(tmp_path):
     rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd1}", auto_name=False)
-    assert rc == 1 and "flash.linux-mtd-partition-required" in _codes(payload)
-    assert "partition_name: fip" in _entry(payload)["message"]
+    assert rc == 0, payload
+    assert _entry(payload)["linuxMtd"]["partitionName"] == "fip"
+
+
+def test_a_manifest_only_name_never_authorises_a_write(tmp_path):
+    # SDK facts without mtd_name; the manifest names flash_partition AND partition_name
+    # consistently -- and wrongly. The manifest must not be able to pick the target.
+    three = PROC_MTD + 'mtd2: 00800000 00001000 "rootfs"\n'
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, partition_name: rootfs, flash_partition: mtd2}",
+        soc=SOC_NO_NAME, env={"FAKE_PROC_MTD": three},
+    )
+    assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
+    assert "mtd_name" in _entry(payload)["message"]
     assert _calls(tmp_path) == []
 
 
-def test_mtd2_without_a_name_is_never_erased_at_the_fip_offset(tmp_path):
-    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd2}", auto_name=False)
-    assert rc == 1 and "flash.linux-mtd-partition-required" in _codes(payload)
+def test_a_manifest_name_disagreeing_with_the_sdk_name_is_refused(tmp_path):
+    three = PROC_MTD + 'mtd2: 00800000 00001000 "rootfs"\n'
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, partition_name: rootfs, flash_partition: mtd2}",
+        env={"FAKE_PROC_MTD": three},
+    )
+    assert rc == 1 and "flash.linux-mtd-partition-mismatch" in _codes(payload)
     assert _calls(tmp_path) == []
+
+
+def test_dry_run_with_facts_but_no_sdk_name_is_labelled_unverified(tmp_path):
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, flash_partition: mtd1}", "--dry-run", confirm=False,
+        soc=SOC_NO_NAME, auto_name=False,
+    )
+    assert rc == 0, payload
+    assert _entry(payload)["linuxMtd"]["bootFactsAuthoritative"] is False
+    assert "NOT authoritative" in _entry(payload)["message"]
+
+
+def test_the_snapshot_copy_is_private(tmp_path):
+    deploy = fm._Deploy(
+        SimpleNamespace(id="x"), SimpleNamespace(), lambda *a, **k: None, [], {}, "/x", {}
+    )
+    deploy.data = b"abc"
+    path = deploy.snapshot_file()
+    try:
+        assert (os.stat(path).st_mode & 0o777) == 0o600
+    finally:
+        import shutil
+        shutil.rmtree(deploy.snapshot_dir, ignore_errors=True)
 
 
 def test_a_wrongly_named_partition_is_refused(tmp_path):
@@ -367,11 +408,15 @@ def test_a_wrongly_named_partition_is_refused(tmp_path):
 def test_an_sdk_mtd_name_wins_and_must_agree_with_the_manifest():
     soc = {"mtd_name": "fip"}
     spec = core.resolve_spec({"host": "h", "flash_partition": "mtd1"})
-    assert core.expected_name(spec, soc) == "fip"
+    assert core.expected_name(spec, soc, "") == ("fip", True)
     named = core.resolve_spec({"host": "h", "flash_partition": "mtd1", "partition_name": "x"})
     with pytest.raises(core.LinuxMtdError) as err:
-        core.expected_name(named, soc)
+        core.expected_name(named, soc, "")
     assert err.value.code == "flash.linux-mtd-partition-mismatch"
+    with pytest.raises(core.LinuxMtdError) as err:
+        core.expected_name(named, {}, "no cm33_boot")
+    assert err.value.code == "flash.linux-mtd-boot-facts-unavailable"
+    assert core.expected_name(named, {}, "", dry_run=True) == ("x", False)
 
 
 def test_the_image_is_snapshotted_once_so_later_edits_cannot_drift(tmp_path, monkeypatch):
