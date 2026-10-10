@@ -153,6 +153,9 @@ from tan.core.flash_plan import (
     is_rust_absolute,
     parse_atoc_start_address,
     parse_system_manifest,
+    check_co_slice_args,
+    left_out_flow_d,
+    merge_flow_d_targets,
     plan_flash_targets,
     registry_keys_debug,
     resolve_artefact_path,
@@ -2260,6 +2263,8 @@ class _Context:
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
+    #: tan-cli#1509: manifest `alif_mram_jlink` slices a lone ATOC write leaves out.
+    left_out_slices: tuple[str, ...] = ()
 
 
 def _flow_d_probe_selection(
@@ -2612,6 +2617,7 @@ def _resolve_flow_d_atoc_via_setools(
     *,
     stack: contextlib.ExitStack | None = None,
     report: dict[str, Any] | None = None,
+    extras: Sequence[tuple[str, FlowDShape]] = (),
 ) -> tuple[Any, str | None]:
     """tan-cli#353's remaining half: when Flow D still has no `atoc`/
     `atoc_address` after the explicit-value and `atoc_map` resolutions above
@@ -2712,6 +2718,15 @@ def _resolve_flow_d_atoc_via_setools(
             "the project chose"
         )
 
+    # tan-cli#1509: a co-slice with no slot0 address cannot be named in the ATOC.
+    missing = next((i for i, sh in extras if sh.app_address is None), None)
+    if missing is not None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is required for slice "
+            f"'{missing}' to be signed into the same ATOC as '{entry_id}' (it becomes "
+            "app-gen-toc's mramAddress)."
+        )
+
     # tan-cli#1322: the DEVICE entry is part of the ATOC unless the operator opted
     # out. Resolved BEFORE the sign so a missing config refuses without spawning.
     device = None
@@ -2753,6 +2768,7 @@ def _resolve_flow_d_atoc_via_setools(
     signed = sign_slot0(
         setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address,
         device_config=device, on_scratch=_on_scratch,
+        extra_slices=[(i, sh.artefact, sh.app_address) for i, sh in extras],
     )
     if signed.shared_touched:
         block["sharedInstallTouched"] = list(signed.shared_touched)
@@ -2869,6 +2885,7 @@ def _flash_entry_body(
     of host, even though nothing here actually touches a real device). The
     real dispatch default (`os.stat`) is unchanged for every existing caller."""
     kind, entry_id = target.kind, target.id
+    co_ids = tuple(c.id for c in target.co_slices)
     lines: list[str] = []
 
     # A `recovery_only` entry reaches dispatch ONLY when the operator both named
@@ -2888,6 +2905,8 @@ def _flash_entry_body(
     preflight_facts: dict[str, Any] = {}
     flow_d_writes: list[dict[str, Any]] = []
     flow_d_ranges: list[tuple[int, int]] = []
+    # tan-cli#1509: the other slices signed into this entry's single ATOC.
+    extras: list[tuple[str, FlowDShape]] = []
 
     def entry(
         method: str | None,
@@ -3236,6 +3255,7 @@ def _flash_entry_body(
             flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
             shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
+            extras.extend(_co_slice_shapes(target, ctx))
             validate_flow_d_preflight_args(flash_args)
             resident_entries(flash_args)  # tan-cli#1322: a malformed list refuses now
             # tan-cli#487, defect 5: the SAME confirm gate `plan_alif_mram_
@@ -3333,9 +3353,10 @@ def _flash_entry_body(
                     refusal = (
                         f"{atoc_replacement_refusal(method, entry_id)} "
                         + replacement_detail(
-                            written_entries(entry_id, device_config=not ctx.no_device_config),
+                            written_entries(entry_id, *co_ids, device_config=not ctx.no_device_config),
                             resident_entries(flash_args),
                             device_config=not ctx.no_device_config,
+                            left_out=ctx.left_out_slices,
                         )
                     )
                     lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -3374,7 +3395,7 @@ def _flash_entry_body(
                     )
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
                 flash_args, shape, ctx, entry_id, confirm,
-                stack=scratch_stack, report=report,
+                stack=scratch_stack, report=report, extras=extras,
             )
             if report.get("setools", {}).get("signSkipped"):
                 note = f"{setools_note}. {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
@@ -3386,14 +3407,16 @@ def _flash_entry_body(
                           preview_sign_skipped=True),
                     lines,
                 )
-            flow_d_writes = _flow_d_writes(flash_args, shape)
+            flow_d_writes = _flow_d_writes(flash_args, shape, extras)
             flow_d_ranges = _flow_d_image_ranges(shape)
+            for _extra_id, extra in extras:
+                flow_d_ranges += _flow_d_image_ranges(extra)
             # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
             # that reaches into another write's first sector (or a resident entry the
             # new ATOC does not rewrite) would erase it. Refused before anything is
             # written -- under --dry-run too.
             rewritten = {e["name"] for e in report.get("atoc", {}).get("entries", ())} or set(
-                written_entries(entry_id, device_config=not ctx.no_device_config)
+                written_entries(entry_id, *co_ids, device_config=not ctx.no_device_config)
             )
             # A resident region that starts exactly where a write does IS that write's
             # predecessor and is REPLACED by it, whatever its name (the bench's
@@ -3432,6 +3455,7 @@ def _flash_entry_body(
         sku=ctx.sku,
         dry_run=ctx.dry_run,
         force_confirm=ctx.force_confirm,
+        extra_apps=tuple((i, sh.artefact, sh.app_address) for i, sh in extras),
     )
     try:
         plan = meta.build(inputs, available)
@@ -3473,9 +3497,10 @@ def _flash_entry_body(
                 f" {ATOC_REPLACEMENT_PREVIEW_NOTE} "
                 + replacement_detail(
                     signed_names
-                    or written_entries(entry_id, device_config=not ctx.no_device_config),
+                    or written_entries(entry_id, *co_ids, device_config=not ctx.no_device_config),
                     resident_entries(flash_args),
                     device_config=not ctx.no_device_config,
+                    left_out=ctx.left_out_slices,
                 )
             )
         signed = f"{setools_note}; " if setools_note else ""
@@ -3701,7 +3726,26 @@ def _flash_entry_body(
     ), lines
 
 
-def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
+def _co_slice_shapes(target: FlashTarget, ctx: _Context) -> list[tuple[str, FlowDShape]]:
+    """tan-cli#1509: `(id, shape)` for each further slice folded into `target`'s ATOC,
+    validated exactly as the lead slice is (MRAM-link guard, `.bin` resolution)."""
+    out: list[tuple[str, FlowDShape]] = []
+    for co in target.co_slices:
+        check_co_slice_args(target.id, target.flash_args, co.id, co.flash_args)
+        path = resolve_artefact_path(co.output_artefact or "", ctx.build_root, ctx.sdk_root, _is_file)
+        slot0 = slot0_address(co.flash_args)
+        unlinked = mram_link_guard(path, co.id, slot0=slot0) if slot0 is not None else None
+        if unlinked is not None:
+            err = FlashPlanError(unlinked)
+            err.code = CODE_NOT_MRAM_LINKED  # type: ignore[attr-defined]
+            raise err
+        out.append((co.id, validate_flow_d_shape(co.flash_args, path, _is_file)))
+    return out
+
+
+def _flow_d_writes(
+    flash_args: Any, shape: FlowDShape, extras: Sequence[tuple[str, FlowDShape]] = ()
+) -> list[dict[str, Any]]:
     """Every write a Flow D entry makes, as `{name, address, size, path,
     sectorSpan}` (tan-cli#1318, and the regions `--readback` re-reads): the app
     blob at `slot0_load_address` in the two-blob mramxip shape, then the ATOC at
@@ -3716,6 +3760,10 @@ def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
 
     if shape.app_address is not None:
         writes.append(planned_write("app", shape.app_address, _size(shape.artefact), shape.artefact))
+    for extra_id, extra in extras:  # tan-cli#1509: every app first, the one package last
+        writes.append(
+            planned_write(f"app:{extra_id}", extra.app_address, _size(extra.artefact), extra.artefact)
+        )
     atoc = fa_str(flash_args, "atoc")
     try:
         atoc_address = fa_str_checked(flash_args, "atoc_address", True)
@@ -4660,6 +4708,10 @@ def _run(
             sdk,
         )
     plan = plan_flash_targets(manifest, core, helper)
+    # tan-cli#1509: several signable alif_mram_jlink slices share ONE ATOC, else the
+    # last write delists the others. Not for --raw/--ram, which never sign.
+    targets = plan.targets if (raw or ram) else merge_flow_d_targets(plan.targets)
+    left_out = () if (raw or ram) else left_out_flow_d(manifest, targets)
 
     # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
     # `app_dir` the oracle uses (`venv_bin_dir`/`west_workspace_dir` both walk
@@ -4762,6 +4814,7 @@ def _run(
         ram_watch=ram_watch,
         raw=raw,
         assume_he=assume_he,
+        left_out_slices=left_out,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     if ram and raw:
@@ -4832,8 +4885,9 @@ def _run(
             return ExitCode.RUNTIME_FAILURE, _data(build_root, entries), issues, text_lines, sdk
     # ATOC section -> the entry of this run that wrote it (tan-cli#1267).
     written_by: dict[str, str] = {}
+    co_rows: dict[int, list[dict[str, Any]]] = {}
     watch_samples: list[dict[str, Any]] = []
-    for target in plan.targets:
+    for target in targets:
         if raw:
             from tan.commands.flash_raw import run_raw_entry
 
@@ -5092,6 +5146,18 @@ def _run(
             else:
                 issues.append(Issue("flash.atoc-guard-unavailable", "warning", entry.atoc_warning))
         entries.append(entry.as_dict())
+        if target.co_slices and rc >= 0:
+            # tan-cli#1509: each slice folded into the lead's ATOC still gets its own row,
+            # so a per-slice consumer sees it flashed. Spliced in after the counts below.
+            co_rows[len(entries) - 1] = [
+                {
+                    "kind": co.kind, "id": co.id, "method": entry.method,
+                    "status": entry.status, "rc": entry.rc,
+                    "message": f"{co.id}: written in the combined ATOC led by {entry.id} "
+                    f"({entry.status}): {entry.message}",
+                }
+                for co in target.co_slices
+            ]
         if "watch" in entry.extra:
             # tan-cli#1436: the samples ride in `data.watch[]`, not in the entry.
             watch_samples.extend(entries[-1].pop("watch"))
@@ -5194,6 +5260,8 @@ def _run(
     text_lines.append(f"flash: {failed} failure(s).")
 
     exit_code = ExitCode.RUNTIME_FAILURE if failed > 0 else ExitCode.SUCCESS
+    if co_rows:
+        entries = [row for i, e in enumerate(entries) for row in [e, *co_rows.get(i, ())]]
     data = _data(build_root, entries)
     if ram and watch_samples:
         data["watch"] = watch_samples

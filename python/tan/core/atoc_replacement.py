@@ -34,11 +34,14 @@ _RESIDENT_ITEM = re.compile(r"^([^@\s]+)(?:@(0[xX][0-9A-Fa-f]+)(?:\+(0[xX][0-9A-
 DEVICE_ENTRY = "DEVICE"
 
 
-def written_entries(entry_id: str, *, device_config: bool) -> tuple[str, ...]:
+def written_entries(
+    entry_id: str, *more: str, device_config: bool
+) -> tuple[str, ...]:
     """The entry names the new ATOC will carry, in table order, as known
     without signing: `DEVICE` (when a device config is included) then the
-    entry itself."""
-    return ((DEVICE_ENTRY,) if device_config else ()) + (entry_id,)
+    entry itself, then any further slices signed into the same ATOC (`more`,
+    tan-cli#1509)."""
+    return ((DEVICE_ENTRY,) if device_config else ()) + (entry_id, *more)
 
 
 def resident_regions(flash_args: Any) -> tuple[tuple[str, int | None, int | None], ...] | None:
@@ -81,9 +84,18 @@ def replacement_detail(
     resident: Sequence[str] | None,
     *,
     device_config: bool,
+    left_out: Sequence[str] = (),
 ) -> str:
-    """The sentence appended to the whole-ATOC refusal and preview note."""
+    """The sentence appended to the whole-ATOC refusal and preview note.
+    `left_out` (tan-cli#1509) names the manifest's other `alif_mram_jlink` slices
+    this run does not flash: they are in the manifest, so tan KNOWS they are
+    delisted whatever `resident_atoc_entries` says."""
     parts = [f"This ATOC names: {', '.join(writes)}."]
+    if left_out:
+        parts.append(
+            f"The manifest's other alif_mram_jlink slice(s) ({', '.join(left_out)}) are NOT "
+            "named, so they will be delisted too -- drop --core to flash them in the same ATOC."
+        )
     if not device_config:
         parts.append(
             "It carries NO DEVICE entry (--no-device-config), so the resident DEVICE "
