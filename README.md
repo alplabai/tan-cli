@@ -374,12 +374,33 @@ target class (e.g. a `yocto` A-cluster slice beside a `zephyr` M-core slice),
 share one target class (e.g. two Zephyr cores) is unaffected -- the classes
 fold to one and no flag is needed.
 
-The full command surface also includes `scaffold`, `completion`, `diff`,
-`pinmux`, `inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`,
-`model`, and `new-som`. `migrate`, `lock`, and `quality` forward to their
+`tan --help` is the authoritative list. Beyond the commands above, the surface
+includes `bootstrap`, `doctor`, `validate`, `generate`, `examples`, `sdk`,
+`monitor`, `probe`, `reset`, `scaffold`, `completion`, `diff`, `pinmux`,
+`inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`, `model`, and
+`new-som`. `tan probe identify` / `tan probe read ADDR [WORDS]` is a read-only
+J-Link inspector (it never writes, erases, halts, resets or runs). `migrate`, `lock`, and `quality` forward to their
 corresponding `west alp-*` commands: `migrate` requires `--check`,
 `--preview`, or `--apply`; `quality` requires `--profile`. The other
 commands run directly in `tan`.
+
+`tan model` has nine subcommands: `build` (compile `board.yaml` `models:` into
+`.alpmodel` packages), `doctor` (NPU-compiler toolchain availability), `check`,
+`list` (declared models next to what is already built), `zoo` (the SDK's model
+zoo; `--sku` filters to a SoM), `add <id>` (add a zoo model to the project),
+`prep <model.onnx>` (INT8-quantize with an accuracy report), and `run
+<model.onnx>` / `ab <model.onnx>` (time a host reference run, or compare two
+models). `run` and `ab` take `--device` to also report the on-device tier,
+from `--capture FILE` or live (a RAM-run of the built `diagnostics.link: itcm`
+project; the live form resets the device and needs `--confirm`). Run `tan model
+--help` for every flag.
+
+`tan flash`, `tan size` and `tan image` accept `--build-root PATH` to read the
+`system-manifest.yaml` from a build root other than `<project>/build`, the same
+root `tan build --build-root` wrote to.
+
+`diagnostics.console:` in `board.yaml` accepts `auto`, `ram`, `uart` and `alp`;
+`alp` is an alias of `uart` and produces identical output.
 
 `tan model check` statically screens a declared model's NPU eligibility with
 no NPU toolchain installed. It reports `npu-eligible` | `cpu-certain` |
@@ -436,7 +457,9 @@ one-off override:
 tan build --sdk-root /path/to/alp-sdk
 ```
 
-`tan sdk list` and `tan sdk current` work today. `tan sdk install` and
+`tan sdk list`, `tan sdk current` and `tan sdk remove <version|path>` work
+today (`remove` refuses the active or pinned install, or a path outside the
+cache root, unless `--force`). `tan sdk install` and
 `tan sdk switch` are not implemented yet, so clone the SDK yourself and use
 `--sdk-root` or let `tan init` write the project pin.
 

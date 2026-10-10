@@ -1078,7 +1078,7 @@ def model(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
         # option, not a second option -- it is what `build`, `run`, `kconfig`,
         # `validate`, `generate` and `inspect` all call the board file, and
-        # what `docs/CLI.md`'s "Common flags" tells a caller every command
+        # what alp-sdk-vscode's `docs/CLI.md` "Common flags" tells a caller every command
         # supports. Declared here so `accept_global_flags` sees it as already
         # covered and stops injecting an inert twin behind this one: a caller
         # who used the surface-wide spelling was served `./board.yaml`'s

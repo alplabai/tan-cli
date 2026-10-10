@@ -566,7 +566,7 @@ def test_compile_opts_paths_are_resolved_absolute_relative_to_board_dir(
 # --------------------------------------------------------------------------
 # tan-cli#398 -- `--board-yaml` is the spelling `build`/`run`/`kconfig`/
 # `validate`/`generate`/`inspect` all use for the board file, and the vscode
-# extension's own CLI contract (`docs/CLI.md`, "Common flags") lists it among
+# extension's own CLI contract (alp-sdk-vscode's `docs/CLI.md`, "Common flags") lists it among
 # the flags "All commands should support". `model` declared only `--board` and
 # took `--board-yaml` as one of `accept_global_flags`' INJECTED options, which
 # are accepted and then dropped -- harmless for an arity-0 `--verbose`, a
