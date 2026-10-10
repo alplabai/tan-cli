@@ -3629,14 +3629,31 @@ jobs:
       # about to be published under THIS tag still match the alp-sdk a
       # customer installing it today will pair it with" -- #889's whole
       # point. Release-blocking is the right call here where it is not there.
+      #
+      # A PRE-RELEASE tan tag (a hyphen, e.g. `v0.7.0-rc1` -- the same test
+      # release.yml's `prerelease:` flag uses) is measured against alp-sdk's
+      # newest published NON-DRAFT release INCLUDING pre-releases instead
+      # (tan-cli#1258, decided 2026-10-10: a tan rc may pair with an alp-sdk
+      # rc). `releases/latest` never returns a pre-release, so without this a
+      # tan rc cut on an alp-sdk rc floor is measured against the previous
+      # stable alp-sdk and reds by construction. A stable tan tag keeps
+      # `releases/latest`, unchanged. `/releases` lists newest-created first.
       - name: resolve latest published alp-sdk release
         id: alp_sdk_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAN_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+          case "${TAN_TAG}" in
+            *-*)
+              tag=$(gh api 'repos/alplabai/alp-sdk/releases?per_page=30' \
+                --jq '[.[] | select(.draft | not)][0].tag_name // ""')
+              echo "::notice::tan tag ${TAN_TAG} is a pre-release: resolving alp-sdk's newest non-draft release, pre-releases included" ;;
+            *)
+              tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name) ;;
+          esac
           case "${tag}" in
             ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
               echo "::error::alp-sdk releases/latest returned something that is not a plain git ref: '${tag}'"

@@ -86,4 +86,4 @@
 # `python/pyproject.toml` moves with it. Nothing else about the readiness
 # picture above changes: the alp-sdk-floor blocker this file already
 # documented (tan-cli#1258) still gates the tag push, under the new number.
-TAN_VERSION = "0.7.0"
+TAN_VERSION = "0.7.0-rc1"

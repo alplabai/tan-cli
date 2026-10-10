@@ -535,9 +535,10 @@ user sees first: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an
 ancestor of `7d58ef32`, so every checkout with the field already has the
 region.
 
-**NOT CLEARED as of 2026-10-10 -- `dev` is not taggable.** The planner mirror,
-the vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
-`a5a137c7b594ebb5d451177803c0eb324069e86b`. The release a tag push is measured
+**NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
+cleared separately; see "Pre-release cut" below. The planner mirror, the
+vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
+`1d20103ba367668ab4ed9b139dc69c246198d2f1`. The release a tag push is measured
 against is the stable `v0.16.0`, which contains none of the six commits below.
 The pre-release `v0.17.0-rc1` (2026-10-08) contains the floor commit
 `b04bb0f7a0edf6af759053311ba66eda0158968b` (`compare/b04bb0f7a...v0.17.0-rc1`
@@ -578,6 +579,22 @@ The same option 3 as tan-cli#591: tan `0.7.0` waits for a STABLE alp-sdk
 release whose tag contains `b04bb0f7a0edf6af759053311ba66eda0158968b`.
 alp-sdk#2047 (milestone `v0.17.0`) tracks cutting it. No SDK-capability gate
 is added around `memory[]` or any other row.
+
+**Pre-release cut (maintainer, 2026-10-10).** That decision binds the stable
+`0.7.0` only. The maintainer approved a tan pre-release, `v0.7.0-rc1`, paired
+with an alp-sdk pre-release. For a hyphenated tan tag, `release-sdk-parity`
+now resolves alp-sdk's newest non-draft release, pre-releases included. A
+stable tan tag still uses `releases/latest`, so the stable gate above is
+unchanged. `v0.17.0-rc1` could not be the pair; measured against it on
+2026-10-10, the job's own steps gave:
+- `scaffold_byte_parity.py` exit 1, 2 of 10 pairs FAIL (`edge-ai/E1M-AEN801`
+  and `edge-ai/E1M-V2N101`, `src/cold_chain.c: content differs`);
+- the planner module 76 failed, every AEN `zephyr-board` emit exiting 3 with
+  `SdkTooOldError` (`aen.som_power_domains`, alp-sdk#2784, schema added in
+  `4b206c8a60d56af318741491a6fecdc499dfcd36`, which is not in rc1).
+
+So alp-sdk `v0.17.0-rc2` was cut at the pin,
+`1d20103ba367668ab4ed9b139dc69c246198d2f1`, and tan `v0.7.0-rc1` requires it.
 
 - **The floor is not the pin.** Each planner re-sync (tan-cli#1268, #1275,
   #1278, #1309, #1216, #1401, #1425, #1393) moved the pin along the same seven

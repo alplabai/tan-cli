@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.7.0] — Unreleased
+## [0.7.0-rc1] — 2026-10-10
 
 **BREAKING: this release ships changes that break a v0.6.0
 consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
@@ -68,19 +68,24 @@ exact before/after:
   publishes `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant`
   no longer offers `u65` (tan-cli#1425)
 
-*This release requires alp-sdk **v0.17.0** (stable release pending,
-alp-sdk#2047) or newer. tan's planner mirror, vendored scaffold and planner
-oracle are pinned to alp-sdk `a5a137c7b594ebb5d451177803c0eb324069e86b`, but
-the floor is the commit above: the first alp-sdk release containing
-`b04bb0f7a0edf6af759053311ba66eda0158968b`. As of 2026-10-10 the pre-release
-`v0.17.0-rc1` contains it and the newest stable release is `v0.16.0`, which
-is too old: it lacks `metadata/e1m_modules/aen/on-module-links.yaml`,
+*This pre-release requires alp-sdk **`v0.17.0-rc2`** or newer (a pre-release;
+the stable `v0.17.0` is tracked in alp-sdk#2047). tan's planner mirror,
+vendored scaffold and planner oracle are pinned to alp-sdk
+`1d20103ba367668ab4ed9b139dc69c246198d2f1`, which `v0.17.0-rc2` is cut at.
+The floor is the first alp-sdk release containing
+`4b206c8a60d56af318741491a6fecdc499dfcd36` (alp-sdk#2793, the AEN SoM
+`power_domains:` block, alp-sdk#2784), which descends from the earlier floor
+`b04bb0f7a0edf6af759053311ba66eda0158968b`. `v0.17.0-rc1` is too old: every
+AEN `tan generate --target zephyr-board` exits 3 with `SdkTooOldError` on it
+(measured 2026-10-10). The newest stable release, `v0.16.0`, is older still:
+it lacks `metadata/e1m_modules/aen/on-module-links.yaml`,
 `metadata/e1m_modules/v2n/supervisor-links.yaml`, the `ALP_SDK_SOM_HW_REV`
 Kconfig symbol, the som-preset v2 presets (alp-sdk#2024), the som-preset
 `inference.auto_order` field (alp-sdk#2677) and the SoC spec's
-`openamp_carveout` block (alp-sdk#2685). Do not tag until a stable release
-containing the floor exists; if its number differs, correct this line. See
-`docs/release-contract.md` and tan-cli#1258.*
+`openamp_carveout` block (alp-sdk#2685). This rc is measured against alp-sdk's
+newest pre-release rather than `releases/latest` (tan-cli#1258); the stable
+`0.7.0` still waits for a stable alp-sdk release containing the floor. See
+`docs/release-contract.md`.*
 
 ### Fixed
 
@@ -8267,6 +8272,495 @@ containing the floor exists; if its number differs, correct this line. See
   updates; and a genuinely hanging (not 404ing) mirror leaves `sources.list`
   completely untouched and exhausts via the pre-existing timeout path.
 
+- **The planner's never-guess IPC refusal carries upstream's ADR-0034
+  citation again, byte-identical to alp-sdk.** When a `memory_map` region has
+  an unresolved base and authors neither `write_authority` nor a legacy
+  `carveout` flag, `tan/planner/carveout.py`'s eligibility check refuses it.
+  tan's reason ended `class unresolved, never guessed`, while alp-sdk's ends
+  `class unresolved, never guessed (ADR-0034 clause 4)` (at `c81cb5db`, and
+  at `15b2f32c`/`20fec7a7` before it). The reason is emitted text: it is
+  carried into the blocked IPC entry's reason and from there into the
+  `BLOCKED:` comments of `ipc-contract-h` and `dts-reservations`, so a
+  preset row of that shape would have made tan's bytes differ from alp-sdk's.
+  No shipped preset reaches the leg today. Dropping the citation was not a
+  relocation convention: `cli.py` and `partition.py` keep their emitted ADR
+  citations, and among the modules mirrored from `scripts/alp_orchestrate/`
+  this was the only emitted string that had lost one. The ported test now
+  pins the whole upstream tail instead of the looser `"never guessed"`
+  substring.
+
+- **`tan flash` and `tan run --flash` now honour the `alif_flash` runner's ATOC guard on a Flow A slice, and take `--replace-atoc` to override it.**
+  A `zephyr_west_flash` slice on the `alif_flash` west runner burns over the
+  SE-UART and replaces the whole ATOC, which silently delists any resident
+  entry the new one does not name (an A32 boot chain, the other core's app).
+  alp-sdk#2262 made the runner read the resident ATOC first and refuse; tan
+  now reads the runner's verdict (`<build_dir>/alif_flash/atoc-guard.json`,
+  schema `alp-sdk.alif-flash-atoc-guard.v1`) and reports a refusal as the
+  new `flash.atoc-guard-refused`, naming every resident entry it would have
+  delisted. When that entry is one an earlier core of the same run just
+  wrote, the message says the manifest cannot be Flow A-flashed one core
+  after another and points at alp-sdk's `flash-run-dualcore.sh`, not at the
+  override. `--replace-atoc` is a separate flag from Flow D's
+  `--atoc-unqueryable`, and neither is accepted for the other. It reaches
+  `west flash` only for a slice whose runner is `alif_flash` and has the
+  guard, and only one such slice per run: a run where it would reach more is
+  refused before anything is written (`flash.replace-atoc-ambiguous`; narrow
+  it with `--core`). The runner checked is the one in the alp-sdk module the
+  build used (its `zephyr_modules.txt`), not just the SDK tan is bound to; a
+  runner without the guard, or a guarded write that succeeds with no verdict,
+  is reported as `flash.atoc-guard-unavailable`. Passed where it does not
+  apply, the flag warns `flash.replace-atoc-not-applicable`; `tan run`
+  without a flash warns `run.flash-flags-ignored` for it and for
+  `--atoc-unqueryable`. A missing, unreadable or inconsistent verdict stays
+  `flash.entry-failed` with a note saying so, and tan removes an earlier
+  run's verdict before spawning so an old one is never reported as this
+  attempt's. A relative `flash_args.build_dir` is now anchored on the
+  directory `west flash` runs in, and a single-domain sysbuild is followed
+  into its domain. There is no manifest spelling. See `docs/setools.md`.
+  `tan flash --ram --replace-atoc` now warns `flash.replace-atoc-ignored` (a RAM-run never writes the ATOC) instead of dropping the flag silently.
+
+- **`tan build`'s planner no longer offers `flash_device: ospi0`/`ospi1` on a
+  SKU whose preset declares that part not fitted.** ADR-0026 lockstep for
+  alp-sdk#2311: `_known_flash_devices()` (`tan/planner/partition.py`) still
+  advertised an `on_module.ospi_memories:` key as a legal
+  `storage[].flash_device:` target even when the SoM preset marks it
+  `assembled: false`, and `_resolve_flash_device()` resolved it to a live
+  descriptor from `capacity_mbit` alone — on `E1M-AEN801`, whose preset
+  declares `ospi0`/`ospi1` unfitted, a `storage:` entry naming `ospi0`
+  silently planned a 32 MiB partition on silicon that carries no such part.
+
+  Both are fixed: `_known_flash_devices()` excludes an `assembled: false` key
+  from the advertised set, and `_resolve_flash_device()` refuses it directly
+  (defense in depth for a hand-built project bypassing the loader's
+  cross-check), naming the SKU, the device, and the declaring preset file.
+  `assembled: optional` and an absent key (schema default: `true`) are
+  unaffected. Ported line-for-line from alp-sdk's
+  `scripts/alp_orchestrate/partition.py`.
+
+  The same bug class hit the loader's own cross-field checks
+  (`tan/planner/loader.py`): `storage[].flash_device` accepted an
+  `on_module.ospi_memories:` key without checking `assembled`, and so did
+  `security.psa.{its,ps}_storage`, so both could name `ospi0` on
+  `E1M-AEN801` and pass. The loader now shares
+  `_is_ospi_key_unassembled()` for all three checks and raises the
+  specific "not assembled" reason instead of the generic "does not
+  resolve" message.
+- **The generated V2N/V2M `m33_sm` board tree no longer wires `&i2c8`
+  (RIIC8/BRD_I2C) as a CM33 Zephyr device.** ADR-0020 lockstep for
+  alp-sdk#2288: BRD_I2C moved to the Cortex-A55/Linux side of the SoM (it is
+  the on-module housekeeping bus the GD32 supervisor uses, and only Linux
+  ever masters it — `metadata/e1m_modules/v2n/core-ownership.yaml`), so the
+  CM33 must never open it. `tan/planner/zephyr_board.py`'s `_v2n_dts` no
+  longer emits a `brd_i2c` alias or a `pinctrl-0`/`clock-frequency`/`status
+  = "okay"` node for it — the node stays present with `status = "disabled"`
+  only, so `alp_i2c_open()` on this board resolves no `bus_id` for it.
+  `_v2n_defconfig` now asserts `brd_i2c.get("status") != "disabled"` (was
+  `!= "enabled"`) and drops `CONFIG_I2C=y` — the on-module GD32G553
+  supervisor bridge is SPI-only from the CM33's side now. Ported
+  line-for-line from alp-sdk's `scripts/gen_zephyr_board.py`.
+
+- **`tan build` refuses `security.psa.attestation_root: optiga_trust_m` on a
+  SKU whose OPTIGA Trust M is not fitted.** ADR-0020 lockstep for
+  alp-sdk#2316: `E1M-AEN801`/`E1M-AEN803` name the part under `on_module:`
+  and `capabilities:`, but their `on_module.i2c_devices` entry for it is
+  `assembled: false`, and the loader accepted the attestation root anyway --
+  the image built and then had no secure element to attest with on silicon.
+  `tan/planner/loader.py` now refuses it with "board.yaml
+  `security.psa.attestation_root: optiga_trust_m` names on-module part
+  'optiga_trust_m', which is not assembled on SoM <SKU> (assembled: false in
+  metadata/e1m_modules/<SKU>.yaml); pick `tfm_internal` or `none`, or switch
+  to a SKU that carries OPTIGA Trust M". A part the preset never lists under
+  `i2c_devices` is unaffected. Ported line-for-line from alp-sdk's
+  `scripts/alp_orchestrate/loader.py` (`_is_i2c_chip_unassembled`), the same
+  shape as the #2311 OSPI guard.
+
+- **`tan build --materialise` no longer refuses a plan because a config
+  artefact keeps a `${NAME}` the project wrote on purpose.** alp-sdk's
+  `connectivity/iot-fleet-ota` writes `ota.server.tenant:
+  "${MENDER_TENANT_TOKEN}"` in `board.yaml` for the build host or the device
+  to fill, and the planner copies it into the emitted config, so the
+  unresolved-token guard refused the whole plan with
+  `build.plan-token-unresolved`. Such a placeholder now stays untouched in a
+  `.conf` file under `slices[*].configArtefacts[*].contents`, reported once
+  per name as the new issue `build.deferred-placeholder`, when the plan's
+  `deferredPlaceholders` lists it (alplabai/alp-sdk#2696; `tan`'s own planner
+  emits the field on every plan, see tan-cli#1309). It is `info`, or
+  `warning` on a live Kconfig line, since Kconfig does not expand `${NAME}`
+  and the firmware would carry the literal text. A plan without the field,
+  or with a malformed one, exempts nothing, and the refusal says which. Every
+  other field, a `.cmake` artefact, the four plan path tokens and any
+  malformed name keep refusing exactly as before, and the refusal gains a
+  hint when a plan list would have admitted the name.
+
+- **A schema file that is valid JSON but not a valid JSON Schema no longer crashes the commands that read SoC and SoM metadata.**
+  `metadata_schema.validate_document` promised never to raise, but a schema
+  such as `{"type": 5}` escaped it as a raw `TypeError` out of `jsonschema`,
+  so `tan presets`, `tan size` and the planner's metadata reads ended in a
+  traceback. The schema is now checked against the JSON Schema metaschema
+  first, and such a file is reported the way an unparseable one already was:
+  one `could not validate against <schema>: not a valid JSON Schema: ...`
+  message, with the document left unvalidated rather than trusted.
+
+- **The seam-1 plan-shape comparator ignores `deferredPlaceholders`, as alp-sdk's own copy does.**
+  alp-sdk#2705 adds the field to every build plan the SDK emits, and the
+  frozen oracle predates it, so tan's vendored comparator would have reported
+  it as a shape delta on every oracle board as soon as the pin moves past
+  that change. The field is derived only from config-artefact contents,
+  which seam 1 already leaves to the emit-snapshot goldens; any other new
+  top-level key still fails the comparison.
+
+- **`tan build` no longer lets CMake pick a shadowing older Python when no workspace venv exists.**
+  With no venv, the Zephyr slice got a bare `-DPython3_EXECUTABLE=python3`, so
+  CMake's own search could resolve e.g. `~/.local/bin/python3.10` and die with
+  `Could NOT find Python3: Found unsuitable version "3.10.20"` while
+  `tan doctor`'s `hostPython` passed on `/usr/bin/python3` 3.14. Build now bakes
+  the absolute, forward-slashed path of an interpreter chosen by the same
+  resolver doctor uses (`tan.core.host_python`): at or above doctor's effective
+  floor (`tan.core.python_floor`, the SDK manifest and Zephyr's `python.cmake`,
+  not a constant) and able to import `west`, scanned across every
+  `python3`/`python`/`python3.N` on PATH (a tan install venv first on PATH has no
+  `west`). A workspace venv still wins.
+  When none qualifies, a slice that would otherwise run fails with the new
+  `build.host-python-unsuitable`, naming each candidate and why (too old / no
+  `west`); a slice `executionPolicy` skips (e.g. `west` missing) stays skipped,
+  and `--materialise` only warns. `tan doctor`'s `hostPython` now warns (same
+  id) in that situation, pointing at `tan bootstrap`.
+  Every `python -c` probe, `tan monitor`'s miniterm launch and bootstrap's pip
+  probe run from a fresh empty directory, so a `west.py`/`serial/` planted in
+  the project or SDK dir cannot execute. Remaining `bootstrap` `-m` spawns: #1331.
+
+- **A Flow D write whose sectors overlap is refused before anything runs.** The AEN
+  MRAM loader rewrites whole 16 KiB sectors and fills the rest with 0xFF, so an app
+  whose tail reaches the first sector of the ATOC (or an entry listed in
+  `flash_args.resident_atoc_entries` as `NAME@0xADDR[+0xSIZE]` that the new ATOC
+  does not rewrite) would have a neighbour's head erased. `tan flash` now computes
+  the sector spans from the file sizes and refuses with the new
+  `flash.write-sector-overlap`, under `--dry-run` too.
+
+- **The Flow D "needs a SIGNED ATOC" refusal names the real SKU.** It said "an
+  AEN801 slot0 image" for every Alif build, including an E1M-AEN803. The text
+  now names the manifest's own `hw_info.sku` and `flash_args.jlink_flash_device`
+  (`the E1M-AEN803 slot0 image (AE822FA0E5597LS0_M55_HE) needs a SIGNED ATOC`),
+  and falls back to a SKU-free noun when the manifest carries neither.
+
+- **`tan doctor`'s `setools` check no longer tells a Flow D host that MRAM
+  flashing "will fail" for want of `$SE_UART`.** Fixes `#1323`. The check
+  asserted the Flow A (`west flash`, `alif_flash` runner) requirement for every
+  host, but a planner-emitted AEN manifest dispatches Flow D (`alif_mram_jlink`),
+  which needs SETOOLS only to sign the ATOC (`app-gen-toc`) plus a J-Link, and
+  never touches the SE-UART. With a built project in scope
+  (`<board.yaml dir>/build/system-manifest.yaml`), the check resolves the method
+  exactly as `tan flash` does (`select_flash_method`) and warns about
+  `$SE_UART` only for Flow A; for Flow D it checks that `app-gen-toc` is present
+  and executable and that `JLinkExe`/`JLink` is available the way `tan flash`
+  finds it (PATH or the workspace venv). The SETOOLS directory is read as
+  `$SETOOLS_DIR`, then the manifest's `flash_args.setools_dir`; a
+  `--setools-dir` flag given to `tan flash` is not visible to doctor, and the
+  detail says so. With no project, the verdict is phrased per method instead of
+  asserting Flow A, and it no longer warns about `$SE_UART` or `app-write-mram`
+  (neither is needed by Flow D; the Flow A pair is checked once a manifest
+  selects Flow A). The `doctor.setools` code and `setools` check id are
+  unchanged.
+
+- **`tan flash` no longer writes into the shared SETOOLS install.** A Flow D run
+  signed the ATOC inside `--setools-dir`, overwriting `build/AppTocPackage.bin`
+  (a 193536 B package was replaced by a 2640 B app-only one), creating
+  `build/images/`, `build/config/` and `build/tan-atoc/`, appending to
+  `build/app-package-map.txt` and leaving a lock file, so every other user of
+  that install found a different package than they left. The sign now runs in a
+  private scratch overlay (small directories copied, the large `alif/` directory
+  and the tools symlinked, a fresh `build/`); the install is byte-identical
+  afterwards (sha256-pinned in the tests). The scratch path is reported as
+  `setools: {dir, source, scratch, scratchRemoved}` on the entry and the tree is
+  removed when the entry ends. The cross-process sign lock tan-cli#380 added is
+  gone with the shared output it protected: two runs get two scratch trees and
+  cannot cross-pair. Because the sign is now side-effect-free, `--dry-run` and an
+  unconfirmed run run `app-gen-toc` in the scratch tree too (they still never
+  spawn the J-Link tool), so their preview reports the real ATOC placement.
+  A preview (`--dry-run` or an unconfirmed run) only runs `app-gen-toc` when the
+  SETOOLS install came from the operator (`--setools-dir` or `SETOOLS_DIR`); an
+  install named only by `flash_args.setools_dir` -- which the project controls --
+  is not executed for a preview: the entry says "ATOC placement not computed; pass
+  --setools-dir to preview it" and carries the info code
+  `flash.preview-sign-skipped`. Every top-level SETOOLS directory except `alif/` is
+  copied into the scratch tree and the signing keys (`utils/key`) are linked rather
+  than duplicated into the temp directory; the scratch tree is registered for
+  removal before the tool runs, and paths in the shared install that changed
+  during a sign are reported as `setools.sharedInstallTouched`. ATOC entry names no
+  longer carry `app-gen-toc`'s NUL padding. A device configuration whose
+  `metadata.device` is another Alif family than the slice's J-Link part profile is
+  reported (`setools.deviceConfig.metadataDevice`, warning
+  `flash.device-config-mismatch`, noting the metadata may be stale) but accepted.
+
+- **`tan monitor` follow-ups from the bench.** `--capture --until` now stops at
+  the end of the matched line: bytes after it in the same read are no longer
+  logged or counted in `bytesSeen`/`bytesSeenTail`. `--log` is validated
+  (symlink, non-regular file, missing or unwritable parent) before the serial
+  port is opened, so a bad path no longer costs an RFC2217 connect, and a FIFO
+  is reported as "not a regular file" instead of `[Errno 6]`. `--help` now says
+  to use `rfc2217://` against ser2net: `socket://` to a telnet port delivers
+  IAC negotiation bytes as data and adds about 4 s.
+
+- The `flash.write-sector-overlap` check treats a resident entry that starts exactly where a write does as replaced by it, whatever its name (a bench `ALP-HE@0x80010000` vs tan's `m55_he` is a legitimate re-flash), and its message no longer claims the ATOC "does not rewrite" such an entry. `flash.device-config-mismatch` is `info` for SETOOLS' own stock config (stale E7 metadata on every default E8 run) and `warning` for a project-supplied one. Transcript rotation matches `alif_mram_jlink-<core>-<timestamp>` exactly, so core `m55` never rotates `m55-hp`'s logs. docs/setools.md notes the SIGKILL leftover and the Windows key-copy fallback.
+  Review round: `_execute`, the DPIDR preflight and the guard never re-resolve the J-Link themselves (a missing binary is the refusal, and `--readback` uses the run's binary); the manifest-only-SETOOLS refusal is hoisted ahead of the probe listing and preflight, so no process spawns first; a PATH entry that is a project virtualenv's `bin` (an activated project `.venv`) is skipped when resolving the J-Link.
+  A refusal that comes after the read-only DPIDR preflight (a sector overlap, say) still reports the SW-DP ID the preflight read, as `jlink.dpidr` with `dpidrSource: preflight`.
+
+- **`tan init --from-example --som <SKU>` renames per-board files onto the
+  chosen SKU's board target, and `tan build` warns on a dead one**
+  (tan-cli#1351): an AEN801 example scaffolded onto `E1M-AEN803` kept
+  `boards/alp_e1m_aen801_m55_he_ae822fa0e5597ls0_rtss_he.{conf,overlay}`,
+  which Zephyr never applies to `alp_e1m_aen803_m55_he/ae822fa0e5597ls0/rtss_he`.
+  The files are now renamed by core id from the SKU's `topology.<core>.board`.
+  `tan build` reports `build.board-file-unmatched` (warning) for any
+  `boards/alp_e1m_*.conf|.overlay` that matches no zephyr slice's board.
+
+- **`tan flash` refuses to write an ITCM-linked image to the app's MRAM slot.** For the
+  Flow D (`alif_mram_jlink`) shapes tan controls -- the mramxip `loadbin` at
+  `slot0_load_address` and the SETOOLS `app-gen-toc` auto-sign -- the artefact ELF's
+  LOAD segments are read before anything spawns, and `flash.mram-image-not-mram-linked`
+  refuses an image whose lowest `p_paddr` (with file content) is below
+  `slot0_load_address`, under `--dry-run` too. It is defence in depth behind the
+  manifest's `ram_run_only` refusal, for a stale or hand-edited manifest. An ELF whose
+  program headers cannot be parsed (ELF64, big-endian, truncated) is refused, not
+  skipped, and so is a raw `.bin` whose same-stem `.elf` is more than a minute older
+  than it. The check is a lower bound only: an image linked above its own slot (an
+  M55-HP image at `0x802B0000` written to the M55-HE slot `0x80010000`) is not caught,
+  and equality is not required because an image header can offset the first segment. Not
+  checked: an operator-supplied ATOC with no `slot0_load_address` (it may carry a
+  legitimate ITCM load entry), `west flash` / `baremetal_cmake_flash`, and Flow A
+  (`zephyr_west_flash` on the `alif_flash` runner), which relies on that runner's own
+  refusal of a bad reset vector and supports images linked at the ITCM global alias.
+
+- **`tan bootstrap` now applies alp-sdk's `zephyr/patches.yml`, so a tan-made workspace can build what needs those patches.**
+  alp-sdk's `scripts/bootstrap.sh` applies and documents them as required to
+  build, but `tan bootstrap` never did: on an unpatched workspace the
+  `peripheral-io/hello-world` example for E1M-AEN801 (m55_hp slice) stopped
+  compiling with `'struct ipm_driver_api' has no member named 'poll_out'` once
+  alp-sdk's `ipm_arm_mhuv2.c` started needing the `poll_out`/`poll_in` IPM patch
+  (the nightly `e2e-container` failure). A new phase runs after the pip
+  installs, verifies with the SDK's `scripts/verify_west_patches.py`, applies
+  only the modules still unpatched with `west patch --dst-module <m> apply`
+  (a bare `west patch apply` is not idempotent on a partially patched tree),
+  and re-verifies. A failure is `bootstrap.west-patches-failed` (blocks
+  `complete.` unless `--allow-partial`); modules absent from a narrow workspace
+  are the non-blocking `bootstrap.west-patches-unchecked`. A failed apply names
+  `west patch --dst-module <m> clean` as the way out. An SDK tag without the
+  verifier skips the phase. New `--no-patches` skips the phase entirely (the
+  workspace's module trees are then left untouched and `zephyr/patches.yml` is
+  NOT applied); `data.noPatches` reports it. Refs #1296 (the nightly `e2e-container` run that first hit it).
+
+- **The workspace patch-check cache no longer weakens silently, and now fingerprints every file a patch touches.** `_patched_files` returned a partial list when a `zephyr/patches/<entry>` could not be read, so the cache key degraded toward HEAD-only and a `west patch clean` or `git checkout -- .` revert of the dropped files went unnoticed. It now returns `None` on any read error and on an empty list, and `tan build` skips the cache, runs the verifier on every build and says why in the new info issue `build.workspace-patches-uncached`. The paths come from a new `tan.core.patch_paths`, which reads the `diff --git a/<old> b/<new>` header (pure renames, mode-only changes and binary patches), `--- a/<path>` (a file a patch deletes, `+++ /dev/null`) and `+++ b/<path>`, only as headers and never as hunk content, with GNU-diff timestamps cut and git-quoted paths unquoted.
+
+- **`tan model run --device` / `ab --device` no longer reports an energy
+  figure the device itself called noise.** On the bench, the
+  aen-inference-energy app printed `RESULT FAIL: delta not resolvable --
+  mean=0.000002 spread=0.000008`, and tan still answered `ok:true` with
+  `energy.valueMjPerInference` 2.446e-06 and a spread three times larger. When
+  the app prints that verdict, or (if it printed no verdict) when the
+  pair-to-pair mean does not clear the app's own bar of 3 standard errors
+  (`mean > 0` for a single pair), `result.energy` is now null. The raw mean,
+  spread, rail and pair count are kept in `diagnostics.unresolvedEnergy`, and
+  a `model.device-energy-unresolved` warning names the rail and the reason. A
+  device `RESULT PASS: ... mJ/inference` keeps the value. The device's
+  `RESULT FAIL` lines now appear in `diagnostics.warnLines`. Latency is
+  unaffected.
+
+- **`tan generate --target cmake-args` refuses a board.yaml `cameras:` entry no core can build with one clean error, and an AEN `zephyr-board` emit against an alp-sdk checkout older than the SoM `power_domains:` block names the SDK floor.** The cmake-args render used to let the planner's raw `CameraSelectError` escape; it now refuses through `PlannerEmitError`, as alp-sdk's `alp_project.py --emit cmake-args` does (alp-sdk#2791). The `alp,som-power` port (alp-sdk#2784) raised a schemaVersion error blaming `metadata/e1m_modules/aen/on-module-links.yaml` when the bound checkout simply predates `on-module-links-v2`; that case is now `SdkTooOldError` (`aen.som_power_domains`). Closes #1393.
+
+- **`tan flash --ram` works on a `diagnostics.link: itcm` project again** (tan-cli#1399). The RAM-only whole-run refusal (`flash.ram-run-only-project`) also fired on `--ram` runs, which refused the exact `tan flash --ram --core <id>` its own message recommends. `--ram` is now forwarded to the rule. Plain `tan flash` on such a project is still refused.
+
+- **A generated RAM-console size never shrinks an app-set one.** `diagnostics.console: ram` used to emit a bare `CONFIG_RAM_CONSOLE_BUFFER_SIZE=2048` after the app's `prj.conf`, silently shrinking a larger app buffer so the console wrapped (alp-sdk#2774). It now emits max(2048, the size the slice's own `prj.conf` sets), and `diagnostics.link: itcm`'s `alp-link-itcm.conf` does the same with its 16384 floor, which has no upstream counterpart. Only `prj.conf` is read: a size set in `boards/<board>.conf`, `prj_<board>.conf` or an app `EXTRA_CONF_FILE` still loses to the floor. The re-sync (alp-sdk#2774) also re-vendors the scaffold's doc links to `v0.17.0-rc1` and recaptures the planner oracle (the plan's `sdkVersion`). Closes #1401.
+
+- **`tan size` no longer reports a false over-budget RAM for a `diagnostics.link: itcm` image with SRAM0-staged data** (tan-cli#1402). RAM summed every writable section whatever its address, so model data linked into SRAM0 was charged against the core's 256 KB DTCM budget (a false over-budget RAM figure). Writable sections placed in the SRAM0 aperture are now left out of RAM, for both the size tool and the section-header reader.
+
+- **`build.board-file-unmatched` no longer flags another board's per-board files** (tan-cli#1403). A `boards/alp_e1m_*` file named for a different real board target (another SKU, SoC family or core, as declared by the SDK's SoM presets) is left alone instead of being reported as misnamed with a wrong rename suggestion. Names that match no real board, such as a typo of this board's target, still warn.
+
+- **`tan model run --device` reports the model, peak SRAM and the device's own latency** (tan-cli#1404). `model` and `peakSramKib` came back `null` although `ENERGY-CFG` carries `model` and `sram_peak_bytes`, and `latencyMs` ignored the app's `LATENCY-RESULT`. `model` now falls back to `ENERGY-CFG` `model`, `peakSramKib` is `sram_peak_bytes / 1024`, and `latencyMs` is `LATENCY-RESULT` `ms_per_inference` when the app printed one.
+
+- **`tan flash`, `tan size` and `tan image` accept the same `--build-root X` that `tan build` does** (tan-cli#1405). `tan build --build-root X` writes `X/build/system-manifest.yaml`, but the consumers only looked at `X/system-manifest.yaml`, so the same value failed with `flash.manifest-not-found`. They now try `X/system-manifest.yaml` first, then `X/build/system-manifest.yaml`, a miss names both paths, and once found the manifest's own directory is the build root, so its relative artefact paths resolve under `X/build`.
+
+- **`flash.sdk-root-not-found` and `build.sdk-root-unresolved` now say where
+  tan looked for alp-sdk.** For a project outside every alp-sdk checkout (a
+  scratch project in a temp directory, say), `tan flash` answered only
+  "Cannot locate alp-sdk root." Both refusals now name each place tan's
+  lookup tried, and that none of them gave a usable checkout:
+  `--sdk-root`, the project pin `<project>/.alp/sdk-path`, the global
+  default `~/.alp/sdk-default`, and the project directory, its `alp-sdk/`
+  child, the sibling `../alp-sdk` and `../alp-sdk-upstream`, and every
+  directory above it. `flash` now also offers `--sdk-root`, which `build`
+  already did. No environment variable is suggested: `ALP_SDK_ROOT` is not
+  part of the lookup.
+
+- **A Flow A `flash.atoc-guard-refused` message no longer drowns in west's
+  runner-loading warnings.** Its `West reported:` tail keeps only the last 4
+  lines of west's output, and on a host missing a runner's optional Python
+  packages two of those were `The module for runner "rtsflash" could not be
+  imported (No module named 'usb')` and `WARNING: runners.alif_flash: the
+  'fdt' Python package (needed by app-gen-toc) was not found`, burying the
+  guard's verdict. On a refusal those two notices, matched by their wording
+  and not by logger name, now move out of the message verbatim into the new
+  warning `flash.runner-setup-warnings`. Any other runner warning stays in
+  the refusal, and a failure the guard did not refuse keeps them all, since
+  there a runner that could not be imported can be the cause.
+
+- **`tan build --sdk-root <sibling checkout>` with the app outside every west
+  workspace is now refused up front as `build.workspace-unresolved`, instead
+  of failing inside west.** When the checkout is not the manifest project of
+  any workspace tan can see (for example a git worktree under `~/.cache`) and
+  the app lives outside every workspace tree (for example under `/tmp`),
+  tan found no workspace and ran `west build` from the app directory, where
+  west stopped with `west: unknown command "build"; do you need to run this
+  inside a workspace?` under only the generic `build.slice-failed`. The slice
+  is now refused before west is spawned, and the message names the
+  directory west would have run from, `ZEPHYR_BASE`, and the two places next
+  to the SDK root tan looked. It offers two remedies: `tan bootstrap
+  --sdk-root <checkout>`, or a `ZEPHYR_BASE` pointing at an existing
+  workspace's `zephyr/`, with the warning that this builds against that
+  workspace's Zephyr revision and patches. The refusal follows what west
+  itself would do, so an app inside some workspace tree, or a `ZEPHYR_BASE`
+  inside one, still goes to west exactly as before. tan does not pick a
+  workspace for a sibling checkout: nothing records which workspace one
+  belongs to.
+
+- **`tan doctor`'s `workspace` check now agrees with `tan build` for an
+  `--sdk-root` checkout that no west workspace has as its manifest** (a
+  sibling git worktree, for example). With the project inside a workspace
+  tree whose manifest names a different alp-sdk, doctor said `fail` with "no
+  Zephyr workspace -- run `tan bootstrap`" although the build succeeds there:
+  west's own walk finds that `.west`. It now says `warn`, naming the
+  workspace west will use and the manifest it names, since the build runs
+  against that workspace's Zephyr revision and patches. With the project
+  outside every workspace, the check still fails, and now names what was
+  checked and the same remedies as `build.workspace-unresolved`. A
+  `ZEPHYR_BASE` inside a workspace is reported as one west "may fall back
+  to".
+
+- **`tan clean` outside every alp-sdk checkout now says where it looked and how to fix it.** `clean.sdk-root-not-found` used to be a bare `Cannot locate alp-sdk root.`; it now names each ladder tier that came up empty (`--sdk-root`, the project pin, the global default, the nearby candidates and every ancestor) and offers `--sdk-root <path>`, as `flash.sdk-root-not-found` has since #1423. A bad `--sdk-root` names the flag alone, since no other tier was tried. Closes #1444.
+
+- **`tan monitor --port rfc2217://host:` no longer crashes inside pyserial.** A malformed serial URL
+  (empty, missing or out-of-range port, missing host, unknown scheme) is refused up front with
+  `monitor.bad-port` (exit 2) naming what is wrong, for `monitor`, `--capture` and
+  `tan reset --confirm-console` (`reset.bad-port`). Closes #1448.
+
+- **`tan flash --readback` no longer reports a false `flash.readback-mismatch` for an image that went to sleep (#1450).**
+  The read-back used to run after the PIN reset had booted the new image; an image that enters
+  STOP gates the debug domain and the fresh session read garbage, advising a needless re-flash.
+  With `--readback` the chip is now read BEFORE the image boots, inside the write session
+  (connect, loadbin, verifybin, `h`, savebin, then the reset tail, one `exit`; bench: a separate
+  read-back session let the app run between the two because J-Link `exit` resumes the core).
+  `jlink.readbackMode` is `in-session` and a match is `jlink.verification: "insession-readback"` (J-Link may serve the read from its cache); a short fresh-session read afterwards upgrades it to `readback-verified`, or leaves it with the info issue `flash.readback-fresh-unconfirmed`. A read-back that cannot read the chip at all (J-Link could not read memory or
+  returned short/no data) is `flash.readback-failed` with "target unreachable (low-power?)",
+  not a mismatch.
+
+- **`tan flash` no longer reports a failed reset for an image that booted (#1453, #1449).**
+  After the PIN reset, J-Link halts the core to confirm it; an app that quickly enters
+  WFI/STOP gates the debug domain, the halt fails, and `flash.jlink-reset-unconfirmed`
+  fired on every healthy Flow D flash. tan now follows a failed halt with a fresh,
+  read-only, non-halting session that reads DHCSR: `S_RESET_ST`
+  set with `S_HALT` and `S_LOCKUP` clear confirms the boot (`jlink.resetConfirmedBy: "dhcsr"`,
+  `jlink.dhcsr`) and no issue is raised; `S_RETIRE_ST` / `S_SLEEP` alone only set `jlink.coreRunning`
+  (they clear on read and are also the old image idling) and the issue stays. When that cannot confirm either, `flash.jlink-reset-unconfirmed`
+  is now `info` on Flow D (still a warning for a `--ram` load) with wording that says the
+  target may be in low power.
+  When J-Link's own reads have already cleared `S_RESET_ST`, three non-halting `DWT_PCSR` PC
+  samples that all fall inside the image just flashed also confirm the boot
+  (`jlink.resetConfirmedBy: "pcsr"`); `0xFFFFFFFF` (halted/sleeping) is no evidence.
+
+- **`tan flash --raw` now proves the calling SESSION holds the place, not just the user (#1457, #1461).** labgrid names
+  the holder `<host>/<user>`, identical for every session of that user, so the lease check accepted a place
+  another session was using and wrote MRAM on it. The gate additionally needs `TAN_LEASE_NONCE` to equal the
+  nonce in the user's own 0600 `~/.cache/alplab-leases/<place>.lease`, written at acquire time by the new
+  `scripts/bench/tan-lease.sh acquire <place>` (which prints the `export` for the acquiring shell only).
+  Missing, malformed, mis-moded or mismatching pieces refuse with `flash.raw-reservation-required` and a message
+  saying what to do. (labgrid `reserve` tokens would also separate sessions but only exist for `reserve`-allocated
+  places, not `acquire`.)
+  The lease also records the place's labgrid `changed:` timestamp and the gate refuses a stale one (a lease from an
+  earlier acquisition); the lease file is opened with `O_NOFOLLOW` and its nonce shape-checked before the constant-time
+  compare; `tan-lease.sh` uses `noclobber`, `grep -qxF`, a fixed lease directory, and writes no lease when labgrid reports
+  no `changed:`. `pwd`/`grp` are imported lazily so `import tan.cli` still works on Windows; `--raw` refuses there
+  (`unsupported on this platform`).
+
+- **Bench follow-ups to the Flow D boot and read-back work (#1458).** The success message names the witness that
+  actually confirmed the boot (the PCSR samples and the image range, not DHCSR). When neither witness reads anything
+  (a STOP window), `flash.jlink-reset-unconfirmed` is `info` worded "no witness (the target may be in low power)".
+  With `--readback` the read-back runs inside the write session (`h`, `savebin`, reset tail, one `exit`)
+  so the app cannot run between two sessions. The boot-probe session leaves its own transcript under
+  `flash-logs/` (`alif_mram_jlink-<core>-bootprobe-<UTC>.log`, path in `jlink.bootProbe`); the read-back
+  is part of the write session's log.
+  A failed combined session now says what J-Link echoed: whether the `verifybin`s passed (the write landed) and whether the reset
+  tail started ("the board was NOT reset: reset or power-cycle it"). A boot confirmed only by PCSR reports
+  `jlink.reset: "new-image-running"` (the new code runs; the SE pin reset is not proven), PCSR ranges are the PF_X
+  LOAD segments only, and a `0x00000000` sample is no sample.
+
+- **Every SDK-root refusal now names where tan looked, and `size`/`run` refuse a bad `--sdk-root`.** `model`, `generate`, `trace`, `validate`, `presets`, `pinmux`, `examples`, `explain`, `init`, `kconfig` and `image` append the same `sdk_search_summary` that `build`/`flash`/`clean` already did, through one helper (`with_sdk_search`); a rejected explicit `--sdk-root` is still named instead, since it is terminal. `tan size --sdk-root <bad>` and `tan run --sdk-root <bad>` now fail with the new `size.sdk-root-unresolved` / `run.sdk-root-unresolved` instead of continuing silently; with no flag and no checkout their behaviour is unchanged. Both intentionally diverge from the v0.4.1 oracle (`size` answered `size.manifest-unavailable`, `run` answered `build.plan-unavailable`); for `size` the refusal now precedes the manifest checks, and `run` exits 1 like its other failures. New codes follow the `<command>.sdk-root-unresolved` spelling (recorded in the `contract/issue-codes.json` notes); existing codes are not renamed. (#1463)
+
+- **`tan reset` names where its J-Link program came from.** When
+  `JLINK_RUN_PLACE` is set and no `--jlink` is given, the trusted wrapper is
+  used by default, and `data.jlink.binarySource` now reports
+  `TAN_JLINK_WRAPPER` instead of "the --jlink flag" (tan-cli#1467).
+
+- **`tan clean --build-root X` no longer deletes the project tree.** It now means what it means to `tan build`/`size`/`image`/`flash` (X is the project tree, relative to the current directory; clean removes `<X>/build`), and refuses with `clean.unsafe-build-root` when the target holds a `board.yaml`. README and `--help` document it.
+- **`tan clean` finds the nested `<X>/build/system-manifest.yaml`**, so out-of-tree slice build dirs it names are swept.
+- **The read-only removal retry no longer follows symlinks**, so it cannot chmod files outside the tree being removed, and a dangling link in a read-only directory no longer aborts the removal with a misleading error.
+- **`tan image` prunes stale `slices/` and `helper-mcus/` entries** left by earlier runs, so the bundle directory holds only this build's output.
+- **`tan run --flash` keeps the build step's issues and text recap** on the flash result instead of dropping them.
+- **`tan run` resolution failures (for example a deleted cwd) become a `run.internal-failure` envelope** instead of a raw traceback.
+- **`tan/core/run.py` docstring** no longer claims `tan build` writes no system manifest.
+- **`tan clean` refuses a manifest slice dir that resolves onto the project root or holds a `board.yaml`**, even when the project sits inside the `--build-root` tree; `tan image` replaces a symlinked `slices/`/`helper-mcus/` instead of emptying its target.
+- **`tan clean --build-root X` deliberately diverges from the v0.4.1 oracle**, which removed X itself; tan removes `<X>/build` so a `build`/`clean` pair never touches sources.
+
+- **`tan sdk remove` now refuses a directory that contains, or sits inside, the active, global-default or registered SDK without `--force`.** The load-bearing check only matched the same directory, so `tan sdk remove sdk-cache` deleted a pinned `v0.19.0` under it and `<sdk>/metadata` left the install half-present; `wasActive` is now true for an ancestor.
+- **`tan bootstrap` probes the host interpreter through the same resolver as `tan doctor`.** It only tried bare `python3`/`python`, so it refused `bootstrap.python-too-old` on a host where doctor passed on `python3.12`; it now spawns the absolute `sys.executable` for the venv too.
+- **`tan doctor` and `tan bootstrap` stop reporting a stamped toolchain as "verified" when the compiler under it is gone.** The stamp alone used to pass doctor and skip bootstrap's repair; both now require the `arm-zephyr-eabi-gcc` file, and bootstrap reinstalls over a hollowed store.
+- **The toolchain messages no longer imply the alp-sdk-pinned archive sha256 was checked.** `west sdk install` discards the archive, so tan has no bytes to hash; doctor and bootstrap now say the sha256 was not compared against the pin and that only the version file and a compiler run were checked.
+- **`tan doctor` adopts an installed pinned-version Zephyr SDK even when another SDK is detected first.** Every detected root is checked against the pin, not only the first.
+- **The `longPaths` check reads git's system and global `core.longpaths` only.** It ran in the project's cwd and so also saw the repo's local config, which fresh `west update` clones never inherit.
+- **`tan bootstrap` now picks its interpreter like `tan doctor`.** A west-capable interpreter at or above the floor is preferred over PATH order, and on POSIX a venv's `python3` that comes first on PATH can now be chosen.
+
+- **`tan validate` warns when the bound alp-sdk's validator is newer than tan's port.** A new non-fatal `validate.sdk-validator-newer` warning fires when the validator sources in the bound checkout differ from the audited ones, and `tan validate --help` now documents `TAN_VALIDATE_ENGINE=subprocess`.
+- **`tan diff` uses the same validator engine as `tan validate`.** It no longer spawns the SDK script unconditionally, so the two commands cannot return opposite verdicts on one board; `TAN_VALIDATE_ENGINE=subprocess` is honoured.
+- **`tan init` no longer silently re-pins `.alp/sdk-path`.** An existing pointer naming a different checkout is now an `update` that needs `--force`, like any other overwritten file.
+- **An undecodable `board.yaml` is reported as `validate.board-yaml-unreadable`.** The in-process engine used to blame the SDK ("tan could not read this SDK") for the user's own file encoding.
+- **`tan init --cores` with `--board-yaml` is refused** (`init.scaffold-input-conflict`) instead of silently dropping the core.
+- **Docs corrected.** Ported-validator docstrings name `HAND_PORT_HASHES` (the pin that exists), the freshness-gate comment no longer claims validator fixes are inherited through a spawn, and the `_load_yaml` docstring no longer says tan ships no YAML dependency.
+
+- **`tan reset` under `JLINK_RUN_PLACE` now needs this session's lease.** It runs the same gate as `tan flash --raw` (`TAN_LEASE_NONCE` matching the 0600 lease file, labgrid showing you as holder of that acquisition, `--probe-usb-path` equal to the place's swd port) and otherwise refuses before any spawn as `reset.reservation-required`, so a pulse can no longer reset a board another session of the same user holds (tan-cli#1485, #1457).
+- **Flow D refuses a slot0 `.bin` older than its ELF.** The mramxip shape judged only the ELF's link address, so an ITCM-linked `.bin` left beside a fresh MRAM-linked ELF was written to slot0; the `.bin` actually written is now compared with its ELF, whichever the manifest names, and refused as `flash.mram-image-not-mram-linked` (tan-cli#1485).
+- **The SETOOLS scratch overlay never copies the signing keys.** `utils/key` is skipped during the copy and linked in, instead of being copied and then removed, so a killed run cannot leave the keys under `/tmp/tan-setools-*` (tan-cli#1485).
+- **Help and docs match the code.** `--setools-dir`, `docs/setools.md` and the auto-sign comments say a manifest-only `flash_args.setools_dir` is never executed; `tan flash --raw --help` lists every reservation requirement; `tan reset --help` and `docs/reset.md` describe place mode, the `exec DisableAutoUpdateFW` line and a safer `--expect` example (tan-cli#1485).
+- **Dead code removed.** The shadowed first `combine_verdicts` in `ram_run.py` and the unreachable second J-Link branch in `flash_cmd._execute` are gone, with no behaviour change (tan-cli#1485).
+
+- **`tan model build` no longer refuses a whole model for one non-fitting ethos_u target** -- a single target's `Sram_Only` no-fit is now a skipped coverage row, and the model is refused (`model.sram-no-fit`) only when no ethos_u target fits and ships (a fitting target that places nothing on the NPU does not count) (#1486).
+- **`.alpmodel` packages are written atomically** -- a failed rebuild no longer leaves a truncated file over the last good package (#1486).
+- **Live `tan model run/ab --device` failures** now exit `VALIDATION_FAILURE` for a synthesised `model.device-flash-failed`, as the registry documents (#1486).
+- **Malformed `models:` entries in board.yaml** (non-string `name`/`source`, a traversal `name`, a non-mapping `compile:`) are reported as `model.board-yaml-invalid` instead of `model.internal-failure` or passing silently (#1486).
+- **`tan model` refuses subcommand-scoped flags on the wrong subcommand** (`--against`, `--calibration`, `--per-channel`, `--min-samples`, `--exact`) with `model.unexpected-argument` instead of silently dropping them (#1486).
+- **Host `tan model run/ab` honour the model's input dtypes** -- integer and uint8 inputs are no longer cast to float32, and extra inputs get a deterministic default sample (#1486).
+
+- **Mailbox channel assignment never aliases channel 0 (alp-sdk#2822).** `tan/planner/carveout.py` `_resolve_mailbox_channel` gives a reserved name its channel, else the lowest unclaimed `reserved_for: app` channel, else a blocked carve-out with a reason; an unreserved `ipc:` entry no longer silently shares `alp_default_rpmsg`'s channel 0.
+- **`CONFIG_RAM_CONSOLE_BUFFER_SIZE` parses like Kconfig.** `016384` now reads as decimal 16384 instead of raising `ValueError`; only a `0x` prefix selects hex.
+- Planner re-synced to alp-sdk `1d20103b`; the planner oracle re-captured byte-identical.
+- **`libraries:` alias table now rejects duplicate keys like alp-sdk.** `_library_alias_table` read `library-aliases-v1.json` with a lenient `json.loads` that kept the last duplicate silently; it now uses `strict_json_loads` (alp-sdk#1127), so tan accepts exactly what the SDK accepts.
+- **Planner doc comments corrected.** The `sdk_capability` probe docs no longer claim an unreadable probe file falls through to the authoring-gap message (it raises `SdkTooOldError`), and the false "known divergence from upstream" note in `_allowed_os_for_core` is gone (upstream carries the same guard since alp-sdk#1852).
+
+- **`tan debug-config` refuses a multi-core build with no `--core`.** It used to take the first slice's core and write a launch configuration that programs it at exit 0; it now exits 2 with `debug-config.core-required`, listing the cores, as `tan probe` and `tan flash` do.
+- **The J-Link launch configuration pins the probe.** `flash_args.jlink_serial` of the selected slice is written as cortex-debug `serialNumber`, so F5 cannot open a different attached J-Link.
+- **`tan probe identify --core m55_he` no longer exits 0 on a `conflict` verdict.** It raises `probe.core-mismatch`, as `tan flash --ram` already refused the same verdict.
+- **`tan faultdecode` refuses register values wider than 32 bits.** `--cfsr 0x100008200` used to decode its low word at exit 0; it now exits 2 with `faultdecode.invalid-register-value`, and a pasted dump ignores such a value.
+- **Docs and help match the code.** `--until` help says long lines are searched on their last 4 KiB; the pyserial-missing hint names `pip install "./python[monitor]"` (tan-cli is not on PyPI); the README monitor-capture example passes `--port`; command counts read 30 and 33.
+
+- **`tan bootstrap` now hashes the cross-toolchain archive against alp-sdk's `metadata/toolchains.json` pin, and refuses on a mismatch.** `west sdk install` verifies only the minimal SDK bundle (against the release `sha256.sum`); the SDK's `setup.sh` fetches the toolchain archive with no check. `tan` therefore passes `--no-gnu-toolchains`, downloads the archive itself and hashes it while streaming, and compares the pins with the sum before and after west runs (west's own parse, refusing duplicate, marker-prefixed or path-prefixed entries). The minimal bundle is verified only through the sum, since `tan` never holds its bytes. An unreachable sum or archive is a blocking refusal (`bootstrap.toolchain-pin-unverified`), a disagreement is `bootstrap.toolchain-pin-mismatch`, and the stamp now records `pinChecked`.
+
+- **`tan model check --exact` evaluates every ethos_u target, as `build` does.** It used to compile only the headline target and exit 2 on its SRAM no-fit while `build` shipped the targets that fit; it now reports the first target that fits and notes the skipped ones, and refuses only when none fits.
+- **A stray `--min-samples` is refused on every subcommand but `prep`.** Typing the default value (`--min-samples 8`) elsewhere was silently dropped; it now exits 2 with `model.unexpected-argument`.
+- **Host `model run`/`ab` warn when a user `.npy` is cast to the model input dtype.** `model.input-dtype-cast` names the cast and, for float to integer, the truncation.
+- **A failed live RAM-run keeps the flash provenance once the board was loaded.** Flow C now reports `ram.loaded`, and `model run --device` keeps `data.flash` on a failure after the load.
+
+- **`tan bootstrap` no longer downloads a toolchain it then refuses to install under an adopted `ALP_TOOLCHAIN_ROOT`.** When the pinned store directory already exists there without a valid stamp (or without its compiler), bootstrap now refuses before `west sdk install` with an accurate message instead of downloading and then blaming a missing stamp.
+- **`tan doctor` stops telling adopted-root users to run `tan bootstrap` to repair a toolchain it will not repair.** The toolchain row now says to remove the directory (or unset `ALP_TOOLCHAIN_ROOT`) first.
+- **A forced `tan sdk remove` of a subtree now reports registry entries it damages.** Default-registry entries whose install contains the removed target raise the new `sdk.remove-registry-entry-damaged` warning instead of staying silent.
+- **The `west sdk install` checksum question is settled and documented.** West verifies only the minimal SDK bundle against the release `sha256.sum`; the toolchain archives are fetched by the SDK's setup script and not re-verified (`docs/toolchain-archive-verification.md`).
+
 ### Added
 
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
@@ -10584,6 +11078,468 @@ containing the floor exists; if its number differs, correct this line. See
   an existing value already equal to the resolved one hits `existing_val ==
   incoming_val` and is left untouched, with no append and no issue.
 
+- **`tan generate --target dts-overlay --core` and `--target cmake-args` render the build plan's own artefacts.** alp-sdk#2771 added each zephyr/baremetal slice's `alp.overlay` and `cmake-args.txt` to `configArtefacts` (additive under `schemaVersion` 1; a board with no header, or an unrecognised SKU, gets a `dts-overlay-unavailable` warning and no overlay instead of failing the plan). The two generate modes now call the helpers `emit_build_plan` fills those entries from, so their bytes cannot diverge from the plan's (ADR-0026 §D), each pinned by a plan-bytes == render test. The re-sync also ports the V2N/V2M board-tree generation changes (alp-sdk#2747, #2685: sci0 RXD pull-up, RAM console, OpenAMP window from the SoC `openamp_carveout`) Supersedes the bot's #1310 proposal. Refs #1216.
+
+- **`tan/planner/partition.py` now carries all 14 of upstream's
+  storage-region-bounds tests, not two.** #1251 ported only the two classes
+  alp-sdk#2022 added to alp-sdk's
+  `tests/scripts/test_orchestrate_storage_region_bounds.py`
+  (`TestLegacyCarveoutFallback`, `TestDerivedVerdictLoadBearingEndToEnd`).
+  The other 12 predate that range and had no tan counterpart, so the
+  behaviour they guard shipped in tan's hash-pinned mirror untested.
+  `python/tests/planner/test_storage_region_bounds.py` now ports them from
+  alp-sdk `c81cb5db`, class for class: `TestAutoAllocation` (an auto-placed
+  mount never lands on MCUboot; a fully tiled device blocks with an
+  actionable reason), `TestExplicitOffset` (offset 0 and an offset inside
+  the ATOC band are refused, and the refusal names the remedy),
+  `TestReservedBytesLessThanCapacity` (a named alternative device always
+  round-trips and has a verified Devicetree label; the V2N101 `ddr_main`
+  overlap and the fully tiled AEN401 name no undefined alternative),
+  `TestTargetingARegionDirectly` (naming the MRAM `storage` sub-region as a
+  flash device is refused, by both the loader and `_resolve_flash_device`)
+  and `TestNoFalsePositives` (a genuinely free device is unaffected).
+  Assertions are kept at upstream's strength; only the metadata root
+  follows tan's per-project `effective_metadata_root()`. Like the rest of
+  the file, they bind the SDK through `tests/planner/_bound_sdk_fixture.py`
+  and skip explicitly when `ALP_SDK_ROOT` is unset. Each of the 12 was shown
+  red against a deliberately broken `partition.py` before landing.
+  `partition.py` itself is unchanged.
+
+- **`tan init --from-example` names the command that writes the
+  `generated/alp.conf` a copied example reads.** Since alp-sdk#866 an
+  example's twister scenarios and bare `west build` lines pass
+  `EXTRA_CONF_FILE=generated/alp.conf`, and its prose points at alp-sdk's
+  `scripts/gen_example_alp_conf.py`, which writes nothing for a project
+  outside alp-sdk's `examples/`. The copy stays verbatim; a new
+  `init.alp-conf-pregeneration` info issue names the reading files and one
+  `tan generate --target zephyr-conf --core <id> --sdk-root <sdk> --output
+  <dir>/generated/alp.conf` command per directory, which writes the same
+  bytes the build plan carries for that core. `tan build` itself never needs
+  the file.
+
+- **`tan model zoo [--sku SKU]` and `tan model add <id>` browse and adopt the
+  SDK's model zoo.** `zoo` lists the entries in the bound alp-sdk's
+  `metadata/model_zoo/` (alp-sdk#2542), and with `--sku` only those
+  bench-validated on that SoM; an entry with an empty `validated_soms` matches
+  no SKU. `add` fetches the model (a bundled starter, or an https download
+  checked against the manifest's sha256), writes it to `models/<id><ext>`
+  beside `board.yaml`, and appends `{name, source[, compile]}` to `models:` as a
+  text splice, so every comment and byte outside that list is kept and no YAML
+  round-trip dependency is added. A name already in `models:`, an existing
+  destination file, or a `models:` written in flow style, anchored or in a
+  multi-document file is refused with nothing written. An SDK without the zoo
+  (older than alp-sdk commit `7018515f9`) is refused with
+  `model.zoo-unavailable`. The unknown-subcommand inventory now reads
+  "Available: build, doctor, check, list, zoo, add." and its
+  `model-unknown-subcommand` golden is re-recorded; fourteen new `model.*` issue
+  codes are registered. Each `zoo` row carries `runsHere` (validated on the
+  board's or `--sku` SKU, `null` without one), and `add` reports the added id in
+  `data.added` with the full row in `data.addedEntry`. Closes #1286.
+
+- **`tan model run` and `tan model ab` time an ONNX model on the host and
+  compare two.** `run` reports median latency over `--runs` inferences and the
+  output argmax on onnxruntime CPU (`backend: cpu-host`); `ab MODEL --against
+  OTHER` runs both on the same input and compares latency and file size.
+  They are host references, never SoM performance (`peakSramKib` and `powerMj`
+  stay `null` until the bench-gated on-device tier lands), and share `prep`'s
+  optional `model` extra. A failed run is `model.run-failed`.
+- **`tan model prep MODEL.onnx --calibration DIR` INT8-quantizes an ONNX model
+  and reports what it cost in accuracy.** It validates the `.npy` calibration
+  samples against the model's input, quantizes with onnxruntime (QDQ static,
+  `--per-channel` optional) into `build/models/<name>.int8.onnx`, and reports
+  top-1 agreement, mean cosine and max abs error against fp32, warning
+  (`model.prep-accuracy-degraded`) below 95% agreement. It needs no vendor
+  toolchain, SDK or hardware. The numeric dependencies come from a new optional
+  `model` extra (`pip install "tan-cli[model]"`); without it the command refuses
+  with `model.model-extra-missing`, and the frozen release binaries do not
+  bundle it. `.tflite` input is refused for now. The existing static screen
+  (`tan model check`) already covers the reference `analyze` module's checks,
+  so none of it is ported. Refs #1287.
+- **`tan model run --device` and `ab --device` report the on-device tier.** They
+  parse the console a benchmark app printed on the target (the
+  `ENERGY-CFG`/`ENERGY-S`/`ENERGY-W` protocol of alp-sdk's
+  `aen-inference-energy` example) from `--capture FILE` (and `--against-capture`
+  for `ab`) into the same result envelope with `tier: device`, `backend:
+  ethos-u`, latency from the measured active span per inference, and
+  `peakSramKib: null`. `powerMj` is set only from a full active-plus-idle
+  sample stream and carries its `carrier-rail-delta` label. A malformed or
+  partial capture, an older firmware, or a missing file is a coded refusal
+  (`model.device-capture-invalid`, `model.device-capture-missing`); degraded
+  evidence is a `model.device-capture-degraded` warning. Without a capture the run is live (see the next entry). A capture is untrusted: every value
+  is range-checked, windows the app skipped or that timed out are excluded, a
+  capture with only timing lines is a valid latency-only result, and `latencyMs`
+  is labelled as window span per inference. Refs #1287.
+- **`tan model run --device` and `ab --device` now run the benchmark on the
+  board when no `--capture` is given.** The already-built
+  `diagnostics.link: itcm` project (alp-sdk `aen-inference-latency` /
+  `aen-inference-energy`, model baked in) is RAM-run through the same Flow C
+  code as `tan flash --ram --ram-console`, in-process, and its
+  `ram_console_buf` text goes through the capture parser.
+  `tan model run --device --project P [--core m55_he] [--wait N]
+  [--probe-usb-path BUS-PORT | --probe-serial SN] [--jlink PATH] --confirm`;
+  `ab --device --project A --against-project B --confirm` runs each in turn
+  (B uses its own board.yaml). `ab` takes both sides live or both from
+  captures; a mix is refused (`model.device-ab-mixed-sources`) before
+  anything runs. Rows carry `tier: device`, `source: live` (`capture` for a
+  capture), the project path, and a `flash` block (core, wait,
+  `transcriptPath`, `attachedCore`, `dpidr`). Every `flash.*` issue Flow C
+  raised is reported alongside the result, warnings included (for example
+  `flash.probe-unverified`, `flash.dpidr-preflight-unarmed`).
+  The run resets the whole device, so it is gated exactly like
+  `tan flash --ram`: `--confirm`, `ALP_FLASH_FORCE=1` in the environment, or
+  `flash_args.confirm: true` in the manifest. MRAM is never written.
+  Refusals: `model.device-no-project`, `model.device-no-manifest`,
+  `model.device-no-itcm-slice`, `model.device-confirm-required`,
+  `model.device-probe-invalid`, `model.device-console-empty`,
+  `model.device-live-needs-two-projects`. A Flow C failure is reported with
+  its own `flash.*` issues, in order, and its exit code;
+  `model.device-flash-failed` appears only when Flow C gave no error.
+  `model.device-flow-unavailable` is gone. The issue stays open until a
+  bench transcript is attached. Refs #1287.
+
+- **`tan model build` and `tan model check --exact` now check that a
+  `Sram_Only` Ethos-U model fits the board: its arena against
+  `board.yaml`'s budget, and its compiled blob plus that arena against
+  SRAM0.** Fixes #1288. The issue assumed the arena half already existed
+  "per #1011"; it did not (#1011 only fixed `req_sram_kib` as arena-only),
+  so the new `tan.model.sram_fit` adds both. Arena: `req_sram_kib` against
+  `cores.<id>.inference.default_arena_kib` (schema default 128). SRAM0:
+  `ceil(blob/1024) + arena` against the resolved SoC variant's
+  `sram_banks_kb.SRAM0`, read through `tan size`'s existing variant
+  resolution. Only a no-fit is certain; a pass reads `fits-unverified`,
+  since every SoC ships `inference_arena_sram_kib: 0` and firmware's own
+  SRAM0 use is not known. Other memory modes report both checks
+  `skipped`; a static screen, with no compiled blob, carries no `sramFit`
+  at all. The budget comes from the core that
+  actually runs the model: the target's `paired_core`, or, for the
+  unpaired Ethos-U85 on E4/E6/E8, the board's one core that builds (not
+  `os: "off"`) and runs inference (an `inference:` block or `tflite-micro`
+  in `libraries:`), the same tests the planner applies. Several candidate
+  cores give a range, decided only outside it. With no such core the arena
+  axis is skipped, but SRAM0 still refuses a blob that cannot fit beside
+  even the schema's 16 KiB minimum arena. On a no-fit, `build` writes no
+  `.alpmodel` and `check --exact` adds an `sramFit` block to each ethos_u
+  backend; both raise the new `model.sram-no-fit` at exit 2
+  (`VALIDATION_FAILURE`).
+
+- **`tan presets` and `tan size` say why a pre-v2 SDK's SoMs are missing.**
+  Against an alp-sdk that predates som-preset v2 (released `v0.16.0` and
+  older), `tan presets` exited 0 with `skus: []`, `soms: []` and no issue at
+  all, and `tan size` reported every budget as `unreadable SoM preset for
+  <sku>`. `tan presets` now adds one `presets.som-schema-version-skipped`
+  warning naming how many presets were skipped, the `schema_version` they
+  declare, and the remedy; `tan size` adds `size.som-schema-version-skipped`
+  for the build's SKU (its row note is unchanged). Both name the path with
+  forward slashes and are `reserved` codes in `contract/issue-codes.json`.
+
+- **`tan flash` takes `--probe-serial <SN>` and `--probe-usb-path <bus-port>` to
+  pick the J-Link a Flow D (`alif_mram_jlink`) write goes to, and refuses rather
+  than guess.** Both override `flash_args.jlink_serial` for the run and are
+  echoed as `probe` on the entry (also under `--dry-run`, which reports the
+  would-be selection). Serials compare canonically (`603000869` is
+  `000603000869`, which is what an unquoted YAML serial becomes), and a serial no
+  visible probe carries is `flash.probe-not-found`. J-Link Commander selects by
+  serial only, so immediately before EACH JLinkExe spawn tan runs the same
+  JLinkExe read-only (`ShowEmuList`, stdin closed, `exec DisableAutoUpdateFW`
+  first -- now line 1 of every script tan hands JLinkExe) and requires the
+  listing to complete cleanly with exactly one emulator carrying the selected
+  serial: `flash.probe-ambiguous` for several, `flash.probe-verify-failed` for a
+  hung, crashed, non-zero or empty listing (or a probe set that changed since
+  selection). When the serial is shared, one listed emulator cannot be tied to
+  the USB path by itself, so the JLinkExe on PATH (a masking wrapper) must also
+  print `TAN_PROBE_ISOLATED_USB_PATH=<its target port>` equal to the selected
+  path; the entry then reports `probe.isolation: "wrapper-attested:<path>"`
+  (`"verified-single-emulator"` only for a unique serial). `TAN_PROBE_USB_PATH`
+  is exported to that JLinkExe so a wrapper can cross-check its own mask.
+  Several probes with no selector, or several sharing the selected serial,
+  refuse before any write. A selector on a non-Flow-D method refuses the run
+  (`flash.probe-selector-unsupported`); a host that cannot enumerate USB warns
+  `flash.probe-unverified` and then requires exactly one emulator in total.
+  `--dry-run` spawns nothing, so a shared-serial USB-path preview reports ok
+  plus a `flash.probe-isolation-required` warning naming what a real run will
+  demand. Enumeration is read-only sysfs and Linux only.
+
+- **`tan flash --ram`: AEN Flow C, a J-Link ITCM RAM-run that never writes MRAM.** The bench's fastest loop (alp-sdk `ram-run.sh`) had no tan equivalent, so every iteration through tan wrote MRAM and a RAM-console app had no way to be read. `tan flash --ram --core <id>` reads the slice's ELF and sibling `zephyr.bin`, derives the load address from the ELF's LOAD segments (the lowest nonzero-FileSiz one, never the first), refuses an image not linked for ITCM/SRAM (`flash.ram-image-not-ram-linked`), checks the vector table against the ELF entry, and runs one J-Link session `connect; halt; loadbin; setpc <reset handler>; go`; SP comes from the vector table via loadbin's reset and is reported, not hand-written. It goes through the same probe-selection guard, DPIDR preflight, trusted J-Link binary and `--dry-run` as a Flow D write, and loads a tan-staged copy of the image so no project path reaches the Commander script. `--ram-console [--wait S]` then reads `ram_console_buf` (address and size from the ELF symbol) with `mem8`, decodes it and reports `ramConsole.{selected,symbol,address,size,bytesRead,text}`; a UART-console build has no symbol, reports `selected: uart` and only warns (`flash.ram-console-symbol-missing`). New codes: `flash.ram-image-not-ram-linked`, `flash.ram-console-symbol-missing`, `flash.ram-failed`.
+  Review round: only the M55 HE core is RAM-run (`flash.ram-core-unsupported`; an image linked for the HP core's ITCM alias on the HE slice is `flash.ram-core-mismatch`); the image must fit the core's ITCM/SRAM apertures and `ram_console_buf` must lie in DTCM/SRAM (capped at 64 KiB), with sizes read from the SoC metadata's `sram_banks_kb` -- no metadata means a refusal, never a guess; a part-number `jlink_device` is refused (RAM-runs attach with the generic Cortex-M55 profile); the load transcript must echo `loadbin` (with `O.K.`), `setpc` and `go` or the load "cannot be confirmed"; the ELF reader rejects a symbol table with entries under 16 bytes, more than 4096 sections or 200000 symbols; the envelope reports the attached core J-Link printed. `--ram` now needs `--confirm` (or `ALP_FLASH_FORCE=1` / `flash_args.confirm`) because the load resets the whole device and replaces the running image; unconfirmed it previews and exits non-zero like an unconfirmed flash.
+
+- **`tan monitor --break-uboot` catches the U-Boot prompt for you.** After
+  opening the port (a local tty, a `/dev/serial/by-id/...` path, or a pyserial
+  URL such as `rfc2217://` / `socket://`, so a labgrid ser2net console
+  endpoint works), it sends the autoboot interrupt key (`--break-key`, default
+  a space; escapes `\xNN \r \n \t \\`) repeatedly until `--prompt` (default
+  `=> `) is seen or `--break-timeout` seconds (default 30) pass. It then
+  continues in the interactive console on the same already-open port (no
+  reopen, so no DTR/RTS toggle that could reset the board; the console needs a
+  terminal), or, under `--non-interactive`, stops after the break-in and exits
+  0. `--break-key`, `--prompt` and `--break-timeout` are refused without
+  `--break-uboot`. The envelope carries `data.breakIn` (`caught`,
+  `elapsedSeconds`, `timeoutSeconds`, `bytesSeen`, `bytesSeenTail`). New
+  issue codes: `monitor.break-timeout`, `monitor.break-io-failed` and
+  `monitor.break-open-failed` (exit 1), `monitor.no-tty` (exit 1, interactive
+  console without a terminal), `monitor.break-bad-option` (exit 2). tan does
+  not power-cycle the board; do that yourself or from labgrid. Not yet
+  validated on V2N silicon.
+  `tan monitor` also gains `--filter` (default `colors`), for both the plain
+  console and the `--break-uboot` one: ANSI colour (SGR) sequences render
+  instead of showing as literal `ESC[1;32m` text, while every other escape
+  sequence from the device (OSC 52 clipboard writes, title changes, cursor and
+  erase sequences, DCS/APC/PM/SOS, C1 controls) is replaced by a visible `·`,
+  so an untrusted target cannot drive the terminal. `default`, `nocontrol` and
+  `printable` are miniterm's own stripping filters; `direct` passes raw bytes
+  to the terminal and is unsafe for an untrusted target. `--capture --log`
+  (tan-cli#1324) stores raw bytes regardless.
+  The `colors` filter is an allowlist: only printable characters and
+  `\r \n \t \b` are output, and the only escape that ever reaches the
+  terminal is an SGR sequence the filter re-emits itself from an allowlist of
+  codes (conceal, blink and anything unknown are dropped, the rest of the
+  sequence kept). Every other escape, C1 and control character becomes `·`,
+  CAN/SUB abort a sequence as terminals do, and over-long sequences are
+  bounded. The plain console is spawned from an empty working directory (which also
+  neutralises relative `PYTHONPATH` entries), so a `serial/` package planted in the
+  project directory is not imported.
+  Over `rfc2217://` (pyserial rejects `write_timeout` there) the break-in
+  guards its own writes with a 1 s deadline; any open failure is reported as
+  `monitor.break-open-failed`. The break-in block also carries `keysSent` and
+  `firstByteSeconds`. Characters the terminal encoding cannot show become `·`.
+  Known limits of `colors`: same-colour (invisible) text and `\b`/`\r`
+  overdrawing cannot be filtered.
+
+- **`tan flash --dry-run` on a Flow D slice shows what it would write.** The preview
+  said only "would sign ... then run app-gen-toc -- not run", so an operator had to
+  reproduce `app-gen-toc` on a scratch SETOOLS copy to learn the ATOC would land at
+  `0x8057F5B0` (2640 B). The entry now carries a `plan` block: the J-Link Commander
+  script (`exec DisableAutoUpdateFW` first, as it is spawned) and argv, every write
+  as `{name, address, size, path, sectorSpan}` with the span in 16 KiB sectors (the
+  loader rewrites whole sectors and fills the rest with 0xFF), and the ATOC
+  `{address, size, entries}`. When tan signs the ATOC the placement and entry list
+  are exact, taken from `app-gen-toc` run in the scratch overlay (tan-cli#1325 made
+  that side-effect-free); for a manifest-supplied blob `entries` is `null`. A
+  dry run still never spawns the J-Link tool. The same block is present on a real
+  or unconfirmed run.
+
+- **`tan flash` reports the method it really used, and the one the manifest
+  declared.** The manifest said `flash_method: zephyr_west_flash` for an
+  E1M-AEN803 slice while `tan flash` quietly ran Flow D (`alif_mram_jlink`), and
+  the two destroy different things. A `tan flash` entry whose method was upgraded
+  now reports `method` (the resolved one) plus `methodDeclared`, and its text
+  header reads `-> alif_mram_jlink (manifest declares zephyr_west_flash)`.
+  Recording the resolved method in `build/system-manifest.yaml` itself is deferred:
+  alp-sdk's `system-manifest-v1.schema.json` forbids extra slice keys, so a
+  `flash_method_resolved` field would fail `check_system_manifest.py` until the
+  schema gains it.
+
+- **`tan monitor --capture` records console output headlessly.** No terminal is
+  needed (it works from CI, an agent, or over `rfc2217://` / `socket://`
+  URLs): it reads the port for `--duration` seconds, or until a line matches
+  `--until <regex>` (default duration 30 s when only `--until` is given), and
+  writes the raw bytes to `--log <file>` (created mode 0600 if new, an existing file keeps its mode; refuses symlinks on the last path component (a no-op guard on Windows) and non-regular files such as FIFOs; absolute path reported in `logFile`; `--filter` is refused with `--capture`). `--until` is searched in each complete line once and in the current unterminated line, so a prompt matches before a newline arrives; the deadline is honoured between lines. The envelope
+  carries `data.capture` (`untilGiven`, `matched` (always a boolean), `matchedLine`, `elapsedSeconds`,
+  `durationSeconds`, `bytesSeen`, `bytesSeenTail`, `logFile`). No match within
+  the duration under `--until` is `monitor.capture-timeout` (exit 1). Other
+  codes: `monitor.capture-bad-option` (exit 2), `monitor.capture-open-failed`
+  and `monitor.capture-io-failed` (exit 1), `monitor.capture-log-failed`
+  (exit 3). Combine with `--break-uboot` to break in first, then capture on
+  the same open port; the last 4 KiB of the break-in output is logged and
+  searched first. A log write failure is `monitor.capture-log-failed`, kept
+  apart from `monitor.capture-io-failed` (serial). Companion flags without `--capture` are refused. A base
+  `pip install` still needs the `monitor` extra; the error names the exact
+  command, and released binaries bundle pyserial.
+
+- **`tan build` honours board.yaml `diagnostics.link: itcm`, producing an AEN
+  Flow C (M55-HE ITCM RAM-run) image.** Until now `tan flash --ram` needed an
+  image linked for ITCM and the only route was hand-copying alp-sdk's
+  `scripts/bench/aen/aen-flowc-itcm.{conf,overlay}` into the app. The planner
+  (ADR-0026) now renders both halves itself as two extra config artefacts
+  beside `alp.conf` (`alp-link-itcm.conf`: `CONFIG_USE_DT_CODE_PARTITION=n`,
+  `CONFIG_FLASH_LOAD_OFFSET=0x0`, and -- for the RAM console (`ram`/`auto`)
+  only -- `CONFIG_DCACHE=n` and a 16 KiB RAM console buffer;
+  `alp-link-itcm.overlay`: `zephyr,flash = &itcm;` and
+  `/delete-property/ zephyr,code-partition;`) and layers them into the Zephyr
+  command (`-DEXTRA_CONF_FILE=<alp.conf>;<alp-link-itcm.conf>`,
+  `-DEXTRA_DTC_OVERLAY_FILE=<alp-link-itcm.overlay>`). Only the `m55_he`
+  slice is retargeted; the stock HP shim and the A32 image build as before,
+  and `link: auto`/unset is byte-identical to before. An `auto` console is
+  promoted to the RAM console (the only Flow C observable). `console: uart` is
+  accepted as well, and `console: alp` is an alias of `uart` (as everywhere
+  else in tan), so both give a UART shell on the RAM-run image (bench
+  2026-10-07, e1m-aen-evk-02: `tan flash --ram` loaded the image at 0x0, shell
+  on UART5). With `uart`/`alp`, `alp-link-itcm.conf` carries only
+  `CONFIG_USE_DT_CODE_PARTITION=n` and `CONFIG_FLASH_LOAD_OFFSET=0x0`;
+  `CONFIG_DCACHE=n` and the 16 KiB `CONFIG_RAM_CONSOLE_BUFFER_SIZE` stay with
+  the RAM console, whose D-cache hang is what they work around.
+
+  Proven on the E8 M55-HE (E1M-AEN801 / E1M-AEN803) and refused elsewhere with
+  a coded validation failure (exit 2, from `tan build`, `tan kconfig` and
+  `tan generate` alike): a project with no `os: zephyr` app on `cores.m55_he`
+  (an M55-HP-only project included), any other SKU, or a sysbuild
+  (`boot:`/`ota:`/TF-M) project is `build.link-itcm-unsupported`; an explicit
+  `linux`/`none` `diagnostics.console:` is
+  `build.link-itcm-console-conflict` (its message names `uart` as an option).
+
+  An ITCM-linked slice cannot be written to MRAM by mistake: its manifest
+  entry carries `flash_method: ram_run_only` (only the wrong-board
+  `expect_dpidr`/`jlink_device` pair stays in `flash_args`; no
+  `jlink_flash_device`/`slot0_load_address`), and plain `tan flash` refuses it
+  by name and points at `tan flash --ram`. Switching `link: itcm` back to
+  `auto` in an existing build dir no longer keeps the ITCM link: the cached
+  `EXTRA_DTC_OVERLAY_FILE` is unset and the stale `alp-link-itcm.*` files are
+  removed before the configure (this also corrects the premise in
+  `_maybe_reset_stale_configure_cache`'s docstring). Needs an alp-sdk whose
+  `board.schema.json` carries `diagnostics.link` (alp-sdk change paired with
+  this one). Closes #1350. Refs #1374, #1419.
+
+- **`tan flash --ram` verifies the attached core is the M55-HE before it loads.** A
+  generic `Cortex-M55` attach takes whichever M55 access port J-Link finds and its
+  `Found Cortex-M55 r1p0` line is the same for HE and HP, so `jlink.attachedCore`
+  could not tell them apart. A read-only session (`connect` plus three `mem32` reads,
+  no halt, no write) now decides from the AP that reports `Core found` (HE APAddr
+  `0x00300000`, HP `0x00200000`) corroborated by the local ITCM at `0x0` against the HE
+  (`0x58000000`) and HP (`0x50000000`) global windows. HE proceeds, a confirmed HP is
+  `flash.ram-core-mismatch`, and anything unconfirmed -- contradictory evidence, an
+  erased or identical ITCM, an unreadable window, an unknown AP -- is the new
+  `flash.ram-core-unconfirmed` unless `--assume-he` takes the documented risk (it never
+  overrides a confirmed HP). `jlink.attachedCore` now reports the Core-found AP, its
+  `APAddr`, the CPUID and the `Found` line, and `ram.coreCheck` carries the words read
+  and the verdicts. A stale alp-sdk whose SoM presets are `schema_version: 1` now says
+  "unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk" in the
+  `--ram` aperture refusal and in `tan debug-config`'s metadata notes.
+  Review and bench-round-8 follow-ups: the AP is DECISIVE (only an HE access port
+  proceeds; the ITCM read is corroboration that can only veto, as a conflict) and the
+  check reads only the local ITCM `0x0` and the HE window `0x58000000` -- the HP window
+  is never read (bench measured that reading it leaves the HE unhaltable until a PIN
+  reset). `--assume-he` never overrides HP evidence or a conflict. The load session's own
+  Core-found AP is compared with the check's, failing loudly with `flash.ram-core-mismatch`
+  if it differs or is HP. `--ram` now surfaces halt/reset trouble in the load transcript
+  as `jlink.resetFailures` and the `flash.jlink-reset-unconfirmed` warning, and says in
+  the message when the load only worked through a J-Link fallback.
+  Final review: several Core-found access ports that include the HP's `0x00200000` are HP evidence (never overridable); trouble in the check session itself is reported against the check (`ram.coreCheck.resetFailures`); a load banner that names no Core-found AP is recorded as `attachedCoreAtLoad: null` with a note instead of being skipped silently.
+
+- **`tan build --project <dir> --board <zephyr-board-target>` builds a
+  `board.yaml`-less Zephyr example** (alp-sdk's bench examples such as
+  `examples/aen/aen-inference-latency`) as one Zephyr slice, through the same
+  west, toolchain, SDK-root and host-Python resolution, pristine policy and
+  envelope as a planned build. `-D NAME=VALUE` (repeatable) passes CMake
+  definitions after `--`. The no-board.yaml `build.plan-unavailable` message
+  now names both routes; a bad `--board`/`-D` is `build.invalid-argument`
+  (tan-cli#1359)
+
+- **`tan doctor` warns when the installed `tan` is behind the source it was
+  installed from.** A new `tanInstall` host check (`doctor.tan-install`,
+  warn-only) reads the install's `direct_url.json`: a path install compares the
+  source tree's `TAN_VERSION`, a git/pipx install compares its `commit_id` with
+  the remote branch tip via one `git ls-remote` (4s timeout; `TAN_DOCTOR_OFFLINE=1`
+  skips it; offline or no git degrades to a pass, never a failure). The fix line
+  is the exact `pipx install --force` command.
+
+- **`tan build --board` now writes `system-manifest.yaml`**, so `tan flash`,
+  `tan flash --ram` and `tan size` can use a plain Zephyr build without a
+  hand-written manifest. The one slice is named by the planner core id of the
+  SoM topology entry whose `board:` is the target (`.../rtss_he` is `m55_he`,
+  `.../rtss_hp` is `m55_hp`), not the Zephyr board qualifier, and carries the
+  `flash_method`/`flash_args` (`expect_dpidr`, `jlink_device`,
+  `jlink_flash_device`, `slot0_load_address`) a planned slice for that board
+  gets. An ELF whose lowest load address is below the SoC's `soc_flash_base`
+  (an ITCM image) is marked `flash_method: ram_run_only`. The "skipped writing
+  system-manifest.yaml" note is gone for this route. A target no SoM preset
+  names gets the reserved `flash_method: none` (schema-valid), which `tan flash`
+  skips (tan-cli#1370)
+
+- **Experimental `TAN_FLASH_RAM_HOLD=1` for `tan flash --ram --ram-console`** keeps the load session open for the `--wait` window (`go; Sleep <wait_ms>; exit`) and skips the separate pre-read wait, reported as `ram.holdSession`; off by default pending a bench A/B (#1372).
+
+- **`tan doctor` and `tan build` now notice a west workspace that lacks
+  alp-sdk's `zephyr/patches.yml`** (tan-cli#1376). A workspace without them
+  builds with `ok: true` and then fails on the device (for example
+  `alp_camera_open` returns `ALP_ERR_NOSUPPORT` without the Alif clock
+  `set_rate` patch). The new `workspacePatches` doctor check and the
+  `build.workspace-patches-missing` build warning run alp-sdk's own
+  `scripts/verify_west_patches.py`, name each ABSENT or DRIFTED patch and its
+  module, and give the fix (`tan bootstrap`, or `west patch --dst-module <m>
+  apply`). The build warning never changes `ok` or the exit code; a verified
+  result is cached under `build/`, keyed by workspace HEADs, patches.yml and
+  the patched files' mtimes. An older SDK without the verifier reports the
+  check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
+  zephyr, which tan has always ignored, is now reported (`zephyrBase` check,
+  `build.zephyr-base-ignored` info).
+
+- **`tan build -D NAME=VALUE` (repeatable) now works on planned (`board.yaml`)
+  builds**, so examples documented with `-DSHIELD=...` /
+  `-DCONFIG_...=...` build as documented. The definitions go after the plan's
+  own args on every Zephyr slice (or only those named by the new
+  `--core <id>`, repeatable), so CMake's last-wins lets them override the
+  plan; `EXTRA_CONF_FILE` / `EXTRA_DTC_OVERLAY_FILE` (and a sysbuild
+  `<image>_` form) are appended `;`-joined to tan's list instead, and
+  `-D BOARD` / `-D Python3_EXECUTABLE` are refused (`build.define-reserved`).
+  A changed `-D` set (added, removed or re-valued) on an already-configured slice wipes that slice's build dir (`build.configure-cache-reset`), since Zephyr caches SHIELD and friends.
+  The envelope records them as `data.defines` (`args`, `slices`); `-D` with
+  no Zephyr slice is `build.define-no-target` (tan-cli#1382)
+
+- **`tan build` honours board.yaml `cameras:` (alp-sdk#2791).** `tan/planner/` gains `cameras.py` and `camera_owner.py` (verbatim) and the `_cameras` hooks in `orchestrator.py` (the `check` at the top of `_slice_command`, and `-DSHIELD`, or `-D<image>_SHIELD` on a sysbuild), `kconfig.py` (`ALP_CAMERA_CAM<n>` in a Yocto `local.conf`, `-DSHIELD` in `cmake-args.txt`) and `buildplan.py` (the `camera-select-failed` warning, and the omitted cmake-args artefact). The AEN `alp,som-power` devicetree node (alp-sdk#2784) is ported into `zephyr_board.py`. `tan validate` needs no port: it spawns the SDK validator. Supersedes the auto re-sync PR #1430. Refs alplabai/alp-sdk#2791, #1393.
+
+- **`tan probe`: a read-only J-Link command, so the bench no longer needs raw `JLinkExe`.** `tan probe identify [--core m55_he|m55_hp]` runs the exact DPIDR preflight script `tan flash` uses and reports `identity.{dpidr,expectedDpidr,dpidrMatch,apAddr,cpuid,core,itcmVerdict,isolation}`; a mismatch with the manifest slice's `expect_dpidr` (`probe.dpidr-mismatch`) or an unreadable ID (`probe.dpidr-unread`) exits 1 before any further session. Only an M55-HE target (`--core m55_he`, or the manifest's selected slice) whose connect banner also placed the attach on the HE access port then runs the `--ram` attach check (`connect` plus two read-only `mem32`); a skipped check (HP, ambiguous or unconfirmed target) reports the verdict from the connect banner's Core-found APAddr with `itcmVerdict: "not-checked"` and an info issue naming why. An attach that contradicts `--core` is `probe.core-mismatch`. `tan probe read <addr> [words]` runs one `mem32` (default 4 words, at most 256: `probe.read-too-large`), accepts only aligned plain hex or decimal (`probe.bad-argument`) and returns the words as hex in `read.data`, after checking its own banner (the SW-DP ID against an armed `expect_dpidr`, the access port against `--core`). It refuses ANY overlap with 0x50000000-0x5FFFFFFF on every core (`probe.read-unsafe-region`) before a J-Link is spawned. Probe selection, the trusted J-Link binary and the `ShowEmuList` verification are the `tan flash` ones (`--probe-usb-path`, `--probe-serial`, `--jlink`, `--build-root`, `--project`; their refusals reuse `flash.probe-*`). The envelope records the exact text sent (including `exec DisableAutoUpdateFW`) and a transcript under `<build_root>/flash-logs/probe-<verb>-<ts>.log`. No `probe` script can contain a write, erase, `loadbin`, `setpc`, `go`, reset or `w1`/`w2`/`w4`; tests scan every generated script for those verbs. New codes: `probe.read-too-large`, `probe.read-unsafe-region`, `probe.bad-argument`, `probe.unknown-verb`, `probe.read-failed`, `probe.failed`, `probe.dpidr-mismatch`, `probe.dpidr-unread`, `probe.core-mismatch`, `probe.manifest-unusable` (warning), `probe.no-manifest` (info), `probe.itcm-not-checked` (info), `probe.internal-failure`.
+
+- **`tan model run --device` (live) keeps the raw console and the flash provenance on every outcome (#1417).**
+  A live row now carries `consoleText` (the tail, capped at 64 Ki characters, with `consoleTruncated`) and the
+  whole console is saved as `<build>/flash-logs/model-console-<UTC ts>.txt`, its path reported as
+  `flash.consolePath`, so `latencyMs` can be checked against the app's own `LATENCY-RESULT`.
+  A refusal that follows a successful load (`model.device-console-empty`,
+  `model.device-capture-invalid`) keeps the `flash` block in `data` (for `ab`, `data.flash.a` /
+  `data.flash.b`), showing the board was RAM-loaded and reset. `model.device-capture-invalid` now
+  suggests raising `--wait`. The confirm refusal no longer says "to actually flash", comes first in
+  `issues` (Flow C's own `flash.*` notes follow it), and top-level `data.model` equals `result.model`.
+
+- **`tan flash --ram --watch <addr>[:<words>][@<period-ms>]` samples target memory while a RAM-run image runs.** The same J-Link session that does `loadbin; setpc; go` keeps going with read-only `mem32` reads separated by `Sleep <ms>` until `--wait` expires, so power and quiesce code can be accepted without a second J-Link spawn (about 45 s each behind the board-farm shim). The option repeats; the samples are reported as `data.watch[]` (`address`, `words`, `index`, `elapsedMs`, `values`), where `elapsedMs` is the scheduled offset after `go`, not a measurement. Refused before any spawn, `--dry-run` included: an unaligned address, zero or more than 64 words, a period outside 10..60000 ms, more than 8 watches or 2000 samples (`flash.ram-watch-invalid`), and the HP TCM windows `0x50000000..0x57FFFFFF` (ITCM + DTCM), whose read from an HE attach leaves the core unhaltable (`flash.ram-watch-unsafe-address`). Samples absent from the transcript carry `values: null` and raise the `flash.ram-watch-incomplete` warning. Reads are read-only on memory, but a register read (FIFO, clear-on-read, clock-gated block) may have side effects. `ram.watch.spawnMs` is the wall-clock of the whole load J-Link spawn, including connect/halt/loadbin and any `--jlink` wrapper overhead (the board-farm shim adds about 45 s): an upper bound on the watch span, NOT a drift measure (J-Link prints no timestamps). The RAM-console read at the end is unchanged.
+
+- **`tan flash --no-reset` (Flow D) sends no reset/run commands (#1445).** After the write, `verifybin` and the
+  in-session read-back the session ends at `exit` with no `RSetType`/`r`/`g`, so tan does not start the new image
+  and a console can be attached first. The envelope reports `jlink.reset: "not-sent"` and says plainly that
+  J-Link's `exit` may resume the core (seen on the bench) and the board is not held in reset. No boot probe runs.
+  Not valid with `--ram` or `--raw`. The read-back itself no longer resets separately (#1458).
+  Refused up front (`flash.no-reset-invalid`) when any selected entry is not a Flow D slice.
+
+- **`tan flash --raw <file>@<addr>` writes MRAM sectors byte-exact for bench backup/restore (#1446).**
+  Repeatable (`--raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000`), through one slice's J-Link
+  part profile (`--core`) with the Flow D probe-selection guard, DPIDR preflight and trusted J-Link
+  binary: `loadbin` + `verifybin` per blob, then `exit` -- no signing, no SETOOLS, no reset. Refused
+  before any spawn (`flash.raw-invalid`, previews too): an address that is not an explicit `0x`
+  literal or not 16 KiB sector-aligned, a blob that is not a whole number of sectors, a range outside
+  the SKU's own MRAM window (its variant's `mram_mb`, the SoC document's `soc_flash_base`; no family default), overlapping ranges. tan never derives an address, so an ATOC/STOC is written only
+  where you said. A real write needs the CLI `--confirm` (a manifest's `flash_args.confirm` never arms it) and a provably held bench reservation: `JLINK_RUN_PLACE` set, the J-Link program tan runs
+  IS the wrapper named by an absolute `TAN_JLINK_WRAPPER` (resolved, outside the cwd, not world-writable;
+  a marker string in a PATH binary proves nothing), and `labgrid-client` (absolute, never a PATH search)
+  reporting this host/user as the single `acquired:` holder (else `flash.raw-reservation-required`). `--readback` re-reads each blob in a fresh session (no
+  reset) and compares sha256; the envelope carries each blob's `sha256`, address and sector span.
+  The reservation check also requires the leased place's `swd` USB path to equal the selected probe's,
+  trusts only root- or you-owned, not other-writable wrapper and `labgrid-client` files (both the symlink's
+  chain and the target's), compares the holder with the real-uid account name, and spawns exactly the path
+  it verified.
+
+- **`tan monitor --capture` can send input and change baud mid-capture.**
+  `--send TEXT` (repeatable; escapes `\xNN \r \n \t \\`) writes to the console as
+  one ordered burst, at the start, `--send-after SECONDS` into the capture, or on
+  the first line matching `--send-on REGEX` (`--send-gap` paces the items), and
+  `--reopen-at BAUD --on REGEX` changes the baud (in place, falling back to a bounded close/reopen) on
+  the first complete line matching, for an app UART that wakes at about 23040 instead of 115200.
+  Both work over `rfc2217://` and local serial. `data.capture.actions` reports
+  the events; the new codes are `monitor.capture-send-failed` and
+  `monitor.capture-reopen-failed` (exit 1), and bad combinations are
+  `monitor.capture-bad-option`. See [`docs/monitor.md`](../docs/monitor.md).
+  Closes #1451.
+
+- **`tan reset` pulses nRESET once through J-Link.** It sends `r0`, `sleep
+  <--pulse-ms>` (default 100, 1 to 10000) and `r1` in one Commander session: no
+  `connect` (Commander toggles the pin without attaching), no halt, no `RSetType`, no `g`, no connect-under-reset and no retry, so a target
+  in STOP is not woken and its VBAT/BKRAM evidence survives (unlike the pin reset
+  inside `tan flash`). `--probe-usb-path` / `--probe-serial` select the probe with
+  the same `ShowEmuList` verification as `tan flash`, `JLINK_RUN_PLACE` (paired with
+  `--probe-usb-path`) is honoured per command through the environment and reported in `data.place`, and
+  the envelope carries `pulseMs`, `jlink`, `probe` and the exact `script`. New
+  codes: `reset.failed`, `reset.bad-argument` (exit 2) and `reset.internal-failure`.
+  With `JLINK_RUN_PLACE` and `--probe-usb-path` it is a single J-Link spawn (the wrapper's
+  handshake is checked afterwards); exit 0 means the pulse was sent, `data.resetObserved` is
+  `"unknown"` unless `--confirm-console PORT --expect REGEX` sees the board reboot
+  (`reset.boot-not-observed` otherwise). The first match must arrive within `--confirm-window` (default 3 s) of J-Link exiting; a later one is `lateMatchAtSeconds`, not a reset.
+  Single-spawn mode is used only when the J-Link program is the `TAN_JLINK_WRAPPER` (trusted path rule, operator-asserted; `data.wrapper.reason` gives a short code); a real JLinkExe takes the guarded two-pass path. With a place named and no trusted wrapper it refuses (`reset.wrapper-required`) before any spawn, and a trusted `TAN_JLINK_WRAPPER` is the default J-Link program. See [`docs/reset.md`](../docs/reset.md). Closes #1452.
+
 ### Changed
 
 - **BREAKING: tan's effective alp-sdk floor rises to the first alp-sdk
@@ -11668,6 +12624,209 @@ containing the floor exists; if its number differs, correct this line. See
     equivalent authoring mistake from "silently skipped at read" to "refused
     at `new-som` write".
 
+- **`tan generate --target yocto-conf` now renders through the build plan's own
+  config-artefact helper.** The per-core `local.conf` comes from
+  `buildplan._slice_config_artefact`, the same call `tan build`'s plan uses for a
+  yocto slice's `configArtefacts[].contents`, as `zephyr-conf` already does
+  (ADR-0026 §D). The bytes are unchanged; a new parity test pins the two call
+  sites together and was checked to red when they diverge. The `RENDER_MODES` and
+  `GENERATE_MODES` parity sets are unchanged. Refs #1216.
+
+- **`tan generate --target ipc-contract-h`, `dts-reservations` and `dts-partitions`
+  now render through the build plan's own shared-artefact helper.** The three
+  standalone emits come from `buildplan._shared_artefact`, the same
+  `_shared_artefacts` call that fills the plan's `sharedArtefacts[].contents`
+  (ADR-0026 §D), instead of calling the emitters independently. Each runs
+  only its own emitter from one table that the plan also iterates, so an unrelated
+  `boot:` refusal no longer breaks them (this also fixes `tfm-sysbuild-conf`). The
+  bytes are unchanged on the success path and error behaviour matches upstream;
+  per-mode parity tests pin the standalone emit to the plan's artefact on every
+  example board that loads. Refs #1216.
+- **A build-plan slice now carries the rendered `alp_hw_info_build.h` and `alp-west-libs.yml` after `cmake-args.txt`.** alp-sdk#2778 appends the two files to every zephyr/baremetal slice's `configArtefacts` (additive under `schemaVersion` 1; a SKU outside the production families gets a `hw-info-unavailable` warning and no header instead of failing the plan). `tan/planner/buildplan.py` ports the helpers, and `tan generate --target hw-info-h|west-libraries --core` renders through the same two, so those bytes cannot diverge from the plan's (ADR-0026 §D). The re-sync also mirrors the E1M-NX9101 removal (alp-sdk#2782: the `NX9` SKU family, the `nxp-imx9` boot default, the `imx93` west token), re-vendors the two scaffold `cold_chain.c` comment edits, and recaptures the planner oracle. The seam-1 comparator accepts the four tails the SDK can emit. Refs #1216.
+
+- **The planner mirror, the vendored scaffold and the planner oracle are pinned to alp-sdk `a5a137c7b594ebb5d451177803c0eb324069e86b`.** This is the one alp-sdk pin of the 0.7.0 release; the re-syncs along the way (tan-cli#1216, #1401, #1425, #1393) moved it in steps and none of the earlier pins is a release pin. The floor does not follow the pin: the first alp-sdk release containing `b04bb0f7a0edf6af759053311ba66eda0158968b` is enough (`v0.17.0-rc1` contains it; a stable `v0.17.0` is still pending, alp-sdk#2047). Newer planner features (`cameras:` selection, the `alp,som-power` node and its `pinctrl_som_power` group) degrade to a warning or a named `SdkTooOldError` against an older checkout instead of requiring the pin. See `docs/release-contract.md`. Refs #1216.
+- **`tan generate --target storage-mounts-c` now renders the build plan's own `generated/storage_mount_table.c` when it carries one.** alp-sdk#2820 adds the table to `sharedArtefacts` only when board.yaml `storage:` declares a mountable partition (`mount:` set, fs not raw, status ok), byte-identical to the standalone emit (ADR-0026 §D). `tan/planner/buildplan.py` ports the conditional entry and `has_storage_mounts`; a project with no mountable partition keeps the empty table the standalone emit always printed, so those bytes are unchanged. A parity test pins the two call sites together on every example board, plus a no-mounts test. Refs #1216.
+
+- **BREAKING: `tan`'s planner is re-synced with alp-sdk `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`,
+  which raises tan's effective alp-sdk floor to the first alp-sdk release
+  containing that commit** (from `c81cb5db9945c8f448a7bb952d374f874e2f42c0`;
+  `c81cb5db` is an ancestor). Besides the som-preset v2 hard cut (tan-cli#1297),
+  the planner now emits what the newer SDK's examples and banner expect:
+  - **A `--sysbuild` slice now gets its per-core `alp.conf`.** ADR-0020
+    lockstep for alp-sdk#866: `tan build` passes
+    `-D<image>_EXTRA_CONF_FILE=<build>/<core>-zephyr/alp.conf` on a sysbuild
+    (`boot:`/OTA) slice, where `<image>` is the basename of the slice's app
+    directory -- sysbuild's own name for the application image. Before, a
+    sysbuild slice carried no `EXTRA_CONF_FILE` at all and relied on the
+    example's own `CMakeLists.txt` running `alp_project.py --emit zephyr-conf
+    --core <id>` at configure time; alp-sdk#866 deletes that bridge from every
+    example, and the scaffolds `tan init` vendors (`python/tan/templates/vendored/`)
+    are re-vendored without it, so a project scaffolded by this `tan` gets
+    `alp.conf` from `tan build` alone. A project scaffolded by an OLDER `tan`
+    still carries the bridge in its `CMakeLists.txt`, so it receives the
+    same per-core config twice -- already true on a non-sysbuild slice (the
+    plan's `-DEXTRA_CONF_FILE` plus the bridge's `list(APPEND
+    EXTRA_CONF_FILE ...)`), and now on a sysbuild slice too. Deleting the
+    bridge block (the `execute_process(... --emit zephyr-conf ...)` and
+    `list(APPEND EXTRA_CONF_FILE ${_alp_generated})` lines) fixes both.
+    When a tokened plan runs from a project root whose directory name
+    differs from the one it was emitted in (`tan build --plan-from ...
+    --execute`), `tan` renames that slice's `-D<image>_EXTRA_CONF_FILE` to
+    the image sysbuild actually builds, instead of passing a name Zephyr
+    silently ignores.
+  - **The vendored scaffolds' bare `west build`/twister steps name a command
+    that works in a scaffold.** The #866 emit tells the reader to run
+    `python3 scripts/gen_example_alp_conf.py .` to write
+    `generated/alp.conf`; a scaffolded project has no `scripts/`, and the
+    SDK's copy writes nothing for a project outside alp-sdk. The vendored
+    READMEs now say `tan generate --target zephyr-conf --core <id>
+    --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf`, and `board.yaml`/
+    `prj.conf` point at that step.
+  - **The boot banner marks the core the image was built for.** alp-sdk#2469:
+    every entry in `CONFIG_ALP_SDK_SOC_CPUS` carries a `|<cluster>` suffix
+    taken from the SoC JSON's `zephyr_cpucluster`, which the newer SDK's
+    `alp_banner.c` strips and uses to place the `(active)` marker. An older
+    SDK prints the suffix verbatim.
+  - **`load_board_yaml` takes a per-target `sku=`** (alp-sdk#2597), the hook
+    the SDK's per-SKU `alp.conf` pre-generation uses; no `tan` command passes
+    it yet.
+  - **The generated AEN board tree's OSPI comment** no longer claims
+    `flash_ospi_alif.c` ships no `flash_driver_api` (alp-sdk#915: it now
+    implements read, JEDEC ID and SFDP, and still never enables XIP).
+  - **Every derived memory row states its `write_authority`** in
+    `system-manifest.yaml` (`customer_runtime` for SRAM/TCM and SoC memory
+    regions, `composite` for the whole-MRAM alias) -- alp-sdk#2024, ported into
+    `tan/planner/som_metadata.py`.
+
+- **BREAKING: tan reads and scaffolds the som-preset v2 schema only.** alp-sdk#2024 hard-cut `metadata/schemas/som-preset-v1.schema.json` to `som-preset-v2.schema.json` (`schema_version` const `2`, `write_authority` required on every `memory_map:` row, `inference.npu_population` removed), and tan now follows with no v1 fallback. `tan new-som` emits `schema_version: 2`, validates its own output against `som-preset-v2.schema.json`, and its `memory_map:` guidance names the required `write_authority:` field and its six schema values (`customer_image`, `vendor_image`, `customer_runtime`, `secure_enclave`, `none`, `composite`). `tan presets`, `tan size`, `tan debug-config` and `tan bootstrap` read and schema-check `som-preset-v2` presets; a preset still declaring `schema_version: 1` is skipped or reported unreadable exactly as any unsupported version was, and the schema-check disclosures name `som-preset-v2.schema.json`. A checkout older than alp-sdk#2024 (including v0.16.0) therefore lists no SoMs under `tan presets` and `tan new-som` exits with "could not read ...som-preset-v2.schema.json"; bind an SDK that carries #2024.
+
+- **`tan model check` now validates the per-NPU op-support table it is about
+  to use against `npu-ops-v1.schema.json`, when the bound SDK ships it.**
+  Fixes #1298. The tables under `metadata/npu_ops/` had no schema when the
+  read path was written (alp-sdk#1801), so only type guards stood between a
+  wrong-shaped table and a verdict. Only the table that matches the requested
+  variant is checked; if it fails, it is skipped like a malformed file (the
+  search goes on to any other table for that variant, otherwise the backend
+  reads `undetermined`) and the report's `notes` name the file, the JSON
+  pointer and what was found. A table for another variant is neither checked
+  nor mentioned. An SDK without the schema, or with one that cannot be loaded
+  (unreadable, not JSON, not a valid JSON Schema), keeps the previous
+  behaviour, the type guards alone, and says so in one note per backend; a
+  broken schema is never blamed on a table. These notes appear on the static
+  screen only, not on the `--exact` compiled or bench-point reports.
+
+- **BREAKING: `tan`'s planner is re-synced with alp-sdk `ac0e2a5e096a1c8c102818650a688d0f7e709066`,
+  which raises tan's effective alp-sdk floor to the first alp-sdk release
+  containing that commit** (from `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`,
+  an ancestor). Two hard edges: `tan generate --target zephyr-board` for a
+  V2N/V2M `m33_sm` core now reads the CM33 watchdog from the SoC spec's
+  `m33_sm` `watchdog` block and refuses an older SDK whose spec has none, and
+  `tan new-som` writes the som-preset `inference.auto_order` field an older
+  SDK's schema rejects. The planner now emits what the newer SDK's examples
+  expect:
+  - **Every build plan carries `deferredPlaceholders`.** alp-sdk#2705: the
+    top-level list of `${NAME}` values the planner left in a config artefact
+    on purpose (`["MENDER_TENANT_TOKEN"]` for `connectivity/iot-fleet-ota`
+    and `connectivity/production-deployment`, `[]` everywhere else), so
+    `tan build` builds both Mender examples. The planner refuses a `${...}`
+    in a config artefact that is a plan path token, is not an upper-case
+    name, is not written in the project's `board.yaml` or sits in a
+    non-`.conf` artefact, and any other `${...}` outside `configArtefacts`.
+    Since every plan `tan` renders carries the field, the
+    `board.yaml` whole-value fallback tan-cli#1302 used for a plan without it
+    is gone: a plan without `deferredPlaceholders` (an older SDK's, or one
+    handed in with `--plan-from`) exempts nothing.
+  - **A `${NAME}` on a live line of a Zephyr Kconfig fragment is refused.**
+    alp-sdk#2705: Zephyr does not expand it, so `CONFIG_HAWKBIT_SERVER="${HOST}"`
+    would have shipped the literal text as the server name. Write the real
+    value in `board.yaml` or set it in the app's own `prj.conf`. A commented
+    hint line is still allowed.
+  - **A Yocto slice no longer gets a self-referencing `MENDER_TENANT_TOKEN`.**
+    alp-sdk#2735: a `${NAME}` tenant used to emit `MENDER_TENANT_TOKEN ?=
+    "${MENDER_TENANT_TOKEN}"` in `local.conf`, which BitBake never expands;
+    the line is now a comment pointing at the documented `conf/local.conf`
+    override.
+  - **Per-product core ownership on V2N/V2M.** alp-sdk#2673/#2674: a
+    `board.yaml` `ownership:` block hands an assignable peripheral to a core,
+    validated against `metadata/e1m_modules/v2n/core-ownership.yaml` (an
+    unknown instance, a core outside the instance's candidates, a
+    hardware-blocked instance or a core `cores:` does not declare is
+    refused). The resolved map appears as `ownership:` in
+    `system-manifest.yaml`, the M33 slice's `alp.conf` gains the Kconfig for
+    peripherals it owns, and the generated `m33_sm` board tree declares
+    every assignable node that has an `m33:` devicetree block `disabled`,
+    with its pinctrl group, for the owning project to enable.
+  - **The V2N/V2M `m33_sm` board tree gains the CM33 `wdt0` node and the
+    GD32 control pads.** alp-sdk#2679: `wdt0` (`renesas,rzv-wdt`, disabled
+    by default because an expiry resets the whole SoM) plus the `alp-wdt0`
+    alias `<alp/wdt.h>` uses. alp-sdk#2695: a `gd32-pads` node
+    (`alp,gd32-pads`: SWDIO, SWCLK, NRST, ATTN) when the SoM's links declare
+    them.
+  - **`gpu2d` is a per-die capability.** alp-sdk#2678: it now follows the
+    silicon variant's `optional_features.gpu_mali_g31`, so the RZ/V2N dies
+    fused without the Mali-G31 no longer report it.
+  - **The SoM's AUTO inference order reaches the build.** alp-sdk#2677: a
+    preset's `inference.auto_order` becomes
+    `CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER` in a Zephyr `alp.conf` and
+    `ALP_SDK_INFERENCE_AUTO_ORDER ?=` in a Yocto `local.conf`. The same
+    alp-sdk change makes `inference.auto_order` the required field and
+    removes `inference.preferred_backend` from som-preset v2, so `tan
+    new-som` now scaffolds `auto_order: [<backend>]` (`[tbd]` by default);
+    against this SDK the old `preferred_backend:` line failed its own
+    schema check.
+  - **Smaller fixes.** `ina228` is wired to the I2C subsystem (alp-sdk#2653),
+    and the SoM preset's `on_module.dxm1` block is no longer read as a chip
+    slug (alp-sdk#2670).
+
+- **The Flow D envelope now says what the J-Link write actually did.** A real write
+  returned only `...; verified and PIN-reset` with an empty stderr: no DPIDR, no
+  transcript, and "verified" was `verifybin` against J-Link's flash cache, not the
+  chip. The entry now carries a `jlink` block: the SW-DP ID read (`dpidr`, from the
+  write transcript, else the read-only preflight, with `dpidrSource`), the
+  transcript as a file under `<build>/flash-logs/` (`transcriptPath`, holding the
+  Commander script and both streams) plus its tail inline, `verification:
+  "cache-verified"` with a note, and `reset`/`resetFailures`. The message says
+  `cache-verified` instead of `verified`. `Reset: Failed` and `CPU may have not been
+  reset` now count as a failed reset alongside `Failed to halt CPU` (tan-cli#522):
+  the message becomes `cache-verified; PIN-reset NOT confirmed` and the new
+  `flash.jlink-reset-unconfirmed` warning is emitted instead of claiming a reset.
+  New `--readback` re-reads every written region in a fresh J-Link session through
+  the same probe-selection guard as the write and compares sha256: a match reports
+  `readback-verified`, a difference fails the entry (`flash.readback-mismatch`), a
+  session that cannot run is `flash.readback-failed`.
+  Each run now writes its own transcript, `flash-logs/alif_mram_jlink-<core>-<UTC
+  YYYYmmddTHHMMSSZ>.log`, instead of overwriting one file: the newest 10 per core
+  are kept, a symlink planted at the log name is replaced rather than followed, and
+  a symlinked `flash-logs` directory is refused. `--readback` now ends its session
+  with the write's reset/go tail so the app is not left halted, and a match reports
+  a note that a fresh-session read is stronger than the flash cache but not a
+  cold-power-cycle proof.
+
+- **A Flow D write signs a `DEVICE` entry by default.** The ATOC tan signed was
+  app-only on the premise that the device configuration is preserved, but it is
+  an entry *inside* the package and the write replaces the whole table, so the
+  resident `DEVICE` entry was deleted (a `0x15C40` package became `0xA50`).
+  `slot0_config` now leads with a `DEVICE` entry (`binary`, version `0.5.00`,
+  `signed: true`, mirroring the alp-sdk bench recipe), sourced from the new
+  `flash_args.setools_device_config` or else SETOOLS' stock
+  `build/config/app-device-config.json`; with neither the run refuses with the
+  new `flash.device-config-missing`. `--no-device-config` opts out. The
+  whole-ATOC acknowledgement and every Flow D preview now list the entries the
+  new ATOC names and, when `flash_args.resident_atoc_entries` is supplied, the
+  resident entries that will not be rewritten.
+
+- **`tan flash --ram` now says that detaching the debugger clears `DEMCR.TRCENA`.**
+  Closing the J-Link session clears TRCENA (bit 24), which stops the DWT cycle counter
+  (`CYCCNT`) in the running image about 10 ms after start while the envelope still
+  reports `ok: true`, so a firmware that does not set TRCENA again prints wrong cycle
+  counts. Every successful `--ram` envelope and its `--dry-run` now carries the info
+  issue `flash.ram-debugger-detach-clears-trcena`, and the `--ram` help and README say
+  the same. The J-Link script is unchanged.
+
+- **The AEN `alp,som-power` node gains its pinctrl group (alp-sdk#2795).** `zephyr_board.py` now emits a `pinctrl_som_power` group (the sorted output control pads of the SKU's present power domains, `input-enable` + `input-schmitt-enable`) ahead of the node, and the node carries `pinctrl-0` / `pinctrl-names`. `cameras.py` takes the upstream docstring change (#2736). The planner oracle re-captures byte-identical and scaffold parity stays 10/10. Refs #1393.
+
+- **`tan validate` now validates in-process instead of spawning alp-sdk's `scripts/validate_board_yaml.py`.** The SDK's rich diagnostic validator (`alp_cli/validator.py`, `diagnostic.py`, `yaml_pos.py`) and the script's orchestrator consistency stage are ported to `tan/core/board_validator*.py` and `tan.planner`; `metadata/**` (including `board.schema.json`) is still read from the resolved checkout, so no schema is vendored. The exit-code map, envelope shape and issue codes are unchanged, and a new parity test holds the port to the script's exit status, stdout and stderr over the SDK's examples and an invalid-board corpus (schema errors, unknown keys, bad types, hw_rev refusals, YAML positions). `data.commandLine` is `""` on this path (nothing is spawned) and the interpreter-floor guard (`validate.python-too-old`) no longer applies; **Version skew:** the in-process validator applies the rules tan was audited against (alp-sdk `a5a137c7`) to whatever SDK is bound, where the spawned script always matched the bound SDK, so a newer SDK's extra checks are not applied until tan is re-synced; if it cannot read the bound SDK at all, `validate.failed` says so rather than blaming the board. `TAN_VALIDATE_ENGINE=subprocess` runs the bound SDK's own validator instead (tan-cli#270).
+
 ### Removed
 
 - **BREAKING: the `swd_probe` flash backend is removed (tan-cli#732) -- GD32
@@ -11729,6 +12888,56 @@ containing the floor exists; if its number differs, correct this line. See
   no separate SDK-Python-interpreter floor to check, so both codes have
   nothing left to name.
 
+- **The last E1M-NX9101 / i.MX 93 rows are removed from tan.** **BREAKING** for a project or script that names `E1M-NX9101` (see the 0.7.0 preamble). alp-sdk dropped the module (alp-sdk#2781, #2782; it was never produced) and #1422 mirrored that upstream; this removes what tan kept as fixture data: the `("E1M-NX9", "m33", None)` row of `_SOM_FAMILIES`, the `NX9` arms in `som_buildability.py`/`scaffold.py`/`pinmux_cmd.py`/`model_zoo.py`, the `rpmsg-imx93` parity and planner-oracle fixtures, and the NX9101 leg of `release-combination.yml`. `tan explain --template` now publishes `initRefusesSkuPrefixes: []`, because every SoM family tan knows has a vendored scaffold tree; `init.som-unsupported` stays (nothing reaches it from a real SKU) and is promoted to `frozen`, since alp-sdk-vscode maps it to `no-scaffold-for-som`. `new-som --ethos-u-variant` no longer offers `u65`, which alp-sdk no longer plans. Closes #1425.
+
+### Security
+
+- **`tan bootstrap` no longer lets a module planted in the project hijack its
+  `pip` and `venv` spawns.** The pip upgrade, `-m venv`, the west and Zephyr
+  requirements installs, the SDK extras and the editable install now run from a
+  fresh empty directory with every path argument made absolute, so a `pip.py` or
+  `venv.py` in the working directory is no longer imported in place of the real
+  module (the same hijack class #1326 closed for the probes). The editable-install
+  log and warning no longer call alp-sdk's `alp_cli`/`alp_mcp` tooling "tan's
+  Python backend": tan plans in-process, and that install is what provides the
+  `alp-mcp` server. Manifest pip specs that name an existing path are made absolute too. Still relative: `-e`/`-c` lines inside a requirements file and `PIP_CONSTRAINT`/`PIP_FIND_LINKS`/`PIP_CONFIG_FILE` environment values, which now resolve against the empty directory. Closes #1331. Refs #270.
+
+- **Flow D never runs a J-Link binary out of the project's workspace `.venv`.** The
+  probe listing, the DPIDR preflight, the write and `--readback` resolved the J-Link
+  tool through the "a west-capable venv is trusted" rule, so a checkout shipping
+  `.venv/bin/JLinkExe` got it executed with the user's privileges while a probe was
+  attached, and the project venv was also put on that child's `PATH`. The binary is
+  now resolved once per run from `--jlink <path>`, `TAN_JLINK`, `PATH` as the user's
+  environment has it, then a SEGGER install root (`/opt/SEGGER/*`,
+  `/Applications/SEGGER/*`, `Program Files\SEGGER`) -- never the venv and never a
+  manifest field -- and the same binary is used for every spawn. An override that
+  names a missing file is refused rather than replaced. The envelope reports
+  `jlink.binary` and `jlink.binarySource`; with no trusted binary the entry fails
+  instead of falling back to the venv.
+- **A confirmed Flow D write no longer executes a SETOOLS install the project alone
+  named, and no longer signs an arbitrary device-config file into MRAM.** Beyond the
+  J-Link binary (tan-cli#1336), `flash_args.setools_dir` lives in the manifest a
+  checkout controls, so a write whose `app-gen-toc` comes only from there is refused
+  with the new `flash.setools-untrusted-source`: name the install with
+  `--setools-dir` or `SETOOLS_DIR`. A manifest `flash_args.setools_device_config`
+  is accepted only when it resolves (symlinks followed) inside the operator-named
+  SETOOLS install or the project directory. Previews with a manifest-only install
+  still skip the sign and report `flash.preview-sign-skipped`.
+
+- **`tan build`'s pristine wipe no longer reaches outside `<project>/build`
+  through a `..` or a symlink in a slice `cwd`.** The sdk-switch-pristine
+  guard (also behind `--pristine`) only checked that the plan's `cwd` string
+  started with `build`. A hand-written `--plan-from` plan with
+  `cwd: build/../src/c1`, or a `build/c1` that is a symlink into `src/`,
+  stayed inside the project (so `build.path-escape` did not fire) and let the
+  wipe delete `<project>/src/c1/build`. The guard now refuses any `..` in the
+  `cwd`, requires the resolved `cwd` to sit at or under `<project>/build`, and
+  refuses a `build/` that is itself a symlink. Such a slice still builds; the
+  wipe is reported as `build.pristine-skipped` instead. tan's own planner
+  never emits either shape (tan-cli#1388)
+
+- **`tan bootstrap` can no longer run a `py.exe`/`python.exe` planted in the current directory on Windows.** The interpreter probe and `-m venv` spawned bare names that CreateProcess resolves against the cwd first; they now go through `resolve_tool` and an absolute path.
+- **Support-bundle home redaction is case-insensitive for Windows (drive-anchored) homes.** A lowercase drive letter or path from VS Code no longer leaks the account name into the bundle.
 ## [0.6.0] — 2026-08-24
 
 *`v0.6.0-rc1` (2026-08-14) was published as a GitHub **pre-release**, so
