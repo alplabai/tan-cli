@@ -94,6 +94,7 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.core import toolchain_provision
+from tan.core.host_python import probe_host_python as shared_probe_host_python
 from tan.core.probe import isolated_cwd, probe_status
 from tan.core.subprocess_env import (
     ld_library_path_needs_restore,
@@ -138,7 +139,6 @@ from tan.core.bootstrap import (
     posix_refusal,
     posix_venv_unusable,
     print_env_block,
-    python_candidates,
     python_ceiling_warning,
     python_floor_skew_warning,
     python_too_old,
@@ -376,38 +376,23 @@ class HostPython:
         return " ".join(self.argv)
 
 
-def probe_host_python(minimum: tuple[int, int]) -> HostPython | None:
-    """Walk `python_candidates` and take the first that RUNS and is at least
-    `minimum`, falling back to the first that merely ran -- so a too-old message
-    can name a real version rather than "did not run". `None` when none runs.
+def probe_host_python(minimum: tuple[int, int], env=None) -> HostPython | None:
+    """The host interpreter, through the ONE shared resolver `tan doctor` and
+    `tan build` use (`core.host_python`): every `python3.N` on PATH on POSIX,
+    `py -3`/`python`/`python3` on Windows, each located by `resolve_tool` (the
+    cwd is never searched, so a planted `py.exe`/`python.exe` cannot run) and
+    spawned by absolute path. The first that clears `minimum` wins, else the
+    first that merely ran, so a too-old message can name a real version.
 
-    "Actually runs" is the whole point on Windows: the Microsoft Store
-    `python.exe` alias sits on PATH and satisfies any presence check, but
-    executing it prints nothing and opens the Store. Requiring parseable output
-    rejects it, and the `py -3` candidate ahead of it means a launcher-only
-    machine still bootstraps.
-
-    The version PREFERENCE is what keeps that ordering safe: `py -3` resolves to
-    the launcher's default, routinely an older install than the bare `python` on
-    PATH.
+    The returned `argv` is the ABSOLUTE `sys.executable` the interpreter
+    reported, so the later `-m venv` spawn is never a bare name either.
+    `None` when none runs (the Windows Store `python.exe` alias prints nothing
+    and is rejected by the probe, as before).
     """
-    first_that_ran: HostPython | None = None
-    for candidate in python_candidates(os.name == "nt"):
-        out = probe(
-            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
-            timeout=PROBE_TIMEOUT_S,
-        )
-        if out is None:
-            continue
-        version = _parse_two_dotted(out)
-        if version is None:
-            continue
-        entry = HostPython(tuple(candidate), version)
-        if version >= minimum:
-            return entry
-        if first_that_ran is None:
-            first_that_ran = entry
-    return first_that_ran
+    best = shared_probe_host_python(minimum, env)
+    if best is None:
+        return None
+    return HostPython((best.interpreter,), best.version)
 
 
 def _parse_two_dotted(raw: str) -> tuple[int, int] | None:
@@ -1837,7 +1822,11 @@ def _finish_toolchain_install(
             f"stamp could not be written: {err} -- it will be re-verified next run.",
         )
         return
-    log.line(f"Cross toolchain {manifest.version} verified and stamped: {_native(store_dir)}")
+    log.line(
+        f"Cross toolchain {manifest.version} installed, version and compiler checked, "
+        f"and stamped: {_native(store_dir)} -- but "
+        f"{toolchain_provision.ARCHIVE_SHA256_NOTE}."
+    )
 
 
 #: Retried the same number of times, with the same backoff shape, as
@@ -2139,8 +2128,15 @@ def toolchain_phase(
         # something would leave a stale credential on disk for as long as the
         # pin held (tan-cli#1148 review).
         _reclaim_sdk_credential_wreckage(root)
-    if toolchain_provision.stamp_matches_pin(_read_toolchain_stamp(store_dir), manifest):
-        log.line(f"Cross toolchain already installed and verified: {_native(store_dir)}")
+    # A stamp alone is not enough: the compiler under it may have been deleted
+    # since (tan-cli#1483), and then the install must be repaired, not skipped.
+    if toolchain_provision.stamp_matches_pin(
+        _read_toolchain_stamp(store_dir), manifest
+    ) and toolchain_provision.store_compiler_present(store_dir, is_windows=is_windows):
+        log.line(
+            f"Cross toolchain already installed and stamped: {_native(store_dir)} "
+            f"(archive sha256 vs the alp-sdk pin was never checked)"
+        )
         return
 
     if is_windows and not any(on_path(program) for program in SEVEN_ZIP_PROGRAMS):

@@ -86,6 +86,31 @@ def gcc_binary_relpath(*, is_windows: bool) -> tuple[str, ...]:
     return ("gnu", TOOLCHAIN_COMPONENT, "bin", name)
 
 
+def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
+    """Whether the stamped store still holds its `arm-zephyr-eabi-gcc` file.
+    A stamp is written only after a compiler probe, but nothing stops the
+    compiler subtree being deleted afterwards (disk cleanup, a partial `rm`);
+    a stamp alone must not keep saying "verified" over that."""
+    try:
+        return store_dir.joinpath(*gcc_binary_relpath(is_windows=is_windows)).is_file()
+    except OSError:
+        return False
+
+
+#: What a stamp does NOT establish. `west sdk install` downloads each archive
+#: into a private temp directory it deletes before exiting, so tan never has
+#: the archive bytes to hash against the sha256 alp-sdk pins in
+#: `metadata/toolchains.json` (and west itself checks only the release's own
+#: `sha256.sum`, fetched from the same source). The stamp therefore means "the
+#: SDK version file matches the pin and the compiler runs", never "the bytes
+#: match alp-sdk's pinned sha256" -- every message that says "verified" says so.
+ARCHIVE_SHA256_NOTE = (
+    "the archive's sha256 was NOT compared against the alp-sdk pin "
+    "(`west sdk install` discards the archive; it only checks the release's own "
+    "sha256.sum)"
+)
+
+
 # ---------------------------------------------------------------------------
 # Host identity
 # ---------------------------------------------------------------------------

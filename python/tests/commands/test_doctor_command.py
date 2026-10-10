@@ -1614,7 +1614,8 @@ def test_collect_shows_toolchain_pass_while_zephyr_sdk_fails_on_a_stamp_with_no_
 
     checks = {c.name: c for c in doctor_cmd._collect(str(sdk_root))}
     assert checks["zephyrSdk"].status == "fail"
-    assert checks["toolchain"].status == "pass"
+    # tan-cli#1483: a stamp over a deleted compiler is no longer "verified".
+    assert checks["toolchain"].status == "fail"
 
 
 #: The literal Python heredoc `scripts/e2e-full.sh`'s Scenario-B step execs

@@ -2543,3 +2543,73 @@ def test_remove_named_version_is_looked_up_under_destination(
     assert env["data"]["removed"] is True
     assert not target.exists()
     assert not (workspace / "v0.19.0").exists(), "must not have looked under cwd instead"
+
+
+def test_remove_refuses_an_ancestor_of_the_active_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1483: removing a directory that CONTAINS the pinned install
+    deleted it with `ok: true` and no `--force` (the old comparison only
+    matched the same directory)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    group = cache_with_canary / "group"
+    target = make_sdk_root(group / "v0.24.0", version="0.24.0")
+    write_pointer(workspace / ".alp" / "sdk-path", target)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(group),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert refused["data"]["wasActive"] is True
+    assert target.exists()
+
+
+def test_remove_refuses_a_subtree_inside_the_active_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1483: removing `<active>/metadata` left the install 'partial'
+    with no refusal."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = make_sdk_root(cache_with_canary / "v0.25.0", version="0.25.0")
+    inner = target / "metadata"
+    inner.mkdir(exist_ok=True)
+    write_pointer(workspace / ".alp" / "sdk-path", target)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(inner),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert inner.exists()
+
+
+def test_remove_refuses_an_ancestor_of_a_registered_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    group = cache_with_canary / "group"
+    target = make_sdk_root(group / "v0.26.0", version="0.26.0")
+    write_registry(isolated_home, {other_project: target}, dated=True)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(group),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert target.exists()

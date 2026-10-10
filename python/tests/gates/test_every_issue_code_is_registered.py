@@ -1024,7 +1024,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=80,
+        expected_calls=81,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

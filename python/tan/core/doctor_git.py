@@ -17,7 +17,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from tan.core.probe import PROBE_TIMEOUT_S, probe
+from tan.core.probe import PROBE_TIMEOUT_S, isolated_cwd, probe
 from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
@@ -124,8 +124,8 @@ def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | No
 
 
 def _git_core_longpaths(git_exe: str | None) -> bool | None:
-    """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
-    precedence, resolved by `git config --get` itself rather than tan
+    """Read git's own EFFECTIVE `core.longpaths` (system -> global precedence
+    -- NOT the project repo's local config, see below -- resolved by `git config --get` itself rather than tan
     re-implementing that precedence by hand) via a real `git` subprocess.
 
     A SEPARATE axis from `doctor_cmd._long_paths_enabled` on purpose
@@ -149,18 +149,24 @@ def _git_core_longpaths(git_exe: str | None) -> bool | None:
     if git_exe is None:
         return None
     try:
-        out = subprocess.run(
-            ["git", "config", "--get", "core.longpaths"],
-            executable=git_exe,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            env=spawn_env(),
-            check=False,
-        )
+        # Run from a fresh EMPTY directory (not inside any repository): from the
+        # project's cwd `git config --get` also merges that repo's LOCAL config,
+        # but `west update` clones fresh module repos that never inherit it, so
+        # only the system/global scopes predict whether those clones succeed.
+        with isolated_cwd() as empty:
+            out = subprocess.run(
+                ["git", "config", "--get", "core.longpaths"],
+                cwd=empty,
+                executable=git_exe,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return classify_git_core_longpaths(out.returncode, out.stdout)
