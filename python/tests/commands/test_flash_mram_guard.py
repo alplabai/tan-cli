@@ -144,14 +144,36 @@ def test_an_elf_far_older_than_its_bin_is_refused_as_stale(tmp_path):
 
 
 @posix_only
-@pytest.mark.parametrize("age", [-3600, 0, 5], ids=["newer", "same-time", "seconds-older"])
-def test_an_elf_newer_or_just_older_than_its_bin_is_trusted(tmp_path, age):
+@pytest.mark.parametrize("age", [0, 5], ids=["same-time", "seconds-older"])
+def test_an_elf_not_newer_than_its_bin_is_trusted(tmp_path, age):
     """A normal build links the ELF, then `objcopy`s the .bin seconds later."""
     message = flash_mram_guard.mram_link_guard(
         _pair(tmp_path, elf_age_s=age), "m55_he", slot0=SLOT0
     )
-    assert message is not None and "older than the .bin" not in message
+    assert message is not None and "older than" not in message
     assert "lowest LOAD segment" in message  # judged on its load address, not its age
+
+
+@posix_only
+@pytest.mark.parametrize("via", ["bin", "elf"])
+def test_a_bin_older_than_its_elf_is_refused_whichever_the_manifest_names(tmp_path, via):
+    """tan-cli#1485: an ITCM-linked .bin left beside a fresh MRAM-linked ELF used to pass,
+    because the ELF alone was judged. Holds for an ELF artefact (the mramxip shape) too."""
+    binary = _pair(tmp_path, elf_age_s=-3600)  # ELF an hour NEWER than the .bin
+    artefact = binary if via == "bin" else str(tmp_path / "a.elf")
+    message = flash_mram_guard.mram_link_guard(artefact, "m55_he", slot0=SLOT0)
+    assert message is not None and "a.bin" in message and "older than its ELF" in message
+
+
+@posix_only
+def test_a_bin_older_than_its_elf_is_refused_on_flow_d(tmp_path, monkeypatch):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    elf = tmp_path / "build" / "a.elf"
+    elf.write_bytes(make_elf(base=SLOT0, entry=SLOT0 | 1))
+    os.utime(elf, (4_000_000_000, 4_000_000_000))  # far newer than the .bin `_flow_d_run` writes
+    rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
+    assert rc == 1 and [i.code for i in issues] == [CODE]
+    assert "older than its ELF" in issues[0].message
 
 
 @posix_only

@@ -105,7 +105,8 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
 #: downloading it, and the minimal bundle matched the release sum which tan compared
 #: with the pin before and after west ran. Nothing is re-hashed from disk later, and
 #: tan never saw the minimal bundle's bytes. A stamp without `pinChecked` predates
-#: this check: nothing about its archives was compared with the pin.
+#: this check: nothing about its archives was compared with the pin. See
+#: docs/toolchain-archive-verification.md.
 ARCHIVE_SHA256_NOTE = (
     "files on disk are not re-hashed; a stamp marked pinChecked means the toolchain "
     "archive was hashed against alp-sdk's pin at download (the minimal SDK bundle only "

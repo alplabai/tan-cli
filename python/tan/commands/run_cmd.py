@@ -349,6 +349,12 @@ def _run(
         # Flow A slice whose runner refuses would name a flag `run` lacked.
         replace_atoc=replace_atoc,
     )
+    # tan-cli#1482: carry the build step's own issues + recap onto this arm as
+    # every other arm does -- a partial build (a skipped slice, a manifest-write
+    # warning) still counts as build_ok, and dropping its warnings here left a
+    # flash result with no sign that a core was not rebuilt.
+    flash_issues = [*build_issues, *flash_issues]
+    flash_text = _build_text_lines(build_data, build_issues) + list(flash_text)
     return flash_exit, flash_data, flash_issues, flash_text
 
 
@@ -471,79 +477,87 @@ def run(
     for a host target, or (with --flash) program a hardware target."""
     json_mode = output_format == "json"
 
-    # Same resolution `build_cmd.build` performs (`run` builds via the same
-    # engine, so it must anchor on the same project) -- see that function for
-    # the reasoning behind each step.
-    cwd = Path.cwd()
-    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
-    if board_yaml is not None and not os.path.isabs(board_yaml):
-        board_yaml = os.path.join(str(workspace_root), board_yaml)
-    if board_yaml is None and (workspace_root / "board.yaml").is_file():
-        board_yaml = str(workspace_root / "board.yaml")
-    build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
-    build_root = _abs_posix(build_root)
-    if board_yaml is not None:
-        board_yaml = _abs_posix(board_yaml)
-
-    # Same ladder `build_cmd.build` resolves -- `--sdk-root` > `.alp/sdk-path`
-    # project pin > the machine-global default (`~/.alp/sdk-default`) > the
-    # positional walk (`resolve_sdk_root_ladder`); `run` builds via the same
-    # engine, so it must agree with `build` on which checkout that is. No
-    # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
-    # own docstring).
-    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
-    resolved_sdk_root = sdk_resolution.path
-    sdk_tier = sdk_resolution.tier
-    sdk_broken_pin = sdk_resolution.broken_project_pin
-    sdk_foreign_default = sdk_resolution.foreign_global_default_for
-    # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
-    # exact same reason: this line was a VERBATIM COPY of the one that carried
-    # the defect, so fixing only `build` would have left its twin here.
-    # `resolve_sdk_root_ladder` returns an explicit `--sdk-root` UNVALIDATED
-    # (I-31 terminal-for-REPORTING, matching the oracle's
-    # `resolve_sdk_tiered`), which is correct for a caller that only reports
-    # the tier and wrong for one that ACTS on the path: a bogus `--sdk-root`
-    # sailed through as `sdk.sourceTier: "sdkRootFlag"` and was then refused
-    # for the NEXT missing thing, telling the customer their project is broken
-    # when the flag they had just typed is what was wrong.
-    #
-    # Guarded HERE rather than inside the shared ladder because every other
-    # caller depends on it staying unvalidated -- the same placement
-    # `build_cmd`, `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk`
-    # already chose. An unresolvable explicit root is treated as no root at
-    # all, so the refusal downstream is the honest "no alp-sdk checkout found"
-    # and no `sdk` key is emitted, matching the oracle.
-    if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk_root):
-        resolved_sdk_root = None
-    # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve is a coded
-    # refusal, not a silent "no root". Without it the typo fell through to the
-    # build engine and surfaced as an unrelated downstream failure. No
-    # `--sdk-root` + no checkout found keeps the engine's own behaviour (the
-    # engine owns that refusal), so only the explicit-flag case is new here.
-    sdk_refusal = None
-    if sdk_root and sdk_root.strip() and resolved_sdk_root is None:
-        refusal_msg = rejected_sdk_root_message(sdk_root, "Nothing was built or run.")
-        sdk_refusal = (
-            ExitCode.RUNTIME_FAILURE,
-            None,
-            [Issue("run.sdk-root-unresolved", "error", refusal_msg)],
-            [f"run: {refusal_msg}"],
-        )
-    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
-    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
-    # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
-    # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
-    # pristine guard's stamp comparison, threaded through from `execute_slices`
-    # rather than self-discovered), and `run` reuses the same engine so it must
-    # resolve it the same way, not just `sdk_root` itself.
-    sdk_root_for_stamp = (
-        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
-    )
-    # tan-cli#236: `boardYaml` reported only when the file really exists -- an
-    # explicit `--board-yaml` skips the `is_file()` discovery guard above.
-    project_obj = Project.resolved(build_root, board_yaml)
-
+    # tan-cli#1482: the resolution prologue lives INSIDE the catch-all (as in
+    # `build_cmd.build`, tan-cli#488 defect 8) so a deleted cwd or a resolver
+    # raise becomes a `run.internal-failure` envelope, not a raw traceback.
+    project_obj = Project(root=None, board_yaml=None)
+    sdk: SdkInfo | None = None
+    sdk_tier = "none"
+    sdk_broken_pin: str | None = None
+    sdk_foreign_default: str | None = None
     try:
+        # Same resolution `build_cmd.build` performs (`run` builds via the same
+        # engine, so it must anchor on the same project) -- see that function for
+        # the reasoning behind each step.
+        cwd = Path.cwd()
+        workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+        if board_yaml is not None and not os.path.isabs(board_yaml):
+            board_yaml = os.path.join(str(workspace_root), board_yaml)
+        if board_yaml is None and (workspace_root / "board.yaml").is_file():
+            board_yaml = str(workspace_root / "board.yaml")
+        build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
+        build_root = _abs_posix(build_root)
+        if board_yaml is not None:
+            board_yaml = _abs_posix(board_yaml)
+
+        # Same ladder `build_cmd.build` resolves -- `--sdk-root` > `.alp/sdk-path`
+        # project pin > the machine-global default (`~/.alp/sdk-default`) > the
+        # positional walk (`resolve_sdk_root_ladder`); `run` builds via the same
+        # engine, so it must agree with `build` on which checkout that is. No
+        # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
+        # own docstring).
+        sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+        resolved_sdk_root = sdk_resolution.path
+        sdk_tier = sdk_resolution.tier
+        sdk_broken_pin = sdk_resolution.broken_project_pin
+        sdk_foreign_default = sdk_resolution.foreign_global_default_for
+        # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
+        # exact same reason: this line was a VERBATIM COPY of the one that carried
+        # the defect, so fixing only `build` would have left its twin here.
+        # `resolve_sdk_root_ladder` returns an explicit `--sdk-root` UNVALIDATED
+        # (I-31 terminal-for-REPORTING, matching the oracle's
+        # `resolve_sdk_tiered`), which is correct for a caller that only reports
+        # the tier and wrong for one that ACTS on the path: a bogus `--sdk-root`
+        # sailed through as `sdk.sourceTier: "sdkRootFlag"` and was then refused
+        # for the NEXT missing thing, telling the customer their project is broken
+        # when the flag they had just typed is what was wrong.
+        #
+        # Guarded HERE rather than inside the shared ladder because every other
+        # caller depends on it staying unvalidated -- the same placement
+        # `build_cmd`, `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk`
+        # already chose. An unresolvable explicit root is treated as no root at
+        # all, so the refusal downstream is the honest "no alp-sdk checkout found"
+        # and no `sdk` key is emitted, matching the oracle.
+        if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk_root):
+            resolved_sdk_root = None
+        # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve is a coded
+        # refusal, not a silent "no root". Without it the typo fell through to the
+        # build engine and surfaced as an unrelated downstream failure. No
+        # `--sdk-root` + no checkout found keeps the engine's own behaviour (the
+        # engine owns that refusal), so only the explicit-flag case is new here.
+        sdk_refusal = None
+        if sdk_root and sdk_root.strip() and resolved_sdk_root is None:
+            refusal_msg = rejected_sdk_root_message(sdk_root, "Nothing was built or run.")
+            sdk_refusal = (
+                ExitCode.RUNTIME_FAILURE,
+                None,
+                [Issue("run.sdk-root-unresolved", "error", refusal_msg)],
+                [f"run: {refusal_msg}"],
+            )
+        sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+        sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+        # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
+        # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
+        # pristine guard's stamp comparison, threaded through from `execute_slices`
+        # rather than self-discovered), and `run` reuses the same engine so it must
+        # resolve it the same way, not just `sdk_root` itself.
+        sdk_root_for_stamp = (
+            str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
+        )
+        # tan-cli#236: `boardYaml` reported only when the file really exists -- an
+        # explicit `--board-yaml` skips the `is_file()` discovery guard above.
+        project_obj = Project.resolved(build_root, board_yaml)
+
         if sdk_refusal is not None:
             exit_code, data, issues, text_lines = sdk_refusal
         else:

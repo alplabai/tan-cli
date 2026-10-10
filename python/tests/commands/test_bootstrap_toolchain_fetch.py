@@ -117,3 +117,26 @@ def test_a_stream_that_ends_short_is_unverified_not_a_mismatch(tmp_path, monkeyp
         "https://example.invalid/", _art(payload), tmp_path / "root" / "t", tmp_path / "root", "leaf"
     )
     assert out.kind == "unverified" and "incomplete download" in out.message
+
+
+def test_a_cwd_planted_seven_zip_is_never_used(tmp_path, monkeypatch):
+    planted = tmp_path / "proj" / "7z.exe"
+    planted.parent.mkdir()
+    planted.write_text("x", encoding="utf-8")
+    good = tmp_path / "bin" / "7za"
+    good.parent.mkdir()
+    good.write_text("x", encoding="utf-8")
+    monkeypatch.chdir(planted.parent)
+    answers = {"7z": planted, "7za": good}
+
+    from tan.core import tool_lookup
+
+    def fake(name, env):
+        hit = answers.get(name)
+        return tool_lookup.ToolResolution(str(hit) if hit else None, "fake")
+
+    monkeypatch.setattr(tool_lookup, "resolve_tool", fake)
+    assert fetch._find_seven_zip() == str(good.resolve())
+
+    del answers["7za"]
+    assert fetch._find_seven_zip() is None  # only the planted one: refuse, never spawn

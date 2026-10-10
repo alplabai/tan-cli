@@ -283,3 +283,76 @@ def test_doctor_and_bootstrap_agree_by_construction_same_verdict_function(tmp_pa
     assert doctor_verdict is bootstrap_verdict is True
     # Both modules reach the identical function object, not two copies.
     assert doctor_cmd.toolchain_provision.stamp_matches_pin is bootstrap_cmd.toolchain_provision.stamp_matches_pin
+
+
+def _stamp(root: Path) -> None:
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / tp.STAMP_FILENAME).write_text(
+        tp.render_stamp(tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi")),
+        encoding="utf-8",
+    )
+
+
+def test_adopted_root_with_a_gone_compiler_does_not_say_bootstrap_repairs_it(tmp_path, monkeypatch):
+    """tan-cli#1498: `tan bootstrap` never repairs a directory under an adopted
+    ALP_TOOLCHAIN_ROOT, so doctor must not offer it as the remedy."""
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    _stamp(adopted / tp.store_dir_name(manifest.version))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "to repair it" not in check.detail
+    assert "will not repair" in check.detail
+    assert "ALP_TOOLCHAIN_ROOT" in check.detail
+    assert not check.fix
+
+
+def test_default_root_with_a_gone_compiler_still_points_at_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    _stamp(tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "tan bootstrap" in check.detail
+    assert check.fix == "tan bootstrap"
+
+
+def test_adopted_root_with_a_different_pin_stamp_does_not_offer_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store = adopted / tp.store_dir_name(manifest.version)
+    store.mkdir(parents=True)
+    (store / tp.STAMP_FILENAME).write_text(
+        tp.render_stamp(tp.ToolchainStamp("0.0.1-other", "0" * 64, "arm-zephyr-eabi")),
+        encoding="utf-8",
+    )
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "different pin" in check.detail
+    assert "will not repair" in check.detail
+    assert not check.fix
+
+
+def test_adopted_root_with_an_unstamped_existing_dir_does_not_offer_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    (adopted / tp.store_dir_name(manifest.version)).mkdir(parents=True)
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "will not repair" in check.detail
+    assert not check.fix

@@ -8,6 +8,7 @@ streams, and extract it into the layout the SDK's own `setup.sh` produces
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import tarfile
@@ -92,17 +93,35 @@ def _download(url: str, dest: Path, art: ToolchainArtifact) -> FetchOutcome:
     return FetchOutcome("ok")
 
 
+def _find_seven_zip() -> str | None:
+    """Absolute path of the first 7-Zip on PATH that is not inside the current
+    directory. The bare name is never spawned: on Windows CreateProcess searches the
+    parent's cwd first, so a planted `7z.exe` in the project would run (cf. #1483)."""
+    from tan.core.tool_lookup import resolve_tool  # noqa: PLC0415
+
+    cwd = Path(os.getcwd()).resolve()
+    for name in SEVEN_ZIP_EXTRACTORS:
+        found = resolve_tool(name, os.environ).resolved
+        if found is None or not Path(found).is_absolute():
+            continue
+        real = Path(found).resolve()
+        if real == cwd or cwd in real.parents:
+            continue
+        return str(real)
+    return None
+
+
 def _extract(archive: Path, dest: Path) -> str | None:
     """Error text, or None. `.tar.xz` via tarfile's `data` filter (no absolute paths,
     no escapes, no device nodes); `.7z` via a 7-Zip binary (Windows' archive format)."""
     dest.mkdir(parents=True, exist_ok=True)
     try:
         if archive.name.endswith(".7z"):
-            program = next((p for p in SEVEN_ZIP_EXTRACTORS if shutil.which(p)), None)
+            program = _find_seven_zip()
             if program is None:
-                return "no 7-Zip on PATH to extract the .7z toolchain archive"
+                return "no usable 7-Zip on PATH to extract the .7z toolchain archive"
             proc = subprocess.run(  # noqa: S603
-                [program, "x", "-y", f"-o{dest}", str(archive)],
+                [program, "x", "-y", f"-o{dest}", "--", str(archive)],
                 capture_output=True, text=True, check=False, env=spawn_env(),
             )
             return None if proc.returncode == 0 else f"{program} exited {proc.returncode}"

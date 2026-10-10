@@ -861,3 +861,31 @@ def test_sign_slot0_signs_a_device_entry_into_the_scratch_config(tmp_path):
         assert _tree_digest(setools_dir) == before
     finally:
         setools_scratch.cleanup_scratch(signed.scratch_dir)
+
+
+def test_scratch_overlay_never_holds_a_copy_of_the_signing_keys(tmp_path, monkeypatch):
+    """tan-cli#1485: the keys used to be copied with `utils/` and removed afterwards, so a kill
+    in between left them in the temp dir. They must not exist in the scratch tree at ANY point
+    before the link is made."""
+    if os.name == "nt":
+        pytest.skip("symlink semantics are POSIX; Windows copies instead")
+    shared = tmp_path / "setools"
+    (shared / "utils" / "key").mkdir(parents=True)
+    (shared / "utils" / "cfg").write_text("cfg", encoding="utf-8")
+    (shared / "utils" / "key" / "OEMRoT.pem").write_text("PRIVATE", encoding="utf-8")
+    (tmp_path / "parent").mkdir()
+    real = setools_scratch.shutil.copytree
+    leaked: list[str] = []
+
+    def spy(src, dst, *a, **kw):
+        out = real(src, dst, *a, **kw)
+        leaked.extend(str(p) for p in Path(dst).rglob("OEMRoT.pem"))
+        return out
+
+    monkeypatch.setattr(setools_scratch.shutil, "copytree", spy)
+    root = setools_scratch.make_scratch(str(shared), str(tmp_path / "parent"))
+    try:
+        assert leaked == []  # no copy of the keys ever existed in the scratch tree
+        assert (Path(root) / "utils" / "key" / "OEMRoT.pem").read_text(encoding="utf-8") == "PRIVATE"
+    finally:
+        setools_scratch.cleanup_scratch(root)

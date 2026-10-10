@@ -784,7 +784,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # Registered as `bootstrap.sdk-credential-unstaged` in
         # contract/issue-codes.json before bumping.
         #
-        # 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
+        # 35 (tan-cli#1498 added the adopted-root pre-download refusal); was 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
         # runtime tripwire under that netrc route: ONE new
         # `log.warn("sdk-credential-unverified", ...)` call site, taken
         # instead of the `Authenticating the Zephyr SDK download ...` line
@@ -798,8 +798,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # contract/issue-codes.json before bumping.
         # 41, not 34, since tan-cli#1496: the pre/post-install sum checks and the
         # toolchain download carry seven new `log.warn` sites, all on the registered
-        # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`.
-        expected_calls=41,
+        # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`;
+        # 42 = 34 + 7 (#1496) + 1 (#1503, merged from dev).
+        expected_calls=42,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
@@ -1029,7 +1030,8 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=81,
+        # 84 (tan-cli#1498): three adopted-root toolchain-check arms, no new code.
+        expected_calls=84,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

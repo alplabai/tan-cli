@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from tan.core.flash_plan import FLOW_D_METHOD, FlashPlanError, fa_str_checked
+from tan.core.flash_plan import FLOW_D_METHOD, FlashPlanError, fa_str_checked, resolve_slot0_binary
 from tan.core.mram_link import mram_link_refusal
 
 #: Ceiling on the bytes read: a Zephyr ELF with debug info is tens of MiB, never this.
@@ -30,6 +30,32 @@ _ELF_MAGIC = b"\x7fELF"
 #: normal build links the ELF and then `objcopy`s the `.bin` from it, seconds apart; an ELF
 #: from an earlier build beside a swapped-in `.bin` is minutes or more older.
 STALE_ELF_SECONDS = 60.0
+
+
+#: Filesystem timestamp slack (FAT keeps 2 s) when asking whether the `.bin` that will be
+#: written is OLDER than its ELF. `objcopy` runs after the link, so a genuine pair never
+#: has the `.bin` older; a leftover from an earlier build is minutes or more.
+BIN_OLDER_SLACK_SECONDS = 2.0
+
+
+def written_bin_older_than_elf(artefact_path: str) -> tuple[str, str] | None:
+    """`(bin, elf)` when the `.bin` Flow D will `loadbin` to slot0 is older than the ELF it
+    must have been made from, else `None` (also when there is no same-stem pair to compare).
+
+    The written `.bin` is `resolve_slot0_binary`'s answer -- the artefact itself, or the
+    sibling `.bin` of an ELF artefact -- so this holds whichever of the two the manifest
+    names. The ELF's link address (checked separately) only vouches for a `.bin` made from
+    THAT link; an ITCM-linked `.bin` left beside a fresh MRAM-linked ELF has an older
+    mtime, which is the only evidence of the mismatch on disk (tan-cli#1485)."""
+    written = resolve_slot0_binary(artefact_path, os.path.isfile)
+    if written is None:
+        return None
+    elf = artefact_path if written != artefact_path else os.path.splitext(artefact_path)[0] + ".elf"
+    try:
+        gap = os.path.getmtime(elf) - os.path.getmtime(written)
+    except OSError:
+        return None
+    return (written, elf) if gap > BIN_OLDER_SLACK_SECONDS else None
 
 
 def find_elf(artefact_path: str) -> tuple[bytes, bool] | None:
@@ -74,13 +100,20 @@ def slot0_address(flash_args: Any) -> int | None:
 
 def mram_link_guard(artefact_path: str, entry_id: str, *, slot0: int) -> str | None:
     """The refusal for a Flow D entry whose ELF is loaded below `slot0`
-    (`slot0_load_address`), or whose same-stem ELF is older than its `.bin`, else `None`.
+    (`slot0_load_address`), or whose same-stem ELF is much older than its `.bin`, or whose `.bin` is older than its ELF, else `None`.
     The caller invokes this only for the shapes tan controls (see the module docstring)."""
+    prefix = f"{FLOW_D_METHOD}[{entry_id}]: refusing -- "
+    older = written_bin_older_than_elf(artefact_path)
+    if older is not None:
+        return (
+            f"{prefix}the .bin that would be written to slot0 ({os.path.basename(older[0])}) is "
+            f"older than its ELF ({os.path.basename(older[1])}), so it was not produced from that "
+            "link and its load address is unknown. Rebuild so the .bin is regenerated from the ELF."
+        )
     found = find_elf(artefact_path)
     if found is None:
         return None
     data, stale = found
-    prefix = f"{FLOW_D_METHOD}[{entry_id}]: refusing -- "
     if stale:
         return (
             f"{prefix}the ELF beside the .bin ({os.path.basename(os.path.splitext(artefact_path)[0])}"
