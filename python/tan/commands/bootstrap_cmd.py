@@ -2000,6 +2000,37 @@ def _check_release_sum(
     return text
 
 
+def _plan_tan_downloads(
+    runner: Runner,
+    manifest: toolchain_provision.ToolchainManifest,
+    when: str,
+    *,
+    archive: bool = False,
+) -> None:
+    """--dry-run: tan's OWN network fetches are not subprocess argvs, so list them in
+    `plannedCommands` as `# tan downloads ...` lines to keep the preview complete."""
+    from tan.commands.bootstrap_toolchain_fetch import toolchain_artifact  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    artifacts = _host_artifacts(manifest)
+    if not artifacts:
+        return
+    art = toolchain_artifact(artifacts)
+    if not archive:
+        runner.planned.append(
+            ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), f"({when}; compared with alp-sdk's pins)"]
+        )
+        return
+    if art is not None:
+        runner.planned.append(
+            ["#", "tan", "downloads", manifest.base_url.rstrip("/") + "/" + art.filename,
+             f"(sha256 checked against alp-sdk's pin {art.sha256})"]
+        )
+    runner.planned.append(
+        ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), "(re-fetched after west; must be unchanged)"]
+    )
+
+
 def _recheck_release_sum(
     log: Log, manifest: toolchain_provision.ToolchainManifest, first_text: str
 ) -> bool:
@@ -2042,7 +2073,14 @@ def _install_pinned_toolchain(
         )
         return False
     log.line(f"Downloading {art.filename} and checking its sha256 against alp-sdk's pin")
-    outcome = fetch.install_pinned_toolchain(manifest.base_url, art, tmp_dir, root, leaf)
+    # Same blind retry the west step gets, for transport failures ONLY ("unverified"):
+    # a hash mismatch or an extraction failure is never retried.
+    for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
+        outcome = fetch.install_pinned_toolchain(manifest.base_url, art, tmp_dir, root, leaf)
+        if outcome.kind != "unverified":
+            break
     if outcome.kind == "ok":
         return True
     if outcome.kind == "mismatch":
@@ -2094,7 +2132,9 @@ def _acquire_toolchain(
             return
         _reclaim_toolchain_wreckage(root, leaf)
     sum_text: str | None = ""
-    if not runner.dry_run:
+    if runner.dry_run:
+        _plan_tan_downloads(runner, manifest, "before west sdk install")
+    else:
         sum_text = _check_release_sum(log, manifest, when="before")
         if sum_text is None:
             return
@@ -2167,6 +2207,7 @@ def _acquire_toolchain(
         log.warn("toolchain-install", f"west sdk install failed: {augmented} {remedy}")
         return
     if runner.dry_run:
+        _plan_tan_downloads(runner, manifest, "after west sdk install", archive=True)
         return
     if not _recheck_release_sum(log, manifest, sum_text or ""):
         return

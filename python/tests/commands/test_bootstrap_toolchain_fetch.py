@@ -64,7 +64,7 @@ def test_a_matching_archive_is_extracted_into_the_setup_sh_layout(tmp_path, monk
 
 def test_a_swapped_archive_is_a_mismatch_and_nothing_is_extracted(tmp_path, monkeypatch):
     good = _archive(tmp_path)
-    evil = _archive(tmp_path, member="arm-zephyr-eabi/evil")
+    evil = good[:-1] + bytes([good[-1] ^ 1])  # same length, different hash
     _serve(monkeypatch, evil)
     (tmp_path / "root").mkdir()
     tmp_dir = tmp_path / "root" / "leaf.tmp-1"
@@ -107,3 +107,13 @@ def test_an_archive_without_the_toolchain_directory_is_an_install_failure(tmp_pa
         "https://example.invalid/", _art(payload), tmp_path / "root" / "t", tmp_path / "root", "leaf"
     )
     assert out.kind == "install"
+
+
+def test_a_stream_that_ends_short_is_unverified_not_a_mismatch(tmp_path, monkeypatch):
+    payload = _archive(tmp_path)
+    _serve(monkeypatch, payload[:-5])
+    (tmp_path / "root").mkdir()
+    out = fetch.install_pinned_toolchain(
+        "https://example.invalid/", _art(payload), tmp_path / "root" / "t", tmp_path / "root", "leaf"
+    )
+    assert out.kind == "unverified" and "incomplete download" in out.message

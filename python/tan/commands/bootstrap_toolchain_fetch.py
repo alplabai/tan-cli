@@ -76,6 +76,12 @@ def _download(url: str, dest: Path, art: ToolchainArtifact) -> FetchOutcome:
                     out.write(chunk)
     except Exception as err:  # noqa: BLE001 -- every transport failure is a message
         return FetchOutcome("unverified", f"{type(err).__name__}: {err}")
+    if total < art.size_bytes:
+        return FetchOutcome(
+            "unverified",
+            f"incomplete download: {total} of the pinned {art.size_bytes} bytes of "
+            f"{art.filename} arrived before the stream ended",
+        )
     got = digest.hexdigest()
     if got != art.sha256.strip().lower():
         return FetchOutcome(

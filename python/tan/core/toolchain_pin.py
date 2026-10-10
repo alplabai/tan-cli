@@ -16,11 +16,15 @@ What is and is NOT verified, stated once (every message and doc defers to this):
 * tan never holds the minimal bundle's bytes (west deletes them), so that bundle is
   verified only transitively, through the sum. That is the residual trust.
 
-The sum-file parser mirrors west's `minimal_sdk_sha256` exactly:
-`re.split(r"\s+", line)` -> `{t[1]: t[0]}`, last duplicate wins, the name is the
-literal second token (so a `*name` binary marker or a `dir/name` prefix is a
-DIFFERENT key west never matches). Where tan and west could diverge, tan refuses
-instead of guessing. **No IO here** -- the sum text arrives already read.
+The sum-file parser accepts a strict SUBSET of what west matches and refuses
+everything else (fail-closed). West does `re.split(r"\s+", line)` -> `{t[1]: t[0]}`
+with the last duplicate winning; tan accepts only a line of exactly two tokens, a
+lowercase 64-hex digest and the literal name, and refuses where west is looser or
+tan cannot tell what west would do: a `*name` marker or `dir/name` prefix (a
+different key to west), uppercase hex (west compares against a lowercase
+hexdigest), a third token, duplicates with differing hashes (west silently takes
+the last), and any other line mentioning a pinned filename. West's behaviour on
+lines naming no pinned file is irrelevant and ignored. **No IO here** -- the sum text arrives already read.
 """
 from __future__ import annotations
 

@@ -68,6 +68,31 @@ def test_a_sum_that_goes_bad_after_west_ran_is_refused(tmp_path, monkeypatch):
     assert log.blocking() == ["toolchain-pin-unverified"]
 
 
+def test_a_transport_failure_of_the_archive_is_retried_but_a_mismatch_is_not(tmp_path, monkeypatch):
+    from tan.commands import bootstrap_toolchain_fetch as fetch
+
+    sleeps = []
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", sleeps.append)
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        return fetch.FetchOutcome("ok") if len(calls) == 3 else fetch.FetchOutcome("unverified", "reset")
+
+    monkeypatch.setattr(fetch, "install_pinned_toolchain", flaky)
+    log, _ = _run(tmp_path, monkeypatch, lambda url: (GOOD, None))
+    assert len(calls) == 3 and not [c for c, _ in log.warnings if c.startswith("toolchain-pin")]
+    assert sleeps and sleeps[0] > 0
+
+    calls.clear()
+    monkeypatch.setattr(
+        fetch, "install_pinned_toolchain",
+        lambda *a, **k: (calls.append(1), fetch.FetchOutcome("mismatch", "bad"))[1],
+    )
+    log, _ = _run(tmp_path, monkeypatch, lambda url: (GOOD, None))
+    assert len(calls) == 1 and log.blocking() == ["toolchain-pin-mismatch"]
+
+
 @pytest.mark.parametrize("kind,code", [
     ("mismatch", "toolchain-pin-mismatch"),
     ("unverified", "toolchain-pin-unverified"),
@@ -81,6 +106,7 @@ def test_a_toolchain_download_failure_is_a_coded_refusal_and_not_stamped(
     monkeypatch.setattr(
         fetch, "install_pinned_toolchain", lambda *a, **k: fetch.FetchOutcome(kind, "boom")
     )
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda s: None)
     log, _ = _run(tmp_path, monkeypatch, lambda url: (GOOD, None))
     assert log.blocking() == [code]
     assert "boom" in log.warnings[0][1]
@@ -121,11 +147,22 @@ def test_dry_run_does_not_touch_the_network(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bootstrap_toolchain_pin, "fetch_sum_text", boom)
     log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True, dry_run=True)
     bootstrap_cmd.toolchain_phase(
-        _workspace(tmp_path), log, bootstrap_cmd.Runner(json=True, dry_run=True), sdk_root, None,
-        is_windows=False,
+        _workspace(tmp_path), log, runner, sdk_root, None, is_windows=False,
     )
     assert log.blocking() == []
+    lines = [" ".join(a) for a in runner.planned]
+    downloads = [ln for ln in lines if ln.startswith("# tan downloads")]
+    assert [ln.split()[3] for ln in downloads] == [
+        "https://example.invalid/sha256.sum",
+        "https://example.invalid/y.tar.xz",
+        "https://example.invalid/sha256.sum",
+    ]
+    # order: sum, then west, then archive + sum re-fetch
+    west_at = next(i for i, ln in enumerate(lines) if ln.startswith("west sdk install"))
+    assert lines[west_at - 1].startswith("# tan downloads") and "sha256.sum" in lines[west_at - 1]
+    assert "y.tar.xz" in lines[west_at + 1]
 
 
 def _findings(text, *names):
