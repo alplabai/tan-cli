@@ -1815,11 +1815,13 @@ PINNED_HASHES: dict[str, str] = {
 #:         `load_board_schema`/`iter_schema_errors` are hand-ported into
 #:         `tan/planner/loader.py` (see that file's own docstring); the
 #:         fixed function, `_schema_error_to_diagnostic`, does not exist in
-#:         tan at all. `tan validate`'s non-`--offline` path spawns
-#:         `scripts/validate_board_yaml.py` against the user's OWN bound
-#:         checkout (see `validate_cmd.py`'s module docstring), so the fix
-#:         is inherited automatically the moment a customer's alp-sdk
-#:         checkout carries it -- nothing to port.
+#:         tan at all. Since tan-cli#270 `tan validate` runs a PORT of
+#:         `scripts/validate_board_yaml.py` in-process, so a validator fix is
+#:         NOT inherited: it must be hand-ported into
+#:         `tan/core/board_validator*.py`, and `PORTED_SOURCE_HASHES`
+#:         (`tan/core/board_validator_skew.py`) moved with it -- until then
+#:         users on a newer checkout get the old rules, and `tan validate`
+#:         warns `validate.sdk-validator-newer`.
 #:   - SEVEN are gone from alp-sdk entirely at `722320a1`
 #:     (`scripts/alp_cli/{faultdecode,validate,new_som,doctor,explain,
 #:     monitor,model}.py` -- confirmed by `git diff --stat`, each a pure

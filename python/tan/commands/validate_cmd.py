@@ -22,7 +22,9 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   **Version skew (the one behavioural difference).** The port applies the
   validator rules tan was audited against (``PORTED_FROM_SDK_COMMIT``) to
   WHATEVER checkout is bound; the spawned script always matched the bound one.
-  A newer SDK's extra checks are not applied, and a crash reading such a
+  A newer SDK's extra checks are not applied (tan warns with
+  ``validate.sdk-validator-newer`` when the bound checkout's validator sources
+  hash differently from the pinned ones), and a crash reading such a
   checkout is reported as ``validate.failed`` saying tan's validator could not
   read this SDK -- not as a board defect. ``TAN_VALIDATE_ENGINE=subprocess``
   runs the bound SDK's own validator instead.
@@ -394,6 +396,62 @@ def _subprocess_engine_requested() -> bool:
     return os.environ.get(VALIDATE_ENGINE_ENV, "").strip().lower() == "subprocess"
 
 
+def subprocess_engine_requested() -> bool:
+    """Public name for the engine choice, shared with `tan diff`."""
+    return _subprocess_engine_requested()
+
+
+def skew_warning(sdk_root: Path) -> str | None:
+    """Message for `validate.sdk-validator-newer`, or None when the bound
+    checkout's validator sources are the ones the port was audited against."""
+    from tan.core.board_validator_skew import skewed_sources
+
+    skewed = skewed_sources(sdk_root)
+    if not skewed:
+        return None
+    return (
+        f"the bound alp-sdk ({_bound_sdk_version(sdk_root)}) has validator sources "
+        f"newer than the ones tan's built-in validator was ported from "
+        f"({PORTED_FROM_SDK_COMMIT[:8]}): {', '.join(skewed)}. Rules added since are "
+        "not applied, so a clean verdict here may not match the SDK's own validator "
+        f"-- run with {VALIDATE_ENGINE_ENV}=subprocess to use it."
+    )
+
+
+def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _Result]:
+    """The default engine: `(status, stderr, result)`, crash-as-skew handling
+    included. Shared by `tan validate` and `tan diff` so both give one verdict."""
+    from tan.core.board_validator_run import run_board_validator
+
+    run = run_board_validator(board_path, sdk_root)
+    result = analyze_validator_output(run.status, run.stderr)
+    if _is_interpreter_crash(run.stderr):
+        # See the "Version skew" paragraph of the module docstring: a crash on a
+        # checkout that has moved past the audited commit is tan's gap, not a
+        # defect in the customer's board.
+        last = run.stderr.strip().splitlines()[-1]
+        result = _Result(
+            OUTCOME_FAILED,
+            (
+                _Finding(
+                    "error",
+                    "tan's built-in validator could not read this SDK "
+                    f"(bound alp-sdk {_bound_sdk_version(sdk_root)}; the "
+                    f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
+                    "This is not a verdict on board.yaml -- retry with "
+                    f"{VALIDATE_ENGINE_ENV}=subprocess to run the SDK's own "
+                    f"validator. Underlying error: {last}",
+                ),
+            ),
+        )
+    if result.outcome != OUTCOME_CLEAN and not result.findings:
+        result = _Result(
+            result.outcome,
+            (_synthesised_finding(result.outcome, run.stderr, used_workspace_venv=True),),
+        )
+    return run.status, run.stderr, result
+
+
 #: `<sdk>/scripts/validate_board_yaml.py` -- the script the oracle spawns
 #: (`crates/tan-cli/src/commands/validate.rs::run_spawn`). NOT
 #: `python -m alp_cli.main validate`: that needs `<sdk>/scripts` on PYTHONPATH,
@@ -650,16 +708,14 @@ class BoardShapeError(Exception):
 def _load_yaml(text: str) -> Any:
     """Parse YAML using PyYAML when present, else a minimal top-level reader.
 
-    tan ships no YAML dependency of its own (`typer` + `rich` only), and the
-    offline path must work with nothing installed. PyYAML is used when it
-    happens to be importable -- it usually is, since a Zephyr workspace needs
-    it -- and otherwise we fall back to reading only what the structural checks
-    actually consult: which top-level keys exist and whether each is a scalar
+    PyYAML is a declared base dependency, so the ImportError branch below is
+    only a stale-venv fallback, not the normal offline path. It degrades to
+    reading only what the structural checks actually consult: which top-level keys exist and whether each is a scalar
     or a block. That is enough to distinguish `som: <scalar>` from
     `som:` + an indented mapping, which is exactly what the checks below ask.
     """
     try:
-        import yaml  # noqa: PLC0415  (optional at runtime, by design)
+        import yaml  # noqa: PLC0415  (stale-venv fallback below)
     except ImportError:
         return _top_level_shape(text)
     try:
@@ -1463,6 +1519,12 @@ def validate(
 ) -> None:
     """Validate a board.yaml.
 
+    By default the SDK's board.yaml validator runs as a port inside tan. A
+    bound alp-sdk newer than that port may add rules tan does not apply; tan
+    warns (`validate.sdk-validator-newer`) when it can tell. Set the
+    environment variable TAN_VALIDATE_ENGINE=subprocess to run the bound
+    SDK's own scripts/validate_board_yaml.py instead.
+
     `--sdk-root` must stay declared HERE, as a same-named local option, even
     though clap makes it `global = true` in Rust
     (`crates/tan-cli/src/cli.rs`): without it `cli._reorder_global_flags`
@@ -1604,6 +1666,7 @@ def validate(
         #: three guards, a spawn that failed to launch, and a timeout (the child
         #: was killed; `TimeoutExpired` carries no returncode).
         validator_status: int | None = None
+        skew_message: str | None = None
 
         if offline:
             try:
@@ -1708,39 +1771,23 @@ def validate(
                 # exists on this path. The run's (status, stderr) go through
                 # the SAME `analyze_validator_output` a spawned script's did,
                 # so the outcome map, issue codes and envelope are unchanged.
-                from tan.core.board_validator_run import run_board_validator
-
-                run = run_board_validator(board_path, resolved_sdk)
-                validator_status = run.status
-                result = analyze_validator_output(run.status, run.stderr)
-                if _is_interpreter_crash(run.stderr):
-                    # See the "Version skew" paragraph of the module docstring:
-                    # a crash on a checkout that has moved past the audited
-                    # commit is tan's gap, not a defect in the customer's board.
-                    last = run.stderr.strip().splitlines()[-1]
-                    result = _Result(
-                        OUTCOME_FAILED,
-                        (
-                            _Finding(
-                                "error",
-                                "tan's built-in validator could not read this SDK "
-                                f"(bound alp-sdk {_bound_sdk_version(resolved_sdk)}; the "
-                                f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
-                                "This is not a verdict on board.yaml -- retry with "
-                                f"{VALIDATE_ENGINE_ENV}=subprocess to run the SDK's own "
-                                f"validator. Underlying error: {last}",
-                            ),
-                        ),
+                # The customer's own file is read HERE, ahead of the engine, so
+                # an undecodable or unreadable board.yaml is the user's to fix
+                # (`validate.board-yaml-unreadable`, like `--offline`), not an
+                # engine crash that blames the SDK.
+                try:
+                    Path(board_path).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as err:
+                    fail(
+                        "board-yaml-unreadable",
+                        f"could not read board.yaml: {err}",
+                        ExitCode.VALIDATION_FAILURE,
                     )
-                if result.outcome != OUTCOME_CLEAN and not result.findings:
-                    result = _Result(
-                        result.outcome,
-                        (
-                            _synthesised_finding(
-                                result.outcome, run.stderr, used_workspace_venv=True
-                            ),
-                        ),
-                    )
+                    return
+                validator_status, _stderr, result = run_in_process_engine(
+                    board_path, resolved_sdk
+                )
+                skew_message = skew_warning(resolved_sdk)
             else:
                 script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
                 # tan-cli#652: also captures whether this resolved a `tan
@@ -1840,6 +1887,12 @@ def validate(
                 for finding in result.findings
             ),
         ]
+        reported_findings = result.findings
+        if skew_message is not None:
+            # Non-fatal: never changes the outcome or exit code. Kept 1:1 with
+            # `issues` by appending the matching finding too.
+            issues.append(Issue("validate.sdk-validator-newer", "warning", skew_message))
+            reported_findings = (*result.findings, _Finding("warning", skew_message))
         exit_code = (
             ExitCode.SUCCESS
             if result.outcome == OUTCOME_CLEAN
@@ -1862,7 +1915,7 @@ def validate(
             # 1:1 with `issues`, built from the same list above -- the
             # diagnostic-v1/SARIF documents read the ALP code, hint,
             # documentation URI and range off these.
-            findings=result.findings,
+            findings=reported_findings,
             sarif_base=sarif_base,
         )
     except typer.Exit:

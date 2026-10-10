@@ -109,7 +109,9 @@ own spawn-and-analyze machinery (`analyze_validator_output`, the same
 `scripts/validate_board_yaml.py` argv, imported from `validate_cmd` rather
 than re-checked here) whenever an SDK has actually resolved: a non-clean
 verdict becomes a `ParseFailure("schema-violation", ...)`, flowing through
-the exact same failure path a structural mismatch already does. `diff` still
+the exact same failure path a structural mismatch already does. Since
+tan-cli#1484 the engine is the one `tan validate` selects (in-process by
+default, the spawn only under `TAN_VALIDATE_ENGINE=subprocess`). `diff` still
 never requires an SDK on its own -- with none resolved (or a stub checkout
 missing `validate_board_yaml.py` -- some of this module's own tests hand it
 exactly that) it falls back to the structural checks alone, exactly as
@@ -168,6 +170,8 @@ from tan.commands.validate_cmd import (
     VALIDATOR_SCRIPT,
     VALIDATOR_TIMEOUT_S,
     _Finding,
+    run_in_process_engine,
+    subprocess_engine_requested,
     _synthesised_finding,
     analyze_validator_output,
 )
@@ -682,9 +686,10 @@ def _spawn_validator(
 
 
 def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path: str) -> None:
-    """Raise `ParseFailure(<outcome>, ...)` when the resolved SDK's own
-    `scripts/validate_board_yaml.py` -- the exact script/argv `validate`
-    spawns -- finds this board.yaml invalid, or its own environment cannot
+    """Raise `ParseFailure(<outcome>, ...)` when the validator engine `tan
+    validate` uses (the in-process port by default; the SDK's own
+    `scripts/validate_board_yaml.py` under `TAN_VALIDATE_ENGINE=subprocess`)
+    finds this board.yaml invalid, or its own environment cannot
     even answer that question (tan-cli#455; see the module docstring's "SDK
     cross-check" / "Review round" sections for the false-clean bug this
     closes and why the outcome, not a hardcoded `"schema-violation"`, is what
@@ -698,6 +703,21 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     subprocess, a timeout -- refuses instead.
     """
     script = os.path.join(sdk_info.root, *VALIDATOR_SCRIPT)
+    if not subprocess_engine_requested():
+        # Same engine `tan validate` defaults to (tan tan-cli#1484): the
+        # in-process port, so the two commands cannot disagree. A checkout with
+        # no `metadata/` (a stub) has nothing to validate against -- a no-op.
+        if not os.path.isdir(os.path.join(sdk_info.root, "metadata")):
+            return
+        _status, _stderr, result = run_in_process_engine(board_path, Path(sdk_info.root))
+        if result.outcome == OUTCOME_CLEAN:
+            return
+        detail = "; ".join(finding.message for finding in result.findings)
+        raise ParseFailure(
+            result.outcome,
+            "board.yaml is not valid: the SDK's own validator rejects it -- run "
+            f"`tan validate` for full diagnostics: {detail}",
+        )
     if not os.path.isfile(script):
         return
     # tan-cli#652: `used_workspace_venv` is threaded through to

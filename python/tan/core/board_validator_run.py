@@ -2,7 +2,7 @@
 """`validate_board_yaml.py`, in-process: the default engine behind `tan validate`.
 
 PORTED from alp-sdk `scripts/validate_board_yaml.py` (tan-cli#270), pinned by
-`tests/gates/test_planner_relocation_freshness.py::BOARD_VALIDATOR_HASHES`.
+`tests/gates/test_planner_relocation_freshness.py::HAND_PORT_HASHES`.
 The function returns what that script's process would have produced -- an exit
 status, a stdout and a stderr -- so `tan.commands.validate_cmd` feeds it through
 the SAME `analyze_validator_output` it always fed a spawned script's output
