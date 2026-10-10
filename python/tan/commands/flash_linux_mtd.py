@@ -13,15 +13,17 @@ It does NOT restart the remote processor or reboot the board: the envelope carri
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from tan.core import flash_linux_mtd as core
 from tan.core.flash_plan import confirm_gate_note
-from tan.core.flow_d_report import sha256_of
 from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 from tan.soc_ref import resolve_soc_path
@@ -46,20 +48,32 @@ def _spawn(argv: list[str]) -> tuple[int, str, str]:
     return done.returncode, done.stdout or "", done.stderr or ""
 
 
-def soc_cm33_boot(sdk_root: str | None, sku: str | None) -> Any:
-    """The `cm33_boot` object of `sku`'s SoC document in the bound SDK's metadata, or `None`
-    when the SDK, the SoM preset or the document cannot be read."""
-    if not sdk_root or not sku:
-        return None
+def soc_cm33_boot(sdk_root: str | None, sku: str | None) -> tuple[Any, str]:
+    """`(cm33_boot, reason)`: the `cm33_boot` object of `sku`'s SoC document in the bound SDK's
+    metadata, or `(None, why-not)` -- the reason is surfaced, never swallowed."""
+    if not sdk_root:
+        return None, "no alp-sdk root is bound (pass --sdk-root)"
+    if not sku:
+        return None, "the system manifest names no SoM SKU"
     meta = Path(sdk_root) / "metadata"
+    preset_path = meta / "e1m_modules" / f"{sku}.yaml"
     try:
         import yaml  # noqa: PLC0415
 
-        preset = yaml.safe_load((meta / "e1m_modules" / f"{sku}.yaml").read_text(encoding="utf-8"))
-        path = resolve_soc_path(preset.get("silicon"), meta)
-        return json.loads(path.read_text(encoding="utf-8")).get("cm33_boot") if path else None
-    except (OSError, ValueError, AttributeError, ImportError):
-        return None
+        preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    except ImportError:
+        return None, "PyYAML is not installed"
+    except (OSError, ValueError) as err:
+        return None, f"the SoM preset {preset_path} is unreadable ({err})"
+    path = resolve_soc_path(preset.get("silicon") if isinstance(preset, dict) else None, meta)
+    if path is None:
+        return None, f"the SoM preset {preset_path} has no resolvable `silicon:` reference"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        return None, f"the SoC document {path} is unreadable ({err})"
+    boot = doc.get("cm33_boot") if isinstance(doc, dict) else None
+    return (boot, "") if boot is not None else (None, f"{path} has no cm33_boot object")
 
 
 class _Deploy:
@@ -75,9 +89,13 @@ class _Deploy:
         self.block: dict[str, Any] = {"steps": []}
         report["linuxMtd"] = self.block
         self.spec = core.Spec(core.Target("", None, None), "")
-        self.facts = core.BootFacts(0, 0, 0, 0)
-        self.want_name: str | None = None
+        self.facts: core.BootFacts | None = None
+        self.authoritative = False
+        self.unavailable = ""
+        self.want_name = ""
         self.size: int | None = None
+        self.data = b""
+        self.snapshot_dir: str | None = None
         self.digest = ""
         self.paths = core.new_remote_paths()
         self.tools: dict[str, str] = {}
@@ -97,32 +115,52 @@ class _Deploy:
                 self.flash_args, cli_host=self.ctx.target_host,
                 cli_partition=self.ctx.target_partition,
             )
-            soc = soc_cm33_boot(self.ctx.sdk_root, self.ctx.sku)
-            self.facts = core.resolve_facts(self.flash_args, soc)
+            soc, why = soc_cm33_boot(self.ctx.sdk_root, self.ctx.sku)
+            self.facts, self.authoritative = core.resolve_facts(
+                self.flash_args, soc, why, dry_run=bool(self.ctx.dry_run)
+            )
+            self.unavailable = "" if self.authoritative else why
             self.want_name = core.expected_name(self.spec, soc)
             self.read_image()
         except core.LinuxMtdError as err:
             return self.fail(err.message, err.code)
         except OSError as err:
             return self.fail(f"cannot read the image {self.local} ({err})", "flash.linux-mtd-failed")
+        f = self.facts
         self.block.update(
             target=self.spec.target.display(), partition=self.spec.partition,
             partitionName=self.want_name, image=self.local,
-            bootFacts={"sramBase": self.facts.sram_base, "imagePad": self.facts.image_pad,
-                       "imageMax": self.facts.image_max, "xspiOffset": self.facts.xspi_offset},
+            bootFactsAuthoritative=self.authoritative,
+            bootFacts=None if f is None else {
+                "sramBase": f.sram_base, "imagePad": f.image_pad,
+                "imageMax": f.image_max, "xspiOffset": f.xspi_offset},
         )
+        if not self.authoritative:
+            self.block["bootFactsUnavailable"] = self.unavailable
         return None
 
     def read_image(self) -> None:
-        """Size, digest and the stored-image checks, once the facts are known."""
+        """Snapshot the file ONCE: size, digest, the stored-image checks and (for the copy)
+        the bytes all come from this single read, so a file changing afterwards cannot make
+        what is erased, written and compared differ from what was validated."""
         if not os.path.isfile(self.local):
             return
-        self.size = os.path.getsize(self.local)
-        self.digest = sha256_of(self.local)
+        cap = (self.facts.image_max if self.facts else 1 << 20) + 1
         with open(self.local, "rb") as fh:
-            head = fh.read(self.facts.image_pad + 8)
-        core.validate_image(head, self.size, self.facts)
+            self.data = fh.read(cap)
+        self.size = len(self.data)
+        self.digest = hashlib.sha256(self.data).hexdigest()
+        if self.facts is not None:
+            core.validate_image(self.data[: self.facts.image_pad + 8], self.size, self.facts)
         self.block.update(imageBytes=self.size, sha256=self.digest)
+
+    def snapshot_file(self) -> str:
+        """The private copy of the snapshot that scp sends (mode 0600, removed afterwards)."""
+        self.snapshot_dir = tempfile.mkdtemp(prefix="tan-linux-mtd-")
+        path = os.path.join(self.snapshot_dir, "image.bin")
+        with open(path, "wb") as fh:
+            fh.write(self.data)
+        return path
 
     def planned(self) -> list[dict]:
         steps = core.planned_commands(self.spec, self.facts, self.local, self.size, self.paths)
@@ -134,10 +172,15 @@ class _Deploy:
         """The dry-run and not-confirmed arms; `None` when a real write should proceed."""
         if self.ctx.dry_run:
             shown = "; ".join(f"{p['step']}: {' '.join(p['argv'])}" for p in self.planned())
+            note = (
+                "" if self.authoritative else
+                " [SDK cm33_boot facts UNAVAILABLE -- the offset below is NOT authoritative and "
+                f"a real run would refuse: {self.unavailable}]"
+            )
             return self.done(
                 "ok",
                 f"would run: {shown} (dry-run: /proc/mtd was not read, so the partition, its "
-                "name and the erase block count were not checked)",
+                f"name and the erase block count were not checked){note}",
             )
         if not self.size:
             why = "is empty" if self.size == 0 else "does not exist; build first"
@@ -187,7 +230,9 @@ class _Deploy:
             offset=lay.offset, eraseBlocks=lay.blocks,
         )
         self.copied = True
-        res = self.run("copy-image", core.scp_argv(self.spec.target, self.local, self.paths[0]))
+        res = self.run(
+            "copy-image", core.scp_argv(self.spec.target, self.snapshot_file(), self.paths[0])
+        )
         if res[0]:
             return self.step_failed("copy-image", res)
         for step, cmd, hazard in (
@@ -254,6 +299,8 @@ def run_linux_mtd_entry(
     finally:
         if job.copied:
             job.cleanup()
+        if job.snapshot_dir:
+            shutil.rmtree(job.snapshot_dir, ignore_errors=True)
     if failed is not None:
         return failed
     report["followUp"] = core.FOLLOW_UP

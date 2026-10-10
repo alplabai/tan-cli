@@ -250,35 +250,42 @@ def _facts_from(mapping: Any) -> BootFacts | None:
     return BootFacts(*vals)
 
 
-def resolve_facts(flash_args: Any, soc_cm33_boot: Any) -> BootFacts:
-    """The SoC metadata's `cm33_boot` is authoritative; the manifest's `flash_args` may supply
-    the same four numbers when no SDK metadata is bound, and must agree when both exist. With
-    neither, the run refuses -- there is no default offset."""
+def resolve_facts(
+    flash_args: Any, soc_cm33_boot: Any, unavailable: str, *, dry_run: bool = False
+) -> tuple[BootFacts | None, bool]:
+    """`(facts, authoritative)`. A real write needs the SoC metadata's `cm33_boot` from the
+    bound SDK: a manifest is checkout-controlled and must never choose a flash offset. Manifest
+    values may be given and must then agree with the SDK. When the SDK facts are unavailable
+    the run refuses, naming WHY (`unavailable`); only a `--dry-run` goes on, with the manifest's
+    numbers (or none) and `authoritative=False` so the plan is labelled as unverified."""
     sdk = _facts_from(soc_cm33_boot)
     manifest = _facts_from(flash_args)
-    if sdk is not None and manifest is not None and sdk != manifest:
+    if sdk is None:
+        if not dry_run:
+            raise LinuxMtdError(
+                f"no CM33 boot facts: the bound SDK's SoC metadata (cm33_boot: sram_base, "
+                f"image_pad, image_max, xspi_offset) is unavailable -- {unavailable}. A flash "
+                "offset is never taken from the manifest or defaulted; nothing was written",
+                code="flash.linux-mtd-boot-facts-unavailable",
+            )
+        return manifest, False
+    if manifest is not None and sdk != manifest:
         raise LinuxMtdError(
             f"flash_args {manifest} disagree with the SoC metadata's cm33_boot {sdk}; "
             "refusing to pick one", code="flash.linux-mtd-invalid",
         )
-    facts = sdk or manifest
-    if facts is None:
+    if sdk.image_max <= sdk.image_pad + 8 or sdk.xspi_offset == 0:
         raise LinuxMtdError(
-            "no CM33 boot facts: the SoC metadata (metadata/socs/**, cm33_boot: sram_base, "
-            "image_pad, image_max, xspi_offset) is not readable from the bound SDK and "
-            "flash_args does not carry them; there is no default offset, nothing was written",
-            code="flash.linux-mtd-boot-facts-unavailable",
+            f"cm33_boot facts are implausible ({sdk}); refusing", code="flash.linux-mtd-invalid"
         )
-    if facts.image_max <= facts.image_pad + 8 or facts.xspi_offset == 0:
-        raise LinuxMtdError(
-            f"cm33_boot facts are implausible ({facts}); refusing", code="flash.linux-mtd-invalid"
-        )
-    return facts
+    return sdk, True
 
 
-def expected_name(spec: Spec, soc_cm33_boot: Any) -> str | None:
-    """The /proc/mtd NAME to require: the manifest's `partition_name`, which must agree with
-    the SoC metadata's `cm33_boot.mtd_name` when that exists."""
+def expected_name(spec: Spec, soc_cm33_boot: Any) -> str:
+    """The /proc/mtd NAME the partition must carry. REQUIRED: the SoC metadata's
+    `cm33_boot.mtd_name` if it has one, else the manifest's `partition_name`, which must agree
+    with the metadata when both exist. Without it nothing stops `flash_partition: mtd2` being
+    erased at the FIP's CM33 offset, so the run refuses."""
     meta = soc_cm33_boot.get("mtd_name") if isinstance(soc_cm33_boot, dict) else None
     if isinstance(meta, str) and meta:
         if spec.expect_name is not None and spec.expect_name != meta:
@@ -287,6 +294,13 @@ def expected_name(spec: Spec, soc_cm33_boot: Any) -> str | None:
                 f"metadata's {meta!r}", code="flash.linux-mtd-partition-mismatch",
             )
         return meta
+    if spec.expect_name is None:
+        raise LinuxMtdError(
+            "flash_args.partition_name is required (e.g. `partition_name: fip`): the CM33 image "
+            "sits inside one specific partition, and only its /proc/mtd NAME proves "
+            f"{spec.partition} is it; nothing was written",
+            code="flash.linux-mtd-partition-required",
+        )
     return spec.expect_name
 
 
@@ -300,7 +314,7 @@ def validate_image(head: bytes, size: int, facts: BootFacts) -> None:
     pad, base = facts.image_pad, facts.sram_base
     if size > facts.image_max:
         raise LinuxMtdError(
-            f"the image is {size} bytes; BL2 silently truncates past image_max "
+            f"the image is larger than image_max (read {size} bytes); BL2 silently truncates past "
             f"{facts.image_max} (0x{facts.image_max:x})", code="flash.linux-mtd-image-invalid",
         )
     if size < pad + 8 or len(head) < pad + 8:
@@ -359,7 +373,7 @@ def _find_row(spec: Spec, rows: list[Row]) -> Row:
 
 
 def check_layout(spec: Spec, proc_mtd: str, facts: BootFacts, image_bytes: int,
-                 want_name: str | None) -> Layout:
+                 want_name: str) -> Layout:
     """The write window, once `/proc/mtd` agrees with the declaration. Every refusal here is
     before anything is copied or erased."""
     row = _find_row(spec, parse_proc_mtd(proc_mtd))
@@ -368,7 +382,7 @@ def check_layout(spec: Spec, proc_mtd: str, facts: BootFacts, image_bytes: int,
             f"{spec.partition} resolves to {row.device}, the bootloader; never written by "
             "linux_mtd", code="flash.linux-mtd-partition-refused",
         )
-    if want_name is not None and row.name != want_name:
+    if row.name != want_name:
         raise LinuxMtdError(
             f"{row.device} is named {row.name!r} in /proc/mtd, not the expected {want_name!r} "
             "(a reordered partition table?); nothing was written",
@@ -476,15 +490,17 @@ def compare_digest(local: str, remote_out: str, device: str) -> str:
     return got
 
 
-def planned_commands(spec: Spec, facts: BootFacts, local_abs: str, size: int | None,
+def planned_commands(spec: Spec, facts: BootFacts | None, local_abs: str, size: int | None,
                      paths: tuple[str, str]) -> list[dict]:
     """The steps a run would take, as shown by `--dry-run`. The device and block count are
-    only known after `/proc/mtd` is read, so a name reference or the count shows a placeholder."""
+    only known after `/proc/mtd` is read, so a name reference or the count shows a placeholder;
+    without SDK facts (`facts` None) so does the offset."""
     n = size if size is not None else 0
+    off = hex(facts.xspi_offset) if facts else "<xspi_offset: SDK facts unavailable>"
     device = f"/dev/{spec.partition}" if spec.by_index else f"/dev/mtd<{spec.partition}>"
-    cmd_erase = remote("flash_erase", device, hex(facts.xspi_offset), "<ceil(image/erasesize)>")
-    cmd_write = remote("mtd_debug", "write", device, hex(facts.xspi_offset), str(n), paths[0])
-    cmd_read = remote("mtd_debug", "read", device, hex(facts.xspi_offset), str(n), paths[1])
+    cmd_erase = remote("flash_erase", device, off, "<ceil(image/erasesize)>")
+    cmd_write = remote("mtd_debug", "write", device, off, str(n), paths[0])
+    cmd_read = remote("mtd_debug", "read", device, off, str(n), paths[1])
     steps = [
         ("probe-partitions", ssh_argv(spec.target, remote_proc_mtd())),
         ("copy-image", scp_argv(spec.target, local_abs, paths[0])),

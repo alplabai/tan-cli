@@ -19,9 +19,14 @@ window `[xspi_offset, xspi_offset + ceil(image/erasesize) * erasesize)`.
 
 The four numbers that bound the window come from the SoC metadata's `cm33_boot`
 (`metadata/socs/renesas/rzv2n/n44.json`: `sram_base`, `image_pad`, `image_max`,
-`xspi_offset`), read from the bound alp-sdk (`--sdk-root`). If no SDK metadata is readable,
-the same four keys may be given in `flash_args`; if both exist they must agree. With neither,
-the run refuses (`flash.linux-mtd-boot-facts-unavailable`): **there is no default offset.**
+`xspi_offset`), read from the bound alp-sdk (`--sdk-root`). **A real write needs them from
+the SDK**: a manifest is checkout-controlled and never chooses a flash offset. The same four
+keys may be given in `flash_args`, but only as a cross-check — a disagreement with the SDK
+refuses (`flash.linux-mtd-invalid`). If the SDK metadata cannot be read, the run refuses
+(`flash.linux-mtd-boot-facts-unavailable`) and the message names why (no `--sdk-root`, no SoM
+preset, no resolvable `silicon:`, no `cm33_boot`). **There is no default offset.** `--dry-run`
+still prints a plan in that case, labelled "SDK cm33_boot facts UNAVAILABLE … NOT
+authoritative", with `linuxMtd.bootFactsAuthoritative: false`.
 
 ## Manifest
 
@@ -36,9 +41,15 @@ slices:
     user: root                    # optional
     port: 22                      # optional
     flash_partition: mtd1         # REQUIRED, never defaulted; mtdN or a /proc/mtd name
-    partition_name: fip           # optional: the /proc/mtd NAME this device must carry
+    partition_name: fip           # REQUIRED: the /proc/mtd NAME the device must carry
     confirm: true                 # or --confirm / ALP_FLASH_FORCE=1, like every writing backend
 ```
+
+`partition_name` is required (unless the SoC metadata's `cm33_boot` itself carries `mtd_name`,
+which it does not today; the two must agree when both exist). Without a name nothing would
+stop `flash_partition: mtd2` from being erased at the FIP's CM33 offset, so a missing name
+refuses with `flash.linux-mtd-partition-required`; the `/proc/mtd` NAME of the resolved
+device must equal it.
 
 ## The image must be padded
 
@@ -55,7 +66,9 @@ has the Thumb bit and lies in `0x08003000..0x08033000`. A raw `zephyr.bin` is re
    size. Refuse when it is absent, is `mtd0` (also when a name resolves there), its NAME
    differs from `partition_name`, `xspi_offset` is not a multiple of the erase size, or the
    erase would end past the partition or past `xspi_offset + image_max`.
-2. `scp` the image to a fresh `/tmp/tan-linux-mtd-<random>.bin`.
+2. `scp` the image to a fresh `/tmp/tan-linux-mtd-<random>.bin`. The file is read once
+   when the run starts; size, sha256, the image checks and the bytes scp sends (a private 0600
+   copy, removed afterwards) all come from that single snapshot.
 3. `flash_erase /dev/mtdN 0x1a0000 <ceil(len/erasesize)>`.
 4. `mtd_debug write /dev/mtdN 0x1a0000 <len> <tmp>`.
 5. `mtd_debug read /dev/mtdN 0x1a0000 <len> /tmp/tan-linux-mtd-rb-<random>.bin`, then
@@ -73,12 +86,12 @@ needs `flash_erase`, `mtd_debug` (mtd-utils), `sha256sum` and `rm`.
 | Refusal | Code |
 |---|---|
 | neither `flash_args.host` nor `--target-host` | `flash.linux-mtd-no-host` |
-| `flash_args.flash_partition` absent | `flash.linux-mtd-partition-required` |
+| `flash_args.flash_partition` or `partition_name` absent | `flash.linux-mtd-partition-required` |
 | partition is `mtd0` (any spelling, or a name that resolves there) | `flash.linux-mtd-partition-refused` |
 | `--partition` differs from the manifest; `/proc/mtd` NAME differs from `partition_name` | `flash.linux-mtd-partition-mismatch` |
 | partition not in the target's `/proc/mtd` | `flash.linux-mtd-partition-absent` |
 | erase window past the partition or `image_max` | `flash.linux-mtd-image-too-large` |
-| no `cm33_boot` facts | `flash.linux-mtd-boot-facts-unavailable` |
+| no SDK `cm33_boot` facts (real write) | `flash.linux-mtd-boot-facts-unavailable` |
 | image not a valid padded CM33 image | `flash.linux-mtd-image-invalid` |
 | host, user, port or partition not a plain value; unaligned offset; flash_args vs metadata disagree | `flash.linux-mtd-invalid` |
 | an ssh/scp step failed or timed out | `flash.linux-mtd-failed` |

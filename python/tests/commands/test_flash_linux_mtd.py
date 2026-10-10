@@ -127,7 +127,9 @@ def _sdk(work: Path, soc: dict | None) -> None:
 
 def _flash(tmp_path, flash_args="{host: 10.0.0.7, user: root, flash_partition: mtd1}",
            *argv, image_name="m33_fw.bin", env=None, confirm=True, image=IMAGE, soc=SOC,
-           method="linux_mtd"):
+           method="linux_mtd", auto_name=True):
+    if auto_name and "flash_partition" in flash_args and "partition_name" not in flash_args:
+        flash_args = flash_args.replace("flash_partition", "partition_name: fip, flash_partition", 1)
     work = tmp_path / "work"
     (work / "build").mkdir(parents=True)
     _sdk(work, soc)
@@ -310,20 +312,99 @@ def test_an_image_that_is_not_a_padded_cm33_image_is_refused_before_scp(tmp_path
     assert _calls(tmp_path) == []
 
 
-def test_no_boot_facts_means_no_write(tmp_path):
+def test_no_sdk_boot_facts_means_no_write_and_the_reason_is_surfaced(tmp_path):
     rc, payload, _ = _flash(tmp_path, soc=None)
     assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
+    assert "SoM preset" in _entry(payload)["message"]
     assert _calls(tmp_path) == []
 
 
-def test_boot_facts_from_flash_args_when_no_sdk_metadata(tmp_path):
+def test_manifest_facts_alone_never_authorise_a_write(tmp_path):
     args = (
         "{host: h1, flash_partition: mtd1, sram_base: 0x08000000, image_pad: 0x3000, "
         "image_max: 0x30000, xspi_offset: 0x1A0000}"
     )
     rc, payload, _ = _flash(tmp_path, args, soc=None)
-    assert rc == 0, payload
-    assert _remote_cmds(tmp_path)[1].startswith("flash_erase /dev/mtd1 0x1a0000 ")
+    assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
+    assert _calls(tmp_path) == []
+
+
+def test_soc_lookup_failures_name_their_cause(tmp_path):
+    assert "no alp-sdk root" in fm.soc_cm33_boot(None, "E1M-V2N101")[1]
+    assert "no SoM SKU" in fm.soc_cm33_boot(str(tmp_path), "")[1]
+    assert "unreadable" in fm.soc_cm33_boot(str(tmp_path), "E1M-V2N101")[1]
+    (tmp_path / "metadata" / "e1m_modules").mkdir(parents=True)
+    (tmp_path / "metadata" / "e1m_modules" / "E1M-V2N101.yaml").write_text("sku: x\n")
+    assert "silicon" in fm.soc_cm33_boot(str(tmp_path), "E1M-V2N101")[1]
+    _sdk(tmp_path / "w", {"other": 1})
+    assert "no cm33_boot" in fm.soc_cm33_boot(str(tmp_path / "w" / "sdk"), "E1M-V2N101")[1]
+    assert fm.soc_cm33_boot(str(tmp_path / "x"), "E1M-V2N101")[0] is None
+    _sdk(tmp_path / "ok", SOC)
+    assert fm.soc_cm33_boot(str(tmp_path / "ok" / "sdk"), "E1M-V2N101") == (SOC["cm33_boot"], "")
+
+
+def test_the_partition_name_is_required(tmp_path):
+    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd1}", auto_name=False)
+    assert rc == 1 and "flash.linux-mtd-partition-required" in _codes(payload)
+    assert "partition_name: fip" in _entry(payload)["message"]
+    assert _calls(tmp_path) == []
+
+
+def test_mtd2_without_a_name_is_never_erased_at_the_fip_offset(tmp_path):
+    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd2}", auto_name=False)
+    assert rc == 1 and "flash.linux-mtd-partition-required" in _codes(payload)
+    assert _calls(tmp_path) == []
+
+
+def test_a_wrongly_named_partition_is_refused(tmp_path):
+    three = PROC_MTD + 'mtd2: 00800000 00001000 "rootfs"\n'
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, flash_partition: mtd2}", env={"FAKE_PROC_MTD": three}
+    )
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-partition-mismatch")
+
+
+def test_an_sdk_mtd_name_wins_and_must_agree_with_the_manifest():
+    soc = {"mtd_name": "fip"}
+    spec = core.resolve_spec({"host": "h", "flash_partition": "mtd1"})
+    assert core.expected_name(spec, soc) == "fip"
+    named = core.resolve_spec({"host": "h", "flash_partition": "mtd1", "partition_name": "x"})
+    with pytest.raises(core.LinuxMtdError) as err:
+        core.expected_name(named, soc)
+    assert err.value.code == "flash.linux-mtd-partition-mismatch"
+
+
+def test_the_image_is_snapshotted_once_so_later_edits_cannot_drift(tmp_path, monkeypatch):
+    bindir = _fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_DIR", str(tmp_path / "fake"))
+    monkeypatch.setenv("FAKE_PROC_MTD", PROC_MTD)
+    img = tmp_path / "m33_fw.bin"
+    img.write_bytes(IMAGE)
+    real = fm._spawn
+
+    def spawn(argv):
+        if argv[-1] == "cat /proc/mtd":  # the file changes after it was validated
+            img.write_bytes(padded(body=b"tampered" * 700))
+        return real(argv)
+
+    monkeypatch.setattr(fm, "_spawn", spawn)
+    _sdk(tmp_path / "work", SOC)
+    ctx = SimpleNamespace(
+        target_host=None, target_partition=None, sdk_root=str(tmp_path / "work" / "sdk"),
+        sku="E1M-V2N101", dry_run=False, force_confirm=True,
+    )
+    seen = {}
+    rc, _, _ = fm.run_linux_mtd_entry(
+        SimpleNamespace(id="cm33"), ctx, artefact_path=str(img),
+        flash_args={"host": "h1", "flash_partition": "mtd1", "partition_name": "fip"},
+        entry=lambda m, s, r, msg, **kw: seen.update(status=s, **kw) or seen,
+        lines=[], report=seen,
+    )
+    assert rc == 0, seen
+    assert (tmp_path / "fake" / "remote.bin").read_bytes() == IMAGE
+    assert seen["linuxMtd"]["digest"]["match"] is True
+    assert seen["linuxMtd"]["sha256"] == hashlib.sha256(IMAGE).hexdigest()
 
 
 def test_flash_args_that_disagree_with_the_sdk_metadata_are_refused(tmp_path):
@@ -388,7 +469,7 @@ def test_a_timed_out_remote_step_says_it_may_still_be_running(tmp_path, monkeypa
 
     rc, _, _ = fm.run_linux_mtd_entry(
         SimpleNamespace(id="cm33"), ctx, artefact_path=str(img),
-        flash_args={"host": "h1", "flash_partition": "mtd1"}, entry=entry, lines=[], report={},
+        flash_args={"host": "h1", "flash_partition": "mtd1", "partition_name": "fip"}, entry=entry, lines=[], report={},
     )
     assert rc == 1 and seen["issue_code"] == "flash.linux-mtd-failed"
     assert "STILL be running" in seen["message"] and "partial image" in seen["message"]
@@ -419,11 +500,17 @@ def test_dry_run_still_applies_the_partition_and_facts_rules(tmp_path):
     assert rc == 1 and "flash.linux-mtd-partition-refused" in _codes(payload)
 
 
-def test_dry_run_without_boot_facts_is_refused(tmp_path):
+def test_dry_run_without_sdk_facts_is_labelled_unverified(tmp_path):
     rc, payload, _ = _flash(
         tmp_path, "{host: h1, flash_partition: mtd1}", "--dry-run", confirm=False, soc=None
     )
-    assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
+    assert rc == 0, payload
+    entry = _entry(payload)
+    assert "UNAVAILABLE" in entry["message"] and "NOT authoritative" in entry["message"]
+    assert entry["linuxMtd"]["bootFactsAuthoritative"] is False
+    assert "SoM preset" in entry["linuxMtd"]["bootFactsUnavailable"]
+    assert "<xspi_offset: SDK facts unavailable>" in entry["message"]
+    assert _calls(tmp_path) == []
 
 
 @pytest.mark.parametrize(
@@ -453,12 +540,13 @@ def test_hostile_host_from_the_flag_is_refused(tmp_path):
     assert _calls(tmp_path) == []
 
 
-def test_hostile_local_path_is_one_argv_element_and_never_reaches_the_remote_shell(tmp_path):
+def test_hostile_local_name_never_reaches_scp_or_the_remote_shell(tmp_path):
     name = "a b;touch pwned$(id)`id`.bin"
     rc, payload, _ = _flash(tmp_path, image_name=name)
     assert rc == 0, payload
     scp = next(c for c in _calls(tmp_path) if c[0] == "scp")
-    assert scp[scp.index("--") + 1].endswith(name)
+    local = scp[scp.index("--") + 1]
+    assert os.path.isabs(local) and local.endswith("/image.bin") and "pwned" not in local
     assert not any("pwned" in c for c in _remote_cmds(tmp_path))
 
 
