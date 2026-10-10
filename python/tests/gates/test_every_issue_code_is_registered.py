@@ -784,7 +784,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # Registered as `bootstrap.sdk-credential-unstaged` in
         # contract/issue-codes.json before bumping.
         #
-        # 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
+        # 35 (tan-cli#1498 added the adopted-root pre-download refusal); was 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
         # runtime tripwire under that netrc route: ONE new
         # `log.warn("sdk-credential-unverified", ...)` call site, taken
         # instead of the `Authenticating the Zephyr SDK download ...` line
@@ -796,7 +796,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # collapsing them would put two verdicts behind one wire string.
         # Registered as `bootstrap.sdk-credential-unverified` in
         # contract/issue-codes.json before bumping.
-        expected_calls=34,
+        expected_calls=35,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
