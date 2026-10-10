@@ -19,7 +19,12 @@ the port:**
   the `rm -rf $UNSET_VAR` shape: `--build-root ""` is refused outright, and a
   manifest `build_dir` that resolves onto the project root (or the
   `--build-root` tree), above it, or onto a directory holding a `board.yaml` is
-  refused. `--build-root X` names a project TREE and clean removes `<X>/build`
+  refused, and so is one that lies inside ANOTHER project's tree (a copied or
+  renamed project's manifest still names the original's absolute slice dirs,
+  tan-cli#1516; an enclosing parent project counts as another project).
+  **Deliberate oracle divergence (tan-cli#1516):** v0.4.1 removes such a dir.
+  Do not "fix" this back in a parity sweep.
+  `--build-root X` names a project TREE and clean removes `<X>/build`
   (tan-cli#1482), so `.` and `..` are valid trees, not refusals.
 * **Deliberate oracle divergence (tan-cli#1482):** the v0.4.1 binary removes X
   itself, joined onto the project root. tan cleans `<X>/build`, with X anchored
@@ -285,10 +290,23 @@ class _Rejected:
     origin: str
     core_id: str = ""
     raw: str = ""
+    #: The other project's root when a slice dir sits inside it (tan-cli#1516).
+    foreign_project: str = ""
 
     def reason(self) -> str:
         """One-line explanation naming the source, verbatim from
-        `RejectedTarget::reason`. The em dash is the oracle's own character."""
+        `RejectedTarget::reason` -- except the foreign-project branch, which is
+        tan's own (deliberate oracle divergence, tan-cli#1516: v0.4.1 removes
+        that dir). The em dash is the oracle's own character."""
+        if self.foreign_project:
+            return (
+                f"refusing to remove slice '{self.core_id}' build_dir "
+                f'"{self.raw}" (resolves to {self.path}) — it lies inside '
+                f"another project ({self.foreign_project} holds a board.yaml): "
+                "this project was copied or renamed after a build, or the dir "
+                "belongs to an enclosing project; rebuild this project or fix "
+                "build/system-manifest.yaml"
+            )
         if self.origin == "slice":
             return (
                 f"refusing to remove slice '{self.core_id}' build_dir "
@@ -358,11 +376,57 @@ def _subsumed_by_build_root(build_root: str, resolved: str) -> bool:
     return True
 
 
+def _foreign_project_root(path: str, own_roots: tuple[str, ...]) -> str | None:
+    """The nearest ancestor of an out-of-tree slice dir that holds a
+    `board.yaml`, when that ancestor is NOT this project -- tan-cli#1516.
+
+    `tan build` records each slice `build_dir` as an absolute path, so a project
+    copied or renamed after a build carries a manifest naming the ORIGINAL
+    project's build tree. Out-of-tree slice dirs stay supported (a Yocto tmp dir
+    sits under no project at all); one inside someone else's project tree never
+    is. The walk stops at this project's own roots (the project root, the
+    `--build-root` tree, the `--board-yaml` directory), so a slice dir elsewhere
+    in this project is never misread as foreign.
+
+    Two walks, and EITHER finding a foreign root refuses: the lexical spelling
+    (what the message names) and the RESOLVED one, because a symlinked component
+    or a `..` through a linked project root reaches a different directory than
+    its spelling suggests -- the same reason [`_resolves_onto_project_root`]
+    exists. Own roots are matched by identity (`samefile`), not spelling, so a
+    case-variant `--project` on a case-insensitive filesystem stays "own".
+    """
+    # `abspath` only for the walk: it anchors a drive-relative `C:rel` the way
+    # Windows will when the removal runs. The reported path is unchanged.
+    starts = (os.path.dirname(_normalize(os.path.abspath(path))),
+              os.path.dirname(os.path.realpath(os.path.abspath(path))))
+    own_names = {_normalize(r) for r in own_roots} | {os.path.realpath(r) for r in own_roots}
+    existing = [r for r in own_roots if os.path.exists(r)]
+
+    def _is_own(directory: str) -> bool:
+        if directory in own_names or os.path.realpath(directory) in own_names:
+            return True
+        try:
+            return any(os.path.samefile(directory, r) for r in existing)
+        except OSError:
+            return False
+
+    for current in starts:
+        while not _is_own(current):
+            if os.path.isfile(os.path.join(current, "board.yaml")):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return None
+
+
 def plan_clean_targets(
     clean_root: str,
     build_root: str,
     slices: list[dict[str, Any]],
     project_root: str | None = None,
+    board_yaml_dir: str | None = None,
 ) -> _Plan:
     """Ordered, de-duplicated removal targets -- `clean::clean_targets`.
 
@@ -387,6 +451,10 @@ def plan_clean_targets(
     # inside X.
     if project_root is None:
         project_root = clean_root
+    # Directories that are THIS project for the foreign-project screen
+    # (tan-cli#1516): a `--board-yaml cfg/board.yaml` project's own `cfg/`
+    # must not read as another project.
+    own_roots = (project_root, clean_root) + ((board_yaml_dir,) if board_yaml_dir else ())
 
     def _unsafe(path: str) -> bool:
         return is_unsafe_removal_target(project_root, path) or is_unsafe_removal_target(
@@ -404,10 +472,11 @@ def plan_clean_targets(
         resolved = _rust_join(clean_root, raw)
         if not _subsumed_by_build_root(build_root, resolved):
             core_id = entry.get("core_id", "")
+            foreign = _foreign_project_root(resolved, own_roots) or ""
             candidates.append(
                 # `str()`: a plain-scalar `core_id: 7` is a valid String to
                 # serde_yaml, so it can reach the rejection message as an int.
-                (resolved, _Rejected(resolved, "slice", str(core_id), raw))
+                (resolved, _Rejected(resolved, "slice", str(core_id), raw, foreign))
             )
 
     plan = _Plan()
@@ -419,6 +488,7 @@ def plan_clean_targets(
         seen.append(key)
         if rejection is None or not (
             _unsafe(path)
+            or rejection.foreign_project
             or (
                 rejection.origin == "slice"
                 and not is_link(path)
@@ -886,7 +956,9 @@ def _run(
             text.append(f"clean: {detail}")
         issues.append(Issue("clean.manifest-unreadable", "warning", detail))
 
-    plan = plan_clean_targets(clean_root, build_root, slices, project_root)
+    plan = plan_clean_targets(
+        clean_root, build_root, slices, project_root, os.path.dirname(board_yaml)
+    )
 
     records: list[dict[str, str]] = []
     removed = 0

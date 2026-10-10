@@ -651,6 +651,150 @@ def test_a_manifest_slice_dir_holding_a_board_yaml_is_refused(tmp_path, monkeypa
     assert (other / "main.c").is_file()
 
 
+def _slice_manifest(build_dir: Path) -> str:
+    return (
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        f'- core_id: m55_hp\n  os: zephyr\n  build_dir: "{build_dir.as_posix()}"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+
+
+def test_a_copied_project_never_cleans_the_original_through_its_absolute_slice_dir(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1516: `tan build` writes each slice `build_dir` as an ABSOLUTE
+    path, so `cp -R projA projB` leaves projB's manifest naming projA's build
+    tree. `tan clean` in projB must refuse that slice, not rmtree projA's build."""
+    proj_a = make_project(tmp_path)
+    slice_a = proj_a / "build" / "m55_hp-zephyr"
+    (proj_a / "build" / "system-manifest.yaml").write_text(_slice_manifest(slice_a))
+    proj_b = tmp_path / "projB"
+    shutil.copytree(proj_a, proj_b)
+    isolate(monkeypatch, tmp_path, proj_b)
+
+    result = runner.invoke(app, ["clean", "--format", "json"])
+
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1, result.stdout
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-target"]
+    message = doc["issues"][0]["message"]
+    assert "another project" in message and str(proj_a) in message
+    assert (slice_a / "zephyr" / "zephyr.elf").read_text() == "ELF"
+    # projB's own build tree is still cleaned -- the refusal is per-slice.
+    assert not (proj_b / "build").exists()
+
+
+def test_a_slice_dir_inside_another_project_is_rejected_by_the_planner(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_text("schema_version: 1\n")
+    other = tmp_path / "other"
+    (other / "build" / "m55-zephyr").mkdir(parents=True)
+    (other / "board.yaml").write_text("schema_version: 1\n")
+    foreign = str(other / "build" / "m55-zephyr")
+
+    plan = plan_clean_targets(
+        str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": foreign}]
+    )
+
+    assert foreign not in plan.targets
+    assert [r.path for r in plan.rejected] == [foreign]
+    assert str(other) in plan.rejected[0].reason()
+
+
+def _project(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "board.yaml").write_text("schema_version: 1\n")
+    return path
+
+
+def test_a_symlinked_component_does_not_hide_a_foreign_project(tmp_path):
+    """The lexical walk sees `<tmp>/blink` (no board.yaml); the resolved walk
+    reaches `other/` through the link and refuses."""
+    proj = _project(tmp_path / "proj")
+    other = _project(tmp_path / "other")
+    (other / "build" / "m55-zephyr").mkdir(parents=True)
+    link = tmp_path / "blink"
+    try:
+        link.symlink_to(other / "build", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not permitted on this host")
+    via_link = str(link / "m55-zephyr")
+
+    plan = plan_clean_targets(str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": via_link}])
+
+    assert via_link not in plan.targets
+    assert [r.path for r in plan.rejected] == [via_link]
+
+
+def test_a_case_variant_project_spelling_is_still_this_project(tmp_path):
+    """On a case-insensitive filesystem `--project .../PROJ` names the same
+    directory as the manifest's `.../proj`; that is not another project."""
+    proj = _project(tmp_path / "proj")
+    upper = tmp_path / "PROJ"
+    if not upper.exists():
+        pytest.skip("case-sensitive filesystem")
+    (proj / "out").mkdir()
+
+    plan = plan_clean_targets(
+        str(upper), str(upper / "build"), [{"core_id": "c", "build_dir": str(proj / "out")}]
+    )
+
+    assert plan.rejected == []
+
+
+def test_the_board_yaml_directory_of_this_project_is_not_foreign(tmp_path):
+    """`--board-yaml cfg/board.yaml`: the project's own `cfg/` holds the board
+    file, and a slice dir under it is still this project's."""
+    proj = tmp_path / "proj"
+    cfg = _project(proj / "cfg")
+    (cfg / "out").mkdir()
+
+    plan = plan_clean_targets(
+        str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": "cfg/out"}],
+        board_yaml_dir=str(cfg),
+    )
+
+    assert plan.rejected == []
+    # `_rust_join` keeps the manifest's `/` (Windows: `...\proj\cfg/out`), so
+    # compare against what the planner itself builds, not a `Path` spelling.
+    assert _rust_join(str(proj), "cfg/out") in plan.targets
+
+
+def test_a_dir_owned_by_an_enclosing_project_is_refused_and_says_so(tmp_path):
+    """Policy, pinned: a nested example's slice dir in its PARENT project's tree
+    is refused, and the message names that cause, not only "copied"."""
+    repo = _project(tmp_path / "repo")
+    example = _project(repo / "examples" / "foo")
+    (repo / "yocto" / "tmp").mkdir(parents=True)
+    target = str(repo / "yocto" / "tmp")
+
+    plan = plan_clean_targets(str(example), str(example / "build"), [{"core_id": "c", "build_dir": target}])
+
+    assert [r.path for r in plan.rejected] == [target]
+    assert "enclosing project" in plan.rejected[0].reason()
+
+
+def test_out_of_tree_slice_dirs_outside_any_project_stay_removable(tmp_path):
+    """The Yocto tmp dir case the module docstring protects, and a slice dir in
+    this project but outside `build/`: neither sits inside a foreign project."""
+    proj = tmp_path / "proj"
+    (proj / "yocto-out").mkdir(parents=True)
+    (proj / "board.yaml").write_text("schema_version: 1\n")
+    yocto = tmp_path / "yocto" / "tmp"
+    yocto.mkdir(parents=True)
+    slices = [
+        {"core_id": "a", "build_dir": str(yocto)},
+        {"core_id": "b", "build_dir": "yocto-out"},
+    ]
+
+    plan = plan_clean_targets(str(proj), str(proj / "build"), slices)
+
+    assert plan.rejected == []
+    assert str(yocto) in plan.targets
+    assert str(proj / "yocto-out") in plan.targets
+
+
 def test_a_build_root_whose_build_dir_holds_a_board_yaml_is_refused(tmp_path, monkeypatch):
     """tan-cli#1482 blocker: never delete a directory that is a project tree."""
     proj = make_project(tmp_path)
