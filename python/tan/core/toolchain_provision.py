@@ -104,6 +104,15 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
 #: `sha256.sum`, fetched from the same source, never against alp-sdk's pin). The stamp therefore means "the
 #: SDK version file matches the pin and the compiler runs", never "the bytes
 #: match alp-sdk's pinned sha256" -- every message that says "verified" says so.
+#:
+#: What west itself does (tan-cli#1498; read from zephyr
+#: `scripts/west_commands/sdk.py`, v4.4.1): it fetches the release's
+#: `sha256.sum`, looks up the ONE minimal-SDK bundle it is about to download
+#: and raises `sha256 mismatched` if that archive's digest differs. The
+#: per-toolchain archives are fetched afterwards by the SDK's own
+#: `setup.sh`/`setup.cmd`, which west runs and does not re-verify. So west
+#: checks the minimal bundle only, never every archive, and never against
+#: alp-sdk's pin.
 ARCHIVE_SHA256_NOTE = (
     "the archive's sha256 was NOT compared against the alp-sdk pin "
     "(`west sdk install` discards the archive; any check west does is against "

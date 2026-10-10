@@ -1171,15 +1171,22 @@ def _load_bearing_reasons(
     named = {origin for origin, _sdk_path in registered}
     # `registered` holds entries the removal destroys (equal to, or inside,
     # the target); an entry whose install CONTAINS the target is damaged too.
-    raw = _read_file(registry_path(_home_alp_dir()))
-    for origin, sdk_path in sorted(parse_registry(raw).items()):
-        if origin not in named and removal_would_damage(
-            normalized_sdk_path(sdk_path), target_posix
-        ):
-            named.add(origin)
+    named |= _registered_containing(target_posix, named)
     for origin in sorted(named):
         reasons.append(f'the registered global default for project "{origin}"')
     return reasons
+
+
+def _registered_containing(target_posix: str, already: set[str]) -> set[str]:
+    """Origins of registry entries whose install CONTAINS `target_posix` (a
+    subtree removal damages them without deleting them), minus `already`."""
+    raw = _read_file(registry_path(_home_alp_dir()))
+    return {
+        origin
+        for origin, sdk_path in parse_registry(raw).items()
+        if origin not in already
+        and removal_would_damage(normalized_sdk_path(sdk_path), target_posix)
+    }
 
 
 def _prune_registry_entries_for(target_posix: str, registered: list[tuple[str, str]]) -> None:
@@ -1551,7 +1558,29 @@ def _run_remove(
         return
 
     _prune_registry_entries_for(target_posix, registered)
+    # tan-cli#1498: a forced subtree removal also damages entries whose
+    # install CONTAINS the target. Those are not pruned (the install they
+    # name still exists), so say so rather than leaving them silent.
+    containing = sorted(_registered_containing(target_posix, {o for o, _p in registered}))
     after = _resolves_to_after(workspace_root)
+    if containing:
+        after = _AfterRemoval(
+            after.data,
+            [
+                *after.issues,
+                *[
+                    Issue(
+                        "sdk.remove-registry-entry-damaged",
+                        "warning",
+                        f'the registered global default for project "{origin}" names an '
+                        f"install that contained {target_posix}; it was left in "
+                        f"~/.alp/sdk-defaults.json but is now incomplete -- re-run "
+                        f"`tan sdk install` or remove that registry entry.",
+                    )
+                    for origin in containing
+                ],
+            ],
+        )
     _emit(
         json_mode=json_mode,
         data=_remove_data(
