@@ -260,6 +260,23 @@ def scrub_message_paths(value, replacements, key=None):
     return value
 
 
+def message_scrub_replacements(work_dir, home_dir):
+    """The `(needle, token)` pairs for `scrub_message_paths`: each scratch
+    directory in BOTH its lexical and its symlink-resolved spelling (macOS
+    `$TMPDIR` is `/var/folders/...`, reported by the child as
+    `/private/var/folders/...`), deduplicated, both spellings mapped to the same
+    token. Order is irrelevant here; the scrubber applies longest first."""
+    pairs = {}
+    for path, token in (
+        (work_dir, WORK_DIR_TOKEN),
+        (home_dir, "__HOME__"),
+        (work_dir.parent, "__WORKPARENT__"),
+    ):
+        for spelling in (path, Path(os.path.realpath(path)), path.resolve()):
+            pairs[spelling.as_posix()] = token
+    return list(pairs.items())
+
+
 def fresh_dir(tag):
     """``<temp>/tan-contract-<tag>-<pid>/root`` -- an empty scratch directory
     under an empty parent nothing else can plausibly populate."""
@@ -377,6 +394,9 @@ def test_envelope_matches_expected(fixture):
     copy_fixture_inputs(fixture, work_dir)
 
     env = case_env(fixture, work_dir, home_dir)
+    # Computed while the directories still exist: the child may report the
+    # symlink-resolved spelling (macOS `/var` -> `/private/var`).
+    scrub_replacements = message_scrub_replacements(work_dir, home_dir)
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "tan", *argv],
@@ -404,14 +424,7 @@ def test_envelope_matches_expected(fixture):
     actual = json.loads(proc.stdout.strip())
     marker = f"tan-contract-{case}-{os.getpid()}/root"
     actual = normalise(actual, None, marker)
-    actual = scrub_message_paths(
-        actual,
-        [
-            (work_dir.as_posix(), WORK_DIR_TOKEN),
-            (home_dir.as_posix(), "__HOME__"),
-            (work_dir.parent.as_posix(), "__WORKPARENT__"),
-        ],
-    )
+    actual = scrub_message_paths(actual, scrub_replacements)
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "
