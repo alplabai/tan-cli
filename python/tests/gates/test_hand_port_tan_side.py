@@ -651,3 +651,13 @@ def test_the_symbol_probe_can_actually_fail():
         _function_body_source(tan_tree, "_definitely_not_a_function_here")
 
     assert HAND_PORT_SDK_ROOT_ENV, "the sibling gate's env-var name is empty"
+
+
+def test_the_validators_ported_from_commit_is_the_audited_hand_port_pin():
+    """tan-cli#270: `validate_cmd.PORTED_FROM_SDK_COMMIT` is what the
+    version-skew message tells the user the in-process validator was cut from.
+    It must move with `HAND_PORT_PINNED_SDK_COMMIT`, or the message lies."""
+    from tan.commands.validate_cmd import PORTED_FROM_SDK_COMMIT
+    from tests.gates.test_planner_relocation_freshness import HAND_PORT_PINNED_SDK_COMMIT
+
+    assert PORTED_FROM_SDK_COMMIT == HAND_PORT_PINNED_SDK_COMMIT

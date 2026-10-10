@@ -26,6 +26,15 @@ The comparison is also run one level up, through `analyze_validator_output`, so
 the parsed findings -- what actually reaches the `tan validate` envelope -- are
 equal, not just the raw text they were parsed from.
 
+**This corpus depends on current SDK metadata facts**, by design: SoM
+`E1M-AEN801` and preset `e1m-evk` exist, `E1M-AEN801`'s hw_rev `r3` is
+`status: reserved` (exit 5), `zz` is not a key of its hw_revisions table
+(exit 4), `emmc` is not on the E8 silicon (the ALP-B010 warning), camera module
+`raspberry_pi_camera_module_1` exists and the EVK's `CAM0` connector has no AEN
+shield overlay. If a re-sync changes one of those facts, the vacuity guard
+below names which case stopped exercising what it claims; update the fact here,
+not the assertion.
+
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skips, loudly, without one.
 """
@@ -111,6 +120,17 @@ CORPUS: dict[str, str | bytes] = {
     "hw-rev-unknown-to-the-table": _mutate("  sku: E1M-AEN801", "  sku: E1M-AEN801\n  hw_rev: zz"),
     # Exit 5: a key of the table whose `status: reserved` refuses a build.
     "hw-rev-reserved-is-not-buildable": _mutate("  sku: E1M-AEN801", "  sku: E1M-AEN801\n  hw_rev: r3"),
+    "chip-block-helper-slug-is-valid": _mutate("  - cc3501e", "  - cc3501e\n  - button_led"),
+    # `_check_camera_owners` -> `plan_cameras(...).errors`: the owner/shield checks
+    # that exist only through the planner leaves `PlannerFacts` carries.
+    "camera-owner-plan-error-missing-shield-overlay": _BASE
+    + "cameras:\n  - connector: CAM0\n    module: raspberry_pi_camera_module_1\n",
+    "camera-unknown-connector": _BASE
+    + "cameras:\n  - connector: CAM9\n    module: raspberry_pi_camera_module_1\n",
+    "camera-duplicate-connector": _BASE
+    + "cameras:\n  - connector: CAM0\n    module: raspberry_pi_camera_module_1\n"
+    "  - connector: CAM0\n    module: innomaker_cam_imx335\n",
+    "camera-unknown-module": _BASE + "cameras:\n  - connector: CAM0\n    module: nope\n",
     "yaml-parse-error": _BASE + "cores: [unclosed\n",
     "yaml-tab-indent-error": _mutate("    app: ./src\n", "\tapp: ./src\n"),
     "duplicate-key": _BASE + "preset: e1m-evk\n",
@@ -152,12 +172,24 @@ def _in_process(board: Path) -> tuple[int, str, str]:
     return run.status, run.stdout, run.stderr
 
 
-def _assert_same(board: Path) -> tuple[int, str, str]:
+#: The ONLY corpus cases on which the reference script dies with an uncaught
+#: exception. Pinned by name: a crash anywhere else -- in either engine -- is a
+#: failure, not something the traceback comparison below may absorb.
+EXPECTED_CRASHES = frozenset({"non-utf8-bytes"})
+
+
+def _assert_same(board: Path, *, may_crash: bool = False) -> tuple[int, str, str]:
     ref = _spawn(board)
     got = _in_process(board)
     assert got[0] == ref[0], f"exit status: in-process {got[0]} != script {ref[0]}\n{ref[2]}\n---\n{got[2]}"
     assert _normal(got[1]) == _normal(ref[1]), f"stdout differs:\n{ref[1]!r}\n{got[1]!r}"
-    if ref[2].startswith("Traceback"):
+    crashed = ref[2].startswith("Traceback")
+    assert crashed == may_crash, (
+        f"reference script {'crashed' if crashed else 'did not crash'} on {board.name}, "
+        f"expected {'a crash' if may_crash else 'a verdict'}:\n{ref[2]}"
+    )
+    assert got[2].startswith("Traceback") == may_crash, got[2]
+    if crashed:
         # An uncaught exception: the frames name the SDK script's own files and
         # line numbers, which no port can share. The exception line must match.
         assert got[2].startswith("Traceback"), got[2]
@@ -177,7 +209,7 @@ def test_invalid_and_edge_boards_report_the_same_diagnostics(name, tmp_path):
         board.write_bytes(body)
     else:
         board.write_bytes(body.encode("utf-8"))
-    _assert_same(board)
+    _assert_same(board, may_crash=name in EXPECTED_CRASHES)
 
 
 def test_a_missing_file_reports_the_same_failure(tmp_path):
@@ -202,6 +234,14 @@ def test_the_corpus_actually_exercises_every_exit_status_family():
     assert statuses["unknown-sku"] == 1, statuses
     assert statuses["hw-rev-unknown-to-the-table"] == 4, statuses
     assert statuses["hw-rev-reserved-is-not-buildable"] == 5, statuses
+    for camera_case in (
+        "camera-owner-plan-error-missing-shield-overlay",
+        "camera-unknown-connector",
+        "camera-duplicate-connector",
+        "camera-unknown-module",
+    ):
+        assert statuses[camera_case] == 1, (camera_case, statuses)
+    assert statuses["chip-block-helper-slug-is-valid"] == 0, statuses
     assert sum(1 for s in statuses.values() if s == 1) >= 15, statuses
     # The warning-only board is a PASS carrying a rendered warning.
     with tempfile.TemporaryDirectory() as td:

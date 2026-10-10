@@ -17,6 +17,11 @@ import yaml
 from tan.core.board_diagnostic import Diagnostic, DiagnosticCollector
 
 
+# Local on purpose: tan has no importable equivalent. `tan.planner.*` cannot be
+# imported before an SDK root is bound (and this module must load without one),
+# and `som_metadata.resolve_soc_path` is the metadata-root-rooted resolver the
+# SDK file's own comment says NOT to reuse here (this site roots at a
+# caller-injected `soc_dir`, alp-sdk#1096).
 def split_silicon_ref(silicon: str | None) -> tuple[str, str, str] | None:
     """Split a `vendor:family:part` `silicon:` key into its three slugs.
 

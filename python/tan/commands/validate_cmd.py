@@ -7,11 +7,35 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   checkout, no subprocess, no network. This is the path the two committed
   conformance fixtures exercise, which is why their ``data.commandLine`` is
   ``""``.
-* without ``--offline`` the real validator is the SDK's own
-  ``scripts/validate_board_yaml.py``, spawned as a subprocess. tan does not
-  reimplement alp-sdk's schema: the SDK owns ``metadata/schemas/`` and
-  ADR-0017's doctrine is to consume what exists. **PORTED (tan-cli#376)** --
-  see "the spawn path" below. Until #376 this branch refused with
+* without ``--offline`` the real validator is a PORT of the SDK's own
+  ``scripts/validate_board_yaml.py``, **run in-process since tan-cli#270**
+  (``tan.core.board_validator_run``; ``tests/parity/test_board_validator_parity.py``
+  holds it byte-for-byte to the script over the SDK's examples and an invalid-
+  board corpus, and ``HAND_PORT_HASHES`` pins the four SDK sources it was cut
+  from). tan still does not vendor alp-sdk's schema: the SDK owns
+  ``metadata/schemas/`` and ADR-0017's doctrine is to consume what exists, so
+  the port reads ``metadata/**`` out of the resolved checkout. The port returns
+  what the script's process would have (exit status + stderr), and that goes
+  through the SAME ``analyze_validator_output`` below -- the status map, issue
+  codes and envelope are unchanged.
+
+  **Version skew (the one behavioural difference).** The port applies the
+  validator rules tan was audited against (``PORTED_FROM_SDK_COMMIT``) to
+  WHATEVER checkout is bound; the spawned script always matched the bound one.
+  A newer SDK's extra checks are not applied, and a crash reading such a
+  checkout is reported as ``validate.failed`` saying tan's validator could not
+  read this SDK -- not as a board defect. ``TAN_VALIDATE_ENGINE=subprocess``
+  runs the bound SDK's own validator instead.
+
+  **Why the spawn path below still exists:** that env var pins it
+  deliberately (the parity test's reference side, the skew escape hatch),
+  ``tan diff`` shares its helpers, and ``validate.spawn-failed`` /
+  ``validate.python-too-old`` are registered codes it alone can emit -- the
+  registry's retired-spelling gate matches a bare suffix across ``tan/``, so
+  they cannot be retired while ``diff.spawn-failed`` / ``diff.python-too-old`` /
+  ``bootstrap.python-too-old`` share it. On the default engine no interpreter is
+  probed and ``data.commandLine`` is ``""``. **PORTED (tan-cli#376)** -- see
+  "the spawn path" below. Until #376 this branch refused with
   ``validate.spawn-not-implemented`` at exit 2, which made the DEFAULT
   invocation the root quickstart documents (``tan validate``) incapable of
   validating anything, and -- because exit 2 is also the genuine
@@ -348,6 +372,22 @@ VALIDATOR_TIMEOUT_S = 300
 #: reference side of the engine-parity test, and what `tan diff`'s cross-check
 #: still shares (`VALIDATOR_SCRIPT`).
 VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
+
+
+#: tan-cli#270: the alp-sdk commit the in-process validator was audited against
+#: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
+PORTED_FROM_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"
+
+
+def _bound_sdk_version(sdk_root: Path) -> str:
+    """`metadata/sdk_version.yaml`'s version, for the skew message."""
+    from tan.commands.sdk_cmd import parse_sdk_version_yaml
+
+    try:
+        text = (Path(sdk_root) / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "(version unknown)"
+    return "v" + (parse_sdk_version_yaml(text) or "(unknown)")
 
 
 def _subprocess_engine_requested() -> bool:
@@ -1673,6 +1713,25 @@ def validate(
                 run = run_board_validator(board_path, resolved_sdk)
                 validator_status = run.status
                 result = analyze_validator_output(run.status, run.stderr)
+                if _is_interpreter_crash(run.stderr):
+                    # See the "Version skew" paragraph of the module docstring:
+                    # a crash on a checkout that has moved past the audited
+                    # commit is tan's gap, not a defect in the customer's board.
+                    last = run.stderr.strip().splitlines()[-1]
+                    result = _Result(
+                        OUTCOME_FAILED,
+                        (
+                            _Finding(
+                                "error",
+                                "tan's built-in validator could not read this SDK "
+                                f"(bound alp-sdk {_bound_sdk_version(resolved_sdk)}; the "
+                                f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
+                                "This is not a verdict on board.yaml -- retry with "
+                                f"{VALIDATE_ENGINE_ENV}=subprocess to run the SDK's own "
+                                f"validator. Underlying error: {last}",
+                            ),
+                        ),
+                    )
                 if result.outcome != OUTCOME_CLEAN and not result.findings:
                     result = _Result(
                         result.outcome,

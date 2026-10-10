@@ -23,7 +23,7 @@ from tan.cli import app
 from tan.commands import validate_cmd
 from tan.core import board_validator_run
 from tan.core.board_diagnostic import Diagnostic, render
-from tan.core.board_validator import PlannerFacts, validate_board_yaml
+from tan.core.board_validator import PlannerFacts, validate_board_yaml  # noqa: F401
 from tan.core.board_validator_compat import _soc_has_kind, split_silicon_ref
 from tan.core.board_yaml_pos import load_with_positions, node_position
 from tan.exit_codes import ExitCode
@@ -378,3 +378,52 @@ def test_positions_and_the_renderer(tmp_path):
         "   = hint: try x\n"
         "   = see: docs/diagnostics/ALP-B003.md\n"
     )
+
+
+@pytest.mark.skipif(SDK is None, reason="set ALP_SDK_ROOT to a real alp-sdk checkout")
+def test_the_run_module_always_hands_the_validator_real_planner_callables(monkeypatch):
+    """`PlannerFacts()` with no callables silently skips the camera-owner checks
+    and the block-slug allowance (the SDK file's failed-import degradation).
+    `board_validator_run` must never take that path."""
+    seen: list[PlannerFacts] = []
+    real = board_validator_run.validate_board_yaml
+
+    def spy(path, *, metadata_root, facts):
+        seen.append(facts)
+        return real(path, metadata_root=metadata_root, facts=facts)
+
+    monkeypatch.setattr(board_validator_run, "validate_board_yaml", spy)
+    boards = sorted((SDK / "examples").rglob("board.yaml"))
+    assert boards
+    board_validator_run.run_board_validator(str(boards[0]), SDK)
+    assert len(seen) == 1
+    facts = seen[0]
+    assert callable(facts.plan_cameras) and callable(facts.resolve_cores)
+    assert facts.block_slugs and "button_led" in facts.block_slugs
+    assert facts.repo_root == SDK
+
+
+def test_an_engine_crash_is_reported_as_tans_gap_not_a_board_defect(tmp_path, monkeypatch):
+    monkeypatch.delenv(validate_cmd.VALIDATE_ENGINE_ENV, raising=False)
+    _project(tmp_path, monkeypatch)
+    sdk = _stand_in_sdk(tmp_path / "alp-sdk")
+    (sdk / "metadata").mkdir()
+    (sdk / "metadata" / "sdk_version.yaml").write_text("version: 9.9.9\n", encoding="utf-8")
+    _no_spawn(monkeypatch)
+    monkeypatch.setattr(
+        board_validator_run,
+        "run_board_validator",
+        lambda *_a: board_validator_run.ValidatorRun(
+            1, "", "Traceback (most recent call last):\nKeyError: 'new_field'\n"
+        ),
+    )
+    result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", "json"])
+    envelope = json.loads(result.output)
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE)
+    assert envelope["data"]["outcome"] == "failed"
+    (issue,) = envelope["issues"]
+    assert issue["code"] == "validate.failed"
+    assert "could not read this SDK" in issue["message"]
+    assert "v9.9.9" in issue["message"] and "a5a137c7" in issue["message"]
+    assert "TAN_VALIDATE_ENGINE=subprocess" in issue["message"]
+    assert "KeyError: 'new_field'" in issue["message"]
