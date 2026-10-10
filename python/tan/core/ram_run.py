@@ -328,18 +328,28 @@ def preamble(serial: str | None, speed: int, device: str) -> list[str]:
 
 
 def load_script(
-    pre: Sequence[str], binary_path: str, image: RamImage, after_go: Sequence[str] = ()
+    pre: Sequence[str],
+    binary_path: str,
+    image: RamImage,
+    after_go: Sequence[str] = (),
+    hold_ms: int = 0,
 ) -> str:
     # Every address below is an `int` rendered with `0x%X`, never a string; the
     # caller passes only a path it staged itself (and already validated).
     """`connect; halt; loadbin; setpc; go` -- the proven Flow C load session.
     `loadbin` resets the core and re-reads the vector table (SP); `setpc` enters
     the reset handler. No MRAM address appears anywhere. `after_go` are extra read-only
-    lines run in the same session once the image is going (`tan.core.ram_watch`)."""
+    lines run in the same session once the image is going (`tan.core.ram_watch`).
+
+    `hold_ms > 0` (experimental hold mode, `TAN_FLASH_RAM_HOLD=1`, tan-cli#1372) keeps the
+    session open for that long after `go` with a plain `Sleep <ms>`: no halt, no register
+    or DEMCR/DWT write follows `go` (a halt after go+Sleep leaves the core incoherent,
+    alp-sdk#2076)."""
     if any(c in binary_path for c in "\r\n\0"):
         raise RamRunError("the image path carries a control character")
     return "\n".join(
-        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", *after_go, "exit"]
+        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", *after_go,
+         *([f"Sleep {int(hold_ms)}"] if hold_ms > 0 else []), "exit"]
     ) + "\n"
 
 
