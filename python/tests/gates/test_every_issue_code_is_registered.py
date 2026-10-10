@@ -451,6 +451,8 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/kconfig_cmd.py", "code"),  # `Issue(code, ...)` inside `_fail`'s OWN body --
         # `_fail`'s literal `code=` call sites are already caught by the plain
         # `code=` keyword scan above; this is only its internal forward.
+        ("tan/commands/flash_cmd.py", "entry.issue_code"),  # `flash.linux-mtd-*` (tan-cli#1314), the
+        # literals are `code=` keywords in `tan/core/flash_linux_mtd.py`.
         ("tan/commands/flash_cmd.py", "code"),  # `Issue(code, ...)` inside `_error`'s OWN body --
         # `_error` is itself in `_FULL_CODE_CALLABLES`.
         ("tan/commands/image_cmd.py", "n.code"),  # <- _Notice, one per bundle-assembly gap

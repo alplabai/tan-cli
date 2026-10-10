@@ -1448,6 +1448,7 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
 #: Flow D permanently unarmed for every real AEN entry, which is the bug this
 #: comment replaces.
 FLOW_D_KEYS = ("jlink_flash_device",)
+LINUX_MTD_METHOD = "linux_mtd"
 FLOW_D_METHOD = "alif_mram_jlink"
 
 #: `jlink_serial`'s `validate_identifier(..., destination=...)` override
@@ -2256,12 +2257,20 @@ def flow_d_preflight_script(
     return "\n".join(lines) + "\n", expected
 
 
+def plan_linux_mtd(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`linux_mtd` (tan-cli#1314) runs several ssh/scp steps, not one argv, so
+    `tan.commands.flash_linux_mtd` takes it over before this builder is reached;
+    the registration exists for the tool gate and the method list."""
+    raise FlashPlanError("linux_mtd is run by tan.commands.flash_linux_mtd, not a single argv plan")
+
+
 _REGISTRY: dict[str, BackendMeta] = {
     "zephyr_west_flash": BackendMeta(("west",), plan_zephyr_west_flash),
     "baremetal_cmake_flash": BackendMeta(("cmake",), plan_baremetal_cmake_flash),
     "yocto_wic_to_sd_or_emmc": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
     "yocto_wic": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
     "xspi_flashwriter": BackendMeta((), plan_xspi_flashwriter),
+    "linux_mtd": BackendMeta(("ssh",), plan_linux_mtd),
     FLOW_D_METHOD: BackendMeta(("JLinkExe", "JLink"), plan_alif_mram_jlink),
 }
 
@@ -2303,6 +2312,7 @@ DPIDR_GUARD_COVERAGE: dict[str, bool] = {
     "yocto_wic": False,
     "yocto_wic_to_sd_or_emmc": False,
     "xspi_flashwriter": False,
+    "linux_mtd": False,
 }
 
 
