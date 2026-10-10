@@ -2,7 +2,7 @@
 """Diagnostic data type + Rust-style renderer for the in-process board validator.
 
 PORTED from alp-sdk `scripts/alp_cli/diagnostic.py` (pinned by
-`tests/gates/test_planner_relocation_freshness.py::BOARD_VALIDATOR_HASHES`).
+`tests/gates/test_planner_relocation_freshness.py::HAND_PORT_HASHES`).
 
 One deliberate departure: the SDK file takes its colour from `colorama`
 (`Fore.RED`, `Style.RESET_ALL`, ...), an undeclared optional dependency that

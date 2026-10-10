@@ -1773,6 +1773,14 @@
       "note": "Assembled as `Issue(f\"validate.{result.outcome}\", ...)` from `OUTCOME_CLEAN`. Added by tan-cli#376. Counter-intuitive but real, and the oracle's own shape (`to_cli_issues` maps every parsed issue to `validate.<outcome>` before its clean-and-empty early return): `scripts/validate_board_yaml.py` renders EVERY diagnostic to stderr and only exits 1 when `collector.has_errors()`, so a board carrying warnings only exits 0 with findings to report. The run is a PASS -- exit 0, `data.outcome: \"clean\"`, `ok: true` -- and each issue under this code is a `warning` (or a `note`, for a standalone `hint:` line); it never carries an `error`. A consumer must read `exitCode`/`severity`, not the presence of an issue, to decide whether the board passed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "validate.sdk-validator-newer",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "Added by tan-cli#1484. Non-fatal: emitted by the DEFAULT (in-process) engine alongside the verdict, never changing the outcome or exit code, when the bound alp-sdk checkout's validator sources (scripts/alp_cli/{validator,diagnostic,yaml_pos}.py, scripts/validate_board_yaml.py) hash differently from the ones tan's port was audited against (`PORTED_SOURCE_HASHES`, kept equal to the freshness gate's HAND_PORT_HASHES). Rules the SDK added since are not applied, so a clean verdict may not match the SDK's own validator; the message names TAN_VALIDATE_ENGINE=subprocess as the remedy. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "validate.failed",
       "status": "reserved",
       "severity": "error",

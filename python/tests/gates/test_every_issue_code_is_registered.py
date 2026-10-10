@@ -911,7 +911,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # guard (`crates/tan-cli/src/commands/validate.rs:124-129`):
         # `python-too-old`, the one #376 left out while its own module docstring
         # claimed three guards were implemented.
-        expected_calls=7,
+        expected_calls=8,
         sites=1,
     ),
     ("tan/commands/doctor_cmd.py", "checks_to_issues"): dict(

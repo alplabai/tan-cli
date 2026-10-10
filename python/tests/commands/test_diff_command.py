@@ -60,6 +60,13 @@ _ORACLE_IOT_WRONG_TYPE_MESSAGE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _spawn_engine(monkeypatch):
+    """The stand-in `validate_board_yaml.py` tests below drive the SPAWN engine;
+    the default (in-process) engine is covered by `test_diff_engine_parity.py`."""
+    monkeypatch.setenv("TAN_VALIDATE_ENGINE", "subprocess")
+
+
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:
     proj = tmp_path / "proj"
     proj.mkdir()

@@ -2,7 +2,7 @@
 """Position-aware YAML loader for board.yaml diagnostics.
 
 PORTED from alp-sdk `scripts/alp_cli/yaml_pos.py` (pinned by
-`tests/gates/test_planner_relocation_freshness.py::BOARD_VALIDATOR_HASHES`).
+`tests/gates/test_planner_relocation_freshness.py::HAND_PORT_HASHES`).
 The body is unchanged; only this docstring is tan's.
 
 Subclasses PyYAML's SafeLoader so every constructed mapping and

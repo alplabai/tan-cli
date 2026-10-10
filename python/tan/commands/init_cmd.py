@@ -112,6 +112,7 @@ clap's doc-comment text; only their presence is the contract.)
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -1146,6 +1147,13 @@ def _finish(
     sdk: _Sdk | None,
 ) -> _Outcome:
     changes = collect_file_changes(project_root, files)
+    # tan-cli#1484: an existing `.alp/sdk-path` that names a DIFFERENT checkout
+    # is a planned change like any other file, so the would-overwrite guard
+    # below covers it. Re-pinning the project to another SDK silently is the
+    # failure this prevents.
+    pin_change = _sdk_pin_change(project_root, sdk)
+    if pin_change is not None:
+        changes.append(pin_change)
 
     if preview:
         # Before the overwrite guard, deliberately: a preview touches no disk,
@@ -1223,6 +1231,23 @@ def _finish(
         unchanged=result.unchanged,
         sdk_pinned=sdk_pinned,
     )
+
+
+def _sdk_pin_change(project_root: Path, sdk: _Sdk | None) -> FileChange | None:
+    """`update` for `.alp/sdk-path` when it already pins a different checkout
+    than the one this run resolved (or is unreadable); `None` otherwise."""
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        return None
+    pointer = project_root / ".alp" / "sdk-path"
+    if not pointer.is_file():
+        return None
+    try:
+        existing = json.loads(pointer.read_text(encoding="utf-8")).get("sdkPath")
+    except (OSError, ValueError, AttributeError):
+        existing = None
+    if existing == sdk.display:
+        return None
+    return FileChange(".alp/sdk-path", "update")
 
 
 def _pin_sdk(project_root: Path, sdk: _Sdk | None) -> str | None:
@@ -1478,6 +1503,18 @@ def init(
         # ignored there too, documented at `_plan_from_example`'s call site
         # below) -- not touched here; only the `--topology` combination is
         # new in this PR and had no such note.
+        # tan-cli#1484: `--board-yaml` replaces the planned board.yaml
+        # verbatim AFTER `--cores` was spliced into it, so the core vanished
+        # with `ok: true`. Same silent-discard shape, same refusal.
+        if isinstance(board_yaml, str) and isinstance(cores, str):
+            raise InitError(
+                "init.scaffold-input-conflict",
+                "tan init --board-yaml supplies the whole board.yaml, so --cores "
+                "would be silently discarded. Put the core in your board.yaml, "
+                "or drop --board-yaml.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
         if topology is not None and cores is not None:
             raise InitError(
                 "init.scaffold-input-conflict",
