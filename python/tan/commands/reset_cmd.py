@@ -173,10 +173,16 @@ def _run(
                 f"{PLACE_ENV} is set but no trusted wrapper is configured ({why}): set "
                 "TAN_JLINK_WRAPPER to the absolute path of the board-farm JLinkExe shim. "
                 "Nothing was spawned."))
+        from_wrapper_env = not jlink_path
         jlink_path = jlink_path or wrapper  # an explicit --jlink wins, and is checked below
+    else:
+        from_wrapper_env = False
     found = resolve_jlink(jlink_path, project_dir=project_dir)
     exe = found.path if found is not None else None
-    data["jlink"] = {"binary": exe, "binarySource": found.source if found else None}
+    # resolve_jlink() labels any path handed to it as "the --jlink flag"; name the real
+    # origin when tan itself defaulted to TAN_JLINK_WRAPPER (tan-cli#1467).
+    source = "TAN_JLINK_WRAPPER" if (found and from_wrapper_env) else (found.source if found else None)
+    data["jlink"] = {"binary": exe, "binarySource": source}
     if exe is None:
         return _fail(data, Issue("reset.failed", "error", fc._NO_TRUSTED_JLINK))
     trusted, reason = trusted_path.is_configured_wrapper(exe)
