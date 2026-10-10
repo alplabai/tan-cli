@@ -143,9 +143,12 @@ def resolve_metadata_sdk_root(
     child checkout supplies the memory budget while the envelope's `sdk` stays
     absent. Collapsing them would change which budget resolves.
 
-    A missing SDK is NOT fatal (the retired Python's `find_sdk_root` die is
-    deliberately dropped): the budget resolves `unknown` and measurement still
-    runs.
+    An ABSENT `--sdk-root` with no checkout found is NOT fatal (the retired
+    Python's `find_sdk_root` die is deliberately dropped): the budget resolves
+    `unknown` and measurement still runs. A non-empty `--sdk-root` that fails
+    the loader-marker check returns `None` here too, but `size` treats THAT as
+    fatal (`size.sdk-root-unresolved`, tan-cli#1463): a typo'd flag silently
+    ignored is the bug.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:

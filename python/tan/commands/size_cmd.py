@@ -53,6 +53,7 @@ from typing import Any
 import typer
 
 from tan.core.shapes import is_file as _is_file
+from tan.core.shapes import rejected_sdk_root_message
 from tan.core.system_manifest import effective_build_root
 from tan.commands.build_output import (
     ManifestInvalid,
@@ -773,6 +774,19 @@ def _run(
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
     metadata_sdk = resolve_metadata_sdk_root(sdk_root_arg, context.workspace_root)
+    if metadata_sdk is None and (sdk_root_arg or "").strip():
+        # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve used to
+        # continue silently with `metadata_sdk=None` and size the build with
+        # no SDK metadata. No flag + no checkout still continues (nothing was
+        # asked for). Intentional divergence from the v0.4.1 oracle, which
+        # reached `size.manifest-unavailable`; this refusal now precedes the
+        # manifest checks.
+        return _error_outcome(
+            project,
+            context,
+            "size.sdk-root-unresolved",
+            rejected_sdk_root_message(sdk_root_arg, "No size report was produced."),
+        )
     metadata_root = (
         None if metadata_sdk is None else os.path.join(str(metadata_sdk), "metadata")
     )

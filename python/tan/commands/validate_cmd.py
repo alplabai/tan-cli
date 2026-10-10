@@ -302,6 +302,7 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
 # tan-cli#1031: this resolver MOVED to `tan.core.board_context` so `tan
 # scaffold` could reuse it instead of growing a fourth project/board
 # resolver. Aliased to the private name this module's call site (and
@@ -1635,10 +1636,13 @@ def validate(
                         "structural checks that need no SDK.",
                     )
                     if sdk_root
-                    else "alp-sdk root is unresolved. Use --sdk-root, place the project "
-                    f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
-                    "`tan validate --offline` runs the structural checks that need "
-                    "no SDK.",
+                    else with_sdk_search(
+                        "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                        f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
+                        "`tan validate --offline` runs the structural checks that need "
+                        "no SDK.",
+                        os.path.abspath(root),
+                    ),
                     ExitCode.VALIDATION_FAILURE,
                 )
                 return

@@ -85,7 +85,7 @@ import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.core.fs_confine import PathEscapeError, resolve_confined
-from tan.core.sdk_discovery import ActiveSdk
+from tan.core.sdk_discovery import ActiveSdk, with_sdk_search
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
@@ -419,7 +419,9 @@ def _resolve(
                 "warning",
                 rejected_sdk_root_message(sdk_root, "Cannot read the pinmux table.")
                 if sdk_root
-                else "alp-sdk root is unresolved; cannot read the pinmux table.",
+                else with_sdk_search(
+                    "alp-sdk root is unresolved; cannot read the pinmux table.", root
+                ),
             )
         )
 

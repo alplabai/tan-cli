@@ -880,6 +880,7 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
         global_default_foreign_project_issue,
         project_pin_issue,
         resolve_sdk_root_ladder,
+        with_sdk_search,
     )
     from tan.core.shapes import SDK_MARKER
 
@@ -893,10 +894,18 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
         )
         raise ExplainError(
             "explain.sdk-root-unresolved",
-            f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
-            f"read -- {NO_SDK_NEXT_STEPS}.",
-            f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
-            f"could be read -- {NO_SDK_NEXT_STEPS}.",
+            with_sdk_search(
+                f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
+                f"read -- {NO_SDK_NEXT_STEPS}.",
+                workspace_root,
+                sdk_root_arg,
+            ),
+            with_sdk_search(
+                f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
+                f"could be read -- {NO_SDK_NEXT_STEPS}.",
+                workspace_root,
+                sdk_root_arg,
+            ),
             selector_value=code.strip(),
             extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
         )

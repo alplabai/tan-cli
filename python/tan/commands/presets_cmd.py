@@ -136,6 +136,7 @@ from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_tiered,
+    with_sdk_search,
 )
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.som_schema_version import (
@@ -1028,7 +1029,7 @@ def presets(
                     "warning",
                     rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
                     if sdk_root
-                    else SDK_UNRESOLVED_MESSAGE,
+                    else with_sdk_search(SDK_UNRESOLVED_MESSAGE, root),
                 )
             )
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring

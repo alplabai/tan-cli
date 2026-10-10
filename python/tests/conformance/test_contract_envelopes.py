@@ -231,6 +231,52 @@ def normalise(value, key, work_dir_marker):
     return value
 
 
+def scrub_message_paths(value, replacements, key=None):
+    """tan-cli#1463: `normalise` rewrites path-KEYED fields only, deliberately
+    leaving `message` alone. A refusal that names where the SDK ladder looked
+    (`sdk_search_summary`) embeds the per-run scratch and home directories in its
+    `message`, so those -- and only those exact absolute prefixes -- are swapped
+    for stable tokens before the compare. `replacements` holds `/`-separated
+    needles; they are applied longest first."""
+    if isinstance(value, str):
+        if key != "message":
+            return value
+        # Longest needle first, so a directory nested inside another (a HOME
+        # under the work dir) still maps to its own token.
+        ordered = sorted(replacements, key=lambda pair: len(pair[0]), reverse=True)
+        text = value.replace("\\", "/")
+        # Only a message that actually embeds one of the scratch prefixes is
+        # touched; any other keeps its backslashes, so a real slash regression
+        # in an unrelated message is not masked.
+        if not any(needle in text for needle, _ in ordered):
+            return value
+        for needle, token in ordered:
+            text = text.replace(needle, token)
+        return text
+    if isinstance(value, list):
+        return [scrub_message_paths(item, replacements, key) for item in value]
+    if isinstance(value, dict):
+        return {k: scrub_message_paths(v, replacements, k) for k, v in value.items()}
+    return value
+
+
+def message_scrub_replacements(work_dir, home_dir):
+    """The `(needle, token)` pairs for `scrub_message_paths`: each scratch
+    directory in BOTH its lexical and its symlink-resolved spelling (macOS
+    `$TMPDIR` is `/var/folders/...`, reported by the child as
+    `/private/var/folders/...`), deduplicated, both spellings mapped to the same
+    token. Order is irrelevant here; the scrubber applies longest first."""
+    pairs = {}
+    for path, token in (
+        (work_dir, WORK_DIR_TOKEN),
+        (home_dir, "__HOME__"),
+        (work_dir.parent, "__WORKPARENT__"),
+    ):
+        for spelling in (path, Path(os.path.realpath(path)), path.resolve()):
+            pairs[spelling.as_posix()] = token
+    return list(pairs.items())
+
+
 def fresh_dir(tag):
     """``<temp>/tan-contract-<tag>-<pid>/root`` -- an empty scratch directory
     under an empty parent nothing else can plausibly populate."""
@@ -348,6 +394,9 @@ def test_envelope_matches_expected(fixture):
     copy_fixture_inputs(fixture, work_dir)
 
     env = case_env(fixture, work_dir, home_dir)
+    # Computed while the directories still exist: the child may report the
+    # symlink-resolved spelling (macOS `/var` -> `/private/var`).
+    scrub_replacements = message_scrub_replacements(work_dir, home_dir)
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "tan", *argv],
@@ -375,6 +424,7 @@ def test_envelope_matches_expected(fixture):
     actual = json.loads(proc.stdout.strip())
     marker = f"tan-contract-{case}-{os.getpid()}/root"
     actual = normalise(actual, None, marker)
+    actual = scrub_message_paths(actual, scrub_replacements)
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "

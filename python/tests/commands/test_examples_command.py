@@ -651,7 +651,8 @@ def test_the_no_flag_message_still_names_the_flag_as_the_remedy(tmp_path, monkey
     flag branch's wording."""
     monkeypatch.chdir(tmp_path)
     doc = json.loads(runner.invoke(app, ["examples", "--format", "json"]).stdout)
-    assert doc["issues"][0]["message"] == SDK_UNRESOLVED_MESSAGE
+    # tan-cli#1463: the message is unchanged; where the ladder looked follows it.
+    assert doc["issues"][0]["message"].startswith(f"{SDK_UNRESOLVED_MESSAGE} Neither `--sdk-root`")
     assert "pass --sdk-root <path> to name the checkout." in doc["issues"][0]["message"]
 
 

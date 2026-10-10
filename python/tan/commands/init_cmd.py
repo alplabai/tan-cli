@@ -120,6 +120,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
 from tan.core.alp_conf_pregen import pregeneration_message
 from tan.core.system_manifest import load_yaml_document
 from tan.core.fs_confine import PathEscapeError, resolve_confined
@@ -933,7 +934,7 @@ def _copied_board_cores(files: list[PlannedFile]) -> object:
 
 
 def _plan_from_example(
-    src: str, som: str | None, sdk: _Sdk | None
+    src: str, som: str | None, sdk: _Sdk | None, search_note: str = ""
 ) -> tuple[str, list[PlannedFile]]:
     """Copy an SDK example directory verbatim. The ONE init path that needs a
     checkout, because the thing it copies lives in one."""
@@ -956,7 +957,8 @@ def _plan_from_example(
             "init.sdk-root-unresolved",
             "alp-sdk root is unresolved. Use --sdk-root or run near an alp-sdk "
             "checkout to copy an example."
-            + (f" (tried '{sdk.display}')" if sdk is not None else ""),
+            + (f" (tried '{sdk.display}')" if sdk is not None else "")
+            + search_note,
             ExitCode.VALIDATION_FAILURE,
         )
 
@@ -1071,7 +1073,7 @@ def _plan_from_example(
 
 
 def _plan_from_topology(
-    topology_raw: str, som: str | None, sdk: _Sdk | None
+    topology_raw: str, som: str | None, sdk: _Sdk | None, search_note: str = ""
 ) -> tuple[str, list[PlannedFile]]:
     """Resolve `--topology` to a catalog record, then delegate to
     `_plan_from_example` exactly as if `--from-example <record's example>`
@@ -1088,7 +1090,8 @@ def _plan_from_topology(
             "init.sdk-root-unresolved",
             "alp-sdk root is unresolved. Use --sdk-root or run near an "
             "alp-sdk checkout to select a template by --topology."
-            + (f" (tried '{sdk.display}')" if sdk is not None else ""),
+            + (f" (tried '{sdk.display}')" if sdk is not None else "")
+            + search_note,
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -1109,7 +1112,7 @@ def _plan_from_topology(
         raise InitError(
             "init.topology-ambiguous", str(err), ExitCode.VALIDATION_FAILURE
         ) from err
-    return _plan_from_example(src, som, sdk)
+    return _plan_from_example(src, som, sdk, search_note)
 
 
 # ---------------------------------------------------------------------------
@@ -1487,13 +1490,22 @@ def init(
                 ExitCode.VALIDATION_FAILURE,
             )
 
+        # tan-cli#1463: where the ladder looked, appended to the unresolved
+        # refusal. An explicit `--sdk-root` is terminal (I-31), so it adds none.
+        # Computed only when a refusal needs it: `Path.absolute()` raises if the
+        # cwd has been removed, which a preview must still survive.
+        search_note = ""
+        if (topology is not None or from_example is not None) and (
+            resolved_sdk is None or not _is_sdk_checkout(resolved_sdk.path)
+        ):
+            search_note = with_sdk_search("", workspace_root, sdk_root)
         if topology is not None:
-            template_id, files = _plan_from_topology(topology, som, resolved_sdk)
+            template_id, files = _plan_from_topology(topology, som, resolved_sdk, search_note)
             # `find_example_by_cores` resolved to an example, so this is the
             # same shape `_plan_from_example` returns directly below.
             subject_label = f"example '{template_id[len('example:') :]}'"
         elif from_example is not None:
-            template_id, files = _plan_from_example(from_example, som, resolved_sdk)
+            template_id, files = _plan_from_example(from_example, som, resolved_sdk, search_note)
             # `--cores` is ignored on this path (the example ships its own
             # board.yaml); `--board-yaml`'s subject names the example, not a
             # template id -- `template_id` here is `"example:<src>"`.

@@ -233,6 +233,21 @@ def sdk_search_summary(workspace_root: Path) -> str:
     )
 
 
+def with_sdk_search(
+    message: str, workspace_root: Path | str, sdk_root_arg: str | None = None
+) -> str:
+    """tan-cli#1463: the ONE route every `<cmd>.sdk-root-*` refusal takes to name
+    where tan looked. Appends `sdk_search_summary` to `message`.
+
+    A REJECTED `--sdk-root` is terminal (I-31): no other tier was tried, so
+    `message` is returned untouched -- claiming the ladder was searched would be
+    false, and `rejected_sdk_root_message` already names the typed value.
+    """
+    if (sdk_root_arg or "").strip():
+        return message
+    return f"{message} {sdk_search_summary(Path(workspace_root))}"
+
+
 def _read_pointer_json(pointer: Path) -> dict[str, Any] | None:
     """Parse a pointer file (`.alp/sdk-path`, `~/.alp/sdk-default`) into its
     dict, or `None` on ANY failure -- missing, unreadable, invalid JSON, or a

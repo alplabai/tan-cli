@@ -71,6 +71,7 @@ import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
 from tan.core.global_flags import accept_global_flags
 from tan.core.link_refusal import refusal_code
 from tan.core.sdk_discovery import sdk_resolution_issues
@@ -438,8 +439,12 @@ def _run_kconfig(
             # through this exact same ladder, so with none resolved it
             # refuses right back with tan-cli#305's own fix text; it is not a
             # remedy for THIS failure, just a second site that needs one.
-            message=f"no alp-sdk checkout found — pass `--sdk-root <PATH>`, or "
-            f"{NO_SDK_NEXT_STEPS}.",
+            message=with_sdk_search(
+                f"no alp-sdk checkout found — pass `--sdk-root <PATH>`, or "
+                f"{NO_SDK_NEXT_STEPS}.",
+                root,
+                sdk_root,
+            ),
             core=None,
             json_mode=json_mode,
             sdk_issues=sdk_issues,

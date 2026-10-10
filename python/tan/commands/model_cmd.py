@@ -184,6 +184,7 @@ from tan.commands.model_host_cmd import (
     run_run,
 )
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
 from tan.core.model_doctor import backend_row, optional_row, registry_backends
@@ -372,8 +373,11 @@ def _require_metadata_sdk_root(sdk_root: str | None, workspace_root: str, no_mod
             # two mechanisms that actually work here (`--sdk-root`, placing
             # the project near a checkout) and swapped the third for
             # NO_SDK_NEXT_STEPS's honest "how to get one at all".
-            else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
-            f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+            else with_sdk_search(
+                "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+                workspace_root,
+            ),
             ExitCode.VALIDATION_FAILURE,
         )
     return resolved_sdk
@@ -956,9 +960,12 @@ def _run_doctor(
                         sdk_root, "Backend availability below is unaffected."
                     )
                     if sdk_root
-                    else "alp-sdk root is unresolved. Use --sdk-root, place the project "
-                    f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. Backend "
-                    "availability below is unaffected."
+                    else with_sdk_search(
+                        "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                        f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. Backend "
+                        "availability below is unaffected.",
+                        context.workspace_root,
+                    )
                 ),
             )
         )

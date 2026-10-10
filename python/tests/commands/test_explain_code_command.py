@@ -237,18 +237,16 @@ def test_no_sdk_bound_refuses_and_names_what_it_could_not_find(tmp_path, monkeyp
     assert result.exit_code == 1, result.output
     doc = json.loads(result.stdout)
     assert doc["ok"] is False
-    assert doc["issues"] == [
-        {
-            "code": "explain.sdk-root-unresolved",
-            "severity": "error",
-            "message": (
-                "alp-sdk root is unresolved, so no diagnostic catalogue could be "
-                "read -- get an alp-sdk checkout (`git clone "
-                "https://github.com/alplabai/alp-sdk`), then point tan at it with "
-                "`--sdk-root <path>`."
-            ),
-        }
-    ]
+    (issue,) = doc["issues"]
+    assert issue["code"] == "explain.sdk-root-unresolved"
+    assert issue["severity"] == "error"
+    # tan-cli#1463: the unchanged remedy is followed by where the ladder looked.
+    assert issue["message"].startswith(
+        "alp-sdk root is unresolved, so no diagnostic catalogue could be "
+        "read -- get an alp-sdk checkout (`git clone "
+        "https://github.com/alplabai/alp-sdk`), then point tan at it with "
+        "`--sdk-root <path>`. Neither `--sdk-root`"
+    )
     # Nothing was resolved, so nothing is claimed: the `sdk` key is ABSENT
     # rather than reporting a root the run never read.
     assert "sdk" not in doc

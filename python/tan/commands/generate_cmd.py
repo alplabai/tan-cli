@@ -104,6 +104,7 @@ import typer
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
@@ -1216,8 +1217,11 @@ def generate(
                 # the two mechanisms that actually work here (`--sdk-root`,
                 # placing the project near a checkout) and swapped the third
                 # for NO_SDK_NEXT_STEPS's honest "how to get one at all".
-                else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
-                f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+                else with_sdk_search(
+                    "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                    f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+                    workspace_root,
+                ),
                 ExitCode.VALIDATION_FAILURE,
                 extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
             )
