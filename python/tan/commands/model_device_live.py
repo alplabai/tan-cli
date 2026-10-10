@@ -205,7 +205,14 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
                 "model.device-flash-failed", "error",
                 f"The Flow C RAM-run failed: {entry.get('message') or 'no detail reported'}",
             ))
-        return LiveRefusal(flash_issues, ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE)
+        # tan-cli#1486: the registry documents `model.device-flash-failed` as
+        # VALIDATION_FAILURE; a Flow C error issue passed through keeps Flow C's own code.
+        synthesised = not any(i.severity == "error" for i in issues)
+        if synthesised:
+            exit_code = ExitCode.VALIDATION_FAILURE
+        else:
+            exit_code = ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE
+        return LiveRefusal(flash_issues, exit_code)
     console = entry.get("ramConsole") or {}
     text = console.get("text")
     console_path, save_issues = _save_console(context, text, data.get("buildRoot"))

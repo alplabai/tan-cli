@@ -196,7 +196,7 @@ from tan.exit_codes import ExitCode
 from tan.model.adapters.drpai import _compiler_version as _drpai_compiler_version
 from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
 from tan.model.adapters.ethos_u import _VELA_CONFIG_ENV, _vela_version, _vendor_config_path
-from tan.model.build import SramNoFitRefused, _ADAPTERS, build_model
+from tan.model.build import SramNoFitRefused, _ADAPTERS, _NAME_RE, build_model
 from tan.model.check import check_model_backends, resolve_check_backends
 from tan.model.package import read_manifest_file
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -354,6 +354,33 @@ def _require_model_entry(m: Any, board_path: Path) -> None:
         raise ModelError(
             "model.board-yaml-invalid",
             f"{board_path}: every `models:` entry needs `name` and `source`.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    # tan-cli#1486: type-check at the shape floor so a malformed entry is the
+    # user's board.yaml's fault (exit 2), not `model.internal-failure`, and a
+    # traversal name never reaches `list`'s `<out>/<name>.alpmodel` stat.
+    name, source, compile_block = m["name"], m["source"], m.get("compile")
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: `models:` entry name {name!r} must be a string matching "
+            f"{_NAME_RE.pattern!r}.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if not isinstance(source, str) or not source:
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: `models:` entry '{name}': `source` must be a non-empty path string.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if compile_block is not None and (
+        not isinstance(compile_block, dict)
+        or any(o is not None and not isinstance(o, dict) for o in compile_block.values())
+    ):
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{board_path}: `models:` entry '{name}': `compile:` must be a mapping of "
+            "backend -> options mapping.",
             ExitCode.VALIDATION_FAILURE,
         )
 
@@ -1002,6 +1029,7 @@ def _refuse_stray_arguments(
     sku: str | None,
     device_flags: tuple[bool, ...] = (),
     live: LiveOptions | None = None,
+    scoped_flags: dict[str, tuple[bool, tuple[str, ...]]] | None = None,
 ) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
@@ -1042,6 +1070,16 @@ def _refuse_stray_arguments(
             raise ModelError(
                 "model.unexpected-argument",
                 "--input and --runs apply to host runs; a device run times what the target ran.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+    # tan-cli#1486: subcommand-scoped flags typed on the wrong subcommand were
+    # accepted and dropped, so the caller got no signal the flag did nothing.
+    for flag, (given, owners) in (scoped_flags or {}).items():
+        if given and subcommand not in owners:
+            raise ModelError(
+                "model.unexpected-argument",
+                f"`tan model {subcommand}` takes no {flag}; it applies to "
+                f"{', '.join('`' + o + '`' for o in owners)} only.",
                 ExitCode.VALIDATION_FAILURE,
             )
     if sku and subcommand == "add":
@@ -1353,6 +1391,13 @@ def model(
         _refuse_stray_arguments(
             subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None),
             live,
+            {
+                "--against": (against is not None, ("ab",)),
+                "--calibration": (calibration is not None, ("prep",)),
+                "--per-channel": (per_channel is True, ("prep",)),
+                "--min-samples": (min_samples != 8, ("prep",)),
+                "--exact": (exact is True, ("check",)),
+            },
         )
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
@@ -1461,7 +1506,7 @@ def model(
 # `exitCode: 0` with `issues: []`. It is now a second decl on `--board`
 # itself (above), so both spellings are one option and read one file.
 #
-# The six arity-0 flags above stay accepted-and-dropped; the injected
-# `--target` is now REFUSED when supplied rather than ignored, per the same
-# issue -- `model` has no emit target to honour it with.
+# The six arity-0 flags above stay accepted-and-dropped, and so does the
+# injected `--target` (the refusal was reverted per tan-cli#403; see
+# `core/global_flags.py`) -- `model` has no emit target to honour it with.
 model = accept_global_flags(model)

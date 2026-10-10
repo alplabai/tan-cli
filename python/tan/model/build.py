@@ -33,6 +33,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from ..core.atomic_write import atomic_write_bytes
 from .adapters import Blob, CompilerAdapter
 from .adapters.cpu import CpuAdapter
 from .adapters.ethos_u import VelaAdapter, VelaFootprintRefused
@@ -93,8 +94,9 @@ def _placed_nothing_on_accelerator(backend: str, blob: Blob) -> bool:
 
 class SramNoFitRefused(Exception):
     """A certain arena or SRAM0-residency NO-FIT under `Sram_Only`
-    (tan-cli#1288, `tan.model.sram_fit`) -- refuses the WHOLE per-model
-    build, unlike `VelaFootprintRefused`'s per-target coverage skip: every
+    (tan-cli#1288, `tan.model.sram_fit`) on EVERY ethos_u target the build
+    reached -- refuses the WHOLE per-model build (a single target's no-fit
+    is a coverage skip, like `VelaFootprintRefused`; tan-cli#1486): every
     ethos_u variant this SKU would ship describes a placement that cannot
     execute on it (`src/backends/inference/ethos_u_aen.cpp` pins every NPU
     access to the SRAM AXI port under `Sram_Only`), so no partial package is
@@ -167,6 +169,8 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
     targets: list[Target] = []
     coverage: list[Coverage] = []
     blobs: list[bytes] = []
+    no_fit_msgs: list[str] = []
+    ethos_u_fit = 0
     for spec in specs:
         candidates = by_backend.get(spec.backend, [])
         if not candidates:
@@ -245,7 +249,14 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
                 paired_core=spec.paired_core, sku=sku, metadata_root=metadata_root,
             )
             if fit.no_fit:
-                raise SramNoFitRefused(_sram_no_fit_message(spec, fit))
+                # ONE target's no-fit skips that target only; the model is
+                # refused as a whole (below) only when NO ethos_u target
+                # survives (tan-cli#1486).
+                msg = _sram_no_fit_message(spec, fit)
+                no_fit_msgs.append(msg)
+                coverage.append(Coverage(spec.backend, spec.accel_config, "skipped", msg))
+                continue
+            ethos_u_fit += 1
         if _placed_nothing_on_accelerator(spec.backend, blob):
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped",
                                      _no_placement_reason(spec, blob)))
@@ -268,6 +279,9 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             caveats=list(blob.caveats)))
         blobs.append(blob.payload)
 
+    if no_fit_msgs and not ethos_u_fit:
+        raise SramNoFitRefused("; ".join(no_fit_msgs))
+
     if not blobs:
         detail = "; ".join(f"{c.backend}:{c.status} ({c.reason})" for c in coverage)
         raise ValueError(f"no blob compiled for model '{name}' (.{src_fmt}); coverage: {detail}")
@@ -285,5 +299,5 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
     resolved_out_dir = out_dir.resolve()
     if not out_path.resolve().is_relative_to(resolved_out_dir):
         raise ValueError(f"refusing to write outside out_dir: {out_path}")
-    out_path.write_bytes(write_package(mft, blobs))
+    atomic_write_bytes(str(out_path), write_package(mft, blobs))
     return out_path
