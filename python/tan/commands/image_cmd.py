@@ -61,6 +61,7 @@ from typing import Any
 
 import typer
 
+from tan.core.dir_removal import is_link
 from tan.core.sdk_discovery import with_sdk_search
 from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
 from tan.core.system_manifest import effective_build_root
@@ -365,6 +366,17 @@ def _assemble_bundle(
     slices_dir = os.path.join(bundle_dir, SLICES_DIR)
     helpers_dir = os.path.join(bundle_dir, HELPERS_DIR)
     for directory in (bundle_dir, slices_dir, helpers_dir):
+        # `makedirs(exist_ok=True)` accepts a symlink to a directory, and the
+        # prune below would then empty its out-of-tree target. Unlink the link
+        # and recreate a real directory.
+        if directory != bundle_dir and is_link(directory):
+            try:
+                os.unlink(directory)
+            except OSError:
+                try:
+                    os.rmdir(directory)
+                except OSError as err:
+                    raise BundleWriteError(f"unlink {directory}: {err}") from err
         try:
             os.makedirs(directory, exist_ok=True)
         except OSError as err:

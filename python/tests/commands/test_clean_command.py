@@ -589,12 +589,13 @@ def test_build_root_is_the_project_tree_and_only_its_build_dir_goes(raw, tmp_pat
     """tan-cli#1482: `--build-root X` means what it means to `tan build` -- X is
     the project TREE and clean removes `<X>/build`, so `.`/`..` name a tree and
     never the sources themselves."""
-    proj = make_project(tmp_path)
-    isolate(monkeypatch, tmp_path, proj)
+    # Nested two levels so `../..` still lands inside tmp_path (xdist-safe).
+    root = tmp_path / "a" / "b"
+    proj = make_project(root)
+    isolate(monkeypatch, root, proj)
     tree = (proj / raw).resolve()
     (tree / "build").mkdir(exist_ok=True)
     (tree / "build" / "stale.o").write_text("x")
-    before = survivors(tmp_path) - {p for p in survivors(tmp_path) if "/build" in str(p)}
 
     result = runner.invoke(app, ["clean", "--build-root", raw, "--format", "json"])
     assert result.exit_code == 0, result.stdout
@@ -602,7 +603,52 @@ def test_build_root_is_the_project_tree_and_only_its_build_dir_goes(raw, tmp_pat
     assert doc["data"]["buildRoot"] == str(tree / "build")
     assert not (tree / "build").exists()
     assert (proj / "src" / "main.c").is_file() and (proj / "board.yaml").is_file()
-    assert_canary_intact(tmp_path)
+    assert_canary_intact(root)
+
+
+def test_a_manifest_slice_dir_resolving_onto_the_project_root_is_refused(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1482 blocker: with `--build-root ..` the real project root (cwd)
+    sits inside X, and a manifest `build_dir` naming it must still be refused."""
+    proj = make_project(tmp_path)
+    sub = proj / "sub"
+    (sub / "src").mkdir(parents=True)
+    (sub / "src" / "main.c").write_text("int main(void){return 0;}")
+    (sub / "board.yaml").write_text("schema_version: 1\n")
+    (proj / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        '- core_id: c\n  os: zephyr\n  build_dir: "sub"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+    isolate(monkeypatch, tmp_path, sub)
+
+    for extra in (["--dry-run"], []):
+        result = runner.invoke(
+            app, ["clean", "--build-root", "..", "--format", "json", *extra]
+        )
+        doc = json.loads(result.stdout)
+        assert result.exit_code == 1, result.stdout
+        assert "clean.unsafe-target" in [i["code"] for i in doc["issues"]]
+        assert all(t["path"] != str(sub) or t["action"] == "refused-unsafe" for t in doc["data"]["targets"])
+        assert (sub / "src" / "main.c").is_file() and (sub / "board.yaml").is_file()
+
+
+def test_a_manifest_slice_dir_holding_a_board_yaml_is_refused(tmp_path, monkeypatch):
+    proj = make_project(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "board.yaml").write_text("schema_version: 1\n")
+    (other / "main.c").write_text("x")
+    (proj / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        f'- core_id: c\n  os: zephyr\n  build_dir: "{other.as_posix()}"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+    isolate(monkeypatch, tmp_path, proj)
+    result = runner.invoke(app, ["clean", "--format", "json"])
+    assert result.exit_code == 1, result.stdout
+    assert (other / "main.c").is_file()
 
 
 def test_a_build_root_whose_build_dir_holds_a_board_yaml_is_refused(tmp_path, monkeypatch):
