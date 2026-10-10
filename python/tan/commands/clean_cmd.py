@@ -19,7 +19,9 @@ the port:**
   the `rm -rf $UNSET_VAR` shape: `--build-root ""` is refused outright, and a
   manifest `build_dir` that resolves onto the project root (or the
   `--build-root` tree), above it, or onto a directory holding a `board.yaml` is
-  refused. `--build-root X` names a project TREE and clean removes `<X>/build`
+  refused, and so is one that lies inside ANOTHER project's tree (a copied or
+  renamed project's manifest still names the original's absolute slice dirs,
+  tan-cli#1516). `--build-root X` names a project TREE and clean removes `<X>/build`
   (tan-cli#1482), so `.` and `..` are valid trees, not refusals.
 * **Deliberate oracle divergence (tan-cli#1482):** the v0.4.1 binary removes X
   itself, joined onto the project root. tan cleans `<X>/build`, with X anchored
@@ -285,10 +287,20 @@ class _Rejected:
     origin: str
     core_id: str = ""
     raw: str = ""
+    #: The other project's root when a slice dir sits inside it (tan-cli#1516).
+    foreign_project: str = ""
 
     def reason(self) -> str:
         """One-line explanation naming the source, verbatim from
         `RejectedTarget::reason`. The em dash is the oracle's own character."""
+        if self.foreign_project:
+            return (
+                f"refusing to remove slice '{self.core_id}' build_dir "
+                f'"{self.raw}" (resolves to {self.path}) — it lies inside '
+                f"another project ({self.foreign_project} holds a board.yaml), "
+                "most likely because this project was copied or renamed after "
+                "a build; rebuild this project or fix build/system-manifest.yaml"
+            )
         if self.origin == "slice":
             return (
                 f"refusing to remove slice '{self.core_id}' build_dir "
@@ -358,6 +370,32 @@ def _subsumed_by_build_root(build_root: str, resolved: str) -> bool:
     return True
 
 
+def _foreign_project_root(path: str, own_roots: tuple[str, ...]) -> str | None:
+    """The nearest ancestor of an out-of-tree slice dir that holds a
+    `board.yaml`, when that ancestor is NOT this project -- tan-cli#1516.
+
+    `tan build` records each slice `build_dir` as an absolute path, so a project
+    copied or renamed after a build carries a manifest naming the ORIGINAL
+    project's build tree. Out-of-tree slice dirs stay supported (a Yocto tmp dir
+    sits under no project at all); one inside someone else's project tree never
+    is. The walk stops at this project's root or the `--build-root` tree, so a
+    slice dir elsewhere in this project is never misread as foreign.
+    """
+    if not os.path.isabs(path):
+        return None
+    own = {_normalize(r) for r in own_roots} | {os.path.realpath(r) for r in own_roots}
+    current = os.path.dirname(_normalize(path))
+    while True:
+        if current in own or os.path.realpath(current) in own:
+            return None
+        if os.path.isfile(os.path.join(current, "board.yaml")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 def plan_clean_targets(
     clean_root: str,
     build_root: str,
@@ -404,10 +442,11 @@ def plan_clean_targets(
         resolved = _rust_join(clean_root, raw)
         if not _subsumed_by_build_root(build_root, resolved):
             core_id = entry.get("core_id", "")
+            foreign = _foreign_project_root(resolved, (project_root, clean_root)) or ""
             candidates.append(
                 # `str()`: a plain-scalar `core_id: 7` is a valid String to
                 # serde_yaml, so it can reach the rejection message as an int.
-                (resolved, _Rejected(resolved, "slice", str(core_id), raw))
+                (resolved, _Rejected(resolved, "slice", str(core_id), raw, foreign))
             )
 
     plan = _Plan()
@@ -419,6 +458,7 @@ def plan_clean_targets(
         seen.append(key)
         if rejection is None or not (
             _unsafe(path)
+            or rejection.foreign_project
             or (
                 rejection.origin == "slice"
                 and not is_link(path)

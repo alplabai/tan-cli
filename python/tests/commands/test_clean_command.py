@@ -651,6 +651,77 @@ def test_a_manifest_slice_dir_holding_a_board_yaml_is_refused(tmp_path, monkeypa
     assert (other / "main.c").is_file()
 
 
+def _slice_manifest(build_dir: Path) -> str:
+    return (
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        f'- core_id: m55_hp\n  os: zephyr\n  build_dir: "{build_dir.as_posix()}"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+
+
+def test_a_copied_project_never_cleans_the_original_through_its_absolute_slice_dir(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1516: `tan build` writes each slice `build_dir` as an ABSOLUTE
+    path, so `cp -R projA projB` leaves projB's manifest naming projA's build
+    tree. `tan clean` in projB must refuse that slice, not rmtree projA's build."""
+    proj_a = make_project(tmp_path)
+    slice_a = proj_a / "build" / "m55_hp-zephyr"
+    (proj_a / "build" / "system-manifest.yaml").write_text(_slice_manifest(slice_a))
+    proj_b = tmp_path / "projB"
+    shutil.copytree(proj_a, proj_b)
+    isolate(monkeypatch, tmp_path, proj_b)
+
+    result = runner.invoke(app, ["clean", "--format", "json"])
+
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1, result.stdout
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-target"]
+    message = doc["issues"][0]["message"]
+    assert "another project" in message and str(proj_a) in message
+    assert (slice_a / "zephyr" / "zephyr.elf").read_text() == "ELF"
+    # projB's own build tree is still cleaned -- the refusal is per-slice.
+    assert not (proj_b / "build").exists()
+
+
+def test_a_slice_dir_inside_another_project_is_rejected_by_the_planner(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_text("schema_version: 1\n")
+    other = tmp_path / "other"
+    (other / "build" / "m55-zephyr").mkdir(parents=True)
+    (other / "board.yaml").write_text("schema_version: 1\n")
+    foreign = str(other / "build" / "m55-zephyr")
+
+    plan = plan_clean_targets(
+        str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": foreign}]
+    )
+
+    assert foreign not in plan.targets
+    assert [r.path for r in plan.rejected] == [foreign]
+    assert str(other) in plan.rejected[0].reason()
+
+
+def test_out_of_tree_slice_dirs_outside_any_project_stay_removable(tmp_path):
+    """The Yocto tmp dir case the module docstring protects, and a slice dir in
+    this project but outside `build/`: neither sits inside a foreign project."""
+    proj = tmp_path / "proj"
+    (proj / "yocto-out").mkdir(parents=True)
+    (proj / "board.yaml").write_text("schema_version: 1\n")
+    yocto = tmp_path / "yocto" / "tmp"
+    yocto.mkdir(parents=True)
+    slices = [
+        {"core_id": "a", "build_dir": str(yocto)},
+        {"core_id": "b", "build_dir": "yocto-out"},
+    ]
+
+    plan = plan_clean_targets(str(proj), str(proj / "build"), slices)
+
+    assert plan.rejected == []
+    assert str(yocto) in plan.targets
+    assert str(proj / "yocto-out") in plan.targets
+
+
 def test_a_build_root_whose_build_dir_holds_a_board_yaml_is_refused(tmp_path, monkeypatch):
     """tan-cli#1482 blocker: never delete a directory that is a project tree."""
     proj = make_project(tmp_path)
