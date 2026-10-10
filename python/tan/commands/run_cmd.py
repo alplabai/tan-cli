@@ -521,10 +521,10 @@ def run(
     # `--sdk-root` + no checkout found keeps the engine's own behaviour (the
     # engine owns that refusal), so only the explicit-flag case is new here.
     sdk_refusal = None
-    if sdk_root and resolved_sdk_root is None:
+    if sdk_root and sdk_root.strip() and resolved_sdk_root is None:
         refusal_msg = rejected_sdk_root_message(sdk_root, "Nothing was built or run.")
         sdk_refusal = (
-            ExitCode.VALIDATION_FAILURE,
+            ExitCode.RUNTIME_FAILURE,
             None,
             [Issue("run.sdk-root-unresolved", "error", refusal_msg)],
             [f"run: {refusal_msg}"],

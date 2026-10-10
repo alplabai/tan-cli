@@ -233,7 +233,9 @@ def sdk_search_summary(workspace_root: Path) -> str:
     )
 
 
-def with_sdk_search(message: str, workspace_root: Path | str, sdk_root_arg: str | None = None) -> str:
+def with_sdk_search(
+    message: str, workspace_root: Path | str, sdk_root_arg: str | None = None
+) -> str:
     """tan-cli#1463: the ONE route every `<cmd>.sdk-root-*` refusal takes to name
     where tan looked. Appends `sdk_search_summary` to `message`.
 
@@ -241,7 +243,7 @@ def with_sdk_search(message: str, workspace_root: Path | str, sdk_root_arg: str 
     `message` is returned untouched -- claiming the ladder was searched would be
     false, and `rejected_sdk_root_message` already names the typed value.
     """
-    if sdk_root_arg:
+    if (sdk_root_arg or "").strip():
         return message
     return f"{message} {sdk_search_summary(Path(workspace_root))}"
 

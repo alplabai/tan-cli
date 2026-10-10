@@ -64,10 +64,11 @@
     "The older `clean.sdk-root-not-found` and `flash.sdk-root-not-found`,",
     "`init.sdk-root-invalid`, `kconfig.no-sdk-root` and `support-bundle.sdk-root`",
     "are FROZEN or already registered and are NOT renamed: a rename is a",
-    "breaking wire change (see above). Every such refusal's message appends",
-    "`tan.core.sdk_discovery.with_sdk_search` (where the ladder looked) unless an",
-    "explicit `--sdk-root` was rejected, which is terminal (I-31) and is named",
-    "by `rejected_sdk_root_message` instead."
+    "breaking wire change (see above). Such a refusal's message names where the",
+    "ladder looked via `tan.core.sdk_discovery.with_sdk_search` (flash and clean",
+    "call `sdk_search_summary` directly), unless an explicit `--sdk-root` was",
+    "rejected, which is terminal (I-31) and is named by",
+    "`rejected_sdk_root_message` instead."
   ],
   "issueCodes": [
     {
@@ -3047,7 +3048,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/size_cmd.py",
-      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout (no `scripts/alp_project.py` under it). `tan size` used to continue silently with no SDK metadata; it now refuses, exit 1, naming the rejected value via `rejected_sdk_root_message`. NOT emitted when no `--sdk-root` was given and no checkout is found: nothing was asked for, so size continues as before. Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout (no `scripts/alp_project.py` under it). `tan size` used to continue silently with no SDK metadata; it now refuses, exit 1, naming the rejected value via `rejected_sdk_root_message`. The refusal now precedes the manifest checks. Intentional divergence from the v0.4.1 oracle, which answered a bad `--sdk-root` with `size.manifest-unavailable`. NOT emitted when no `--sdk-root` was given and no checkout is found: nothing was asked for, so size continues as before. Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "run.sdk-root-unresolved",
@@ -3055,7 +3056,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/run_cmd.py",
-      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout. `tan run` used to null it to 'no root' and fall through to the build engine, so a typo surfaced as an unrelated downstream failure; it now refuses before building, exit 2, naming the rejected value via `rejected_sdk_root_message`. NOT emitted when no `--sdk-root` was given: the engine's own handling of an absent root is unchanged. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout. `tan run` used to null it to 'no root' and fall through to the build engine, so a typo surfaced as an unrelated downstream failure; it now refuses before building, exit 1 (like every other `run` failure), naming the rejected value via `rejected_sdk_root_message`. Intentional divergence from the v0.4.1 oracle, which reached `build.plan-unavailable` for the same input. NOT emitted when no `--sdk-root` was given: the engine's own handling of an absent root is unchanged. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "doctor.board-yaml",

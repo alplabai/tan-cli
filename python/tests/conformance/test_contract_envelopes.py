@@ -236,13 +236,21 @@ def scrub_message_paths(value, replacements, key=None):
     leaving `message` alone. A refusal that names where the SDK ladder looked
     (`sdk_search_summary`) embeds the per-run scratch and home directories in its
     `message`, so those -- and only those exact absolute prefixes -- are swapped
-    for stable tokens before the compare. `replacements` is ordered, longest
-    prefix first, already `/`-separated."""
+    for stable tokens before the compare. `replacements` holds `/`-separated
+    needles; they are applied longest first."""
     if isinstance(value, str):
         if key != "message":
             return value
+        # Longest needle first, so a directory nested inside another (a HOME
+        # under the work dir) still maps to its own token.
+        ordered = sorted(replacements, key=lambda pair: len(pair[0]), reverse=True)
         text = value.replace("\\", "/")
-        for needle, token in replacements:
+        # Only a message that actually embeds one of the scratch prefixes is
+        # touched; any other keeps its backslashes, so a real slash regression
+        # in an unrelated message is not masked.
+        if not any(needle in text for needle, _ in ordered):
+            return value
+        for needle, token in ordered:
             text = text.replace(needle, token)
         return text
     if isinstance(value, list):

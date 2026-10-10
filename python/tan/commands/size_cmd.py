@@ -774,11 +774,13 @@ def _run(
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
     metadata_sdk = resolve_metadata_sdk_root(sdk_root_arg, context.workspace_root)
-    if metadata_sdk is None and sdk_root_arg:
+    if metadata_sdk is None and (sdk_root_arg or "").strip():
         # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve used to
         # continue silently with `metadata_sdk=None` and size the build with
         # no SDK metadata. No flag + no checkout still continues (nothing was
-        # asked for).
+        # asked for). Intentional divergence from the v0.4.1 oracle, which
+        # reached `size.manifest-unavailable`; this refusal now precedes the
+        # manifest checks.
         return _error_outcome(
             project,
             context,

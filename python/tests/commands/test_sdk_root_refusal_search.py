@@ -118,7 +118,7 @@ def test_run_refuses_a_rejected_explicit_sdk_root(tmp_path):
         cwd=project, env_overrides=env,
     )
     doc = envelope_of(proc)
-    assert proc.returncode == 2
+    assert proc.returncode == 1
     assert doc["ok"] is False
     assert str(bad) in _message(doc, "run.sdk-root-unresolved")
 
