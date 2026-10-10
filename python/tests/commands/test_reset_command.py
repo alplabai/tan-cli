@@ -532,8 +532,17 @@ _CHANGED = "2026-10-09 17:12:47.796610"
 
 
 def _holder():
+    # Evaluated at collection time by the parametrize table below, so it must
+    # not import POSIX-only `pwd` on Windows, where these tests are skipped.
+    if os.name == "nt":
+        return "host/user"
     import socket
     return f"{socket.gethostname()}/{flash_raw._current_user()}"
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt", reason="the session-lease interlock is POSIX-only (pwd/grp, O_NOFOLLOW)"
+)
 
 
 def _show(path="3-4.2", holder=None, changed=_CHANGED):
@@ -562,6 +571,7 @@ def _real_gate(env, monkeypatch, *, lease=True, nonce=_NONCE, show=None):
     monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (show or _show(), ""))
 
 
+@_POSIX_ONLY
 @pytest.mark.parametrize(
     "kw, text",
     [
@@ -581,6 +591,7 @@ def test_a_place_without_this_sessions_lease_is_refused_before_any_spawn(env, mo
     assert text in issues[0].message and calls == []
 
 
+@_POSIX_ONLY
 def test_a_place_without_a_probe_usb_path_cannot_match_the_lease(env, monkeypatch):
     calls = _no_exec(monkeypatch)
     _real_gate(env, monkeypatch)
@@ -588,6 +599,7 @@ def test_a_place_without_a_probe_usb_path_cannot_match_the_lease(env, monkeypatc
     assert rc == 1 and codes(issues) == ["reset.reservation-required"] and calls == []
 
 
+@_POSIX_ONLY
 def test_a_place_with_this_sessions_lease_pulses(env, monkeypatch):
     jl = FakeJlink(monkeypatch)
     _real_gate(env, monkeypatch)
@@ -596,6 +608,7 @@ def test_a_place_with_this_sessions_lease_pulses(env, monkeypatch):
     assert data["singleSpawn"] is True and jl.reset_scripts()
 
 
+@_POSIX_ONLY
 def test_no_place_needs_no_lease(env, monkeypatch):
     jl = FakeJlink(monkeypatch)
     monkeypatch.setattr(flash_raw, "_reservation_refusal",
@@ -610,6 +623,7 @@ def _help(*args):
     return " ".join(out.output.split())
 
 
+@_POSIX_ONLY
 def test_reset_help_states_the_place_mode_rules(env):
     """tan-cli#1485: the help named neither the wrapper env nor the post-pulse handshake, and its
     example banner was one the docs say may be missed."""
@@ -619,6 +633,7 @@ def test_reset_help_states_the_place_mode_rules(env):
     assert "--expect 'Zephyr'" not in text
 
 
+@_POSIX_ONLY
 def test_flash_help_names_every_raw_reservation_requirement_and_the_setools_trust_rule(env):
     text = _help("flash")
     for needle in ("TAN_LEASE_NONCE", "TAN_JLINK_WRAPPER", "swd port", "flash.setools-untrusted-source"):
