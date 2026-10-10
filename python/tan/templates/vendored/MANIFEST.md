@@ -95,15 +95,19 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`5a612e24a`**
-  (`5a612e24ad895f35a1365792f9e52ee929926d2d`, alp-sdk `dev`) — the
-  `a5a137c7b` -> `5a612e24a` planner re-sync (alp-sdk#2820 `storage_mount_table.c`
-  in `sharedArtefacts`). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
-  <5a612e24a>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+- **Current vendor point (all templates):** **`1d20103ba`**
+  (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
+  `5a612e24a` -> `1d20103ba` planner re-sync (alp-sdk#2822: carveout.py
+  `_resolve_mailbox_channel`, kconfig.py RAM console size). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <1d20103ba>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
   unchanged. The pin moves in the same change as `parity.yml`'s
   `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
   `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+- **Prior vendor point (all templates):** **`5a612e24a`**
+  (`5a612e24ad895f35a1365792f9e52ee929926d2d`) — the
+  `a5a137c7b` -> `5a612e24a` planner re-sync (alp-sdk#2820); nothing re-vendored.
 
 - **Prior vendor point (all templates):** **`a5a137c7b`**
   (`a5a137c7b594ebb5d451177803c0eb324069e86b`) — the
@@ -672,14 +676,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`5a612e24a`** (alp-sdk `dev`, full sha
-  `5a612e24ad895f35a1365792f9e52ee929926d2d`) — the checkout the emit was RUN
+- Commit: **`1d20103ba`** (alp-sdk `dev`, full sha
+  `1d20103ba367668ab4ed9b139dc69c246198d2f1`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `a5a137c7b` (tan-cli#1393), and before that
+  This line used to say `5a612e24a` (tan-cli#1216), and before that
+  `a5a137c7b` (tan-cli#1393), and before that
   `0dee99fb5` (tan-cli#1440), and before that
   `c4eb27645` (tan-cli#1427), and before that
   `030de105d` (tan-cli#1401), and before that

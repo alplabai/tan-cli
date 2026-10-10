@@ -424,6 +424,6 @@ def test_an_engine_crash_is_reported_as_tans_gap_not_a_board_defect(tmp_path, mo
     (issue,) = envelope["issues"]
     assert issue["code"] == "validate.failed"
     assert "could not read this SDK" in issue["message"]
-    assert "v9.9.9" in issue["message"] and "5a612e24" in issue["message"]
+    assert "v9.9.9" in issue["message"] and "1d20103b" in issue["message"]
     assert "TAN_VALIDATE_ENGINE=subprocess" in issue["message"]
     assert "KeyError: 'new_field'" in issue["message"]
