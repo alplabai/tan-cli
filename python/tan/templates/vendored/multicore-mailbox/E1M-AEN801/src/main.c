@@ -40,7 +40,7 @@
  * =============
  *
  * The HE-side application lives at
- * `https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/multicore/mproc-mailbox/peer/main.c`.  Both halves build
+ * `https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/examples/multicore/mproc-mailbox/peer/main.c`.  Both halves build
  * standalone via `west build`, and `board.yaml` declaring both
  * `m55_hp` and `m55_he` as real project cores means one `tan build`
  * already produces both images through the orchestrator's existing

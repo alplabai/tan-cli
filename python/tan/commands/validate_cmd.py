@@ -378,7 +378,7 @@ VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
 
 #: tan-cli#270: the alp-sdk commit the in-process validator was audited against
 #: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
-PORTED_FROM_SDK_COMMIT = "1d20103ba367668ab4ed9b139dc69c246198d2f1"
+PORTED_FROM_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"
 
 
 def _bound_sdk_version(sdk_root: Path) -> str:

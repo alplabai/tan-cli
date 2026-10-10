@@ -988,7 +988,7 @@ env:
   # `pinctrl_som_power` group; the planner oracle was re-captured and is
   # byte-identical (the oracle modes do not render the Zephyr board); scaffold
   # parity is 10/10 unchanged.
-  PINNED_SDK_TAG: 1d20103ba367668ab4ed9b139dc69c246198d2f1
+  PINNED_SDK_TAG: 84a6e0d211d6cc7898e1c3827cfff9b43ed309c7
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1319,7 +1319,7 @@ env:
   # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: 1d20103ba367668ab4ed9b139dc69c246198d2f1
+  PINNED_PLANNER_ORACLE_SDK_REF: 84a6e0d211d6cc7898e1c3827cfff9b43ed309c7
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -3629,14 +3629,31 @@ jobs:
       # about to be published under THIS tag still match the alp-sdk a
       # customer installing it today will pair it with" -- #889's whole
       # point. Release-blocking is the right call here where it is not there.
+      #
+      # A PRE-RELEASE tan tag (a hyphen, e.g. `v0.7.0-rc1` -- the same test
+      # release.yml's `prerelease:` flag uses) is measured against alp-sdk's
+      # newest published NON-DRAFT release INCLUDING pre-releases instead
+      # (tan-cli#1258, decided 2026-10-10: a tan rc may pair with an alp-sdk
+      # rc). `releases/latest` never returns a pre-release, so without this a
+      # tan rc cut on an alp-sdk rc floor is measured against the previous
+      # stable alp-sdk and reds by construction. A stable tan tag keeps
+      # `releases/latest`, unchanged. `/releases` lists newest-created first.
       - name: resolve latest published alp-sdk release
         id: alp_sdk_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAN_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+          case "${TAN_TAG}" in
+            *-*)
+              tag=$(gh api 'repos/alplabai/alp-sdk/releases?per_page=30' \
+                --jq '[.[] | select(.draft | not)][0].tag_name // ""')
+              echo "::notice::tan tag ${TAN_TAG} is a pre-release: resolving alp-sdk's newest non-draft release, pre-releases included" ;;
+            *)
+              tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name) ;;
+          esac
           case "${tag}" in
             ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
               echo "::error::alp-sdk releases/latest returned something that is not a plain git ref: '${tag}'"

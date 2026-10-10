@@ -1409,7 +1409,7 @@ from tests.conftest import sdk_root
 #: name -> its channel, else lowest unclaimed `reserved_for: app` channel, else a
 #: blocked carve-out with a reason; never a silent channel 0); kconfig.py parses
 #: CONFIG_RAM_CONSOLE_BUFFER_SIZE base-10 unless `0x`. Both 3-way merged cleanly.
-PINNED_SDK_COMMIT = "1d20103ba367668ab4ed9b139dc69c246198d2f1"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
+PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2477,7 +2477,7 @@ PINNED_HASHES: dict[str, str] = {
 #: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
 #: `"phy_refclk"` on the ethernet-PHY domain.
 #: `5a612e24` -> `1d20103b`: no hand-port source moved; hashes unchanged.
-HAND_PORT_PINNED_SDK_COMMIT = "1d20103ba367668ab4ed9b139dc69c246198d2f1"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
+HAND_PORT_PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
