@@ -702,6 +702,77 @@ def test_a_slice_dir_inside_another_project_is_rejected_by_the_planner(tmp_path)
     assert str(other) in plan.rejected[0].reason()
 
 
+def _project(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "board.yaml").write_text("schema_version: 1\n")
+    return path
+
+
+def test_a_symlinked_component_does_not_hide_a_foreign_project(tmp_path):
+    """The lexical walk sees `<tmp>/blink` (no board.yaml); the resolved walk
+    reaches `other/` through the link and refuses."""
+    proj = _project(tmp_path / "proj")
+    other = _project(tmp_path / "other")
+    (other / "build" / "m55-zephyr").mkdir(parents=True)
+    link = tmp_path / "blink"
+    try:
+        link.symlink_to(other / "build", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not permitted on this host")
+    via_link = str(link / "m55-zephyr")
+
+    plan = plan_clean_targets(str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": via_link}])
+
+    assert via_link not in plan.targets
+    assert [r.path for r in plan.rejected] == [via_link]
+
+
+def test_a_case_variant_project_spelling_is_still_this_project(tmp_path):
+    """On a case-insensitive filesystem `--project .../PROJ` names the same
+    directory as the manifest's `.../proj`; that is not another project."""
+    proj = _project(tmp_path / "proj")
+    upper = tmp_path / "PROJ"
+    if not upper.exists():
+        pytest.skip("case-sensitive filesystem")
+    (proj / "out").mkdir()
+
+    plan = plan_clean_targets(
+        str(upper), str(upper / "build"), [{"core_id": "c", "build_dir": str(proj / "out")}]
+    )
+
+    assert plan.rejected == []
+
+
+def test_the_board_yaml_directory_of_this_project_is_not_foreign(tmp_path):
+    """`--board-yaml cfg/board.yaml`: the project's own `cfg/` holds the board
+    file, and a slice dir under it is still this project's."""
+    proj = tmp_path / "proj"
+    cfg = _project(proj / "cfg")
+    (cfg / "out").mkdir()
+
+    plan = plan_clean_targets(
+        str(proj), str(proj / "build"), [{"core_id": "c", "build_dir": "cfg/out"}],
+        board_yaml_dir=str(cfg),
+    )
+
+    assert plan.rejected == []
+    assert str(cfg / "out") in plan.targets
+
+
+def test_a_dir_owned_by_an_enclosing_project_is_refused_and_says_so(tmp_path):
+    """Policy, pinned: a nested example's slice dir in its PARENT project's tree
+    is refused, and the message names that cause, not only "copied"."""
+    repo = _project(tmp_path / "repo")
+    example = _project(repo / "examples" / "foo")
+    (repo / "yocto" / "tmp").mkdir(parents=True)
+    target = str(repo / "yocto" / "tmp")
+
+    plan = plan_clean_targets(str(example), str(example / "build"), [{"core_id": "c", "build_dir": target}])
+
+    assert [r.path for r in plan.rejected] == [target]
+    assert "enclosing project" in plan.rejected[0].reason()
+
+
 def test_out_of_tree_slice_dirs_outside_any_project_stay_removable(tmp_path):
     """The Yocto tmp dir case the module docstring protects, and a slice dir in
     this project but outside `build/`: neither sits inside a foreign project."""
