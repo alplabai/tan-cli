@@ -39,9 +39,14 @@ The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.16.0** | none live |
-| tan | **v0.6.0** | none live |
-| Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
+| alp-sdk | **v0.16.0** | **v0.17.0-rc1** (2026-10-08) |
+| tan | **v0.6.0** | none tagged; `0.7.0` is unreleased on `dev` |
+| Alp IDE | **v0.6.0** | none live |
+
+`tan` `0.7.0` is waiting on a stable alp-sdk release that contains its floor
+commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (alp-sdk#2047);
+`v0.17.0-rc1` contains it but is a pre-release. `docs/release-contract.md` has
+the decision.
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and
 `SUPPORTED_CLI_VERSION` moved to it (now `0.5.1`) on `alp-sdk-vscode`'s `main`
@@ -153,7 +158,7 @@ schedules, not one, so no single ref covers all of it:
   port them.
 - **`tan model build` was also real at rc1**, ported by the same `729234ad`.
   #253 (tracking its oracle-parity and test-coverage gap-closure) stayed
-  open and moved to `v0.7.0` rather than closing with #254/#255/#256; the
+  open and moved to `v0.7.0` (where it has since closed) rather than closing with #254/#255/#256; the
   eight `model` lifecycle subcommands beyond `build` remain unported (#674,
   `v0.8.0`).
 
@@ -210,9 +215,10 @@ platforms a Python `tan` release does not publish.
 
 `alp-sdk` is upstream and independent; none of the above changes how it ships.
 Its only obligations to the rest of the toolchain are to keep firing the
-`alp-sdk-planner-change` dispatch when its contract surface moves, and — much
-later, at `tan` `v0.7.0` — to drop its own Python planner once `tan` owns
-planning outright.
+`alp-sdk-planner-change` dispatch when its contract surface moves, and —
+once `tan` `v0.7.0` is released — to drop its own Python planner now that
+`tan` owns planning outright (alp-sdk still carries `scripts/alp_orchestrate/`
+and tan-cli#270 is open).
 
 ## Standing rules
 
