@@ -106,6 +106,8 @@ applicable".
 - [ ] Touches `python/tan/planner/**` or `test_planner_relocation_freshness.py` →
       no planner re-sync PR is open, or this PR waits for it and rebases after it
       lands. See `docs/planner-resync.md`.
+- [ ] Updated someone else's PR branch → only because it had a conflict, with a comment
+      on the PR before and after the push, and no force-push. See `docs/pr-branch-updates.md`.
 - [ ] New issue code → registered, no duplicates, frozen-set gate green.
 - [ ] Host paths / conflict markers → `test_no_leaked_host_paths.py`,
       `test_no_conflict_markers.py`.
