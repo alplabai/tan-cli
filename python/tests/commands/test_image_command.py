@@ -172,20 +172,20 @@ def test_non_finite_hw_info_values_write_valid_json_matching_the_stdout_envelope
 
 
 def test_present_helper_firmware_is_copied_and_hashed(tmp_path):
-    wbytes(tmp_path / "br" / "gd32_bridge.bin", b"BRIDGEFW")
+    wbytes(tmp_path / "br" / "aux_helper.bin", b"BRIDGEFW")
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32_bridge.bin\n"
+        "- name: aux_helper\n  chip: gd32g553\n  firmware_path: aux_helper.bin\n"
         "boot_order: []\n",
     )
     doc = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "br"))
     helper = doc["data"]["helper_mcus"][0]
-    assert helper["name"] == "gd32_bridge"
+    assert helper["name"] == "aux_helper"
     # `chip`, deliberately -- the retired Python emitted a perpetually-null `role`.
     assert helper["chip"] == "gd32g553"
     assert "role" not in helper
-    assert helper["artefact"] == "helper-mcus/gd32_bridge.bin"
+    assert helper["artefact"] == "helper-mcus/aux_helper.bin"
     assert helper["size"] == 8
     # A plain copy, so this one IS byte-identical to the oracle's hash.
     assert helper["sha256"] == hashlib.sha256(b"BRIDGEFW").hexdigest()
@@ -200,7 +200,7 @@ def test_helper_basename_collision_does_not_overwrite(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32/zephyr.bin\n"
+        "- name: aux_helper\n  chip: gd32g553\n  firmware_path: gd32/zephyr.bin\n"
         "- name: cc3501e_otp\n  chip: cc3501e\n  firmware_path: cc35/zephyr.bin\n"
         "boot_order: []\n",
     )
@@ -332,11 +332,11 @@ def test_build_produced_helper_artefact_still_resolves_when_sdk_root_is_also_giv
     # --sdk-root must not regress the already-working case: a helper artefact
     # this build itself produced, absent from the sdk root entirely.
     sdk = make_sdk_root(tmp_path)
-    wbytes(tmp_path / "br" / "gd32_bridge.bin", b"BRIDGEFW")
+    wbytes(tmp_path / "br" / "aux_helper.bin", b"BRIDGEFW")
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32_bridge.bin\n"
+        "- name: aux_helper\n  chip: gd32g553\n  firmware_path: aux_helper.bin\n"
         "boot_order: []\n",
     )
     result = run_cli(
@@ -403,7 +403,7 @@ def test_a_concrete_missing_helper_firmware_is_a_hard_error(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: firmware/gd32.bin\n"
+        "- name: aux_helper\n  chip: gd32g553\n  firmware_path: firmware/gd32.bin\n"
         "boot_order: []\n",
     )
     result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
@@ -679,7 +679,7 @@ def test_a_rejected_sdk_root_flag_is_named_not_reported_as_absent(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n"
+        "- name: aux_helper\n  chip: gd32g553\n"
         "  firmware_path: firmware/gd32-bridge/build/zephyr/zephyr.bin\n"
         "boot_order: []\n",
     )
@@ -706,7 +706,7 @@ def test_an_absent_sdk_root_flag_still_says_so(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n"
+        "- name: aux_helper\n  chip: gd32g553\n"
         "  firmware_path: firmware/gd32-bridge/build/zephyr/zephyr.bin\n"
         "boot_order: []\n",
     )
@@ -837,11 +837,11 @@ def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
 def test_nested_manifest_relative_helper_firmware_resolves_under_build(tmp_path):
     # tan-cli#1405 review: `--build-root X` with the manifest at X/build/ must
     # resolve its RELATIVE firmware_path under X/build, not X.
-    wbytes(tmp_path / "X" / "build" / "gd32_bridge.bin", b"NESTEDFW")
+    wbytes(tmp_path / "X" / "build" / "aux_helper.bin", b"NESTEDFW")
     write(
         tmp_path / "X" / "build" / "system-manifest.yaml",
         "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
-        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32_bridge.bin\n"
+        "- name: aux_helper\n  chip: gd32g553\n  firmware_path: aux_helper.bin\n"
         "boot_order: []\n",
     )
     result = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "X"))

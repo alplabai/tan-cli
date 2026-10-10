@@ -646,7 +646,7 @@ def _open_console_pty(sink):
     stderr_isatty=True`; with the pipe tee, `stdout_isatty=False
     stderr_isatty=False`. `pyocd flash`, `west flash` and `openocd` all gate
     their `\\r`-redrawn progress bar and their colour on `isatty()`, so a
-    bench operator watching a multi-minute GD32G553 or Alif MRAM write lost
+    bench operator watching a multi-minute Alif MRAM write lost
     the live progress indicator the previous release showed -- and a write
     that shows no progress reads as hung, which is the operator-perception
     problem tan-cli#388/#522 are about, arriving from a third direction. A
@@ -1146,7 +1146,7 @@ class _Tee:
     `pipe tee   child sees  stdout_isatty=False  stderr_isatty=False`.
     `pyocd flash` / `west flash` / `openocd` gate their own `\r`-updated
     progress bar and colour output on `isatty()`, so on a real terminal an
-    operator lost the live progress indicator for a multi-minute GD32/Alif
+    operator lost the live progress indicator for a multi-minute Alif
     write -- console output was still complete and still live line-by-line,
     but the CHILD renders it differently once it can no longer see a tty of
     its own, and a write that shows no progress reads as hung.
@@ -2098,7 +2098,7 @@ def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool)
       `ALP_FLASH_FORCE`). This one refuses NOBODY: the refusal text is itself
       the discovery mechanism, delivered at the one moment the operator is
       looking. It is strictly stronger than the shipped default for the
-      customer path -- a bricked-bridge recovery is a real, maintainer-
+      customer path -- a bricked-device recovery is a real, maintainer-
       confirmed scenario (a customer CAN flash, to recover a bricked device,
       with Alp Lab-supplied binaries), and such a customer will never have
       read a bench doc to know an env var exists.
@@ -2106,8 +2106,8 @@ def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool)
     The shipped default is the FIRST, and the reason is scope rather than
     design: #589's actual incident is a bench host, where the switch is set
     once and is sufficient, and tan-cli#610 endorses exactly this shape while
-    the GD32's SW-DP ID is unverified -- arming anything by default before
-    that value is settled would refuse writes against an ID nobody can source.
+    the SW-DP ID is unverified -- arming anything by default before that value
+    is settled would refuse writes against an ID nobody can source.
     Refuse-with-override is the better end state for the customer path and is
     recorded as a follow-up, not dismissed.
 
@@ -2120,8 +2120,8 @@ def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool)
     `method ==` literal (tan-cli#609). #589 shipped this switch scoped to
     `swd_probe` (removed by tan-cli#732), matching the advisory's own scope at
     the time; #609 then measured that the advisory never reached the AEN at
-    all, so the Alif MRAM write -- the genuinely CUSTOMER-facing flash path,
-    the GD32 bridge having been factory-programmed by Alp Lab -- sat outside
+    all, so the Alif MRAM write -- the genuinely CUSTOMER-facing flash path --
+    sat outside
     both halves of the guard. Widening the switch with the advisory, off one
     shared table, is what stops the next backend inheriting the same silence.
     It changes nothing for anyone who has not set the env var: the switch is
@@ -3001,18 +3001,17 @@ def _flash_entry_body(
         # with this exact method is either hand-authored against a doc that
         # predates the removal, or emitted by an alp-sdk checkout older than
         # alp-sdk#1439 (which stopped emitting `flash_method: swd_probe` on
-        # every shipped GD32-bridge preset). Either way the operator needs
+        # every shipped preset). Either way the operator needs
         # the removal named and the actual replacement path pointed at, not
         # a bare "which has no registered backend" that reads like a typo.
         if method == _REMOVED_SWD_PROBE_METHOD:
             msg = (
                 f"flash: {kind} '{entry_id}' declares flash_method '{method}', which "
-                "tan-cli#732 removed -- GD32 bridge programming has separated out of "
-                "tan; this backend no longer exists. The GD32's field-update path is "
-                "unaffected: update_channel: alp_ota_spi_bridge (unchanged, still "
-                "projected into this manifest when the preset declares it). tan has "
-                "no built-in replacement for a LOCAL SWD write today (e.g. recovering "
-                "a bricked bridge) -- see docs/setools.md and tan-cli#610."
+                "tan-cli#732 removed -- this backend no longer exists. "
+                "update_channel: alp_ota_spi_bridge is unchanged and still "
+                "projected into this manifest when the preset declares it. tan has "
+                "no built-in replacement for a LOCAL SWD write today -- see "
+                "docs/setools.md."
             )
         elif method == RAM_RUN_ONLY_METHOD:
             # tan-cli#1350: an ITCM-linked image (board.yaml `diagnostics.link:
@@ -4242,7 +4241,7 @@ def _flow_d_preflight(
     `flash_args.expect_dpidr` ALONE, for a backend with no separate
     preflight-only device field the way Flow D's `jlink_device` is (see
     `validate_flow_d_preflight_args`'s `require_device_key`). `swd_probe`'s
-    J-Link arm (a GD32 bridge write) was the one caller that passed
+    J-Link arm was the one caller that passed
     `read_device` until tan-cli#732 removed the backend; both parameters stay
     for the next one.
 
@@ -4286,8 +4285,7 @@ def _flow_d_preflight(
     # SILENTLY changed wording a bench operator reads, with nothing pinning
     # the string to catch it. Branched on `method` instead, so Flow D's exact
     # original wording is byte-for-byte unchanged and a future second backend
-    # can get its own correct noun the way `swd_probe` (removed by tan-cli
-    # #732) once did -- it wrote the GD32 bridge's own flash, not MRAM.
+    # can get its own correct noun.
     verb = "write MRAM" if method == FLOW_D_METHOD else "write"
     # tan-cli#1336: never from the project venv -- the run's trusted J-Link.
     binary = jlink_exe  # resolved ONCE by the caller; never re-resolved here
@@ -4378,7 +4376,7 @@ def _flow_d_preflight(
         # A real board answered but with a DIFFERENT SW-DP ID than expected --
         # the bench mismatch #369 actually measured. A USB serial can be
         # CLONED across two separate physical probes (a real OEM J-Link clone
-        # measured sharing one with a GD32 bridge probe on a different board
+        # measured sharing one with a different probe on a different board
         # entirely), so `jlink_serial` alone cannot disambiguate them even
         # when set -- `JLinkExe` selects by serial only, with no USB-port
         # selector. The SW-DP ID this preflight already reads IS the true
@@ -4387,7 +4385,7 @@ def _flow_d_preflight(
         # tan-cli#512, secondary: name the ACTUAL SW-DP ID this connect just read,
         # not only the expected one -- on a bench where a USB serial is CLONED
         # across two physical probes (measured: `603000869` answers both a real
-        # AEN E8 at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID
+        # AEN E8 at `0x4C013477` and another board at `0x0BE12477`), the actual ID
         # is the single most useful datum for working out which board actually
         # answered. `_dp_id_value` reuses the exact regex `_dp_id_reported` just
         # matched on this same banner, so it cannot fail to find a value here.

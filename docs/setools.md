@@ -283,7 +283,7 @@ changes.
 Its scope is the same table as the advisory (tan-cli#609): Flow D today. It was
 `swd_probe`-only when tan-cli#589 shipped it (that backend was removed by
 tan-cli#732), which left the AEN MRAM path — the genuine *customer* flash path
-of the two, the GD32 bridge being factory-programmed by Alp Lab — outside both
+of the two — outside both
 halves of the guard. On Flow D the refusal fires ahead of the SETOOLS
 auto-sign, not merely ahead of the write (tan-cli#512 measured a wrong-board
 abort that correctly left slot0 byte-identical but had already mutated the
@@ -479,24 +479,14 @@ query, and a persisted override would switch a working check off for every
 later run, including the one where the board carries something new. (`tan
 run --flash` regenerates the manifest before flashing anyway.)
 
-## GD32 bridge programming: not this backend, not `tan` any more
+## Removed: the `swd_probe` flash backend
 
-`tan flash` no longer has a local-write path for the E1M-X V2N/V2M SoMs' GD32
-bridge supervisor MCU (the `swd_probe` backend, removed by tan-cli#732 — GD32
-programming is separating out of `tan` entirely). The GD32's **field-update**
-path is untouched and stays: `helper_firmware[].update_channel:
-alp_ota_spi_bridge` (protocol v0.6 Path A, slot-A/B application bootloader
-with commit and rollback, over the bridge link rather than SWD), which alp-sdk
-still emits and `tan` still projects into `build/system-manifest.yaml`. A
-project that previously relied on `tan flash --helper gd32_bridge` for a local
-SWD write (recovering a bricked bridge, say) has no in-tree `tan` replacement
-as of this change; that gap is tracked separately, not silently dropped — see
-tan-cli#610 (`needs-silicon`, the still-open contradiction over the GD32
-bridge's own SW-DP ID), whose premise — settling `expect_dpidr` for a `tan
-flash` write to the GD32 — no longer applies now that `tan` has no such write
-to arm, but stays open rather than closed over: the underlying SW-DP ID
-contradiction is a real, unresolved bench fact that whatever tool ends up
-programming the GD32 will still need.
+`tan flash` no longer has a local SWD-write path for on-module helper MCUs (the
+`swd_probe` backend, removed by tan-cli#732). The helper **field-update** path
+is untouched: `helper_firmware[].update_channel: alp_ota_spi_bridge`, which
+alp-sdk still emits and `tan` still projects into `build/system-manifest.yaml`.
+`tan` has no in-tree replacement for a local SWD write of a helper MCU; a
+manifest that still declares `flash_method: swd_probe` is refused by name.
 
 ## Related
 
@@ -507,8 +497,7 @@ programming the GD32 will still need.
   the surrounding fixes answer.
 - tan-cli#520, #589, #609 — the wrong-board SW-DP ID guard: the preflight
   itself, the opt-in strict switch, and making both method-independent.
-- tan-cli#732 — removed the `swd_probe` flash backend (GD32 programming
-  separating out of `tan`); #610 above is the open follow-up it leaves.
+- tan-cli#732 — removed the `swd_probe` flash backend.
 - tan-cli#1252 — `--atoc-unqueryable`: a Flow D write replaces the whole ATOC
   and cannot enumerate what is resident first, so the replacement must be
   acknowledged. Ports alp-sdk#2025 (PR alp-sdk#2029), which put the same
