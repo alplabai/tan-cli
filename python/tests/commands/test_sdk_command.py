@@ -2591,6 +2591,7 @@ def test_remove_refuses_a_subtree_inside_the_active_sdk_without_force(
     )
     assert refused["ok"] is False
     assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert refused["data"]["wasActive"] is True
     assert inner.exists()
 
 

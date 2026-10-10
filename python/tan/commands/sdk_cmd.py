@@ -1371,7 +1371,7 @@ def _run_remove(
     # being removed is the TARGET -- because the predicate is asymmetric about
     # symlinks (see its section banner).
     active_posix = _abs_posix(active.path) if active.path is not None else None
-    was_active = active_posix is not None and removal_would_take_out(
+    was_active = active_posix is not None and removal_would_damage(
         active_posix, target_posix
     )
 

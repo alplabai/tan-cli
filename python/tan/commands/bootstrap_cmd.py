@@ -2075,7 +2075,7 @@ def toolchain_phase(
 ) -> None:
     """ADR 0021 Lane 1 P1. Every exit here is either a plain `log.line` -- a
     clean, non-blocking skip that changes nothing about the run's verdict
-    (already installed and verified, an unsupported host, no artifact for
+    (already installed with a valid stamp and compiler, an unsupported host, no artifact for
     this host at the pinned version) -- or `log.warn("toolchain-install",
     ...)`, which IS `WORKSPACE_BLOCKING`: reported, and blocks `complete.`
     unless `--allow-partial`, because a customer whose FIRST real-silicon
