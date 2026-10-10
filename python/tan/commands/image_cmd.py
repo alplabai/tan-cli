@@ -60,6 +60,7 @@ from typing import Any
 
 import typer
 
+from tan.core.sdk_discovery import with_sdk_search
 from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
 from tan.core.system_manifest import effective_build_root
 from tan.commands.build_output import (
@@ -211,7 +212,7 @@ def _bundle_slice(
     return slice_entry(core_id, os_name, artefact, sha256, size)
 
 
-def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
+def _unresolved_sdk_clause(sdk_root_arg: str | None, workspace_root: str | None = None) -> str:
     """The trailing "why was there no sdk_root" clause of an
     `image.helper-missing` message.
 
@@ -236,7 +237,10 @@ def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
     `test_an_absent_sdk_root_flag_still_says_so`, so a reword lands there too.
     """
     if sdk_root_arg is None:
-        return "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+        clause = "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+        # tan-cli#1463: name where the ladder looked, like every other
+        # SDK-root refusal.
+        return with_sdk_search(clause, workspace_root) if workspace_root else clause
     return (
         f'sdk root not resolved (--sdk-root "{sdk_root_arg}" is not an alp-sdk '
         f"checkout)"
@@ -250,6 +254,7 @@ def _bundle_helper(
     helpers_dir: str,
     used_names: set[str],
     sdk_root_arg: str | None = None,
+    workspace_root: str | None = None,
 ) -> dict[str, Any] | _Notice | None:
     """Copy one helper's firmware, or a notice, or `None` for an absent one.
 
@@ -283,7 +288,7 @@ def _bundle_helper(
     if firmware is None:
         tried = "; ".join(f"{label} {path}" for label, path in candidates)
         if sdk_root is None and not os.path.isabs(raw):
-            tried += f"; {_unresolved_sdk_clause(sdk_root_arg)}"
+            tried += f"; {_unresolved_sdk_clause(sdk_root_arg, workspace_root)}"
         return _Notice(
             "image.helper-missing",
             "error",
@@ -333,6 +338,7 @@ def _assemble_bundle(
     manifest: SystemManifest,
     yaml_text: str,
     sdk_root_arg: str | None = None,
+    workspace_root: str | None = None,
 ) -> tuple[list[_Notice], dict[str, Any], str]:
     """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
     present helper firmware, write `bundle-manifest.json`."""
@@ -399,7 +405,7 @@ def _assemble_bundle(
     used_names: set[str] = set()
     for helper in manifest.helper_mcus:
         result = _bundle_helper(
-            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg
+            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg, workspace_root
         )
         if result is None:
             continue
@@ -552,7 +558,7 @@ def _run(
     sdk_root = context.sdk.root if context.sdk is not None else None
     try:
         notices, bundle, bundle_dir = _assemble_bundle(
-            build_root, sdk_root, manifest, yaml_text, sdk_root_arg
+            build_root, sdk_root, manifest, yaml_text, sdk_root_arg, str(context.workspace_root)
         )
     except BundleWriteError as err:
         return _error_outcome(

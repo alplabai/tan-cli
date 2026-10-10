@@ -321,14 +321,16 @@ def test_sdk_key_is_absent_not_null_without_a_checkout(tmp_path):
 def test_sdk_key_is_absent_when_sdk_root_is_not_a_checkout(tmp_path):
     # `--sdk-root` is terminal (I-31): a bad path resolves to NOTHING rather than
     # falling through to some other checkout, and the envelope must not advertise
-    # a path no command could use.
+    # a path no command could use. tan-cli#1463: it is also now a coded refusal
+    # (`size.sdk-root-unresolved`) rather than a silent "no SDK metadata" size.
     (tmp_path / "notsdk").mkdir()
     footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
     doc = envelope(
         run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "notsdk")
     )
     assert "sdk" not in doc
-    assert doc["data"]["slices"][0]["budget_note"] == "no SoM preset for E1M-TEST"
+    assert doc["ok"] is False
+    assert [i["code"] for i in doc["issues"]] == ["size.sdk-root-unresolved"]
 
 
 def test_board_overrides_the_manifest_sku(tmp_path):

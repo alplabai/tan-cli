@@ -231,6 +231,27 @@ def normalise(value, key, work_dir_marker):
     return value
 
 
+def scrub_message_paths(value, replacements, key=None):
+    """tan-cli#1463: `normalise` rewrites path-KEYED fields only, deliberately
+    leaving `message` alone. A refusal that names where the SDK ladder looked
+    (`sdk_search_summary`) embeds the per-run scratch and home directories in its
+    `message`, so those -- and only those exact absolute prefixes -- are swapped
+    for stable tokens before the compare. `replacements` is ordered, longest
+    prefix first, already `/`-separated."""
+    if isinstance(value, str):
+        if key != "message":
+            return value
+        text = value.replace("\\", "/")
+        for needle, token in replacements:
+            text = text.replace(needle, token)
+        return text
+    if isinstance(value, list):
+        return [scrub_message_paths(item, replacements, key) for item in value]
+    if isinstance(value, dict):
+        return {k: scrub_message_paths(v, replacements, k) for k, v in value.items()}
+    return value
+
+
 def fresh_dir(tag):
     """``<temp>/tan-contract-<tag>-<pid>/root`` -- an empty scratch directory
     under an empty parent nothing else can plausibly populate."""
@@ -375,6 +396,14 @@ def test_envelope_matches_expected(fixture):
     actual = json.loads(proc.stdout.strip())
     marker = f"tan-contract-{case}-{os.getpid()}/root"
     actual = normalise(actual, None, marker)
+    actual = scrub_message_paths(
+        actual,
+        [
+            (work_dir.as_posix(), WORK_DIR_TOKEN),
+            (home_dir.as_posix(), "__HOME__"),
+            (work_dir.parent.as_posix(), "__WORKPARENT__"),
+        ],
+    )
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "

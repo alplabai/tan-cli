@@ -73,6 +73,7 @@ from tan.core.sdk_discovery import (
     project_pin_issue,
     resolve_sdk_root_wide,
     sdk_ladder_divergence_issue,
+    with_sdk_search,
 )
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
@@ -578,7 +579,7 @@ def examples(
                     "warning",
                     rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
                     if sdk_root
-                    else SDK_UNRESOLVED_MESSAGE,
+                    else with_sdk_search(SDK_UNRESOLVED_MESSAGE, workspace_root),
                 )
             )
         if filter_ is not None:

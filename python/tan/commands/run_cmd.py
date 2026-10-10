@@ -72,7 +72,7 @@ from tan.core.sdk_discovery import (
     project_pin_issue,
     resolve_sdk_root_ladder,
 )
-from tan.core.shapes import is_sdk_root
+from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -515,6 +515,20 @@ def run(
     # and no `sdk` key is emitted, matching the oracle.
     if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk_root):
         resolved_sdk_root = None
+    # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve is a coded
+    # refusal, not a silent "no root". Without it the typo fell through to the
+    # build engine and surfaced as an unrelated downstream failure. No
+    # `--sdk-root` + no checkout found keeps the engine's own behaviour (the
+    # engine owns that refusal), so only the explicit-flag case is new here.
+    sdk_refusal = None
+    if sdk_root and resolved_sdk_root is None:
+        refusal_msg = rejected_sdk_root_message(sdk_root, "Nothing was built or run.")
+        sdk_refusal = (
+            ExitCode.VALIDATION_FAILURE,
+            None,
+            [Issue("run.sdk-root-unresolved", "error", refusal_msg)],
+            [f"run: {refusal_msg}"],
+        )
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
@@ -530,18 +544,21 @@ def run(
     project_obj = Project.resolved(build_root, board_yaml)
 
     try:
-        exit_code, data, issues, text_lines = _run(
-            build_root=build_root,
-            sdk_root=sdk_root,
-            sdk_root_for_stamp=sdk_root_for_stamp,
-            board_yaml=board_yaml,
-            flash=flash,
-            core=core,
-            confirm=confirm,
-            atoc_unqueryable=atoc_unqueryable,
-            replace_atoc=replace_atoc,
-            json_mode=json_mode,
-        )
+        if sdk_refusal is not None:
+            exit_code, data, issues, text_lines = sdk_refusal
+        else:
+            exit_code, data, issues, text_lines = _run(
+                build_root=build_root,
+                sdk_root=sdk_root,
+                sdk_root_for_stamp=sdk_root_for_stamp,
+                board_yaml=board_yaml,
+                flash=flash,
+                core=core,
+                confirm=confirm,
+                atoc_unqueryable=atoc_unqueryable,
+                replace_atoc=replace_atoc,
+                json_mode=json_mode,
+            )
     except Exception as err:  # noqa: BLE001 -- see build_cmd.build's identical guard
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None

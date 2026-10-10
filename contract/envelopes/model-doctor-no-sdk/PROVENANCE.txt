@@ -99,3 +99,5 @@ installed, and on such a host those variables are absent, not empty. Pinning
 treat empty as absent -- a falsiness check tightened to `is None` in any one of
 them would flip a row here with nothing in the fixture explaining why it ever
 relied on that.
+
+tan-cli#1463 update: the refusal message now ends with `sdk_search_summary` (where the SDK ladder looked). The scratch/home directories it embeds are rewritten to __WORKDIR__/__HOME__/__WORKPARENT__ by the harness (`scrub_message_paths`, `message` fields only). Re-recorded by appending that sentence to the one affected issue message; nothing else changed.

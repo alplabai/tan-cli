@@ -48,3 +48,5 @@ ABSOLUTE path in `issues[].message`, and `normalise()` deliberately does not
 rewrite message strings.
 
 Fully deterministic: no host state is read, so no `env.json`.
+
+tan-cli#1463 update: the refusal message now ends with `sdk_search_summary` (where the SDK ladder looked). The scratch/home directories it embeds are rewritten to __WORKDIR__/__HOME__/__WORKPARENT__ by the harness (`scrub_message_paths`, `message` fields only). Re-recorded by appending that sentence to the one affected issue message; nothing else changed.

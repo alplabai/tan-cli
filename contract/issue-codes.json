@@ -55,7 +55,19 @@
     "nobody. It was: 42 of the 198 python-side entries had already gone stale",
     "under that regime, unnoticed, before the field was dropped for that",
     "whole side. `contract.rs::check_or_delegate` asserts the absence, so a",
-    "python-side entry cannot silently regain a value nothing will ever check."
+    "python-side entry cannot silently regain a value nothing will ever check.",
+    "",
+    "SDK-root refusal naming (tan-cli#1463): a code for 'no usable alp-sdk",
+    "checkout' is spelled `<command>.sdk-root-unresolved`, the majority",
+    "spelling (build, model, generate, trace, validate, presets, pinmux,",
+    "examples, explain, init, bootstrap). New and reserved codes follow it.",
+    "The older `clean.sdk-root-not-found` and `flash.sdk-root-not-found`,",
+    "`init.sdk-root-invalid`, `kconfig.no-sdk-root` and `support-bundle.sdk-root`",
+    "are FROZEN or already registered and are NOT renamed: a rename is a",
+    "breaking wire change (see above). Every such refusal's message appends",
+    "`tan.core.sdk_discovery.with_sdk_search` (where the ladder looked) unless an",
+    "explicit `--sdk-root` was rejected, which is terminal (I-31) and is named",
+    "by `rejected_sdk_root_message` instead."
   ],
   "issueCodes": [
     {
@@ -3028,6 +3040,22 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/size_cmd.py",
       "note": "Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout (no `scripts/alp_project.py` under it). `tan size` used to continue silently with no SDK metadata; it now refuses, exit 1, naming the rejected value via `rejected_sdk_root_message`. NOT emitted when no `--sdk-root` was given and no checkout is found: nothing was asked for, so size continues as before. Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
+      "code": "run.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "note": "tan-cli#1463: an explicit `--sdk-root` that does not resolve to an alp-sdk checkout. `tan run` used to null it to 'no root' and fall through to the build engine, so a typo surfaced as an unrelated downstream failure; it now refuses before building, exit 2, naming the rejected value via `rejected_sdk_root_message`. NOT emitted when no `--sdk-root` was given: the engine's own handling of an absent root is unchanged. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "doctor.board-yaml",
