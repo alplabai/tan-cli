@@ -367,7 +367,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#1496: recorded via `Log.warn` in `_toolchain_pin_agrees`, BEFORE `west sdk install` runs. The release's `sha256.sum` has no entry for, or a different sha256 than, an artifact alp-sdk pins in `metadata/toolchains.json` (upstream may have swapped the archive and republished the sum, which west's own check would accept). Nothing is downloaded. A `WORKSPACE_BLOCKING` member. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+      "note": "tan-cli#1496: recorded via `Log.warn` in `_check_release_sum` (before AND after `west sdk install`), `_recheck_release_sum` (the sum changed while west ran) and `_install_pinned_toolchain` (the toolchain archive tan downloaded hashes differently from alp-sdk's pin). The release's `sha256.sum` has no entry for, or a different sha256 than, an artifact alp-sdk pins in `metadata/toolchains.json` (upstream may have swapped the archive and republished the sum, which west's own check would accept). Nothing is downloaded. A `WORKSPACE_BLOCKING` member. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "bootstrap.toolchain-pin-unverified",
@@ -375,7 +375,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#1496: recorded via `Log.warn` in `_toolchain_pin_agrees`. The release `sha256.sum` could not be fetched (offline, DNS, TLS, proxy, HTTP error, oversized body), so the pin comparison could not run. Deliberately a refusal rather than a warn-and-continue: the install needs the same network, and stamping an archive the pin was never compared with is the silent pass #1496 closes. A `WORKSPACE_BLOCKING` member; `--no-toolchain` skips the phase. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+      "note": "tan-cli#1496: recorded via `Log.warn` in `_check_release_sum` and `_install_pinned_toolchain`. The release `sha256.sum` or the toolchain archive could not be fetched (offline, DNS, TLS, proxy, HTTP error, oversized body), so the pin comparison could not run. Deliberately a refusal rather than a warn-and-continue: the install needs the same network, and stamping an archive the pin was never compared with is the silent pass #1496 closes. A `WORKSPACE_BLOCKING` member; `--no-toolchain` skips the phase. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "bootstrap.west-patches-failed",

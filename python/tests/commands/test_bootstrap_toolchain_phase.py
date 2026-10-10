@@ -126,6 +126,19 @@ def _stub_release_sum_fetch(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_toolchain_download(monkeypatch):
+    """tan-cli#1496: tan, not west, fetches + hashes the toolchain archive. Hermetic
+    here: the (fake) west already wrote the compiler, so the download is a no-op success.
+    Dedicated cases live in test_bootstrap_toolchain_pin.py."""
+    from tan.commands import bootstrap_toolchain_fetch
+
+    monkeypatch.setattr(
+        bootstrap_toolchain_fetch, "install_pinned_toolchain",
+        lambda *a, **k: bootstrap_toolchain_fetch.FetchOutcome("ok"),
+    )
+
+
 def _argv_index_of_install_dir(argv_from_west_sdk_install_argv) -> int:
     return argv_from_west_sdk_install_argv.index("--install-dir") + 1
 
@@ -237,8 +250,8 @@ def test_the_install_log_does_not_claim_the_archive_hash_was_checked(tmp_path, m
     )
     out = capsys.readouterr()
     text = out.out + out.err
-    assert "not re-hashed from disk" in text
-    assert "checked alp-sdk's pin against the release's sha256.sum" in text
+    assert "hashed against alp-sdk's pin" in text
+    assert "tan did not see its bytes" in text
     assert "verified and stamped" not in text
 
 

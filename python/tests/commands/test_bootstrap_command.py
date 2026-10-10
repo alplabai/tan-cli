@@ -2291,7 +2291,7 @@ def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp
         p for p in planned if "sdk" in p.split() and "install" in p.split()
     ]
     assert len(install_cmds) == 1, planned
-    assert "--gnu-toolchains arm-zephyr-eabi" in install_cmds[0]
+    assert "--no-gnu-toolchains" in install_cmds[0]
     assert "--version 1.0.1" in install_cmds[0]
     # tan-cli#1176: the published plan is what a customer copies and runs by
     # hand, so the flag that makes the command work on a host without

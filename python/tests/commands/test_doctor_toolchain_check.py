@@ -99,7 +99,7 @@ def test_a_verified_stamp_matching_the_pin_is_a_pass(tmp_path, monkeypatch):
     assert check.status == "pass"
     assert manifest.version in check.detail
     # tan-cli#1483: never claims the archive bytes were checked against the pin.
-    assert "not re-hashed from disk" in check.detail
+    assert "not re-hashed" in check.detail
 
 
 def test_a_stamp_over_a_deleted_compiler_is_a_fail_not_verified(tmp_path, monkeypatch):

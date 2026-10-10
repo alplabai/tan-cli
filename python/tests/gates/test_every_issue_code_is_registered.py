@@ -796,10 +796,10 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # collapsing them would put two verdicts behind one wire string.
         # Registered as `bootstrap.sdk-credential-unverified` in
         # contract/issue-codes.json before bumping.
-        # 36, not 34, since tan-cli#1496: `_toolchain_pin_agrees` carries one
-        # `log.warn("toolchain-pin-unverified", ...)` and one
-        # `log.warn("toolchain-pin-mismatch", ...)`, both registered.
-        expected_calls=36,
+        # 41, not 34, since tan-cli#1496: the pre/post-install sum checks and the
+        # toolchain download carry seven new `log.warn` sites, all on the registered
+        # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`.
+        expected_calls=41,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were

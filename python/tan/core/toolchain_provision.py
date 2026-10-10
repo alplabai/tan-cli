@@ -97,19 +97,20 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
         return False
 
 
-#: What a stamp does and does NOT establish about the archive bytes. `west sdk
-#: install` deletes its downloads, so tan never holds an archive to hash. What
-#: tan does instead (tan-cli#1496): BEFORE the install it fetches the release's
-#: `sha256.sum` and refuses unless every pinned artifact's entry there equals
-#: alp-sdk's `metadata/toolchains.json` pin; west then verifies each archive
-#: against that same sum. So an install tan stamped means "the archives matched
-#: the pin through the release sum", NOT "tan re-hashed the files on disk" -- and
-#: it says nothing for a toolchain installed before that check existed.
+#: What a stamp does and does NOT establish (tan-cli#1496; the full account is in
+#: `tan.core.toolchain_pin`'s docstring). `west sdk install` verifies only the
+#: minimal SDK bundle (against the release `sha256.sum`) and its `setup.sh` fetches
+#: the toolchain archive with no check, so a stamped install with `pinChecked` means:
+#: the toolchain archive's sha256 was hashed by tan against alp-sdk's pin while
+#: downloading it, and the minimal bundle matched the release sum which tan compared
+#: with the pin before and after west ran. Nothing is re-hashed from disk later, and
+#: tan never saw the minimal bundle's bytes. A stamp without `pinChecked` predates
+#: this check: nothing about its archives was compared with the pin.
 ARCHIVE_SHA256_NOTE = (
-    "the archive's sha256 was not re-hashed from disk (`west sdk install` discards "
-    "the archive); at install time `tan bootstrap` checked alp-sdk's pin against "
-    "the release's sha256.sum, which west checks the archive against, so a toolchain "
-    "installed by an older tan was never compared with the pin"
+    "files on disk are not re-hashed; a stamp marked pinChecked means the toolchain "
+    "archive was hashed against alp-sdk's pin at download (the minimal SDK bundle only "
+    "via the release sha256.sum, which west checks), and an unmarked stamp predates "
+    "that check, so its archives were never compared with the pin"
 )
 
 
@@ -345,6 +346,9 @@ class ToolchainStamp:
     #: reading `tan doctor`'s output sees which compiler was actually proven
     #: to run, not just a version number.
     target_triple: str
+    #: True only when this tan hashed the toolchain archive against the alp-sdk pin
+    #: (tan-cli#1496). Absent in older stamps -> False.
+    pin_checked: bool = False
 
 
 def render_stamp(stamp: ToolchainStamp) -> str:
@@ -357,6 +361,7 @@ def render_stamp(stamp: ToolchainStamp) -> str:
                 "version": stamp.version,
                 "manifestDigest": stamp.manifest_digest,
                 "targetTriple": stamp.target_triple,
+                "pinChecked": stamp.pin_checked,
             },
             indent=2,
             sort_keys=True,
@@ -380,7 +385,7 @@ def parse_stamp(text: str) -> ToolchainStamp | None:
     triple = doc.get("targetTriple")
     if not (isinstance(version, str) and isinstance(digest, str) and isinstance(triple, str)):
         return None
-    return ToolchainStamp(version, digest, triple)
+    return ToolchainStamp(version, digest, triple, doc.get("pinChecked") is True)
 
 
 def stamp_matches_pin(stamp: ToolchainStamp | None, manifest: ToolchainManifest) -> bool:
@@ -564,12 +569,19 @@ def low_disk_note(free_bytes: int) -> str | None:
 NO_HOSTTOOLS_FLAG = "--no-hosttools"
 
 
+#: tan-cli#1496: west installs ONLY the (west-verified) minimal bundle; the
+#: toolchain archive is fetched and hashed by tan itself, because the bundle's
+#: `setup.sh` downloads it with `wget` and no integrity check.
+NO_GNU_TOOLCHAINS_FLAG = "--no-gnu-toolchains"
+
+
 def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[str]:
-    """The one place this argv is assembled -- `--gnu-toolchains`, not the
-    deprecated `--toolchains` alias (`scripts/west_commands/sdk.py`: the
+    """The one place this argv is assembled -- `--no-gnu-toolchains`, not the
+    deprecated `--no-toolchains` alias (`scripts/west_commands/sdk.py`: the
     deprecated spelling only warns-and-aliases today, but a customer reading
     `data.plannedCommands` under `--dry-run` should see the command tan will
-    actually run, not one the ADR's own text used loosely).
+    actually run). The toolchain itself is then acquired by tan
+    ([`NO_GNU_TOOLCHAINS_FLAG`]).
 
     [`NO_HOSTTOOLS_FLAG`] rides on every one of these, unconditionally --
     see its own comment for the `file(1)` failure it prevents (tan-cli#1176),
@@ -581,8 +593,7 @@ def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[
         "install",
         "--version",
         version,
-        "--gnu-toolchains",
-        TOOLCHAIN_COMPONENT,
+        NO_GNU_TOOLCHAINS_FLAG,
         NO_HOSTTOOLS_FLAG,
         "--install-dir",
         install_dir,

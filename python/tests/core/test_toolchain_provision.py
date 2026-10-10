@@ -299,11 +299,12 @@ def test_west_sdk_install_argv_uses_the_non_deprecated_gnu_toolchains_flag():
     assert argv == [
         "/venv/bin/west", "sdk", "install",
         "--version", "1.0.1",
-        "--gnu-toolchains", "arm-zephyr-eabi",
+        "--no-gnu-toolchains",
         "--no-hosttools",
         "--install-dir", "/tmp/x",
     ]
-    assert "--toolchains" not in argv  # the deprecated alias, never emitted
+    assert "--no-toolchains" not in argv  # the deprecated alias, never emitted
+    assert "--gnu-toolchains" not in argv  # tan fetches + hashes the toolchain itself
 
 
 def test_west_sdk_install_argv_always_passes_no_hosttools():
