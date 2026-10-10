@@ -239,10 +239,10 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             continue
         if spec.backend == "ethos_u":
             # tan-cli#1288: a certain arena/SRAM0 no-fit under `Sram_Only`
-            # refuses the WHOLE model build (see `SramNoFitRefused`), unlike
-            # every OTHER per-target refusal above/below this line -- a
-            # no-op for every other memory mode (`evaluate_sram_fit` itself
-            # gates on it).
+            # skips THIS target as a coverage row; the model is refused
+            # (see `SramNoFitRefused`) only when no ethos_u target ships
+            # (tan-cli#1486) -- a no-op for every other memory mode
+            # (`evaluate_sram_fit` itself gates on it).
             fit = evaluate_sram_fit(
                 memory_mode=spec.vela_memory_mode, req_sram_kib=blob.req_sram_kib,
                 blob_len_bytes=len(blob.payload), board_doc=board_doc,
@@ -256,11 +256,12 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
                 no_fit_msgs.append(msg)
                 coverage.append(Coverage(spec.backend, spec.accel_config, "skipped", msg))
                 continue
-            ethos_u_fit += 1
         if _placed_nothing_on_accelerator(spec.backend, blob):
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped",
                                      _no_placement_reason(spec, blob)))
             continue
+        if spec.backend == "ethos_u":
+            ethos_u_fit += 1       # fits AND ships; a fit that places nothing does not count
         targets.append(Target(
             backend=spec.backend, silicon_ref=spec.silicon_ref,
             blob_format=blob.format, accel_config=spec.accel_config,

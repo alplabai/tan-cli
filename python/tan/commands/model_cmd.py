@@ -1150,7 +1150,7 @@ def model(
         False,
         "--exact",
         help="With `check`: attempt a real compile (Ethos-U only, via `vela`) "
-        "instead of the static screen. Ignored by `build`/`doctor`/`list`.",
+        "instead of the static screen. Refused by the other subcommands.",
     ),
     sku: str = typer.Option(
         None,

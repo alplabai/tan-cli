@@ -751,6 +751,12 @@ def test_build_model_one_target_no_fit_skips_only_that_target(tmp_path, monkeypa
                       board_doc=board_doc)
     assert out.is_file()
     assert not list(tmp_path.glob("*.tan-tmp"))
+    from tan.model.package import read_manifest_file
+    mft = read_manifest_file(out)
+    assert len(mft.targets) == 1
+    assert mft.targets[0].accel_config == "ethos-u55-256"
+    skipped = [c for c in mft.coverage if c.accel_config == "ethos-u55-128"]
+    assert len(skipped) == 1 and skipped[0].status == "skipped" and "arena" in skipped[0].reason
 
 
 def test_build_model_ships_when_the_blob_fits(tmp_path, monkeypatch):

@@ -349,3 +349,5 @@ def test_subcommand_scoped_flags_are_refused_elsewhere(tmp_path):
                  ("run", "a.onnx", "--against", "b.onnx")):
         code, doc = _run(tmp_path, *args)
         assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument", args
+        flag = next(a for a in args if a.startswith("--"))
+        assert flag in doc["issues"][0]["message"], args
