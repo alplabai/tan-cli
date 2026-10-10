@@ -123,7 +123,10 @@ CORPUS: dict[str, str | bytes] = {
     "chip-block-helper-slug-is-valid": _mutate("  - cc3501e", "  - cc3501e\n  - button_led"),
     # `_check_camera_owners` -> `plan_cameras(...).errors`: the owner/shield checks
     # that exist only through the planner leaves `PlannerFacts` carries.
-    "camera-owner-plan-error-missing-shield-overlay": _BASE
+    # E1M-AEN301 has no `e1m_evk_rpi_csi` overlay for its m55_hp target (the
+    # AEN401/801/803 ones landed with alp-sdk#2809); cc3501e is AEN801-only.
+    "camera-owner-plan-error-missing-shield-overlay": _BASE.replace(
+        "E1M-AEN801", "E1M-AEN301").replace("chips:\n  - cc3501e\n\n", "")
     + "cameras:\n  - connector: CAM0\n    module: raspberry_pi_camera_module_1\n",
     "camera-unknown-connector": _BASE
     + "cameras:\n  - connector: CAM9\n    module: raspberry_pi_camera_module_1\n",

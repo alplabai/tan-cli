@@ -95,7 +95,11 @@ def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
     if mode == "dts-partitions":
         return _shared_artefact(project, "generated/dts-partitions.dtsi")
     if mode == "storage-mounts-c":
-        return emit_storage_mounts_c(project)
+        # The plan carries the table only when a partition is mountable
+        # (alp-sdk#2820); "" here means "none", and the standalone emit has
+        # always printed the empty table in that case, so keep it byte-identical.
+        return (_shared_artefact(project, "generated/storage_mount_table.c")
+                or emit_storage_mounts_c(project))
     if mode == "tfm-sysbuild-conf":
         return _shared_tfm_conf(project)
     if mode == "build-plan":
