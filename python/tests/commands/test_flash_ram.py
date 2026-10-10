@@ -1247,3 +1247,21 @@ def test_hold_dry_run_shows_the_sleep_script(tmp_path, monkeypatch):
     assert entry["ram"]["holdSession"] is True
     assert entry["plan"]["jlinkScript"][-3:] == ["go", "Sleep 1500", "exit"]
     assert "session close" in _trcena(issues)[0].message
+
+
+def test_a_failure_after_the_load_marks_ram_loaded(tmp_path, monkeypatch):
+    """tan-cli#1497: `ram.loaded` is produced by Flow C itself, so `model run
+    --device` can keep its provenance when the console read fails."""
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch, read_rc=1)
+    rc, data, _issues, _l, _s = _run(tmp_path, ram_console=True)
+    assert rc == 1
+    assert data["entries"][0]["ram"]["loaded"] is True
+
+
+def test_a_failure_before_the_load_completes_leaves_ram_loaded_absent(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch, load_out="Cannot connect to target.\n")
+    rc, data, _issues, _l, _s = _run(tmp_path)
+    assert rc == 1
+    assert "loaded" not in data["entries"][0].get("ram", {})

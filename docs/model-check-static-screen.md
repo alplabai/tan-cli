@@ -33,6 +33,13 @@ tan model check --format json   # the full report, every field
 tan model check --exact         # attempt a real vela compile (Ethos-U only)
 ```
 
+`--exact` mirrors `tan model build`: it compiles every `ethos_u` target of the
+SKU (headline first), skips a target whose SRAM does not fit or that places no
+operator on the NPU, and reports the first target that compiles and fits. A
+note names the skipped targets, and a target whose compile failed or was
+refused keeps its `--exact` note (tagged `[target <accel-config>]`) instead of
+vanishing. Only when no target fits does the headline's result stand.
+
 `ok` and the exit code stay `0` for any run that completed, whatever the
 *screening* verdicts read — reporting `partial`, `cpu-only` or
 `undetermined` **is** the feature, never a failure. **One exception, and only
@@ -396,9 +403,10 @@ the unresolved case above) is real: it is plain ceil'd-KiB arithmetic against
 a real, sourced number, so a failure is a hard physical fact, not a screen.
 `tan model build` records a certain no-fit as a skipped coverage row for that
 target, and refuses the model (no `.alpmodel` written) only when no ethos_u
-target fits; `tan model check --exact` reports the SAME certain
-no-fit as the `model.sram-no-fit` issue at `ExitCode.VALIDATION_FAILURE`,
-alongside the model's own report (nothing about `sramFit` is hidden even
+target fits; `tan model check --exact` reports the certain
+no-fit as the `model.sram-no-fit` issue at `ExitCode.VALIDATION_FAILURE`
+only when NO ethos_u target fits (otherwise it reports the first fitting
+target and a note naming the skipped ones), alongside the model's own report (nothing about `sramFit` is hidden even
 when the run refuses). This never offers or implies an MRAM placement — the
 NPU reading weights in place from MRAM is unproven on the bench.
 

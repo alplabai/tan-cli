@@ -1957,7 +1957,7 @@ def test_a_refused_footprint_note_survives_a_bench_match_without_its_false_tail(
 
 
 def test_a_vela_failure_note_survives_a_bench_match_without_its_false_tail(tmp_path, monkeypatch):
-    """tan-cli#791 round-2 review item 4, site 4 of 5 (`_maybe_exact_ethos_u`'s
+    """tan-cli#791 round-2 review item 4, site 4 of 5 (`_exact_ethos_u`'s
     generic-exception branch): the compile failure itself is a HOST fact and
     survives; "reporting the static screen instead" is a BASIS clause and
     must not."""
@@ -2302,3 +2302,43 @@ def test_exact_with_a_fitting_headline_is_unchanged(tmp_path, monkeypatch):
         monkeypatch, tmp_path, {"ethos-u55-256": 70, "ethos-u55-128": 300})
     assert rep.sram_fit is not None and rep.sram_fit.no_fit is False
     assert rep.arena_bytes == 70 * 1024
+
+
+def test_exact_keeps_the_failed_headlines_note_when_a_later_target_wins(tmp_path, monkeypatch):
+    """tan-cli#1497 review: a headline vela failure must not vanish silently
+    when target 2 compiles and fits."""
+    _two_u55_tree(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, **_kw):
+        if accel_config == "ethos-u55-256":
+            raise RuntimeError("vela exploded on the headline")
+        return Blob(format="vela_tflite", payload=b"x" * 1024, arena_bytes=70 * 1024,
+                    compiler_version="vela 5.1.0", req_sram_kib=70,
+                    cpu_op_count=0, npu_op_count=1)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 128}}}}
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=True, board_doc=board_doc)[0]
+    assert rep.basis == "compiled"
+    assert any("vela failed" in n and "ethos-u55-256" in n for n in rep.notes), rep.notes
+    assert not any("reporting the static screen instead" in n.lower() for n in rep.notes)
+
+
+def test_exact_skips_a_headline_that_places_nothing_on_the_npu(tmp_path, monkeypatch):
+    _two_u55_tree(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, **_kw):
+        npu = 0 if accel_config == "ethos-u55-256" else 1
+        return Blob(format="vela_tflite", payload=b"x" * 1024, arena_bytes=70 * 1024,
+                    compiler_version="vela 5.1.0", req_sram_kib=70,
+                    cpu_op_count=1 - npu, npu_op_count=npu)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 128}}}}
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=True, board_doc=board_doc)[0]
+    assert any("ethos-u55-256" in n and "place no operator" in n for n in rep.notes), rep.notes
+    assert any("ethos-u55-128" in n and "compiled for" in n for n in rep.notes), rep.notes

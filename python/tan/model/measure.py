@@ -138,9 +138,12 @@ def describe_input_cast(sample_dtype: Any, want: str) -> str | None:
     if have == np.dtype(want):
         return None
     msg = f"input sample dtype {have} was cast to the model input dtype {want}"
-    if have.kind == "f" and np.dtype(want).kind in "iub":
+    wd = np.dtype(want)
+    if wd.kind == "b":
+        msg += "; every nonzero value became True"
+    elif have.kind == "f" and wd.kind in "iu":
         msg += "; fractional values were truncated toward zero"
-    elif np.dtype(want).itemsize < have.itemsize or (have.kind in "iu" and np.dtype(want).kind == "f"):
+    elif not np.can_cast(have, wd, "safe"):
         msg += "; precision or range may be lost"
     return msg
 

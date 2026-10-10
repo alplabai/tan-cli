@@ -335,3 +335,17 @@ def test_a_stray_min_samples_is_refused_even_at_its_default_value(tmp_path):
     code, doc = invoke("run", "m.onnx", "--min-samples", "8", "--project", str(proj))
     assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument"
     assert "--min-samples" in doc["issues"][0]["message"]
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_run_warns_when_the_input_sample_was_cast(tmp_path):
+    """tan-cli#1497: a float64 `--input` fed to a float32 model is cast; the
+    envelope says so at exit 0."""
+    import numpy as np
+
+    proj = project(tmp_path)
+    np.save(proj / "x.npy", np.zeros((1, 3, 224, 224), dtype=np.float64))
+    code, doc = invoke("run", "m.onnx", "--input", "x.npy", "--runs", "1", "--project", str(proj))
+    assert code == 0, doc
+    issue = next(i for i in doc["issues"] if i["code"] == "model.input-dtype-cast")
+    assert issue["severity"] == "warning" and "float64" in issue["message"]

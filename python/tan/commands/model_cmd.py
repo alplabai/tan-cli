@@ -1165,8 +1165,9 @@ def model(
     per_channel: bool = typer.Option(
         False, "--per-channel", help="With `prep`: per-channel weight quantization."
     ),
-    min_samples: int = typer.Option(
-        None, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
+    min_samples: int | None = typer.Option(
+        None, "--min-samples", metavar="N",
+        help="With `prep`: fewest calibration samples accepted (default 8)."
     ),
     device: bool = typer.Option(
         False,

@@ -286,8 +286,10 @@ def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tup
 
 
 def _cast_warnings(path: Path, result: Any) -> list[Issue]:
-    """`model.input-dtype-cast` (tan-cli#1497) when the user's `.npy` was cast
-    to the model input dtype -- float to int truncates silently otherwise."""
+    """`model.input-dtype-cast` (tan-cli#1497) when the sample (the user's
+    `--input` .npy, or tan's own generated sample reused for `ab`'s second
+    model) was cast to the model input dtype -- float to int truncates
+    silently otherwise."""
     note = getattr(result, "input_cast", None)
     if not note:
         return []

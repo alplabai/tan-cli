@@ -89,3 +89,13 @@ def test_describe_input_cast_flags_narrowing_and_ignores_identity():
     from tan.model.measure import describe_input_cast
     assert describe_input_cast("float64", "float32") is not None
     assert describe_input_cast("float32", "float32") is None
+
+
+def test_describe_input_cast_wording_per_kind():
+    pytest.importorskip("numpy")
+    from tan.model.measure import describe_input_cast
+    assert "True" in describe_input_cast("float32", "bool")
+    assert "truncated" in describe_input_cast("float32", "int8")
+    assert "range" in describe_input_cast("int8", "uint8")          # same size, wraps
+    assert "range" in describe_input_cast("int64", "float32")
+    assert "may be lost" not in describe_input_cast("int8", "float32")   # lossless widening
