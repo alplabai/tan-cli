@@ -2530,8 +2530,12 @@ HAND_PORT_PINNED_SDK_COMMIT = "a5a137c7b594ebb5d451177803c0eb324069e86b"  # alp-
 #: file made across the repo boundary") -- `loader.py` itself is already
 #: tracked in `PINNED_HASHES` above (its main body relocated from
 #: `scripts/alp_orchestrate/loader.py`), the same split-heritage shape
-#: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
-#: itself, so neither is in `HAND_PORT_SOURCES` below.
+#: `sentinels.py` set the precedent for -- AND, since tan-cli#270, the whole
+#: file in `tan/core/board_validator*.py` (the in-process `tan validate`
+#: engine, with `diagnostic.py`, `yaml_pos.py` and `validate_board_yaml.py`
+#: pinned beside it). None of these lives under `tan/planner/` itself, so none
+#: is in `HAND_PORT_SOURCES` below; `test_hand_port_tan_side.py`'s
+#: `HAND_PORT_TAN_SIDE` is where their tan files are named.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
@@ -2546,6 +2550,15 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
     "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
     "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
+    # tan-cli#270: `tan validate` runs these four IN-PROCESS now instead of
+    # spawning the SDK's script. `validator.py` above was already pinned for the
+    # two schema helpers `tan/planner/loader.py` copied; it is now ALSO the source
+    # of `tan/core/board_validator{,_schema,_compat}.py`. Byte-identical at
+    # `HAND_PORT_PINNED_SDK_COMMIT` and at alp-sdk `origin/dev` `4c7d2d34`
+    # (the commit the port was cut from; verified by hashing both).
+    "scripts/alp_cli/diagnostic.py": "6a96eb120d73640196cefbd30d13e40a515d00d11368e440123594189cd16d96",
+    "scripts/alp_cli/yaml_pos.py": "c83580d86a8f2bc575e20b44f4893847a6a08f765774861f2d29a8bd61ae5b74",
+    "scripts/validate_board_yaml.py": "91e06880f068447f98a2c68f1ffb4b6da29c18d2fcadfa0232d982e6612557d4",
     "scripts/alp_project.py": "c505f9dfad7557715929cbe190830fe21268695891b637b28752c0de65389afd",
 }
 
