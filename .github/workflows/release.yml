@@ -512,9 +512,13 @@ jobs:
       - name: freeze tan (PyInstaller in ${{ matrix.container }}) + measure the glibc floor
         if: ${{ matrix.container }}
         shell: bash
+        env:
+          CONTAINER_IMAGE: ${{ matrix.container }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/src" -w /src/python "${{ matrix.container }}" bash -euc '
+          # Mirror first: Docker Hub rate-limits anonymous runner pulls.
+          IMG=$(bash scripts/ci/docker-pull.sh "${CONTAINER_IMAGE}")
+          docker run --rm -v "$PWD:/src" -w /src/python "${IMG}" bash -euc '
             # binutils, for objdump. PyInstaller shells out to it on Linux to
             # walk each binary dependency and refuses outright without it:
             # "ERROR: On Linux, objdump is required. It is typically provided by
