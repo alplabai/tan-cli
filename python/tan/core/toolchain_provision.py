@@ -97,26 +97,21 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
         return False
 
 
-#: What a stamp does NOT establish. `west sdk install` downloads each archive
-#: into a private temp directory it deletes before exiting, so tan never has
-#: the archive bytes to hash against the sha256 alp-sdk pins in
-#: `metadata/toolchains.json` (west's own archive check, if any, compares against the release's
-#: `sha256.sum`, fetched from the same source, never against alp-sdk's pin). The stamp therefore means "the
-#: SDK version file matches the pin and the compiler runs", never "the bytes
-#: match alp-sdk's pinned sha256" -- every message that says "verified" says so.
-#:
-#: What west itself does (tan-cli#1498; read from zephyr
-#: `scripts/west_commands/sdk.py`, v4.4.1): it fetches the release's
-#: `sha256.sum`, looks up the ONE minimal-SDK bundle it is about to download
-#: and raises `sha256 mismatched` if that archive's digest differs. The
-#: per-toolchain archives are fetched afterwards by the SDK's own
-#: `setup.sh`/`setup.cmd`, which west runs and does not re-verify. So west
-#: checks the minimal bundle only, never every archive, never against alp-sdk's
-#: pin (docs/toolchain-archive-verification.md).
+#: What a stamp does and does NOT establish (tan-cli#1496; the full account is in
+#: `tan.core.toolchain_pin`'s docstring). `west sdk install` verifies only the
+#: minimal SDK bundle (against the release `sha256.sum`) and its `setup.sh` fetches
+#: the toolchain archive with no check, so a stamped install with `pinChecked` means:
+#: the toolchain archive's sha256 was hashed by tan against alp-sdk's pin while
+#: downloading it, and the minimal bundle matched the release sum which tan compared
+#: with the pin before and after west ran. Nothing is re-hashed from disk later, and
+#: tan never saw the minimal bundle's bytes. A stamp without `pinChecked` predates
+#: this check: nothing about its archives was compared with the pin. See
+#: docs/toolchain-archive-verification.md.
 ARCHIVE_SHA256_NOTE = (
-    "the archive's sha256 was NOT compared against the alp-sdk pin "
-    "(`west sdk install` discards the archive; west verifies only the minimal bundle "
-    "against sha256.sum, and setup.sh-fetched toolchains are not verified by west)"
+    "files on disk are not re-hashed; a stamp marked pinChecked means the toolchain "
+    "archive was hashed against alp-sdk's pin at download (the minimal SDK bundle only "
+    "via the release sha256.sum, which west checks), and an unmarked stamp predates "
+    "that check, so its archives were never compared with the pin"
 )
 
 
@@ -352,6 +347,9 @@ class ToolchainStamp:
     #: reading `tan doctor`'s output sees which compiler was actually proven
     #: to run, not just a version number.
     target_triple: str
+    #: True only when this tan hashed the toolchain archive against the alp-sdk pin
+    #: (tan-cli#1496). Absent in older stamps -> False.
+    pin_checked: bool = False
 
 
 def render_stamp(stamp: ToolchainStamp) -> str:
@@ -364,6 +362,7 @@ def render_stamp(stamp: ToolchainStamp) -> str:
                 "version": stamp.version,
                 "manifestDigest": stamp.manifest_digest,
                 "targetTriple": stamp.target_triple,
+                "pinChecked": stamp.pin_checked,
             },
             indent=2,
             sort_keys=True,
@@ -387,7 +386,7 @@ def parse_stamp(text: str) -> ToolchainStamp | None:
     triple = doc.get("targetTriple")
     if not (isinstance(version, str) and isinstance(digest, str) and isinstance(triple, str)):
         return None
-    return ToolchainStamp(version, digest, triple)
+    return ToolchainStamp(version, digest, triple, doc.get("pinChecked") is True)
 
 
 def stamp_matches_pin(stamp: ToolchainStamp | None, manifest: ToolchainManifest) -> bool:
@@ -571,12 +570,19 @@ def low_disk_note(free_bytes: int) -> str | None:
 NO_HOSTTOOLS_FLAG = "--no-hosttools"
 
 
+#: tan-cli#1496: west installs ONLY the (west-verified) minimal bundle; the
+#: toolchain archive is fetched and hashed by tan itself, because the bundle's
+#: `setup.sh` downloads it with `wget` and no integrity check.
+NO_GNU_TOOLCHAINS_FLAG = "--no-gnu-toolchains"
+
+
 def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[str]:
-    """The one place this argv is assembled -- `--gnu-toolchains`, not the
-    deprecated `--toolchains` alias (`scripts/west_commands/sdk.py`: the
+    """The one place this argv is assembled -- `--no-gnu-toolchains`, not the
+    deprecated `--no-toolchains` alias (`scripts/west_commands/sdk.py`: the
     deprecated spelling only warns-and-aliases today, but a customer reading
     `data.plannedCommands` under `--dry-run` should see the command tan will
-    actually run, not one the ADR's own text used loosely).
+    actually run). The toolchain itself is then acquired by tan
+    ([`NO_GNU_TOOLCHAINS_FLAG`]).
 
     [`NO_HOSTTOOLS_FLAG`] rides on every one of these, unconditionally --
     see its own comment for the `file(1)` failure it prevents (tan-cli#1176),
@@ -588,8 +594,7 @@ def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[
         "install",
         "--version",
         version,
-        "--gnu-toolchains",
-        TOOLCHAIN_COMPONENT,
+        NO_GNU_TOOLCHAINS_FLAG,
         NO_HOSTTOOLS_FLAG,
         "--install-dir",
         install_dir,
@@ -601,7 +606,7 @@ def augment_acquisition_failure(detail: str) -> str:
     applied to THIS download) when `detail` -- the captured `west sdk
     install` failure text -- names a checksum mismatch. `west` itself
     compares downloads against the release's own published `sha256.sum`
-    (never against alp-sdk's pin) and raises `sha256 mismatched: <want>:<got>` on a
+    (tan checks alp-sdk's pin against that sum BEFORE the install) and raises `sha256 mismatched: <want>:<got>` on a
     disagreement -- which reads exactly like "the upstream archive is
     corrupt" unless a reader is told a TLS-terminating middlebox rewriting
     the byte stream produces the identical symptom.

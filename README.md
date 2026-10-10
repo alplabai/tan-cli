@@ -195,6 +195,19 @@ What those commands do:
    compiler and re-verifies its stamp rather than reinstalling. Pass
    `--no-toolchain` to skip this phase (the rest of `bootstrap` is
    unaffected, and `native_sim` builds never need a cross toolchain at all).
+   What the phase verifies (tan-cli#1496): `west sdk install` checks only the
+   minimal SDK bundle, against the release `sha256.sum`; the SDK's `setup.sh`
+   then fetches the toolchain archive with no check at all. So `tan` compares
+   alp-sdk's sha256 pins (`metadata/toolchains.json`) with that sum before and
+   after west runs, passes `--no-gnu-toolchains`, and downloads the toolchain
+   archive itself, hashing it against the pin while it streams. The minimal
+   bundle is therefore verified only through the sum (`tan` never holds its
+   bytes), and nothing is re-hashed from disk afterwards. A mismatch, an
+   ambiguous or duplicated sum entry, or a sum or archive that cannot be
+   fetched (offline, a SOCKS proxy) refuses with `bootstrap.toolchain-pin-mismatch`
+   or `bootstrap.toolchain-pin-unverified` and stamps nothing; `--no-toolchain`
+   skips the phase. The stamp records `pinChecked`; a toolchain installed by an
+   older `tan` is kept but reported as never compared with the pin.
    This phase does **not** need `file` on PATH, on any host: it passes
    `--no-hosttools` to the underlying `west sdk install` (tan-cli#1176), so
    the SDK's own host-tools step -- the part that needs `file`, and that dies
