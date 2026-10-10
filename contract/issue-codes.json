@@ -3888,7 +3888,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: neither flash_args.host nor --target-host names the board. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: neither flash_args.host nor --target-host names the board. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-invalid",
@@ -3896,7 +3896,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: the host, flash_args.user, flash_args.port or flash_args.flash_partition is not a plain value (a host or user that could be read as an ssh option, a non-numeric or out-of-range port, a partition that is not an mtdN device name). Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the host (a ':' or anything but a plain hostname/IPv4 address), flash_args.user, flash_args.port, the partition reference or partition_name is not a plain value, or flash_args and the SoC metadata disagree on cm33_boot, or the xspi_offset is not a multiple of the target's erase size. Nothing was spawned or written. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-partition-required",
@@ -3904,7 +3904,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: flash_args.flash_partition is absent; it is never defaulted. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: flash_args.flash_partition is absent; it is never defaulted. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-partition-refused",
@@ -3912,7 +3912,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: flash_args.flash_partition is mtd0 (the bootloader), which linux_mtd never writes. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the partition is mtd0 (the bootloader), whether named as mtd0/mtd00 or resolved there from a name via /proc/mtd. Nothing was written. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-partition-mismatch",
@@ -3920,7 +3920,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: --partition names a different partition than the manifest's flash_args.flash_partition. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: --partition names a different partition than the manifest's flash_args.flash_partition (compared after mtd01 -> mtd1), or the /proc/mtd NAME of the resolved device differs from flash_args.partition_name / the SoC metadata's cm33_boot.mtd_name (a reordered partition table). Nothing was written. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-partition-absent",
@@ -3928,7 +3928,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: the named partition is not listed in the target's /proc/mtd. Nothing was written; the check is a read-only `cat /proc/mtd` over ssh. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the named partition is not (uniquely) listed in the target's /proc/mtd. Nothing was written; the check is a read-only `cat /proc/mtd` over ssh. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-image-too-large",
@@ -3936,7 +3936,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: the image is larger than the named partition's /proc/mtd size. Nothing was written. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the erase of ceil(image/erasesize) blocks at cm33_boot.xspi_offset would end past the partition size or past xspi_offset + image_max. Nothing was written. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-failed",
@@ -3944,7 +3944,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: an ssh or scp step failed (connection, copy, flash_erase, flashcp, read-back), the image could not be read, or ssh/scp are not on PATH. The message names the step and its rc, and after a failed write says the partition was erased and may hold a partial image. The steps taken are in data.entries[].linuxMtd.steps. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: an ssh or scp step failed or timed out (connection, copy, flash_erase, mtd_debug write/read, sha256sum), the image could not be read, or ssh/scp are not on PATH. The message names the step and its rc; after a failed erase/write it says the CM33 window may hold a partial image, and after a timeout it says the remote command may still be running and must not be re-run. The steps taken are in data.entries[].linuxMtd.steps. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.linux-mtd-readback-mismatch",
@@ -3952,7 +3952,39 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/core/flash_linux_mtd.py",
-      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux). EMISSION CONDITION: the sha256 of the first image-length bytes read back from the partition differs from the local image's. The partition may hold a bad image: do not reboot into it, re-flash. Both digests are in data.entries[].linuxMtd.digest. Deliberately distinct from flash.entry-failed and flash.readback-mismatch (Flow D). Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the sha256 of the image-length window read back with `mtd_debug read` at xspi_offset differs from the local image's. The window may hold a bad image: do not reboot into it, re-flash. Both digests are in data.entries[].linuxMtd.digest. Deliberately distinct from flash.entry-failed and flash.readback-mismatch (Flow D). Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.linux-mtd-boot-facts-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/flash_linux_mtd.py",
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: neither the bound SDK's SoC metadata (cm33_boot: sram_base, image_pad, image_max, xspi_offset) nor flash_args carries the four numbers, or one is not a non-negative integer. There is no default offset. Nothing was spawned. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.linux-mtd-image-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/flash_linux_mtd.py",
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the stored image fails the checks of docs/provisioning-v2n.md (CM33 image): larger than image_max, shorter than the pad plus a vector table, first image_pad bytes not all zero (an unpadded zephyr.bin), initial SP outside SRAM0, or a reset vector without the Thumb bit or outside sram_base+image_pad..+image_max. Nothing was copied. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.linux-mtd-cleanup-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: the write succeeded (or failed) but removing the temp files the run created in the target's /tmp did not succeed. data.entries[].linuxMtd.tempFiles names them. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.linux-mtd-option-ignored",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added by tan-cli#1314 (`tan flash`, flash_method `linux_mtd`: V2N / V2N-M1 CM33 deploy over the running Linux; the CM33 image lives INSIDE mtd1 at cm33_boot.xspi_offset, so only that window is erased and written). EMISSION CONDITION: --target-host or --partition was given but no entry in the run uses flash_method linux_mtd. Nothing depended on them. Not validated on silicon. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

@@ -2270,7 +2270,7 @@ _REGISTRY: dict[str, BackendMeta] = {
     "yocto_wic_to_sd_or_emmc": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
     "yocto_wic": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
     "xspi_flashwriter": BackendMeta((), plan_xspi_flashwriter),
-    "linux_mtd": BackendMeta(("ssh",), plan_linux_mtd),
+    "linux_mtd": BackendMeta(("ssh", "scp"), plan_linux_mtd),
     FLOW_D_METHOD: BackendMeta(("JLinkExe", "JLink"), plan_alif_mram_jlink),
 }
 

@@ -2,27 +2,34 @@
 """`tan flash` backend `linux_mtd` (tan-cli#1314), against a FAKE ssh/scp on PATH.
 
 Hermetic: no network, no board. The fakes log every argv and emulate just enough of the
-target (`/proc/mtd`, `flash_erase`, `flashcp`, a sha256 read-back). They prove tan's
-sequencing, refusals and quoting; they do NOT prove the real board accepts the commands
-(that needs a V2N bench run).
+target (`/proc/mtd`, `flash_erase`, `mtd_debug`, `sha256sum`). They prove tan's sequencing,
+window arithmetic, refusals and quoting; they do NOT prove the real board accepts the
+commands (that needs a V2N bench run).
+
+The load-bearing fact: the CM33 image lives INSIDE mtd1 (the FIP partition) at 0x1A0000, so a
+whole-partition erase would brick the board. Every test of the happy path pins the erase to
+that window.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from tan.commands import flash_linux_mtd as fm
 from tan.core import flash_linux_mtd as core
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 _FAKE = r'''#!{python}
-import hashlib, json, os, sys
+import hashlib, json, os, shlex, sys
 d = os.environ["FAKE_DIR"]
 tool = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
@@ -31,36 +38,59 @@ with open(os.path.join(d, "calls.jsonl"), "a") as fh:
 if "BatchMode=yes" not in args or not any(a.startswith("ConnectTimeout=") for a in args):
     print("fake: BatchMode / ConnectTimeout missing", file=sys.stderr); sys.exit(99)
 fail = os.environ.get("FAKE_FAIL", "")
+def sha(path):
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
 if tool == "scp":
     if fail == "scp":
         print("scp: connection refused", file=sys.stderr); sys.exit(1)
     local = args[args.index("--") + 1]
-    with open(local, "rb") as fh:
-        open(os.path.join(d, "remote.sha"), "w").write(hashlib.sha256(fh.read()).hexdigest())
+    open(os.path.join(d, "remote.bin"), "wb").write(open(local, "rb").read())
     sys.exit(0)
 cmd = args[-1]
-if cmd.startswith("cat /proc/mtd"):
+words = shlex.split(cmd)
+if words[:2] == ["cat", "/proc/mtd"]:
     sys.stdout.write(os.environ["FAKE_PROC_MTD"]); sys.exit(0)
-if cmd.startswith("flash_erase"):
+if words[0] == "flash_erase":
     sys.exit(3 if fail == "erase" else 0)
-if cmd.startswith("flashcp"):
-    sys.exit(4 if fail == "flashcp" else 0)
-if cmd.startswith("head -c"):
-    digest = open(os.path.join(d, "remote.sha")).read()
+if words[:2] == ["mtd_debug", "write"]:
+    sys.exit(4 if fail == "mtd_write" else 0)
+if words[:2] == ["mtd_debug", "read"]:
+    if fail == "mtd_read":
+        sys.exit(5)
+    data = open(os.path.join(d, "remote.bin"), "rb").read()
     if fail == "corrupt":
-        digest = "0" * 64
-    print(digest + "  -"); sys.exit(0)
-if cmd.startswith("rm -f"):
+        data = b"\xff" + data[1:]
+    open(os.path.join(d, "rb.bin"), "wb").write(data)
     sys.exit(0)
+if words[0] == "sha256sum":
+    if fail == "sha":
+        sys.exit(6)
+    print(sha(os.path.join(d, "rb.bin")) + "  " + words[1]); sys.exit(0)
+if words[:2] == ["rm", "-f"]:
+    sys.exit(7 if fail == "rm" else 0)
 print("fake: unexpected command " + cmd, file=sys.stderr); sys.exit(98)
 '''
 
 PROC_MTD = (
     "dev:    size   erasesize  name\n"
     'mtd0: 00200000 00001000 "bl2"\n'
-    'mtd1: 00400000 00001000 "cm33"\n'
+    'mtd1: 00800000 00001000 "fip"\n'
 )
-IMAGE = b"\xa5" * 4096 + b"cm33-image"
+OFFSET = 0x1A0000
+SOC = {
+    "cm33_boot": {
+        "sram_base": 0x08000000, "image_pad": 0x3000, "image_max": 0x30000, "xspi_offset": OFFSET,
+    }
+}
+BODY = b"cm33-body" * 600  # 5400 bytes
+
+
+def padded(sp: int = 0x08100000, reset: int = 0x08003101, body: bytes = BODY) -> bytes:
+    return bytes(0x3000) + struct.pack("<II", sp, reset) + body
+
+
+IMAGE = padded()
 
 
 def _fake_bin(tmp_path: Path) -> Path:
@@ -74,24 +104,36 @@ def _fake_bin(tmp_path: Path) -> Path:
     return bindir
 
 
-def _manifest(image: Path, flash_args: str) -> str:
+def _manifest(image: Path, flash_args: str, method: str) -> str:
     return (
         "schema_version: 1\nhw_info: {sku: E1M-V2N101}\nslices:\n"
         f"- {{core_id: cm33, os: zephyr, output_artefact: '{image}', status: ok,\n"
-        f"   flash_method: linux_mtd, flash_args: {flash_args}}}\n"
+        f"   flash_method: {method}, flash_args: {flash_args}}}\n"
         "helper_mcus: []\nboot_order: []\n"
     )
 
 
-def _flash(tmp_path, flash_args="{host: 10.0.0.7, user: root, flash_partition: mtd1}",
-           *argv, image_name="m33_fw.bin", env=None, confirm=True):
-    work = tmp_path / "work"
-    (work / "build").mkdir(parents=True)
+def _sdk(work: Path, soc: dict | None) -> None:
     (work / "sdk" / "scripts").mkdir(parents=True)
     (work / "sdk" / "scripts" / "alp_project.py").write_text("")
-    image = tmp_path / image_name
-    image.write_bytes(IMAGE)
-    (work / "build" / "system-manifest.yaml").write_text(_manifest(image, flash_args))
+    if soc is None:
+        return
+    meta = work / "sdk" / "metadata"
+    (meta / "e1m_modules").mkdir(parents=True)
+    (meta / "e1m_modules" / "E1M-V2N101.yaml").write_text("silicon: renesas:rzv2n:n44\n")
+    (meta / "socs" / "renesas" / "rzv2n").mkdir(parents=True)
+    (meta / "socs" / "renesas" / "rzv2n" / "n44.json").write_text(json.dumps(soc))
+
+
+def _flash(tmp_path, flash_args="{host: 10.0.0.7, user: root, flash_partition: mtd1}",
+           *argv, image_name="m33_fw.bin", env=None, confirm=True, image=IMAGE, soc=SOC,
+           method="linux_mtd"):
+    work = tmp_path / "work"
+    (work / "build").mkdir(parents=True)
+    _sdk(work, soc)
+    img = tmp_path / image_name
+    img.write_bytes(image)
+    (work / "build" / "system-manifest.yaml").write_text(_manifest(img, flash_args, method))
     bindir = _fake_bin(tmp_path)
     child_env = {
         **os.environ, "HOME": str(work), "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
@@ -105,14 +147,12 @@ def _flash(tmp_path, flash_args="{host: 10.0.0.7, user: root, flash_partition: m
         [sys.executable, "-m", "tan", "flash", "--sdk-root", "./sdk", "--format", "json", *argv, "."],
         cwd=work, capture_output=True, text=True, env=child_env, timeout=120,
     )
-    return proc.returncode, json.loads(proc.stdout), image
+    return proc.returncode, json.loads(proc.stdout), img
 
 
 def _calls(tmp_path: Path) -> list[list[str]]:
     log = tmp_path / "fake" / "calls.jsonl"
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text().splitlines()]
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
 def _remote_cmds(tmp_path: Path) -> list[str]:
@@ -127,41 +167,53 @@ def _codes(payload):
     return [i["code"] for i in payload["issues"]]
 
 
-def test_happy_path_runs_every_step_in_order_and_cleans_up(tmp_path):
-    rc, payload, image = _flash(tmp_path)
+def _refused_untouched(tmp_path, rc, payload, code):
+    assert rc == 1 and code in _codes(payload), payload
+    cmds = _remote_cmds(tmp_path)
+    assert not any(c.startswith(("flash_erase", "mtd_debug write")) for c in cmds), cmds
+    assert not any(c[0] == "scp" for c in _calls(tmp_path))
+
+
+def test_happy_path_touches_only_the_cm33_window_inside_mtd1(tmp_path):
+    rc, payload, _ = _flash(tmp_path)
     assert rc == 0, payload
     entry = _entry(payload)
     assert entry["method"] == "linux_mtd" and entry["status"] == "ok"
-    calls = _calls(tmp_path)
-    kinds = [c[0] for c in calls]
-    assert kinds == ["ssh", "scp", "ssh", "ssh", "ssh", "ssh"]
+    assert [c[0] for c in _calls(tmp_path)] == ["ssh", "scp", "ssh", "ssh", "ssh", "ssh", "ssh"]
     cmds = _remote_cmds(tmp_path)
+    blocks = -(-len(IMAGE) // 0x1000)
     assert cmds[0] == "cat /proc/mtd"
-    assert cmds[1] == "flash_erase /dev/mtd1 0 0"
-    assert cmds[2].startswith("flashcp -v /tmp/tan-linux-mtd-") and cmds[2].endswith("/dev/mtd1")
-    assert cmds[3].startswith(f"head -c {len(IMAGE)} /dev/mtd1 | sha256sum")
-    assert cmds[4].startswith("rm -f /tmp/tan-linux-mtd-")
-    assert all(any("root@10.0.0.7" in a for a in c) for c in calls)
+    # Never the whole partition: erase starts at 0x1a0000 and spans only the image's blocks.
+    assert cmds[1] == f"flash_erase /dev/mtd1 0x1a0000 {blocks}"
+    assert cmds[2].startswith(f"mtd_debug write /dev/mtd1 0x1a0000 {len(IMAGE)} /tmp/tan-linux-mtd-")
+    assert cmds[3].startswith(f"mtd_debug read /dev/mtd1 0x1a0000 {len(IMAGE)} /tmp/tan-linux-mtd-rb-")
+    assert cmds[4].startswith("sha256sum /tmp/tan-linux-mtd-rb-")
+    assert cmds[5].startswith("rm -f /tmp/tan-linux-mtd-") and "-rb-" in cmds[5]
+    assert not any(c.startswith("flashcp") or " 0 0" in c for c in cmds)
+    assert all(any("root@10.0.0.7" in a for a in c) for c in _calls(tmp_path))
+    scp = next(c for c in _calls(tmp_path) if c[0] == "scp")
+    assert os.path.isabs(scp[scp.index("--") + 1])
     block = entry["linuxMtd"]
     local = hashlib.sha256(IMAGE).hexdigest()
     assert block["digest"] == {"algorithm": "sha256", "local": local, "readBack": local, "match": True}
     assert [s["step"] for s in block["steps"]] == [
-        "probe-partitions", "copy-image", "erase", "write", "read-back", "cleanup",
+        "probe-partitions", "copy-image", "erase", "write", "read-back", "digest", "cleanup",
     ]
-    assert block["tempFileRemoved"] is True
-    assert "remoteproc" in entry["followUp"] and "NOT running" in entry["followUp"]
+    assert block["offset"] == OFFSET and block["eraseBlocks"] == blocks and block["tempFileRemoved"]
+    assert "ALP_V2N_CM33_SRAM_NS" in entry["followUp"] and "DSW1" in entry["followUp"]
     assert not _codes(payload)
 
 
 def test_without_confirm_nothing_is_spawned(tmp_path):
     rc, payload, _ = _flash(tmp_path, confirm=False)
-    assert _entry(payload)["status"] == "planned" and "flash.confirm-required" in _codes(payload), payload
+    assert _entry(payload)["status"] == "planned" and "flash.confirm-required" in _codes(payload)
     assert _calls(tmp_path) == []
 
 
-def test_cli_host_overrides_the_manifest(tmp_path):
+def test_cli_host_overrides_the_manifest_and_leading_zero_partition_agrees(tmp_path):
     rc, payload, _ = _flash(
-        tmp_path, "{user: root, flash_partition: mtd1}", "--target-host", "board.lab", "--partition", "mtd1"
+        tmp_path, "{user: root, flash_partition: mtd1}", "--target-host", "board.lab",
+        "--partition", "mtd01",
     )
     assert rc == 0, payload
     assert all(any("root@board.lab" in a for a in c) for c in _calls(tmp_path))
@@ -187,10 +239,16 @@ def test_missing_partition_is_refused_never_defaulted(tmp_path):
     assert _calls(tmp_path) == []
 
 
-def test_mtd0_is_refused_even_with_a_matching_flag(tmp_path):
-    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd0}", "--partition", "mtd0")
+@pytest.mark.parametrize("ref", ["mtd0", "mtd00", "mtd000"])
+def test_mtd0_is_refused_in_every_spelling(tmp_path, ref):
+    rc, payload, _ = _flash(tmp_path, f"{{host: h1, flash_partition: {ref}}}")
     assert rc == 1 and "flash.linux-mtd-partition-refused" in _codes(payload)
     assert _calls(tmp_path) == []
+
+
+def test_a_name_that_resolves_to_mtd0_is_refused(tmp_path):
+    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: bl2}")
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-partition-refused")
 
 
 def test_cli_partition_disagreeing_with_the_manifest_is_refused(tmp_path):
@@ -199,38 +257,148 @@ def test_cli_partition_disagreeing_with_the_manifest_is_refused(tmp_path):
     assert _calls(tmp_path) == []
 
 
+def test_a_partition_given_by_name_resolves_through_proc_mtd(tmp_path):
+    rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: fip}")
+    assert rc == 0, payload
+    assert _remote_cmds(tmp_path)[1].startswith("flash_erase /dev/mtd1 0x1a0000 ")
+
+
+def test_a_reordered_table_cannot_redirect_the_write(tmp_path):
+    swapped = 'mtd0: 00200000 00001000 "bl2"\nmtd1: 00800000 00001000 "rootfs"\n'
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, flash_partition: mtd1, partition_name: fip}",
+        env={"FAKE_PROC_MTD": swapped},
+    )
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-partition-mismatch")
+
+
 def test_partition_absent_from_proc_mtd_writes_nothing(tmp_path):
     rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd5}")
-    assert rc == 1 and "flash.linux-mtd-partition-absent" in _codes(payload)
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-partition-absent")
     assert _remote_cmds(tmp_path) == ["cat /proc/mtd"]
-    assert [c[0] for c in _calls(tmp_path)] == ["ssh"]
 
 
-def test_image_larger_than_the_partition_writes_nothing(tmp_path):
-    small = 'mtd0: 00200000 00001000 "bl2"\nmtd1: 00000400 00001000 "cm33"\n'
+def test_window_past_the_partition_end_is_refused(tmp_path):
+    small = 'mtd0: 00200000 00001000 "bl2"\nmtd1: 001A1000 00001000 "fip"\n'
     rc, payload, _ = _flash(tmp_path, env={"FAKE_PROC_MTD": small})
-    assert rc == 1 and "flash.linux-mtd-image-too-large" in _codes(payload)
-    assert [c[0] for c in _calls(tmp_path)] == ["ssh"]
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-image-too-large")
+
+
+def test_unaligned_offset_is_refused(tmp_path):
+    odd = 'mtd0: 00200000 00001000 "bl2"\nmtd1: 00800000 00030000 "fip"\n'
+    rc, payload, _ = _flash(tmp_path, env={"FAKE_PROC_MTD": odd})
+    _refused_untouched(tmp_path, rc, payload, "flash.linux-mtd-invalid")
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        BODY,  # a raw zephyr.bin, no pad
+        bytes([1]) + bytes(0x2FFF) + struct.pack("<II", 0x08100000, 0x08003101) + BODY,
+        padded(sp=0x20001000),
+        padded(reset=0x08003100),  # no Thumb bit
+        padded(reset=0x09003101),  # outside the window
+        padded(reset=0x08002001),  # below sram_base + pad
+        bytes(0x3000),  # no vector table
+        padded(body=bytes(0x30000)),  # over image_max
+    ],
+    ids=["unpadded", "dirty-pad", "bad-sp", "no-thumb", "reset-high", "reset-low", "no-vectors", "too-big"],
+)
+def test_an_image_that_is_not_a_padded_cm33_image_is_refused_before_scp(tmp_path, image):
+    rc, payload, _ = _flash(tmp_path, image=image)
+    assert rc == 1 and "flash.linux-mtd-image-invalid" in _codes(payload)
+    assert _calls(tmp_path) == []
+
+
+def test_no_boot_facts_means_no_write(tmp_path):
+    rc, payload, _ = _flash(tmp_path, soc=None)
+    assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
+    assert _calls(tmp_path) == []
+
+
+def test_boot_facts_from_flash_args_when_no_sdk_metadata(tmp_path):
+    args = (
+        "{host: h1, flash_partition: mtd1, sram_base: 0x08000000, image_pad: 0x3000, "
+        "image_max: 0x30000, xspi_offset: 0x1A0000}"
+    )
+    rc, payload, _ = _flash(tmp_path, args, soc=None)
+    assert rc == 0, payload
+    assert _remote_cmds(tmp_path)[1].startswith("flash_erase /dev/mtd1 0x1a0000 ")
+
+
+def test_flash_args_that_disagree_with_the_sdk_metadata_are_refused(tmp_path):
+    args = (
+        "{host: h1, flash_partition: mtd1, sram_base: 0x08000000, image_pad: 0x3000, "
+        "image_max: 0x30000, xspi_offset: 0x1000}"
+    )
+    rc, payload, _ = _flash(tmp_path, args)
+    assert rc == 1 and "flash.linux-mtd-invalid" in _codes(payload)
+    assert _calls(tmp_path) == []
 
 
 def test_readback_mismatch_is_a_coded_error_and_still_cleans_up(tmp_path):
     rc, payload, _ = _flash(tmp_path, env={"FAKE_FAIL": "corrupt"})
     assert rc == 1 and "flash.linux-mtd-readback-mismatch" in _codes(payload)
     digest = _entry(payload)["linuxMtd"]["digest"]
-    assert digest["match"] is False and digest["readBack"] == "0" * 64
+    assert digest["match"] is False
     assert _remote_cmds(tmp_path)[-1].startswith("rm -f /tmp/tan-linux-mtd-")
     assert "followUp" not in _entry(payload)
 
 
-@pytest.mark.parametrize("step", ["scp", "erase", "flashcp"])
-def test_a_failing_step_stops_the_run_and_cleans_up(tmp_path, step):
+@pytest.mark.parametrize(
+    ("step", "partial"),
+    [("scp", False), ("erase", True), ("mtd_write", True), ("mtd_read", False), ("sha", False)],
+)
+def test_a_failing_step_stops_the_run_cleans_up_and_names_the_hazard(tmp_path, step, partial):
     rc, payload, _ = _flash(tmp_path, env={"FAKE_FAIL": step})
     assert rc == 1 and "flash.linux-mtd-failed" in _codes(payload)
-    cmds = _remote_cmds(tmp_path)
-    assert not any(c.startswith("head -c") for c in cmds)
-    assert cmds[-1].startswith("rm -f /tmp/tan-linux-mtd-")
+    message = _entry(payload)["message"]
+    assert ("partial image" in message) is partial
+    assert _remote_cmds(tmp_path)[-1].startswith("rm -f /tmp/tan-linux-mtd-")
     if step == "erase":
-        assert not any(c.startswith("flashcp") for c in cmds)
+        assert not any(c.startswith("mtd_debug") for c in _remote_cmds(tmp_path))
+
+
+def test_a_timed_out_remote_step_says_it_may_still_be_running(tmp_path, monkeypatch):
+    bindir = _fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_DIR", str(tmp_path / "fake"))
+    monkeypatch.setenv("FAKE_PROC_MTD", PROC_MTD)
+    real = fm._spawn
+
+    def spawn(argv):
+        if "flash_erase" in argv[-1]:
+            return 124, "", "timed out after 300s"
+        return real(argv)
+
+    monkeypatch.setattr(fm, "_spawn", spawn)
+    img = tmp_path / "m33_fw.bin"
+    img.write_bytes(IMAGE)
+    sdk = tmp_path / "work"
+    _sdk(sdk, SOC)
+    ctx = SimpleNamespace(
+        target_host=None, target_partition=None, sdk_root=str(sdk / "sdk"), sku="E1M-V2N101",
+        dry_run=False, force_confirm=True,
+    )
+    seen = {}
+
+    def entry(method, status, rc, message, **kw):
+        seen.update(status=status, message=message, **kw)
+        return seen
+
+    rc, _, _ = fm.run_linux_mtd_entry(
+        SimpleNamespace(id="cm33"), ctx, artefact_path=str(img),
+        flash_args={"host": "h1", "flash_partition": "mtd1"}, entry=entry, lines=[], report={},
+    )
+    assert rc == 1 and seen["issue_code"] == "flash.linux-mtd-failed"
+    assert "STILL be running" in seen["message"] and "partial image" in seen["message"]
+
+
+def test_a_temp_file_that_cannot_be_removed_is_a_warning(tmp_path):
+    rc, payload, _ = _flash(tmp_path, env={"FAKE_FAIL": "rm"})
+    assert rc == 0, payload
+    warning = next(i for i in payload["issues"] if i["code"] == "flash.linux-mtd-cleanup-failed")
+    assert warning["severity"] == "warning" and "/tmp/tan-linux-mtd-" in warning["message"]
 
 
 def test_dry_run_prints_the_plan_and_spawns_nothing(tmp_path):
@@ -239,14 +407,23 @@ def test_dry_run_prints_the_plan_and_spawns_nothing(tmp_path):
     entry = _entry(payload)
     assert entry["status"] == "ok" and "would run" in entry["message"]
     steps = [p["step"] for p in entry["linuxMtd"]["plannedSteps"]]
-    assert steps == ["probe-partitions", "copy-image", "erase", "write", "read-back", "cleanup"]
-    assert "followUp" in entry
+    assert steps == [
+        "probe-partitions", "copy-image", "erase", "write", "read-back", "digest", "cleanup",
+    ]
+    assert "followUp" in entry and "0x1a0000" in entry["message"]
     assert _calls(tmp_path) == []
 
 
-def test_dry_run_still_applies_the_partition_rules(tmp_path):
+def test_dry_run_still_applies_the_partition_and_facts_rules(tmp_path):
     rc, payload, _ = _flash(tmp_path, "{host: h1, flash_partition: mtd0}", "--dry-run", confirm=False)
     assert rc == 1 and "flash.linux-mtd-partition-refused" in _codes(payload)
+
+
+def test_dry_run_without_boot_facts_is_refused(tmp_path):
+    rc, payload, _ = _flash(
+        tmp_path, "{host: h1, flash_partition: mtd1}", "--dry-run", confirm=False, soc=None
+    )
+    assert rc == 1 and "flash.linux-mtd-boot-facts-unavailable" in _codes(payload)
 
 
 @pytest.mark.parametrize(
@@ -254,11 +431,14 @@ def test_dry_run_still_applies_the_partition_rules(tmp_path):
     [
         "{host: '-oProxyCommand=touch /tmp/pwned', flash_partition: mtd1}",
         "{host: 'h1;touch /tmp/pwned', flash_partition: mtd1}",
+        "{host: 'h1:/etc', flash_partition: mtd1}",
+        "{host: '[::1]', flash_partition: mtd1}",
         "{host: h1, user: 'root;id', flash_partition: mtd1}",
         "{host: h1, user: '-oX=y', flash_partition: mtd1}",
         "{host: h1, port: '22; id', flash_partition: mtd1}",
         "{host: h1, flash_partition: 'mtd1; rm -rf /'}",
         "{host: h1, flash_partition: '../dev/sda'}",
+        "{host: h1, flash_partition: mtd1, partition_name: 'fip; id'}",
     ],
 )
 def test_hostile_values_are_refused_before_anything_spawns(tmp_path, flash_args):
@@ -282,13 +462,28 @@ def test_hostile_local_path_is_one_argv_element_and_never_reaches_the_remote_she
     assert not any("pwned" in c for c in _remote_cmds(tmp_path))
 
 
+def test_target_options_for_another_method_are_disclosed(tmp_path):
+    rc, payload, _ = _flash(
+        tmp_path, "{}", "--dry-run", "--target-host", "h1", method="zephyr_west_flash",
+        confirm=False,
+    )
+    assert "flash.linux-mtd-option-ignored" in _codes(payload)
+
+
 def test_every_remote_token_is_shell_quoted():
     assert core.remote("rm", "-f", "/tmp/a b;$(id)") == "rm -f '/tmp/a b;$(id)'"
     spec = core.resolve_spec({"host": "h1", "flash_partition": "mtd1"})
-    argv = core.ssh_argv(spec.target, core.remote_erase(spec))
-    assert argv[-3:] == ["--", "h1", "flash_erase /dev/mtd1 0 0"]
-    assert "BatchMode=yes" in argv
+    argv = core.ssh_argv(spec.target, core.remote_proc_mtd())
+    assert argv[-3:] == ["--", "h1", "cat /proc/mtd"] and "BatchMode=yes" in argv
+
+
+def test_leading_zero_indexes_are_normalised():
+    assert core.canonical_partition("mtd01", "x") == "mtd1"
+    assert core.resolve_spec({"host": "h", "flash_partition": "mtd01"}, cli_partition="mtd1").partition == "mtd1"
 
 
 def test_proc_mtd_parsing():
-    assert core.parse_proc_mtd(PROC_MTD) == {"mtd0": 0x200000, "mtd1": 0x400000}
+    rows = core.parse_proc_mtd(PROC_MTD)
+    assert [(r.index, r.size, r.erasesize, r.name) for r in rows] == [
+        (0, 0x200000, 0x1000, "bl2"), (1, 0x800000, 0x1000, "fip"),
+    ]

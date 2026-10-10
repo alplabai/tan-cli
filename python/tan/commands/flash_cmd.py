@@ -4833,6 +4833,13 @@ def _run(
             [f"flash: {m}" for _, m in unsupported],
             sdk,
         )
+    if target_host or target_partition:
+        from tan.commands.flash_linux_mtd import ignored_options_note
+
+        note = ignored_options_note(plan.targets, select_flash_method)
+        if note:
+            text_lines.append(note)
+            issues.append(Issue("flash.linux-mtd-option-ignored", "warning", note))
     if replace_atoc and ram:
         # tan-cli#1267: a RAM-run writes nothing to MRAM, so there is no ATOC for
         # the override to apply to. Said out loud rather than dropped, the same
@@ -4905,6 +4912,13 @@ def _run(
             )
             text_lines.append(required)
             issues.append(Issue("flash.probe-isolation-required", "warning", required))
+        if entry.extra.get("linuxMtd", {}).get("tempFileRemoved") is False:
+            message = (
+                f"{entry.id}: the temp files {', '.join(entry.extra['linuxMtd']['tempFiles'])} "
+                "could not be removed from the target's /tmp; delete them by hand."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.linux-mtd-cleanup-failed", "warning", message))
         if entry.recovery_armed:
             # tan-cli#611. Emitted BEFORE the entry's own outcome lines are
             # counted, and to both channels for the same reason `flash.dpidr-
