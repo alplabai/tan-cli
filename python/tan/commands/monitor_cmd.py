@@ -128,8 +128,9 @@ def _pyserial_missing() -> MonitorError:
     return MonitorError(
         "monitor.pyserial-missing",
         "pyserial is required for `tan monitor`. Install it with "
-        '`pip install "tan-cli[monitor]"`. A frozen `tan` binary bundles it at '
-        "build time, so a binary built without that extra cannot gain it here.",
+        '`pip install "./python[monitor]"` from a tan-cli checkout (tan-cli is '
+        "not on PyPI), or `pip install pyserial`. A frozen `tan` binary bundles "
+        "it at build time, so a binary built without that extra cannot gain it here.",
         ExitCode.RUNTIME_FAILURE,
         {"schemaVersion": DATA_SCHEMA_VERSION},
     )
@@ -508,8 +509,8 @@ def monitor(
         None,
         "--until",
         help="With --capture: stop at the first line (or unterminated partial line, "
-        "e.g. a prompt) matching this regex; the envelope carries it. Each line "
-        "is searched on its first 4 KiB, a partial line on its last 4 KiB. A "
+        "e.g. a prompt) matching this regex; the envelope carries it. A line "
+        "longer than 4 KiB is searched on its last 4 KiB (complete or partial). A "
         "regex cannot be interrupted inside one search. No match in time is an error.",
     ),
     log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),

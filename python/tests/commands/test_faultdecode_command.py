@@ -1451,3 +1451,21 @@ def test_every_registered_format_json_command_can_emit_an_envelope():
         "`{command, ok, exitCode, project, data, issues}` the extension's "
         f"`isEnvelope` guard requires: {offenders}"
     )
+
+
+def test_a_register_wider_than_32_bits_is_refused_not_truncated():
+    """tan-cli#1488: `--cfsr 0x100008200` decoded its low word at exit 0."""
+    result = runner.invoke(app, ["--format", "json", "--cfsr", "0x100008200"])
+    assert result.exit_code == 2
+    env = json.loads(result.stdout)
+    assert env["issues"][0]["code"] == "faultdecode.invalid-register-value"
+    assert "32 bits" in env["issues"][0]["message"]
+    ok = runner.invoke(app, ["--format", "json", "--cfsr", "0xFFFFFFFF"])
+    assert ok.exit_code == 0, ok.output
+
+
+def test_a_dump_register_wider_than_32_bits_is_ignored():
+    from tan.core.faultdecode import parse_dump
+
+    assert parse_dump("CFSR = 0x100008200") == {}
+    assert parse_dump("CFSR = 0x00008200")["cfsr"] == 0x8200

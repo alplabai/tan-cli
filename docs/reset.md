@@ -75,9 +75,9 @@ written, erased or flashed. A test holds the generated script to that verb list.
   `--confirm-timeout`. A matching line gives `resetObserved: true` and
   `data.console`; none gives `reset.boot-not-observed` (exit 1). Only bytes
   arriving after J-Link exits count, so pick a banner printed some time after
-  reset. `--confirm-console` needs pyserial: install `tan-cli[monitor]`
-  (`pip install -e "./python[monitor]"` for a checkout; a bare editable install
-  lacks it and the error says so).
+  reset. `--confirm-console` needs pyserial: install it with
+  `pip install "./python[monitor]"` from a checkout (tan-cli is not on PyPI; a
+  bare editable install lacks it and the error says so).
 
 ## Confirmation window, and what an nRESET pulse cannot do
 

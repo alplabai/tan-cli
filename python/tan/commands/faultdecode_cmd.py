@@ -147,11 +147,14 @@ class NegativeRegisterValue(Exception):
     else in this command.
     """
 
-    def __init__(self, option: str, value: str) -> None:
+    def __init__(self, option: str, value: str, *, too_wide: bool = False) -> None:
         self.option = option
         self.value = value
         self.message = (
-            f"--{option}: {value!r} is negative -- a fault register value is "
+            f"--{option}: {value!r} does not fit in 32 bits -- a fault register is "
+            "a 32-bit word, so this is likely a mistyped extra digit."
+            if too_wide
+            else f"--{option}: {value!r} is negative -- a fault register value is "
             "unsigned, so there is nothing to decode. Pass the value exactly as "
             "the dump printed it (hex, with or without a 0x prefix)."
         )
@@ -184,6 +187,8 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
         ) from err
     if parsed < 0:
         raise NegativeRegisterValue(option, value)
+    if parsed > 0xFFFFFFFF:
+        raise NegativeRegisterValue(option, value, too_wide=True)
     return parsed
 
 

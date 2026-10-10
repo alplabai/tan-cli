@@ -395,9 +395,12 @@ def parse_dump(text: str) -> dict[str, int]:
         key = canon[m.group(1).lower()]
         raw = m.group(2)
         try:
-            found[key] = int(raw, 16)
+            value = int(raw, 16)
         except ValueError:  # pragma: no cover - regex already constrains this
             continue
+        if value > 0xFFFFFFFF:
+            continue  # not a 32-bit register word; never decode its low half
+        found[key] = value
 
     # Compose CFSR from sub-registers if a combined CFSR was not given outright.
     if "cfsr" not in found:

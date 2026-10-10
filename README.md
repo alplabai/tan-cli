@@ -359,7 +359,7 @@ move.
 | Remove build output | `tan clean` |
 | Generate configuration files | `tan generate` |
 | Check the host setup | `tan doctor` |
-| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
+| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --port rfc2217://gw:4001 --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
 | Generate debugger settings | `tan debug-config` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |
@@ -506,7 +506,7 @@ of that, and **every registered command parses them**:
 `tan/core/global_flags.py` holds the shared spec and injects it into any
 command that does not already declare the flag itself. What keeps that true is
 split in two. `tests/gates/test_global_flags_gate.py` fails the build for the
-29 commands that reject an unknown option; it cannot speak for `lock`,
+30 commands that reject an unknown option; it cannot speak for `lock`,
 `migrate` and `quality`, which register `ignore_unknown_options`
 (`west_forward_cmd.py`) and would swallow an undeclared flag into the `west`
 passthrough rather than reject it — those three are held by
