@@ -597,7 +597,7 @@ boot_order: []
     # Names the removal explicitly -- not the generic "no registered backend"
     # phrasing every OTHER unrecognised method still gets (pinned below).
     assert "tan-cli#732" in message, message
-    assert "GD32 bridge programming has separated out of tan" in message, message
+    assert "this backend no longer exists" in message, message
     # Names the actual replacement path, not just that one no longer exists.
     assert "alp_ota_spi_bridge" in message, message
     assert "no registered backend" not in message, message

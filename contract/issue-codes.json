@@ -1241,7 +1241,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "RETIRED by tan-cli#732, which removed the swd_probe flash backend entirely -- GD32 programming is separating out of tan (the GD32's field-update path, update_channel: alp_ota_spi_bridge, is untouched and stays; this was swd_probe's local-write path only). This code was the machine-readable half of a caveat on an swd_probe ELF/HEX write whose core never halted (added closing tan-cli#540; see the git history of this entry for the full mechanism, now deleted with _swd_probe_qualified_message/_swd_probe_halt_markers/jlink_commander_script). Pre-consumer -- nothing in alp-sdk-vscode matched this code, so retiring it is not a breaking wire change. RESERVED: this spelling must never be reused for a different verdict, which is what the frozen/retired gate asserts."
+      "note": "RETIRED by tan-cli#732, which removed the swd_probe flash backend entirely -- the field-update path, update_channel: alp_ota_spi_bridge, is untouched and stays; this was swd_probe's local-write path only. This code was the machine-readable half of a caveat on an swd_probe ELF/HEX write whose core never halted (added closing tan-cli#540; see the git history of this entry for the full mechanism, now deleted with _swd_probe_qualified_message/_swd_probe_halt_markers/jlink_commander_script). Pre-consumer -- nothing in alp-sdk-vscode matched this code, so retiring it is not a breaking wire change. RESERVED: this spelling must never be reused for a different verdict, which is what the frozen/retired gate asserts."
     },
     {
       "code": "generate.in-process-unavailable",
