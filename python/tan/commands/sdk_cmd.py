@@ -1575,7 +1575,7 @@ def _run_remove(
                         f'the registered global default for project "{origin}" names an '
                         f"install that contained {target_posix}; it was left in "
                         f"~/.alp/sdk-defaults.json but is now incomplete -- re-run "
-                        f"`tan sdk install` or remove that registry entry.",
+                        f"restore that SDK or remove that registry entry.",
                     )
                     for origin in containing
                 ],
