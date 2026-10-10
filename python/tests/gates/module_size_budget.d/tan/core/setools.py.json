@@ -5,11 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      62,
+      69,
       "sign_slot0"
     ],
     [
-      95,
+      99,
       "_sign_in_scratch"
     ]
   ]
