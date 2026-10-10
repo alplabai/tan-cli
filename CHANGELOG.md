@@ -70,8 +70,9 @@ exact before/after:
 
 *This pre-release requires alp-sdk **`v0.17.0-rc2`** or newer (a pre-release;
 the stable `v0.17.0` is tracked in alp-sdk#2047). tan's planner mirror,
-vendored scaffold and planner oracle are pinned to alp-sdk
-`1d20103ba367668ab4ed9b139dc69c246198d2f1`, which `v0.17.0-rc2` is cut at.
+vendored scaffold and planner oracle are pinned to alp-sdk `v0.17.0-rc2`
+itself (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, the release merge of
+`dev` at `1d20103ba367668ab4ed9b139dc69c246198d2f1`).
 The floor is the first alp-sdk release containing
 `4b206c8a60d56af318741491a6fecdc499dfcd36` (alp-sdk#2793, the AEN SoM
 `power_domains:` block, alp-sdk#2784), which descends from the earlier floor

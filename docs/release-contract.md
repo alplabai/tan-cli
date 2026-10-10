@@ -538,7 +538,7 @@ region.
 **NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
 cleared separately; see "Pre-release cut" below. The planner mirror, the
 vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
-`1d20103ba367668ab4ed9b139dc69c246198d2f1`. The release a tag push is measured
+`v0.17.0-rc2` (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`). The release a tag push is measured
 against is the stable `v0.16.0`, which contains none of the six commits below.
 The pre-release `v0.17.0-rc1` (2026-10-08) contains the floor commit
 `b04bb0f7a0edf6af759053311ba66eda0158968b` (`compare/b04bb0f7a...v0.17.0-rc1`
@@ -593,8 +593,16 @@ unchanged. `v0.17.0-rc1` could not be the pair; measured against it on
   `SdkTooOldError` (`aen.som_power_domains`, alp-sdk#2784, schema added in
   `4b206c8a60d56af318741491a6fecdc499dfcd36`, which is not in rc1).
 
-So alp-sdk `v0.17.0-rc2` was cut at the pin,
-`1d20103ba367668ab4ed9b139dc69c246198d2f1`, and tan `v0.7.0-rc1` requires it.
+So alp-sdk `v0.17.0-rc2` was cut from `dev` at
+`1d20103ba367668ab4ed9b139dc69c246198d2f1` (tag commit
+`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, 2026-10-10), tan's pins moved to
+the tag commit, and tan `v0.7.0-rc1` requires it. The planner mirror had nothing
+to port across that range (`planner_resync.py`: up to date); the planner oracle
+was recaptured, and the only change was `sdkVersion` on all 103 build-plan
+emits. Measured against the tag the same day:
+`kconfig_fixture_parity.py` and `toolchain_lock_parity.py` exit 0,
+`scaffold_byte_parity.py` exits 0 with 10/10 pairs after the link re-vendor,
+and the planner module has 1860 passed, 0 failed.
 
 - **The floor is not the pin.** Each planner re-sync (tan-cli#1268, #1275,
   #1278, #1309, #1216, #1401, #1425, #1393) moved the pin along the same seven
