@@ -545,7 +545,9 @@ Halt/reset trouble in the load transcript (`CPU could not be halted`, `Could not
 core`, `SYSRESETREQ has confused core`, `Reset: Failed`, `CPU may have not been reset`) is
 reported as `jlink.resetFailures` plus the `flash.jlink-reset-unconfirmed` warning, and the
 message says the load only worked through a J-Link fallback. The words read and the verdicts are in
-`ram.coreCheck`.
+`ram.coreCheck`. `ram.loaded` (`data.entries[].ram`) is `true` once the load session is
+proven (the image is on the board and the device was reset), whatever fails afterwards; it is
+absent when the entry failed before that point.
 
 A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
 (`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever

@@ -487,7 +487,7 @@ def _perf_disagreement_note(point: PerfPoint, diffs: list[str]) -> str:
 #: absent, license-gated, footprint refused, ...) -- every HOST-fact
 #: note-authoring site in `tan.model.check`'s exact-compile path shares this
 #: prefix by construction (`_license_gated_exact_note`, `_footprint_refused_
-#: note`, and every degrade branch in `_maybe_exact_ethos_u`/`_vela_placement_
+#: note`, and every degrade branch in `_exact_ethos_u`/`_vela_placement_
 #: unreadable`). The BASIS-clause sites in that SAME path deliberately do
 #: NOT share it -- "This stays the static screen."/"Reporting the static
 #: screen instead." (`check.py:233`, `:341`, `:387`, `:429`, `:518`) -- and

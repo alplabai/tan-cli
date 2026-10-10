@@ -66,3 +66,36 @@ def test_default_input_follows_the_input_dtype(monkeypatch):
     _fake_ort(monkeypatch, [_Inp("x", ["batch", 3], "tensor(uint8)")], [])
     x = default_input("m.onnx")
     assert x.dtype == np.uint8 and x.shape == (1, 3)
+
+
+# tan-cli#1497: a user sample cast to the model input dtype is reported.
+def test_run_host_reports_a_float_to_int_cast(monkeypatch):
+    np = pytest.importorskip("numpy")
+    from tan.model.measure import run_host
+    _fake_ort(monkeypatch, [_Inp("ids", [1, 4], "tensor(int64)")], [])
+    res = run_host("m.onnx", np.full((1, 4), 1.5, dtype=np.float32), runs=1)
+    assert res.input_cast is not None and "truncated" in res.input_cast
+
+
+def test_run_host_reports_nothing_when_the_dtype_already_matches(monkeypatch):
+    np = pytest.importorskip("numpy")
+    from tan.model.measure import run_host
+    _fake_ort(monkeypatch, [_Inp("ids", [1, 4], "tensor(int64)")], [])
+    assert run_host("m.onnx", np.ones((1, 4), dtype=np.int64), runs=1).input_cast is None
+
+
+def test_describe_input_cast_flags_narrowing_and_ignores_identity():
+    pytest.importorskip("numpy")
+    from tan.model.measure import describe_input_cast
+    assert describe_input_cast("float64", "float32") is not None
+    assert describe_input_cast("float32", "float32") is None
+
+
+def test_describe_input_cast_wording_per_kind():
+    pytest.importorskip("numpy")
+    from tan.model.measure import describe_input_cast
+    assert "True" in describe_input_cast("float32", "bool")
+    assert "truncated" in describe_input_cast("float32", "int8")
+    assert "range" in describe_input_cast("int8", "uint8")          # same size, wraps
+    assert "range" in describe_input_cast("int64", "float32")
+    assert "may be lost" not in describe_input_cast("int8", "float32")   # lossless widening

@@ -212,7 +212,11 @@ def live_console(context: ProjectContext, label: str | None, live: LiveOptions) 
             exit_code = ExitCode.VALIDATION_FAILURE
         else:
             exit_code = ExitCode(int(code)) if int(code) else ExitCode.RUNTIME_FAILURE
-        return LiveRefusal(flash_issues, exit_code)
+        # tan-cli#1497: a failure AFTER the image was loaded and the device reset
+        # (Flow C's `ram.loaded`) still happened to the board: keep the provenance.
+        loaded = bool((entry.get("ram") or {}).get("loaded"))
+        return LiveRefusal(flash_issues, exit_code,
+                           flash=_provenance(entry, live) if loaded else None)
     console = entry.get("ramConsole") or {}
     text = console.get("text")
     console_path, save_issues = _save_console(context, text, data.get("buildRoot"))
