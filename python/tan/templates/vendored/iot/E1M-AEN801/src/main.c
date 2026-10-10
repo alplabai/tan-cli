@@ -15,7 +15,7 @@
  *   5. Disconnect cleanly.                        (alp_mqtt_close)
  *
  * Transport (E1M-AEN801): the CC3501E Wi-Fi6+BLE coprocessor bridge
- * (https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cc3501e-bridge.md), selected automatically by the AEN board
+ * (https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/cc3501e-bridge.md), selected automatically by the AEN board
  * emit from `iot.wifi: true` -- the app never names it, it just
  * calls <alp/iot.h>.  The bridge is silicon-validated (2026-06-24);
  * this is a real transport, not a stub.
@@ -23,7 +23,7 @@
  * Bridge bring-up (#2112): alp_wifi_open() only resolves to the CC3501E
  * backend once an application has attached a live bridge handle --
  * cc3501e_bridge_bringup() (src/cc3501e_bridge.c, the same copyable
- * template every https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/aen/aen-cc3501e-* app uses) does exactly that
+ * template every https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/examples/aen/aen-cc3501e-* app uses) does exactly that
  * before this app calls alp_wifi_open() below.  On native_sim the bring-up
  * fails fast (ALP_ERR_NOT_PRESENT_ON_THIS_SOC -- no SPI/GPIO backend
  * matches that SoC ref) and this app falls through to the same
@@ -32,7 +32,7 @@
  * The "sensor reading": to keep the focus on the transport, this
  * template publishes a synthetic metric (device uptime).  Swap
  * read_telemetry_value() for a real sensor read -- e.g. compose it
- * with the `sensor` template (https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-master,
+ * with the `sensor` template (https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/examples/peripheral-io/i2c-master,
  * TMP112 over <alp/chips/tmp112.h>) -- and the publish path here is
  * unchanged.
  *

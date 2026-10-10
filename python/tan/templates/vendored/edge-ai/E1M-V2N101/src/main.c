@@ -17,7 +17,7 @@
  * time are the real metrics; thresholds are configurable per product.  This is
  * NOT a certified GxP / 21-CFR-Part-11 data logger (no validated audit trail,
  * no calibration traceability, no tamper-proof storage).  The model is a stub
- * (see https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/ai/cold-chain-monitor/models/README.md); with no model the
+ * (see https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/examples/ai/cold-chain-monitor/models/README.md); with no model the
  * deterministic classifier + anomaly fallback run.
  *
  *
@@ -152,7 +152,7 @@ static const struct cc_config CFG = {
  * An unusable tensor (wrong shape from the stub backend) causes every
  * alp_inference_invoke() to return no usable output, which anomaly_score()
  * detects and routes to cc_anomaly_fallback().  See
- * https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/ai/cold-chain-monitor/models/README.md for the autoencoder
+ * https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/examples/ai/cold-chain-monitor/models/README.md for the autoencoder
  * training recipe to replace this stub. */
 static const uint8_t s_model[] = { 0x00 };
 

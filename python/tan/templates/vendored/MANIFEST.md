@@ -105,6 +105,15 @@ from an un-revendored SDK change.
   `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
 
+  Re-vendored links only, for tan `v0.7.0-rc1` (tan-cli#1258): alp-sdk
+  `v0.17.0-rc2` is cut at this commit, so the emit's doc-link renderer renders
+  `blob|tree/v0.17.0-rc2/`, and every vendored `v0.17.0-rc1` link (20 files)
+  plus the matching `DELIBERATE_EDITS` strings in `scaffold_byte_parity.py`
+  moved to `v0.17.0-rc2`. No other byte changed. Verified against a checkout
+  carrying a local `v0.17.0-rc2` tag (what `release-sdk-parity`'s
+  `fetch-tags: true` checkout sees): `scaffold_byte_parity.py` rc 0, **10/10**
+  pairs PASS; before the swap, 10/10 FAIL.
+
 - **Prior vendor point (all templates):** **`5a612e24a`**
   (`5a612e24ad895f35a1365792f9e52ee929926d2d`) — the
   `a5a137c7b` -> `5a612e24a` planner re-sync (alp-sdk#2820); nothing re-vendored.
