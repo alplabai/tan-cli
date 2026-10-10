@@ -20,6 +20,7 @@ size, and the operator needs it before arming.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -62,6 +63,100 @@ RESET_FAILURE_MARKERS = (
 def reset_failures(transcript: str) -> tuple[str, ...]:
     """Every reset-failure marker present in `transcript`, in marker order."""
     return tuple(m for m in RESET_FAILURE_MARKERS if m in transcript)
+
+
+#: Core-debug DHCSR (0xE000EDF0) bits (tan-cli#1453). S_RESET_ST and S_RETIRE_ST are
+#: sticky but CLEAR ON READ, and J-Link reads DHCSR itself (a failed halt, the probe's
+#: own `connect`) before tan does -- so only S_RESET_ST (a reset happened since the last
+#: read, with no lockup) counts as proof that THIS reset booted. S_SLEEP / S_RETIRE_ST
+#: alone are also what the OLD image idling looks like, so they prove only that a core is
+#: running, never that the reset took.
+DHCSR_ADDRESS = "0xE000EDF0"
+DHCSR_S_HALT = 1 << 17
+DHCSR_S_SLEEP = 1 << 18
+DHCSR_S_LOCKUP = 1 << 19
+DHCSR_S_RETIRE_ST = 1 << 24
+DHCSR_S_RESET_ST = 1 << 25
+_DHCSR_RAN = DHCSR_S_SLEEP | DHCSR_S_RETIRE_ST | DHCSR_S_RESET_ST
+
+#: Probe-transcript phrasing that means the probe session itself reset or tried to halt
+#: the core, which makes its DHCSR read evidence of that session, not of the flash's reset.
+PROBE_TROUBLE_MARKERS = ("Reset:",)
+
+#: DWT_PCSR, the program-counter sample register: a NON-halting witness of where a RUNNING
+#: core is executing (tan-cli#1453 review). DHCSR's S_RESET_ST is cleared by J-Link's own
+#: reads and will usually be gone, so this is the second witness. It needs the DWT unit
+#: present (Cortex-M55 has it) and readable while the core runs; a halted or sleeping core
+#: returns 0xFFFFFFFF, which is no sample at all.
+DWT_PCSR_ADDRESS = "0xE000101C"
+PCSR_NO_SAMPLE = 0xFFFFFFFF
+#: 0x00000000 is not a sample either (a gated or unpowered DWT reads as zero).
+PCSR_NO_SAMPLES = (PCSR_NO_SAMPLE, 0x00000000)
+PCSR_SAMPLES = 3
+
+
+def nohalt_probe_script(jlink_script: str) -> str:
+    """A fresh, read-only, NON-halting session: the write's preamble up to and including
+    `connect`, one `mem32` of DHCSR, `exit` (tan-cli#1453). Raises `ValueError` without a
+    `connect` line."""
+    out: list[str] = []
+    for line in jlink_script.splitlines():
+        out.append(line)
+        if line.strip().lower() == "connect":
+            break
+    else:
+        raise ValueError("the write script has no `connect` line to build a probe from")
+    out.append(f"mem32 {DHCSR_ADDRESS} 1")
+    for _ in range(PCSR_SAMPLES):
+        out += [f"mem32 {DWT_PCSR_ADDRESS} 1", "Sleep 5"]
+    out.append("exit")
+    return "\n".join(out) + "\n"
+
+
+def dhcsr_in(transcript: str) -> int | None:
+    """The DHCSR word a `mem32 0xE000EDF0 1` printed (`E000EDF0 = 03050001`), or `None`."""
+    match = re.search(r"E000EDF0\s*=\s*([0-9A-Fa-f]{8})", transcript)
+    return int(match.group(1), 16) if match else None
+
+
+def dhcsr_confirms_reset(value: int | None) -> bool:
+    """True only when `value` shows a reset since the last read (S_RESET_ST) on a core
+    that is neither halted nor locked up."""
+    return (
+        value is not None and bool(value & DHCSR_S_RESET_ST)
+        and not value & (DHCSR_S_HALT | DHCSR_S_LOCKUP)
+    )
+
+
+def dhcsr_core_running(value: int | None) -> bool:
+    """True when `value` shows a running core (retired an instruction, slept, or reset)
+    that is not halted or locked up. This does NOT say the reset took."""
+    return (
+        value is not None and bool(value & _DHCSR_RAN)
+        and not value & (DHCSR_S_HALT | DHCSR_S_LOCKUP)
+    )
+
+
+def pcsr_samples(transcript: str) -> list[int]:
+    """Every PC sample a `mem32 0xE000101C 1` printed, in order (0xFFFFFFFF included)."""
+    return [int(m, 16) for m in re.findall(r"E000101C\s*=\s*([0-9A-Fa-f]{8})", transcript)]
+
+
+def pcsr_in_ranges(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) -> bool:
+    """True when at least one real sample exists and EVERY real sample lies inside
+    `ranges` (`[start, end)` of the image tan just flashed). 0xFFFFFFFF is no evidence; a
+    sample outside the ranges (old image, loader, ROM) vetoes. The old image is not known to
+    tan, so an old image linked into the same range is not excluded -- that residual is why
+    S_RESET_ST stays the stronger witness."""
+    real = [x for x in samples if x not in PCSR_NO_SAMPLES]
+    return bool(real) and bool(ranges) and all(
+        any(lo <= x < hi for lo, hi in ranges) for x in real
+    )
+
+
+def probe_trouble(transcript: str) -> tuple[str, ...]:
+    """Reset/halt markers in a boot-probe transcript (it must have done neither)."""
+    return tuple(m for m in (*PROBE_TROUBLE_MARKERS, *RESET_FAILURE_MARKERS) if m in transcript)
 
 
 def dpidr_in(transcript: str) -> str | None:
@@ -128,6 +223,79 @@ def reset_tail(jlink_script: str) -> list[str]:
     return ["g"]
 
 
+#: What an in-session read-back proves (tan-cli#1458): the chip's bytes were read back after a
+#: halt, in the write's own session, before the reset -- NOT a fresh session, so J-Link's
+#: flash cache may sit between the read and the cells.
+VERIFICATION_INSESSION = "insession-readback"
+VERIFICATION_INSESSION_NOTE = (
+    "the written regions were read back with savebin in the SAME J-Link session as the write, "
+    "after a halt and before the PIN reset (a separate session would let the app run in "
+    "between); their sha256 matches the source files. J-Link may serve that read from its flash "
+    "cache, so this is NOT a fresh-session or cold-power-cycle proof (alp-sdk#2233); "
+    "`readback-verified` is reserved for a fresh-session match."
+)
+VERIFICATION_INSESSION_NORESET_NOTE = (
+    "the written regions were read back with savebin in the SAME J-Link session as the write, "
+    "after a halt; no reset command was sent (--no-reset); their sha256 matches the source "
+    "files. J-Link may serve that read from its flash cache, so this is NOT a fresh-session or "
+    "cold-power-cycle proof (alp-sdk#2233); `readback-verified` is reserved for a fresh-session "
+    "match."
+)
+
+#: J-Link Commander phrasing for "no debug access to the target right now" -- a gated
+#: debug domain (the app is in STOP/WFI) as much as a bad cable (tan-cli#1450).
+UNREACHABLE_MARKERS = (
+    "Could not read memory",
+    "Cannot read memory",
+    "Cannot connect to target",
+    "Could not connect to target",
+    "Connecting to target failed",
+)
+
+
+def target_unreachable(transcript: str) -> bool:
+    """Whether `transcript` says the target could not be reached for a memory read."""
+    return any(m in transcript for m in UNREACHABLE_MARKERS)
+
+
+def drop_reset_tail(jlink_script: str) -> str:
+    """The write script WITHOUT its reset/run tail (`RSetType` .. final `exit`): connect,
+    loadbin, verifybin, `exit`. For `--no-reset` (tan-cli#1445): no reset command is sent. J-Link's
+    `exit` may still resume the core (bench, tan-cli#1458), which is why the envelope says so."""
+    lines = [line for line in jlink_script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("rsettype"):
+            return "\n".join([*lines[:i], "exit"]) + "\n"
+    return jlink_script
+
+
+def combined_script(
+    jlink_script: str, regions: Sequence[tuple[str, int, str]], tail: bool = True
+) -> str:
+    """The write session WITH the read-back inside it (tan-cli#1458, bench): everything up to
+    the first `RSetType` (connect, loadbin, verifybin), then `h`, one `savebin` per region,
+    the write's own reset/run tail, `exit`. There is NO `exit` between the write and the read:
+    J-Link's `exit` resumes the core even after `h`, so a separate read-back session let the
+    app run on stale state before it connected. `regions` is `(address_hex, size, dest)`.
+    `tail=False` (`--no-reset`) ends after the read with `exit` and no reset/run commands; the
+    script then needs no `RSetType`. Otherwise raises `ValueError` without a `RSetType` tail to
+    keep (nothing to run after the read)."""
+    lines = [line for line in jlink_script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("rsettype"):
+            break
+    else:
+        if tail:
+            raise ValueError("the write script has no reset tail to run after the read-back")
+        i = len(lines) - 1 if lines and lines[-1].strip().lower() == "exit" else len(lines)
+    tail_lines = reset_tail(jlink_script) if tail else []
+    out = [*lines[:i], "h"]
+    for address, size, dest in regions:
+        validate_commander_path(dest, "the read-back destination path")
+        out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
+    return "\n".join([*out, *tail_lines, "exit"]) + "\n"
+
+
 def readback_script(
     jlink_script: str,
     regions: Sequence[tuple[str, int, str]],
@@ -136,6 +304,9 @@ def readback_script(
     write used (everything up to and including `connect`, so the same probe,
     interface, speed and part-number device), then one `savebin <file>, <addr>,
     <size>` per region and `exit`. `regions` is `(address_hex, size, dest_path)`.
+    The session ends at `exit` WITHOUT the write's reset/run tail (a raw sector write must
+    not reset or run anything, tan-cli#1446; Flow D reads inside its write session instead,
+    see [`combined_script`]).
     Raises `ValueError` if `jlink_script` has no `connect` line."""
     out: list[str] = []
     for line in jlink_script.splitlines():
@@ -147,7 +318,6 @@ def readback_script(
     for address, size, dest in regions:
         validate_commander_path(dest, "the read-back destination path")
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
-    out.extend(reset_tail(jlink_script))
     out.append("exit")
     return "\n".join(out) + "\n"
 

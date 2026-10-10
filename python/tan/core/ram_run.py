@@ -72,6 +72,8 @@ class Segment:
     vaddr: int
     filesz: int
     memsz: int
+    #: ELF `p_flags` (PF_X = 1). Defaults to R+X so hand-built segments stay executable.
+    flags: int = 5
 
 
 @dataclass(frozen=True)
@@ -98,9 +100,11 @@ def parse_elf(data: bytes) -> ElfImage:
         segments = []
         for i in range(phnum):
             off = phoff + i * phentsize
-            p_type, _o, p_vaddr, p_paddr, p_filesz, p_memsz = struct.unpack_from("<IIIIII", data, off)
+            p_type, _o, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags = struct.unpack_from(
+                "<IIIIIII", data, off
+            )
             if p_type == 1:  # PT_LOAD
-                segments.append(Segment(p_paddr, p_vaddr, p_filesz, p_memsz))
+                segments.append(Segment(p_paddr, p_vaddr, p_filesz, p_memsz, p_flags))
         symbols = _symbols(data, shoff, shentsize, shnum)
     except struct.error as err:
         raise RamRunError(f"truncated ELF file ({err})") from err

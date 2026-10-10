@@ -77,6 +77,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, Mapping
 
 #: POSIX-only, and the ONE reason this file has a conditional import
@@ -222,11 +223,26 @@ from tan.core.flow_d_report import (
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
     VERIFICATION_READBACK_NOTE,
+    DHCSR_S_HALT,
+    DHCSR_S_LOCKUP,
+    dhcsr_in,
+    dhcsr_confirms_reset,
+    pcsr_in_ranges,
+    pcsr_samples,
+    dhcsr_core_running,
+    probe_trouble,
     dpidr_in,
+    nohalt_probe_script,
     planned_write,
     readback_script,
     reset_failures,
     sha256_of,
+    combined_script,
+    drop_reset_tail,
+    VERIFICATION_INSESSION,
+    VERIFICATION_INSESSION_NORESET_NOTE,
+    VERIFICATION_INSESSION_NOTE,
+    target_unreachable,
     transcript_tail,
 )
 from tan.core.setools_scratch import cleanup_scratch, family_mismatch, resolve_device_config
@@ -1917,6 +1933,18 @@ _FLOW_D_VERIFIED_ONLY = (
     "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
     "did not halt)"
 )
+#: tan-cli#1445: `--no-reset`. Honest about what tan can and cannot promise: J-Link's `exit`
+#: has been seen to resume the core even without a reset command (bench, tan-cli#1458).
+#: tan-cli#1453 review: PCSR proves the NEW code runs, not that the SE pin reset took.
+_FLOW_D_NEW_IMAGE = (
+    "; cache-verified; PIN-reset requested, new image confirmed running without a halt: {witness}"
+)
+_FLOW_D_NO_RESET = (
+    "; cache-verified; --no-reset: no reset command was sent, but J-Link's exit may resume the "
+    "core (the board is not held in reset)"
+)
+#: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
+_FLOW_D_VERIFIED_NOHALT = "; cache-verified and PIN-reset (boot confirmed without a halt: {witness})"
 
 
 def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
@@ -2228,12 +2256,16 @@ class _Context:
     ram_wait: float = 1.5
     #: `--watch` specs (tan-cli#1436), raw; parsed and refused in `flash_ram`.
     ram_watch: tuple[str, ...] = ()
+    #: `--raw <file>@<addr>` specs (tan-cli#1446), raw; parsed and refused in `flash_raw`.
+    raw: tuple[str, ...] = ()
     #: `--assume-he` (tan-cli#1354): proceed when the attached-core check cannot confirm
     #: the M55-HE (ambiguous/unreadable ITCM). A documented risk, never the default.
     assume_he: bool = False
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
+    #: `--no-reset` (tan-cli#1445): Flow D sends no reset/run commands after the write.
+    no_reset: bool = False
     #: `--jlink PATH` (tan-cli#1336): the explicit J-Link binary, a CLI input.
     jlink_path: str | None = None
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
@@ -2861,6 +2893,7 @@ def _flash_entry_body(
     # tan-cli#1321: what the read-only DPIDR preflight read, for the `jlink` block.
     preflight_facts: dict[str, Any] = {}
     flow_d_writes: list[dict[str, Any]] = []
+    flow_d_ranges: list[tuple[int, int]] = []
 
     def entry(
         method: str | None,
@@ -3361,6 +3394,7 @@ def _flash_entry_body(
                     lines,
                 )
             flow_d_writes = _flow_d_writes(flash_args, shape)
+            flow_d_ranges = _flow_d_image_ranges(shape)
             # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
             # that reaches into another write's first sector (or a resident entry the
             # new ATOC does not rewrite) would erase it. Refused before anything is
@@ -3419,6 +3453,14 @@ def _flash_entry_body(
     if guard.append:
         # After `meta.build`, before the preview below, so `--dry-run` shows it.
         plan = replace(plan, argv=(*plan.argv, REPLACE_ATOC_FLAG))
+
+    if method == FLOW_D_METHOD and ctx.no_reset and plan.jlink_script:
+        # tan-cli#1445: no RSetType / r / g. The message and script shown by a preview match.
+        plan = replace(
+            plan,
+            jlink_script=drop_reset_tail(plan.jlink_script),
+            ok_message=plan.ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_NO_RESET, 1),
+        )
 
     if method == FLOW_D_METHOD:
         report["plan"] = _flow_d_plan_block(plan, flow_d_writes, report)
@@ -3526,8 +3568,17 @@ def _flash_entry_body(
             return 1, entry(method, "failed", 1, refusal), lines
 
     stale = clear_stale_verdict(guard_build_dir) if guard.guarded else None
+    # tan-cli#1450: under `--readback` the write session stops before the PIN reset; the
+    # read-back session carries the reset/run tail instead, so the chip is read BEFORE
+    # the new image boots (and may put the debug domain to sleep).
+    exec_plan = plan
+    inline: _InlineReadback | None = None
+    if method == FLOW_D_METHOD and ctx.readback and plan.jlink_script:
+        inline = _flow_d_inline_readback(plan, flow_d_writes, tail=not ctx.no_reset)
+        if inline is not None:
+            exec_plan = replace(plan, jlink_script=inline.script)
     outcome = _execute(
-        plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe
+        exec_plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe
     )
     if not outcome.success and probe_guard is not None and probe_guard.tripped:
         lines.append(f"  FAIL: {probe_guard.tripped}")
@@ -3540,11 +3591,35 @@ def _flash_entry_body(
     reset_unconfirmed = False
     readback_failure: tuple[str, str] | None = None
     if method == FLOW_D_METHOD:
-        reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
-        if outcome.success and ctx.readback:
-            readback_failure = _flow_d_readback(
-                plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
+        reset_unconfirmed = _flow_d_record(
+            exec_plan, outcome, ctx, entry_id, report, preflight_facts
+        )
+        if ctx.no_reset:
+            reset_unconfirmed = False
+            report["jlink"].update(
+                reset="not-sent",
+                resetNote="--no-reset: no reset command was sent. J-Link's exit may still resume "
+                "the core; the board is not held in reset. Reset or power-cycle when ready.",
             )
+        if outcome.success and ctx.readback:
+            if inline is not None:
+                readback_failure = _flow_d_inline_verdict(
+                    report.setdefault("jlink", {}), outcome, inline, ctx.no_reset
+                )
+            else:
+                # Fallback: no inline session could be built -- a fresh-session read-back.
+                readback_failure = _flow_d_readback(
+                    plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe,
+                    entry_id=entry_id,
+                )
+        if reset_unconfirmed and _flow_d_confirm_boot(
+            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id
+        ):
+            reset_unconfirmed = False
+    if inline is not None and readback_failure is None and outcome.success:
+        _flow_d_fresh_confirm(plan, ctx, report, inline, probe_guard, jlink_exe, entry_id)
+    if inline is not None:
+        shutil.rmtree(inline.tmp, ignore_errors=True)
     if readback_failure is not None:
         code, text = readback_failure
         msg = f"{method}[{entry_id}]: {text}"
@@ -3567,9 +3642,32 @@ def _flash_entry_body(
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
-            ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
-            if report.get("jlink", {}).get("verification") == VERIFICATION_READBACK:
-                ok_message += "; read back in a fresh J-Link session (sha256 match)"
+            if report.get("jlink", {}).get("resetConfirmedBy") == "pcsr":
+                ok_message = ok_message.replace(
+                    _FLOW_D_VERIFIED_AND_RESET,
+                    _FLOW_D_NEW_IMAGE.format(witness=report["jlink"]["witness"]), 1)
+            elif report.get("jlink", {}).get("resetConfirmedBy"):
+                ok_message = ok_message.replace(
+                    _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
+                        witness=report["jlink"]["witness"]), 1)
+            elif report.get("jlink", {}).get("reset") == "unconfirmed":
+                ok_message = ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY, 1)
+            else:
+                ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+            ver = report.get("jlink", {}).get("verification")
+            if ver == VERIFICATION_INSESSION:
+                ok_message += (
+                    "; read back in the write session after a halt, no reset command sent "
+                    "(sha256 match, in-session: may be J-Link cache)"
+                    if ctx.no_reset else
+                    "; read back in the write session after a halt and before the reset "
+                    "(sha256 match, in-session: may be J-Link cache)"
+                )
+            elif ver == VERIFICATION_READBACK:
+                ok_message += (
+                    "; read back in the write session and again in a fresh J-Link session (sha256 match)"
+                    if inline is not None else "; read back in a fresh J-Link session (sha256 match)"
+                )
         sections: tuple[str, ...] = ()
         if guard.guarded:
             ok_message, unguarded, sections = guarded_success(
@@ -3589,6 +3687,8 @@ def _flash_entry_body(
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
+    if inline is not None:
+        msg += _inline_failure_note(outcome, exec_plan, ctx.no_reset)
     refused = False
     noise: list[str] = []
     if guard.guarded:
@@ -3765,6 +3865,257 @@ def _flow_d_record(
     return bool(failures) and outcome.success
 
 
+def _flow_d_image_ranges(shape: FlowDShape) -> list[tuple[int, int]]:
+    """`[start, end)` ranges the NEW image executes from, for the PCSR boot witness: the
+    LOAD segments of the app ELF beside the flashed `.bin`; else, in the mramxip shape, the
+    blob's own MRAM window. Empty (no PCSR evidence possible) when neither is known."""
+    from tan.core.ram_run import RamRunError, parse_elf
+
+    try:
+        with open(os.path.splitext(shape.artefact)[0] + ".elf", "rb") as fh:
+            elf = parse_elf(fh.read())
+        ranges = [
+            (seg.vaddr, seg.vaddr + seg.filesz)
+            for seg in elf.segments if seg.filesz > 0 and seg.flags & 1  # PF_X only
+        ]
+        if ranges:
+            return ranges
+    except (OSError, RamRunError):
+        pass
+    try:
+        if shape.app_address is not None:
+            start = int(shape.app_address, 16)
+            return [(start, start + os.path.getsize(shape.artefact))]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _pcsr_witness(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) -> str:
+    real = [x for x in samples if x not in (0xFFFFFFFF, 0)]
+    inside = next(((lo, hi) for lo, hi in ranges if real and lo <= real[0] < hi), ranges[0])
+    return (
+        f"{len(real)} PC sample(s) (DWT_PCSR, e.g. 0x{real[0]:08X}) inside the image range "
+        f"0x{inside[0]:08X}-0x{inside[1]:08X}"
+    )
+
+
+def _save_session_log(
+    ctx: _Context, entry_id: str, label: str, script: str, outcome: _Outcome
+) -> dict[str, Any]:
+    """tan-cli#1458: every J-Link session of a Flow D run leaves its transcript under
+    `flash-logs/` (`alif_mram_jlink-<core>-<label>-<UTC>.log`), not only the write's.
+    `{"transcriptPath": ...}` or `{"transcriptError": ...}`; never raises."""
+    try:
+        return {"transcriptPath": _write_transcript(
+            _flow_d_log_path(ctx.build_root, f"{entry_id}-{label}"),
+            f"# tan flash {FLOW_D_METHOD}[{entry_id}] {label} session rc={outcome.returncode}\n"
+            f"## J-Link Commander script\n{_DISABLE_FW_UPDATE}{script}\n"
+            f"## stdout\n{outcome.stdout}\n## stderr\n{outcome.stderr}\n",
+        )}
+    except OSError as err:
+        return {"transcriptPath": None, "transcriptError": str(err)}
+
+
+def _flow_d_confirm_boot(
+    plan: FlashPlan,
+    ctx: _Context,
+    report: dict[str, Any],
+    probe_guard: "_ProbeGuard | None",
+    jlink_exe: str | None = None,
+    image_ranges: Sequence[tuple[int, int]] = (),
+    entry_id: str = "entry",
+) -> bool:
+    """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
+    quickly enters WFI/STOP gates the debug domain), which says nothing about whether
+    the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
+    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened; failing
+    that, PC samples (DWT_PCSR) that all fall inside the new image do (`resetConfirmedBy:
+    "pcsr"`). True, and
+    the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
+    `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
+    unconfirmed. Never raises, never writes."""
+    block = report.setdefault("jlink", {})
+    if plan.jlink_script is None:
+        return False
+    try:
+        script = nohalt_probe_script(plan.jlink_script)
+    except ValueError:
+        return False
+    probe = _execute(
+        dataclasses.replace(plan, jlink_script=script),
+        True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
+    )
+    text = f"{probe.stdout}\n{probe.stderr}"
+    saved = _save_session_log(ctx, entry_id, "bootprobe", script, probe)
+    value = dhcsr_in(text) if probe.success else None
+    trouble = probe_trouble(text)
+    block["bootProbe"] = {
+        "performed": True, "dhcsr": None if value is None else f"0x{value:08X}",
+        "trouble": list(trouble), **saved,
+    }
+    if trouble:
+        return False  # the probe itself reset/halted: its DHCSR says nothing about the flash
+    block["coreRunning"] = dhcsr_core_running(value)
+    samples = pcsr_samples(text)
+    block["bootProbe"]["pcsr"] = [f"0x{x:08X}" for x in samples]
+    block["bootProbe"]["imageRanges"] = [[f"0x{lo:08X}", f"0x{hi:08X}"] for lo, hi in image_ranges]
+    if dhcsr_confirms_reset(value):
+        block.update(
+            reset="pin-reset", resetConfirmedBy="dhcsr", dhcsr=f"0x{value:08X}",
+            witness=f"DHCSR 0x{value:08X}, S_RESET_ST set",
+            resetNote="the halt after the reset failed, but DHCSR (read without halting) shows "
+            "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
+        )
+        return True
+    # Second, non-halting witness: S_RESET_ST is usually already cleared by J-Link's own reads.
+    # The PC samples (DWT_PCSR) must all fall inside the image tan just flashed; 0xFFFFFFFF
+    # (halted/sleeping) is no evidence, and a halted or locked-up core never confirms.
+    halted = value is not None and bool(value & (DHCSR_S_HALT | DHCSR_S_LOCKUP))
+    if not halted and pcsr_in_ranges(samples, image_ranges):
+        block.update(
+            reset="new-image-running", resetConfirmedBy="pcsr",
+            dhcsr=None if value is None else f"0x{value:08X}",
+            witness=_pcsr_witness(samples, image_ranges),
+            resetNote="the halt after the reset failed, but every PC sample (DWT_PCSR, read "
+            "without halting) lies inside the image just flashed: the new code is running. That "
+            "does not prove the Secure Enclave PIN reset itself took.",
+        )
+        return True
+    return False
+
+
+@dataclass(frozen=True)
+class _InlineReadback:
+    """The write session with its read-back inside it (tan-cli#1458): the combined Commander
+    script, the regions it reads (`address, size, path, recorded sha256`), their temp
+    destinations and the temp directory to remove."""
+
+    script: str
+    regions: list[tuple[str, int, str, Any]]
+    dests: list[str]
+    tmp: str
+
+
+def _flow_d_inline_readback(
+    plan: FlashPlan, writes: list[dict[str, Any]], tail: bool = True
+) -> "_InlineReadback | None":
+    """Build the combined write + halt + savebin + reset session, or `None` (nothing to read
+    back, or the script has no reset tail) so the caller falls back to a fresh-session read."""
+    regions = [(w["address"], w["size"], w["path"], w.get("sha256")) for w in writes if w.get("size")]
+    if not regions or plan.jlink_script is None:
+        return None
+    try:  # hash BEFORE the write: a setools scratch file may be gone by the time it is judged
+        regions = [(a, n, p, h or sha256_of(p)) for (a, n, p, h) in regions]
+    except OSError:
+        return None
+    tmp = tempfile.mkdtemp(prefix="tan-readback-")
+    dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
+    try:
+        script = combined_script(
+            plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)], tail
+        )
+    except (ValueError, FlashPlanError):
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    return _InlineReadback(script, regions, dests, tmp)
+
+
+def _flow_d_inline_verdict(
+    block: dict[str, Any], outcome: _Outcome, inline: _InlineReadback, no_reset: bool = False
+) -> tuple[str, str] | None:
+    """Judge the dumps the combined session wrote. A match is `insession-readback` (J-Link may
+    serve the read from its flash cache); `readback-verified` needs the fresh-session confirm."""
+    block["readbackMode"] = "in-session"
+    return _readback_verdict(
+        block, inline.regions, inline.dests, verification=VERIFICATION_INSESSION,
+        note=VERIFICATION_INSESSION_NORESET_NOTE if no_reset else VERIFICATION_INSESSION_NOTE,
+    )
+
+
+def _inline_failure_note(outcome: _Outcome, plan: FlashPlan, no_reset: bool) -> str:
+    """tan-cli#1458 review: what a failed combined session did, from J-Link's echoed lines:
+    how many `verifybin`s printed "Verify successful." (did the write land?) and whether the
+    reset tail (`RSetType`) started (was the board reset?)."""
+    text = f"{outcome.stdout}\n{outcome.stderr}"
+    wanted = sum(1 for l in (plan.jlink_script or "").splitlines() if l.startswith("verifybin "))
+    passed = text.count("Verify successful.")
+    if wanted and passed >= wanted:
+        landed = f"the write landed (verifybin passed {passed}/{wanted})"
+    elif wanted:
+        landed = f"the write may NOT have landed (verifybin passed {passed}/{wanted})"
+    else:
+        landed = "verifybin was not part of this session"
+    if no_reset:
+        reset = "no reset command was part of this run (--no-reset)"
+    elif "J-Link>RSetType" in text:
+        reset = "the reset tail started"
+    else:
+        reset = "the reset tail did not run: the board was NOT reset: reset or power-cycle it"
+    return (
+        f" (--readback reads inside the write session: {landed}; {reset}; see "
+        "jlink.transcriptPath)"
+    )
+
+
+def _flow_d_fresh_confirm(
+    plan: FlashPlan,
+    ctx: _Context,
+    report: dict[str, Any],
+    inline: _InlineReadback,
+    probe_guard: "_ProbeGuard | None",
+    jlink_exe: str | None,
+    entry_id: str,
+) -> None:
+    """After the combined session (and its reset), a short FRESH `savebin` session. A match
+    upgrades `insession-readback` to `readback-verified`. It never fails the entry: after the
+    reset the app may already be in STOP (tan-cli#1450), so an unreachable target keeps
+    `insession-readback` with an info note, and a full-length difference is a warning (the
+    in-session read matched, so it may be low-power garbage or a real fault -- check the
+    transcript). Reported as `jlink.freshReadback` and `flash.readback-fresh-unconfirmed`."""
+    block = report.setdefault("jlink", {})
+    scratch: dict[str, Any] = {}
+    writes = [{"address": a, "size": n, "path": p, "sha256": h} for (a, n, p, h) in inline.regions]
+    failure = _flow_d_readback(
+        plan, None, ctx, writes, {"jlink": scratch}, probe_guard, jlink_exe, entry_id=entry_id  # type: ignore[arg-type]
+    )
+    info: dict[str, Any] = {"transcript": scratch.get("readbackSession", {}).get("transcriptPath")}
+    if failure is None:
+        block["verification"] = VERIFICATION_READBACK
+        block["verificationNote"] = VERIFICATION_READBACK_NOTE
+        info["state"] = "verified"
+    elif failure[0] == "flash.readback-mismatch":
+        info.update(state="differs", message=(
+            "the fresh-session read-back after the reset returned full-length bytes that differ "
+            "from the in-session read-back. The target may have been in low power (the debug "
+            "domain returns garbage) or the chip may not hold the image: power-cycle and read "
+            "the regions back again before trusting this flash."
+        ))
+    else:
+        info.update(state="unreachable", message=(
+            "no fresh-session confirmation: the target could not be read after the reset "
+            f"(low power?): {failure[1]} Verification stays `insession-readback`."
+        ))
+    block["freshReadback"] = info
+
+
+def _flow_d_readback_unreachable(
+    block: dict[str, Any], why: str, regions: list[dict[str, Any]] | None = None
+) -> tuple[str, str]:
+    """tan-cli#1450: the read-back could not READ the chip, which says nothing about what
+    the chip holds -- so it is `flash.readback-failed` ("nothing was compared"), never a
+    mismatch that advises a re-flash."""
+    block["readback"] = {"performed": False, "reason": "target unreachable (low-power?)"}
+    if regions is not None:
+        block["readback"]["regions"] = regions
+    return (
+        "flash.readback-failed",
+        f"target unreachable (low-power?): {why}, so nothing was compared. This is NOT "
+        "evidence the write failed -- do not re-flash on it. Wake the target (reset or "
+        "power-cycle it) and read the regions back again.",
+    )
+
+
 def _flow_d_readback(
     plan: FlashPlan,
     outcome: _Outcome,
@@ -3773,19 +4124,21 @@ def _flow_d_readback(
     report: dict[str, Any],
     probe_guard: "_ProbeGuard | None",
     jlink_exe: str | None = None,
+    entry_id: str = "entry",
 ) -> tuple[str, str] | None:
-    """`--readback` (tan-cli#1321): re-read every written region in a FRESH
-    J-Link session (`savebin`) and compare sha256 with the source file. `None`
-    when every region matches (the `jlink` block is upgraded to
-    `readback-verified`); else `(issue_code, message)`.
+    """A FRESH-session read-back (`savebin`, no reset, no run): `None` when every region
+    matches (the `jlink` block is upgraded to `readback-verified`); else
+    `(issue_code, message)`. Used by `--raw` (tan-cli#1446) and as Flow D's fallback when no
+    in-session read-back can be built (tan-cli#1458: Flow D reads inside the write session,
+    because J-Link's `exit` resumes the core between two sessions).
 
-    It spawns through `_execute` with the SAME `probe_guard` the write used, so
-    the probe-selection verification (ShowEmuList, TOCTOU re-check, shared-serial
-    isolation) runs again immediately before this spawn -- a read-back that went
-    to a different probe than the write would be a green light for the wrong
-    board. A guard refusal comes back as its own `flash.probe-*` code."""
-    regions = [(w["address"], w["size"], w["path"]) for w in writes if w.get("size")]
+    It spawns through `_execute` with the SAME `probe_guard` the write used, so the
+    probe-selection verification runs again immediately before this spawn; a guard refusal
+    comes back as its own `flash.probe-*` code."""
     block = report.setdefault("jlink", {})
+    regions = [
+        (w["address"], w["size"], w["path"], w.get("sha256")) for w in writes if w.get("size")
+    ]
     if not regions or plan.jlink_script is None:
         block["readback"] = {"performed": False, "reason": "no readable written region"}
         return "flash.readback-failed", "no written region to read back"
@@ -3794,54 +4147,73 @@ def _flow_d_readback(
         dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
         try:
             script = readback_script(
-                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)]
+                plan.jlink_script, [(a, n, d) for (a, n, _p, _h), d in zip(regions, dests)],
             )
         except (ValueError, FlashPlanError) as err:
             block["readback"] = {"performed": False, "reason": str(err)}
             return "flash.readback-failed", f"could not build the read-back session: {err}"
         read = _execute(
             dataclasses.replace(plan, jlink_script=script),
-            True, ctx.venv_bin, ctx.workspace, probe_guard,
-            jlink_exe=jlink_exe,
+            True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
         )
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
             return f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped
+        block["readbackSession"] = _save_session_log(ctx, entry_id, "readback", script, read)
         if not read.success:
             block["readback"] = {"performed": False, "reason": _capture_tail(read) or "session failed"}
+            if target_unreachable(f"{read.stdout}\n{read.stderr}"):
+                return _flow_d_readback_unreachable(block, "the session could not read memory")
             return (
                 "flash.readback-failed",
                 "the write landed and cache-verified, but the fresh read-back session "
                 f"failed: {_capture_tail(read) or 'no output'}",
             )
-        results = []
-        for (address, size, path), dest in zip(regions, dests):
-            expected = sha256_of(path)
-            try:
-                actual = sha256_of(dest)[:] if os.path.getsize(dest) == size else None
-                if actual is None:
-                    actual = f"short-read:{os.path.getsize(dest)}"
-            except OSError:
-                actual = "missing"
-            results.append(
-                {"address": address, "size": size, "sha256Expected": expected,
-                 "sha256Actual": actual, "match": actual == expected}
-            )
-        ok = all(r["match"] for r in results)
-        block["readback"] = {"performed": True, "ok": ok, "regions": results}
-        if not ok:
-            bad = [r["address"] for r in results if not r["match"]]
-            return (
-                "flash.readback-mismatch",
-                "the write cache-verified but a fresh J-Link session read DIFFERENT bytes "
-                f"back at {', '.join(bad)} -- the chip does not hold the image. Do not "
-                "trust this board's slot0; re-flash.",
-            )
-        block["verification"] = VERIFICATION_READBACK
-        block["verificationNote"] = VERIFICATION_READBACK_NOTE
-        return None
+        return _readback_verdict(block, regions, dests)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _readback_verdict(
+    block: dict[str, Any],
+    regions: list[tuple[str, int, str, Any]],
+    dests: list[str],
+    verification: str = VERIFICATION_READBACK,
+    note: str = VERIFICATION_READBACK_NOTE,
+) -> tuple[str, str] | None:
+    """Compare the dumps with the recorded hashes. A full-length dump that differs is a
+    mismatch whatever else happened; "unreachable" only when no region came back full-length."""
+    results = []
+    for (address, size, path, known), dest in zip(regions, dests):
+        expected = known or sha256_of(path)
+        try:
+            actual = sha256_of(dest) if os.path.getsize(dest) == size else None
+            if actual is None:
+                actual = f"short-read:{os.path.getsize(dest)}"
+        except OSError:
+            actual = "missing"
+        results.append(
+            {"address": address, "size": size, "sha256Expected": expected,
+             "sha256Actual": actual, "match": actual == expected}
+        )
+    ok = all(r["match"] for r in results)
+    block["readback"] = {"performed": True, "ok": ok, "regions": results}
+    short = [r for r in results if str(r["sha256Actual"]).startswith("short-read:")
+             or r["sha256Actual"] == "missing"]
+    # A full-length dump that differs is a real mismatch, whatever else happened.
+    mismatched = [r["address"] for r in results if not r["match"] and r not in short]
+    if mismatched:
+        return (
+            "flash.readback-mismatch",
+            "the write cache-verified but the J-Link read-back read DIFFERENT bytes "
+            f"back at {', '.join(mismatched)} -- the chip does not hold the image. Do not "
+            "trust this board's slot0; re-flash.",
+        )
+    if short:
+        return _flow_d_readback_unreachable(block, "J-Link returned no data", results)
+    block["verification"] = verification
+    block["verificationNote"] = note
+    return None
 
 
 def _flow_d_preflight(
@@ -4160,12 +4532,14 @@ def _run(
     enumerate_probes: Callable[[], Any] | None = None,
     no_device_config: bool = False,
     readback: bool = False,
+    no_reset: bool = False,
     jlink_path: str | None = None,
     ram: bool = False,
     ram_console: bool = False,
     ram_wait: float = 1.5,
     assume_he: bool = False,
     ram_watch: tuple[str, ...] = (),
+    raw: tuple[str, ...] = (),
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4388,14 +4762,28 @@ def _run(
         no_device_config=no_device_config,
         project_dir=app_dir,
         readback=readback,
+        no_reset=no_reset,
         jlink_path=jlink_path,
         ram=ram,
         ram_console=ram_console,
         ram_wait=ram_wait,
         ram_watch=ram_watch,
+        raw=raw,
         assume_he=assume_he,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
+    if ram and raw:
+        return _error(build_root, "flash.raw-invalid", "--raw writes MRAM; it cannot be combined with --ram.", sdk)
+    if raw:
+        # tan-cli#1446: a raw sector write targets exactly ONE slice (its J-Link part profile).
+        slices = [t for t in plan.targets if t.kind == "slice"]
+        if helper is not None or len(slices) != 1:
+            return _error(
+                build_root, "flash.raw-invalid",
+                "tan flash --raw writes through exactly one slice's J-Link part profile: pick it "
+                f"with --core <id> (and no --helper); {len(slices)} slice(s) matched.", sdk,
+            )
+        plan = dataclasses.replace(plan, targets=tuple(slices))
     if ram:
         # tan-cli#1313: Flow C RAM-runs exactly ONE slice; helpers are never RAM-run.
         slices = [t for t in plan.targets if t.kind == "slice"]
@@ -4406,6 +4794,20 @@ def _run(
                 f"(and no --helper); {len(slices)} slice(s) matched.", sdk,
             )
         plan = dataclasses.replace(plan, targets=tuple(slices))
+    if no_reset:
+        # tan-cli#1445 review: refused BEFORE anything is flashed, so a multi-entry run cannot
+        # flash a Flow D slice and only then reject a helper MCU or a west_flash slice.
+        others = [
+            t.id for t in plan.targets
+            if t.kind != "slice" or (select_flash_method(t) or t.flash_method) != FLOW_D_METHOD
+        ]
+        if others:
+            return _error(
+                build_root, "flash.no-reset-invalid",
+                "--no-reset only applies to a Flow D (alif_mram_jlink) write, but these entries "
+                f"use another method or are helper MCUs: {', '.join(others)}. Narrow the run with "
+                "--core <id>, or drop --no-reset.", sdk,
+            )
     unsupported = [] if ram else _probe_selector_unsupported(plan.targets, ctx)
     if unsupported:
         return (
@@ -4440,7 +4842,11 @@ def _run(
     written_by: dict[str, str] = {}
     watch_samples: list[dict[str, Any]] = []
     for target in plan.targets:
-        if ram:
+        if raw:
+            from tan.commands.flash_raw import run_raw_entry
+
+            rc, entry, lines = run_raw_entry(target, ctx)
+        elif ram:
             from tan.commands.flash_ram import run_ram_entry
 
             rc, entry, lines = run_ram_entry(target, ctx)
@@ -4531,6 +4937,12 @@ def _run(
                 issues.append(Issue("flash.ram-watch-unsafe-address", "error", entry.message))
             elif entry.issue_code == "flash.ram-failed":
                 issues.append(Issue("flash.ram-failed", "error", entry.message))
+            elif entry.issue_code == "flash.raw-invalid":
+                issues.append(Issue("flash.raw-invalid", "error", entry.message))
+            elif entry.issue_code == "flash.raw-reservation-required":
+                issues.append(Issue("flash.raw-reservation-required", "error", entry.message))
+            elif entry.issue_code == "flash.raw-failed":
+                issues.append(Issue("flash.raw-failed", "error", entry.message))
             elif entry.issue_code == "flash.setools-untrusted-source":
                 issues.append(Issue("flash.setools-untrusted-source", "error", entry.message))
             elif entry.issue_code == "flash.write-sector-overlap":
@@ -4604,14 +5016,37 @@ def _run(
             # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
             # not land, so the freshly written image was not necessarily started.
             # A warning, not an error: the write and its cache verify succeeded.
+            # tan-cli#1453: on Flow D this is `info`: the halt that would confirm the
+            # reset fails on an app that already sleeps, so it is not evidence of a
+            # failed boot. A RAM load keeps the warning.
+            running = entry.extra.get("jlink", {}).get("coreRunning")
             message = (
                 f"{entry.id}: J-Link reported a failed reset ("
                 + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
-                + "); the PIN reset that starts the new image is NOT confirmed -- "
-                "power-cycle the board and check it booted."
+                + "); "
+                + (
+                    "core running, reset not proven: a read-only DHCSR check shows a running "
+                    "core but not a reset since the write -- it may be the old image. "
+                    if running else
+                    "no witness: the halt failed and the read-only DHCSR/PCSR check read nothing "
+                    "that confirms the reset (the target may be in low power). "
+                )
+                + "If the console shows the new app it booted; otherwise power-cycle the board."
             )
             text_lines.append(message)
-            issues.append(Issue("flash.jlink-reset-unconfirmed", "warning", message))
+            issues.append(Issue(
+                "flash.jlink-reset-unconfirmed",
+                "info" if entry.method == FLOW_D_METHOD else "warning", message))
+        fresh = entry.extra.get("jlink", {}).get("freshReadback") or {}
+        if fresh.get("state") in ("differs", "unreachable"):
+            # tan-cli#1458 review: the in-session read matched but the fresh-session confirm
+            # did not -- info when the target was merely unreachable, a warning when it
+            # returned different bytes.
+            message = f"{entry.id}: {fresh['message']}"
+            text_lines.append(message)
+            issues.append(Issue(
+                "flash.readback-fresh-unconfirmed",
+                "warning" if fresh["state"] == "differs" else "info", message))
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
@@ -4949,6 +5384,23 @@ def flash(
         "HE attach leaves the core unhaltable (flash.ram-watch-invalid / "
         "flash.ram-watch-unsafe-address).",
     ),
+    raw: list[str] = typer.Option(
+        None,
+        "--raw",
+        metavar="FILE@ADDR",
+        help="Byte-exact MRAM sector write for bench backup/restore (tan-cli#1446; repeatable), "
+        "e.g. --raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000. Goes through ONE slice's "
+        "J-Link part profile (--core) and the same probe-selection guard, DPIDR preflight and "
+        "trusted J-Link binary as a Flow D write: loadbin + verifybin per blob, NO reset, no "
+        "signing, no SETOOLS. Refused (flash.raw-invalid) before any spawn: an address that is "
+        "not an explicit 0x literal or not 16 KiB sector-aligned, a blob that is empty or not a "
+        "whole number of sectors, a range outside the SKU's MRAM, overlapping ranges. tan never "
+        "derives an address, so an ATOC/STOC is only ever written where YOU said. Needs "
+        "the CLI --confirm (never flash_args.confirm) and a provably held bench reservation "
+        "(JLINK_RUN_PLACE set, a reservation-enforcing JLinkExe wrapper, and labgrid-client "
+        "showing you as holder: flash.raw-reservation-required). --readback re-reads each blob in a fresh session "
+        "(no reset) and compares sha256; the envelope carries each blob's sha256.",
+    ),
     assume_he: bool = typer.Option(
         False,
         "--assume-he",
@@ -4983,6 +5435,16 @@ def flash(
         "the project's workspace .venv, and never from the manifest. Used for the "
         "probe listing, the DPIDR preflight, the write and --readback alike, and "
         "reported as jlink.binary.",
+    ),
+    no_reset: bool = typer.Option(
+        False,
+        "--no-reset",
+        help="Flow D (tan-cli#1445): send NO reset/run commands after the write, verify and "
+        "(with --readback) read-back, so the new image is not started by tan and a console can be "
+        "attached first. HONEST LIMIT: J-Link's `exit` has been seen to resume the core on its own "
+        "(bench), and the board is not held in reset, so this is 'no reset command is sent', not "
+        "'the core is guaranteed stopped'. The envelope says `jlink.reset: not-sent`. Reset or "
+        "power-cycle when ready. Not valid with --ram or --raw.",
     ),
     readback: bool = typer.Option(
         False,
@@ -5083,6 +5545,10 @@ def flash(
         raise typer.BadParameter("--ram-console / --wait / --assume-he only mean something with --ram")
     if isinstance(watch, list) and watch and ram is not True:
         raise typer.BadParameter("--watch only means something with --ram")
+    if isinstance(raw, list) and raw and ram is True:
+        raise typer.BadParameter("--raw writes MRAM; it cannot be combined with --ram")
+    if no_reset is True and (ram is True or (isinstance(raw, list) and raw)):
+        raise typer.BadParameter("--no-reset only applies to a Flow D write, not --ram or --raw")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -5122,12 +5588,14 @@ def flash(
             probe_usb_path=probe_usb_path,
             no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
             readback=readback if isinstance(readback, bool) else False,
+            no_reset=no_reset if isinstance(no_reset, bool) else False,
             jlink_path=jlink if isinstance(jlink, str) else None,
             ram=ram if isinstance(ram, bool) else False,
             ram_console=ram_console if isinstance(ram_console, bool) else False,
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
             assume_he=assume_he if isinstance(assume_he, bool) else False,
             ram_watch=tuple(watch) if isinstance(watch, list) else (),
+            raw=tuple(raw) if isinstance(raw, list) else (),
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

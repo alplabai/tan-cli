@@ -153,15 +153,77 @@ read-only preflight's, with `dpidrSource`), `transcriptPath` (a file under
 `<build>/flash-logs/` with the Commander script and both streams) and
 `transcriptTail`, `verification`, and `reset` / `resetFailures`. A transcript
 containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU may
-have not been reset` downgrades the message to `PIN-reset NOT confirmed` and
-raises `flash.jlink-reset-unconfirmed` (warning).
+have not been reset` first triggers a read-only, non-halting DHCSR check in a fresh
+session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset:`
+or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
+"dhcsr"`, no issue code). Because J-Link's own reads usually clear it, a second non-halting
+witness also confirms: three `DWT_PCSR` (0xE000101C) PC samples that all fall inside the
+image just flashed (`resetConfirmedBy: "pcsr"`, `jlink.reset: "new-image-running"` -- PCSR proves the new code
+runs, not that the Secure Enclave pin reset took; the ranges are the PF_X LOAD segments of the
+app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
+proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
-`--readback` re-reads every written region in a **fresh** J-Link session
-(`savebin`), through the same probe-selection guard as the write, and compares
-sha256: `readback-verified` on a match, `flash.readback-mismatch` on a
-difference. A fresh session is stronger than the cache but still weaker than
-reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
-on the bench.
+`--readback` (Flow D) reads every written region back **inside the write session**: connect,
+`loadbin`, `verifybin`, `h`, `savebin` per region, then the reset/run tail and a single `exit`
+(tan-cli#1458: J-Link's `exit` resumes the core even after `h`, so a separate read-back session let
+the app run on stale state first, and the chip is read before the new image can boot and put the
+debug domain to sleep). Same probe-selection guard as the write; sha256 compared with the source
+files. A match is reported as `jlink.verification: "insession-readback"` (`jlink.readbackMode:
+"in-session"`), **not** `readback-verified`: J-Link may serve an in-session read from its flash
+cache. Afterwards a short **fresh** `savebin` session runs; a match upgrades the value to
+`readback-verified` (`jlink.freshReadback.state: "verified"`). It never fails the entry: if the
+target cannot be read after the reset (low power) the value stays `insession-readback` with the
+info issue `flash.readback-fresh-unconfirmed`; a full-length difference there is the same code as a
+warning (garbage from a gated debug domain, or a real fault: power-cycle and read again). A
+full-length difference in the in-session read is `flash.readback-mismatch`; a read that cannot read
+the chip is `flash.readback-failed` ("target unreachable (low-power?)"), never a mismatch that
+advises a re-flash. A session that dies in the halt/read steps is reported as the entry failure with
+what J-Link echoed: whether the `verifybin`s passed (did the write land?) and whether the reset tail
+started ("the board was NOT reset: reset or power-cycle it"). `--raw --readback` and the no-tail
+fallback use a fresh session without a reset. With `--no-reset` the wording says "after a halt; no
+reset command was sent", never "before the reset".
+
+`--no-reset` (tan-cli#1445) sends **no** reset/run commands: the session ends after the
+write, `verifybin` and (with `--readback`) the in-session read-back, at `exit`, so tan does
+not start the new image and you can attach a console first. The honest limit: J-Link's `exit`
+has been seen to resume the core on its own (bench, tan-cli#1458) and the board is not held in
+reset, so this means "no reset command is sent", not "the core is stopped". The envelope says
+`jlink.reset: "not-sent"` with a `resetNote`, and the message says so. No boot probe runs (there
+is no reset to confirm). Reset or power-cycle when ready. Holding nRESET across `exit` (J-Link
+`r0`) was considered and is not implemented: its behaviour could not be verified, an nRESET pulse
+does not wake an Alif E8 that is in a correctly configured STOP, and a board left in reset until
+`tan reset` or a power cycle is a worse default. Not valid with `--ram` or `--raw`.
+
+### `--raw <file>@<addr>`: byte-exact sector restore
+
+`tan flash --core <id> --raw he_slot0.bin@0x80010000 --raw atoc.bin@0x8057C000
+--confirm [--readback]` puts `savebin` backups back exactly. One slice's J-Link
+part profile and the Flow D probe guard, `loadbin` + `verifybin` per blob, **no
+reset**, no signing. Every address is an explicit `0x` literal, 16 KiB
+sector-aligned; every blob a whole number of sectors; all inside the SKU's MRAM
+and non-overlapping, or `flash.raw-invalid` (previews included). tan derives no
+address, so an ATOC/STOC is only written where you name it. A real write needs the
+CLI `--confirm` (never a manifest's `flash_args.confirm`) and a provably held bench
+reservation (`flash.raw-reservation-required` otherwise, failing closed):
+`TAN_LEASE_NONCE` set to the nonce in your own `~/.cache/alplab-leases/<place>.lease`
+(tan-cli#1457: labgrid's holder is `<host>/<user>` for every session of a user, so the
+holder alone cannot tell sessions apart; acquire with
+`eval "$(scripts/bench/tan-lease.sh acquire <place>)"`, release with
+`scripts/bench/tan-lease.sh release <place>`);
+the lease also records the place's labgrid `changed:` timestamp (updated on every acquire/release) and
+the gate refuses a lease whose value no longer matches, so a lease left over from an earlier
+acquisition is stale; `--raw` is unsupported where POSIX `pwd`/`grp`/uid are missing (Windows);
+`JLINK_RUN_PLACE` set; the J-Link program tan runs resolves to the wrapper named by
+an absolute `TAN_JLINK_WRAPPER` (outside the cwd, not world-writable; a marker string
+inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolute,
+`TAN_LABGRID_CLIENT` or a fixed directory list, never a `PATH` search) reports this
+host/user (real-uid account) as the single `acquired:` holder, with the leased place's `swd` USB path equal to the selected probe's (`--probe-usb-path`). The wrapper and `labgrid-client` must be owned by root or you and not writable by others or by a shared group, along the symlink's own chain and the resolved target's. This guards against accidental writes; it is
+not a security boundary. The MRAM window is the SKU's own variant `mram_mb` at the SoC
+document's `soc_flash_base`; a SKU that does not resolve is refused. The envelope's
+`raw.writes[]` carries each blob's `sha256`, address and sector span;
+`raw.resetCommands` is `false` (no reset command is sent, but `loadbin` may halt the
+core). Power-cycle afterwards so the Secure Enclave boots the restored contents.
 
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
