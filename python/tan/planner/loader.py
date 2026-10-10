@@ -1342,7 +1342,7 @@ def _library_alias_table(metadata_root: Path) -> dict[str, str]:
     path = metadata_root / "library-aliases-v1.json"
     if not path.is_file():
         return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = strict_json_loads(path.read_text(encoding="utf-8"), source=path)
     aliases = doc.get("aliases")
     return dict(aliases) if isinstance(aliases, dict) else {}
 
