@@ -39,12 +39,17 @@ one resolves:
    `tan build` runs (unlike the manifest field below), but is scoped to
    whatever shell/session set it.
 3. **`flash_args.setools_dir`** in `build/system-manifest.yaml` — lowest
-   precedence, and **not durable**: `tan build` regenerates this file on
-   every run (`python/tan/commands/build/manifest.py`), and alp-sdk's own
-   emit carries no `setools_dir` key at all. A hand-edit here is silently
-   overwritten by your next build. Prefer the flag or the environment
-   variable for anything you want to survive a rebuild; treat this field as
-   build-owned, not a place to hand-author a durable setting.
+   precedence, **never executed** (tan-cli#1343/#1344), and **not durable**: the
+   manifest is project-controlled, and tan will not run an `app-gen-toc` a
+   checkout picked for a write to a board. A manifest-only source is still
+   *found* (so the messages can name it), but a confirmed `tan flash` refuses it
+   as `flash.setools-untrusted-source` before any spawn, and `--dry-run` / an
+   unconfirmed run skip the sign (`setools.signSkipped: true`, issue
+   `flash.preview-sign-skipped`) instead of reporting the ATOC placement. Name
+   the install yourself with the flag or the environment variable. `tan build`
+   also regenerates this file on every run
+   (`python/tan/commands/build/manifest.py`) and alp-sdk's own emit carries no
+   `setools_dir` key, so a hand-edit here would be overwritten anyway.
 
 If none of the three resolves, `tan flash` refuses with a message naming all
 three sources, in this same order, and how to set each one — it never
@@ -80,13 +85,16 @@ one install can no longer cross-pair (tan-cli#380) without any lock. The scratch
 tree is removed when the entry finishes; the entry reports it as
 `setools: {dir, source, scratch, scratchRemoved}`.
 
-A successful sign names which SETOOLS install did it (`--setools-dir`,
-`SETOOLS_DIR`, or `flash_args.setools_dir` — see `setools.source` in `tan
-flash`'s own output), not only a failed one.
+A successful sign names which SETOOLS install did it (`--setools-dir` or
+`SETOOLS_DIR`; see `setools.source` in `tan flash`'s own output), not only a
+failed one. A manifest-only `flash_args.setools_dir` never signs (see source 3
+above).
 
 Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
 `app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
-placement. They still never spawn `JLinkExe`.
+placement, **when the install came from `--setools-dir` or `SETOOLS_DIR`**. With a
+manifest-only source the preview skips the sign and says so. They still never
+spawn `JLinkExe`.
 
 ### The `DEVICE` entry (tan-cli#1322)
 

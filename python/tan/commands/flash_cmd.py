@@ -1722,20 +1722,6 @@ def _execute(
             resolved[0],
             resolved[cut + 1],
         )
-    if plan.jlink_script is not None:
-        extra_env = None
-        if probe_guard is not None:
-            # tan-cli#1312: verify the selection against what this very
-            # JLinkExe sees, immediately before it writes.
-            refusal = _probe_guard_refusal(probe_guard, argv[0], venv_bin, workspace)
-            if refusal is not None:
-                return _Outcome(success=False, stderr=refusal, captured=capture)
-            extra_env = probe_guard.env()
-        extra = {"extra_env": extra_env} if extra_env else {}
-        return _spawn_jlink(
-            spawned, plan.jlink_script, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace,
-            resolved[0], **extra,
-        )
     return _spawn(spawned, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace, resolved[0])
 
 
@@ -2642,11 +2628,16 @@ def _resolve_flow_d_atoc_via_setools(
 
     **tan-cli#1325: the sign runs in a private scratch overlay of the SETOOLS
     install** (`tan.core.setools_scratch`), so it is side-effect-free on the
-    customer's shared install and is now done under `--dry-run` and an
-    unconfirmed run too -- which is what lets the preview show the real ATOC
-    placement (tan-cli#1318). It used to be skipped there (tan-cli#487, defect 5)
-    precisely because it wrote `build/` in the shared install; that hazard no
-    longer exists, so `confirm` is accepted for call-site stability and unused.
+    customer's shared install and is done under `--dry-run` and an unconfirmed run
+    too -- which is what lets the preview show the real ATOC placement
+    (tan-cli#1318). It used to be skipped there (tan-cli#487, defect 5) precisely
+    because it wrote `build/` in the shared install; that hazard no longer exists.
+    **The trust boundary (tan-cli#1343/#1344):** only a SETOOLS install the OPERATOR
+    named (`--setools-dir` / `$SETOOLS_DIR`) is ever executed. One named only by
+    `flash_args.setools_dir` in the manifest (which a checkout controls) is never run:
+    a preview skips the sign (`signSkipped`, `flash.preview-sign-skipped`) and a
+    confirmed write raises `SetoolsUntrustedSourceError`
+    (`flash.setools-untrusted-source`).
     The scratch tree is registered on `stack` for removal when the entry ends
     (J-Link reads the ATOC out of it), and described in `report["setools"]`
     (`dir`, `source`, `scratch`, `scratchRemoved`). `stack=None` -- a direct
@@ -2708,8 +2699,8 @@ def _resolve_flow_d_atoc_via_setools(
         # tan-cli#1343 review: a PREVIEW must not execute a binary the PROJECT picked.
         # `flash_args.setools_dir` lives in the manifest, which a checkout controls, so
         # app-gen-toc is only run for a preview when the operator named the install
-        # (`--setools-dir` / `$SETOOLS_DIR`). A confirmed write still signs: the
-        # operator armed it knowing what the manifest says.
+        # (`--setools-dir` / `$SETOOLS_DIR`). A confirmed write does NOT sign with a
+        # manifest-only install either: it was refused just above (tan-cli#1344).
         if report is not None:
             report["setools"] = {
                 "dir": setools.path, "source": setools.source, "signSkipped": True,
@@ -5409,8 +5400,11 @@ def flash(
         "whole number of sectors, a range outside the SKU's MRAM, overlapping ranges. tan never "
         "derives an address, so an ATOC/STOC is only ever written where YOU said. Needs "
         "the CLI --confirm (never flash_args.confirm) and a provably held bench reservation "
-        "(JLINK_RUN_PLACE set, a reservation-enforcing JLinkExe wrapper, and labgrid-client "
-        "showing you as holder: flash.raw-reservation-required). --readback re-reads each blob in a fresh session "
+        "(all of, else flash.raw-reservation-required: JLINK_RUN_PLACE=<place>; TAN_JLINK_WRAPPER=<absolute "
+        "path of the reservation-enforcing JLinkExe wrapper> and tan running that program; this "
+        "shell's TAN_LEASE_NONCE from `eval \"$(scripts/bench/tan-lease.sh acquire <place>)\"`; "
+        "labgrid-client showing you as the holder of that same acquisition; and --probe-usb-path "
+        "equal to the place's swd port). --readback re-reads each blob in a fresh session "
         "(no reset) and compares sha256; the envelope carries each blob's sha256.",
     ),
     assume_he: bool = typer.Option(
@@ -5525,8 +5519,11 @@ def flash(
         help="Alif SETOOLS install used to auto-sign a Flow D slot0 ATOC "
         "(license-gated; obtained from Alif, never redistributed by tan). "
         "Precedence: this flag, then the SETOOLS_DIR environment variable, "
-        "then flash_args.setools_dir in the manifest (lowest -- and rebuilt "
-        "over by the next `tan build`, see docs/setools.md).",
+        "then flash_args.setools_dir in the manifest. The manifest source is "
+        "NEVER executed (a checkout picked it): a confirmed write refuses it "
+        "(flash.setools-untrusted-source) and a preview skips the sign "
+        "(flash.preview-sign-skipped). Name the install with this flag or "
+        "SETOOLS_DIR (see docs/setools.md).",
     ),
     output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
 ) -> None:

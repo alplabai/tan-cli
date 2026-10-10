@@ -562,16 +562,6 @@ def ap_verdict(attached: dict | None) -> str:
     return {HE_AP_ADDR: "he", HP_AP_ADDR: "hp"}.get(addr, "unidentified")
 
 
-def combine_verdicts(ap: str, itcm: str) -> str:
-    """The AP is the PRIMARY identification; the ITCM-alias read corroborates. Agreement
-    or silence from the secondary keeps the primary; a contradiction is `conflict`. With
-    no usable AP the ITCM verdict stands alone."""
-    if ap in ("he", "hp"):
-        other = "hp" if ap == "he" else "he"
-        return "conflict" if itcm == other else ap
-    return itcm
-
-
 # ── which core did the generic attach land on? (tan-cli#1354) ───────────────
 #
 # J-Link's "Found Cortex-M55 r1p0" is the same line for the HE and the HP core, and a
