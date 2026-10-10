@@ -3,12 +3,20 @@
 """Per-core OS-class taxonomy + the topology view (issue #95).
 
 A core's runtime is fixed by its Cortex class -- Cortex-A -> Yocto (Linux),
-Cortex-M -> Zephyr (RTOS) -- not chosen freely. This module owns that taxonomy
-(the default-OS rule, the runtime class, the allowed-OS set read from the board
-schema) plus `core_os_topology` / `emit_os_topology`, the per-core OS facts an
-IDE/tool renders. Extracted from alp_orchestrate as the #285 topology seam and
-re-exported from the package __init__, so callers + alp_project.py keep importing
-the same names unchanged.
+Cortex-M -> Zephyr (RTOS) -- not chosen freely. This module owns the
+allowed-OS set read from the board schema, plus `core_os_topology` /
+`emit_os_topology`, the per-core OS facts an IDE/tool renders. Extracted from
+alp_orchestrate as the #285 topology seam and re-exported from the package
+__init__, so callers + alp_project.py keep importing the same names unchanged.
+
+The default-OS rule itself (`_default_os_from_core_type` / `CLASS_RUNTIMES` /
+`_cross_class_os` below) is IMPORTED, not defined here, as of tan-cli#870:
+`tan.core.os_class` now owns it, re-exported under these same names so every
+caller and test that already imports them from this module is unaffected. See
+that module's docstring for why the rule moved somewhere `tan.planner`'s
+process-global SDK-root binding cannot reach -- `tan presets`' `allowedOs`
+field needs the identical convention without paying this package's bind-first
+import cost.
 """
 
 from __future__ import annotations
@@ -18,31 +26,20 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tan.core.document_guards import DocumentGuards
+from tan.core.os_class import CLASS_RUNTIMES  # noqa: F401  (re-export: unchanged public name)
+from tan.core.os_class import allowed_os_for_core as _allowed_os_for_core_shared
+from tan.core.os_class import cross_class_os as _cross_class_os  # noqa: F401  (re-export: validate.py's `from .topology import ... _cross_class_os`)
+from tan.core.os_class import default_os_from_core_type as _default_os_from_core_type
+
 from .models import OrchestratorError
 from .paths import BOARD_SCHEMA
 
+#: The malformed-document register, bound to THIS module's curated class.
+_GUARDS = DocumentGuards(OrchestratorError)
+
 if TYPE_CHECKING:
     from .models import BoardProject
-
-
-def _default_os_from_core_type(core_type: str) -> str:
-    """Infer default OS from a SoC's `cores[].type`.
-
-    Convention (codified across the SoM presets pre-2026-05-18):
-        cortex-a*  ->  yocto
-        cortex-m*  ->  zephyr
-        anything else ->  off
-
-    Used as the fallback when a SoM preset's `topology.<core>.os` is
-    omitted (the field is now optional in som-preset-v1.schema.json --
-    M-class cores default to Zephyr, A-class to Yocto).
-    """
-    t = (core_type or "").lower()
-    if t.startswith("cortex-a"):
-        return "yocto"
-    if t.startswith("cortex-m"):
-        return "zephyr"
-    return "off"
 
 
 @functools.lru_cache(maxsize=None)
@@ -60,26 +57,72 @@ def _core_os_choices(metadata_root: Path) -> tuple[str, ...]:
     `schemas/` of its own (e.g. a synthetic test root) -- the same fallback
     `loader._validate_board` applies, so a scratch root without a schema copy
     still resolves instead of raising a raw `FileNotFoundError`.
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    topology.py` (tan-cli#1162), which still spells the lines below as two
+    `is_file()` pre-flights and a bare `json.loads(read_text(...))`. Two
+    defects lived in that, and only one is the bare read the issue names:
+
+    * The fallback pre-flight is not a guard but a SELECTOR, and
+      `is_file()` answered `False` to "denied" and "is a directory"
+      exactly as to "not there" -- so an unreadable project schema fell
+      back silently onto a DIFFERENT document and the caller was told an
+      `os:` set the project never declared. `read_optional_text`
+      classifies on the real exception: `ENOENT`/`ENOTDIR` is the legal
+      no-schema-of-its-own branch, everything else is a refusal.
+    * On a `chmod 000` PARENT that pre-flight does not answer at all on
+      3.12.3/3.13.15 (`Path.is_file()` raises `PermissionError`; 3.14.7
+      returns `False` -- tan-cli#1127), so one unreadable schema was a raw
+      traceback on two interpreters and a silent wrong answer on the third.
+
+    CALLERS: `validate._enforce_loader_rules:343` via `loader.py:1009`, so
+    every `load_board_yaml` -- `tan build`, `tan validate`, `tan generate`,
+    `tan kconfig` -- plus `_allowed_os_for_core` below. On `tan build` the
+    raw exception was absorbed by `build_cmd.py:505` into a
+    `build.plan-unavailable` envelope naming the type, not the file.
+
+    The `$defs` chain uses `require_key` rather than bare subscript for the
+    same reason: a legal-JSON schema missing `core_entry`, or with a
+    non-list `enum`, reached `tuple()` as a raw `KeyError`/`TypeError`.
     """
     schema_path = Path(metadata_root) / "schemas" / "board.schema.json"
-    if not schema_path.is_file():
+    text = _GUARDS.read_optional_text(schema_path, what="board schema")
+    if text is None:
         schema_path = BOARD_SCHEMA
-    if not schema_path.is_file():
-        raise OrchestratorError(f"board schema not found: {schema_path}")
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    return tuple(schema["$defs"]["core_entry"]["properties"]["os"]["enum"])
-
-
-# The two class-determined OS runtimes (issue #95): Cortex-A -> Yocto (Linux),
-# Cortex-M -> Zephyr (RTOS).  These follow the core class and are NOT
-# user-selectable (see _default_os_from_core_type); `baremetal` (no-OS) and
-# `off` (disabled) are the only values a board.yaml may set explicitly.
-CLASS_RUNTIMES = ("yocto", "zephyr")
+        text = _GUARDS.require_readable_text(
+            schema_path, what="board schema",
+            absent=f"board schema not found: {schema_path}")
+    schema = _GUARDS.require_json_mapping_doc(
+        text, path=schema_path, what="board schema")
+    defs = _GUARDS.require_key(
+        schema, "$defs", dict, doc=schema_path, field="board schema")
+    entry = _GUARDS.require_key(
+        defs, "core_entry", dict, doc=schema_path, field="$defs")
+    props = _GUARDS.require_key(
+        entry, "properties", dict, doc=schema_path, field="$defs.core_entry")
+    os_prop = _GUARDS.require_key(
+        props, "os", dict, doc=schema_path,
+        field="$defs.core_entry.properties")
+    return tuple(_GUARDS.require_key(
+        os_prop, "enum", list, doc=schema_path,
+        field="$defs.core_entry.properties.os"))
 
 
 def _runtime_class(core_type: str) -> str:
-    """`linux` for Cortex-A, `rtos` for Cortex-M, else `other`."""
-    t = (core_type or "").lower()
+    """`linux` for Cortex-A, `rtos` for Cortex-M, else `other`.
+
+    `core_type` is typed `str`, and today's one caller (`core_os_topology`)
+    already normalises a non-string `type` to `""` before this is reached
+    (`soc_types`'s `isinstance` guard, tan-cli#957/#962) -- so the
+    `isinstance` check below is defense-in-depth, not a live bug fix: it is
+    currently unreachable, not currently wrong. It is added anyway so this
+    shared-shaped helper does not repeat the exact assumption ("my caller
+    surely guarded this") that let the bare idiom survive unnoticed at both
+    `presets_cmd.core_type_lookup` and `kconfig._emit_inference` (tan-cli#962)
+    -- a future caller of this function gets the same backstop those two
+    now have, instead of inheriting the crash-or-leak choice again.
+    """
+    t = core_type.lower() if isinstance(core_type, str) else ""
     if t.startswith("cortex-a"):
         return "linux"
     if t.startswith("cortex-m"):
@@ -87,18 +130,28 @@ def _runtime_class(core_type: str) -> str:
     return "other"
 
 
-def _cross_class_os(core_type: str) -> set[str]:
-    """The class runtime a core may NOT be set to -- the OS of the *other*
-    class.  A Cortex-A can't run Zephyr; a Cortex-M can't run Yocto."""
-    return set(CLASS_RUNTIMES) - {_default_os_from_core_type(core_type)}
-
-
 def _allowed_os_for_core(core_type: str, metadata_root: Path) -> list[str]:
     """The os: values valid for this core: every runtime minus the other
     class's OS -- e.g. Cortex-A -> [yocto, baremetal, off], Cortex-M ->
-    [zephyr, baremetal, off]."""
-    cross = _cross_class_os(core_type)
-    return [o for o in _core_os_choices(metadata_root) if o not in cross]
+    [zephyr, baremetal, off].
+
+    Delegates to `tan.core.os_class.allowed_os_for_core` (tan-cli#914) rather
+    than open-coding the same subtraction `_cross_class_os` performs: an
+    unresolved `core_type` (`""` -- `core_os_topology`'s own
+    `soc_types.get(core_id, "")`) degrades to `[]` there rather than the
+    plausible-but-wrong cross-class subtraction, the SAME degrade
+    `presets_cmd.allowed_os_lookup` needs -- see that function's docstring for
+    why the two must never drift apart on this again.
+
+    Upstream agrees: alp-sdk's `scripts/alp_orchestrate/topology.py` carries
+    the same `[]` guard for an unresolved `core_type` since alp-sdk#1852
+    (porting tan-cli#914 / tan-cli#957), so there is no divergence to record.
+    Do NOT reintroduce a `["baremetal", "off"]` guess here -- that is the
+    plausible-but-wrong answer #870/#914 exist to remove.  This reaches
+    `core_os_topology`'s `allowed_os` field, which `test_planner_emit_parity`
+    pins byte-for-byte against the oracle.
+    """
+    return _allowed_os_for_core_shared(core_type, _core_os_choices(metadata_root))
 
 
 def core_os_topology(project: "BoardProject") -> dict[str, Any]:
@@ -112,8 +165,17 @@ def core_os_topology(project: "BoardProject") -> dict[str, Any]:
     valid dropdown).  Lets the Board Configurator show the SDK's selection +
     the legal overrides instead of guessing or offering a cross-class OS.
     """
+    # `c.get("type", "")` is UNVALIDATED against `soc-spec-v1.schema.json`'s
+    # own `"type": {"type": "string"}` -- the identical gap `presets_cmd.
+    # core_type_lookup` closed for tan-cli#957, same class, this call site
+    # pre-dating it. `core_type` below feeds `_runtime_class`/
+    # `_default_os_from_core_type`'s `(core_type or "").lower()` AND is
+    # written verbatim to the emitted `core_type` field, so a non-string
+    # here is an `AttributeError` (build/`--emit os-topology` abort) or a
+    # wire leak, same two failure modes. Normalises to the same `""`
+    # unresolved sentinel a missing `type`/entry already produces.
     soc_types = {
-        c["id"]: c.get("type", "")
+        c["id"]: c["type"] if isinstance(c.get("type"), str) else ""
         for c in (project.soc_spec.get("cores") or []) if "id" in c
     }
     rows: list[dict[str, Any]] = []

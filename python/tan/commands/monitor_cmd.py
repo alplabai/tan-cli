@@ -40,7 +40,7 @@ imports nothing from alp-sdk beyond `alp_cli._workspace.python_exe`, itself
 just `sys.executable` -- the running interpreter. This port does NOT read
 `sys.executable` directly, though: under PyInstaller `sys.executable` IS
 `tan` itself, so spawning it would just re-enter this CLI instead of
-launching miniterm -- the same reasoning `build_cmd.py`'s `_planner_python`
+launching miniterm -- the same reasoning `tan.core.sdk_discovery`'s `_planner_python`
 and `generate_cmd.py` already carry, spelled out there so it need not be
 re-argued per call site. This port reuses that same function, a PATH name
 (`python`/`python3`) never `sys.executable`, when frozen or when
@@ -64,15 +64,21 @@ miniterm returned. The actual child code still reaches the issue message.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
 import sys
+import tempfile
+from enum import Enum
 from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _planner_python
+from tan.core.sdk_discovery import _planner_python
+from tan.core import console_filter as console_filter_mod
+from tan.core import serial_url
+from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -82,6 +88,20 @@ DEFAULT_BAUD = 115200
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+
+class ConsoleFilter(str, Enum):
+    """Console output filters. `colors` (tan's own, default) keeps SGR colour
+    sequences and neutralises every other escape/control byte; `default`,
+    `nocontrol`, `printable` are miniterm's own stripping filters. `direct`
+    passes the device's bytes to the terminal unmodified and is UNSAFE for an
+    untrusted target (OSC 52 clipboard writes, title changes, screen games)."""
+
+    COLORS = "colors"
+    DIRECT = "direct"
+    DEFAULT = "default"
+    NOCONTROL = "nocontrol"
+    PRINTABLE = "printable"
 
 
 class MonitorError(Exception):
@@ -108,11 +128,34 @@ def _pyserial_missing() -> MonitorError:
     return MonitorError(
         "monitor.pyserial-missing",
         "pyserial is required for `tan monitor`. Install it with "
-        '`pip install "alp-tan[monitor]"`. A frozen `tan` binary bundles it at '
-        "build time, so a binary built without that extra cannot gain it here.",
+        '`pip install "./python[monitor]"` from a tan-cli checkout (tan-cli is '
+        "not on PyPI), or `pip install pyserial`. A frozen `tan` binary bundles "
+        "it at build time, so a binary built without that extra cannot gain it here.",
         ExitCode.RUNTIME_FAILURE,
         {"schemaVersion": DATA_SCHEMA_VERSION},
     )
+
+
+#: Contract-harness seam ONLY (tan-cli#1165) -- never a documented,
+#: `--help`-visible flag. `_available_ports()`'s real source, pyserial's own
+#: `list_ports.comports()`, enumerates whatever serial hardware happens to be
+#: physically attached to the host running it, so no golden envelope can pin a
+#: non-empty, deterministic `data.availablePorts` (the field
+#: `contract/envelopes/monitor-no-port` exists to freeze) without depending on
+#: the recording machine's own hardware -- and on a CI runner with nothing
+#: plugged in, `data.availablePorts` would record as `[]` forever, pinning
+#: nothing the issue asked for. Set to a JSON-encoded `[[device, description],
+#: ...]` array, this REPLACES the pyserial enumeration outright, in the exact
+#: `[(device, description)]` shape every regular CALLER (`_refuse_listing_ports`,
+#: `_port_is_usable`) already expects, so none of THOSE need to know the seam
+#: exists. `_run_monitor` is the one exception: it also checks this variable
+#: directly, to skip its own "pyserial is importable" precheck (see that
+#: function's comment) -- without that second check this golden would depend
+#: on whether pyserial happens to be installed in whatever environment replays
+#: it, the exact host-dependence this seam exists to remove. See
+#: `contract/envelopes/monitor-no-port/PROVENANCE.txt` for how a golden arms
+#: it via `env.json`.
+_TEST_PORTS_ENV = "TAN_MONITOR_TEST_PORTS_JSON"
 
 
 def _available_ports() -> list[tuple[str, str]]:
@@ -127,7 +170,21 @@ def _available_ports() -> list[tuple[str, str]]:
     spawned. Left unguarded the ImportError escaped as an unexpected exception
     and surfaced as `monitor.internal-failure` at exit 5 -- "tan has a bug" --
     for what is simply an optional dependency the customer never installed.
+
+    `_TEST_PORTS_ENV`, when set, short-circuits all of the above -- see its own
+    comment. A malformed value (bad JSON, the wrong shape) is a harness/fixture
+    bug, not a customer-facing one -- the same "do not let this become
+    `monitor.internal-failure`" reasoning the ImportError guard above states
+    for itself -- so it is swallowed and falls through to the real enumeration
+    below rather than escaping as an unexpected exception.
     """
+    fake = os.environ.get(_TEST_PORTS_ENV)
+    if fake is not None:
+        try:
+            return [(str(device), str(description)) for device, description in json.loads(fake)]
+        except (ValueError, TypeError):
+            pass
+
     try:
         from serial.tools import list_ports  # noqa: PLC0415 (optional at runtime)
     except ImportError as err:
@@ -287,12 +344,52 @@ def _child_stdout(json_mode: bool):
     return subprocess.DEVNULL
 
 
+def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_mode: bool) -> int:
+    """Run the plain console child (`python -c <bootstrap>`), returning its exit code."""
+    try:
+        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would be imported instead of pyserial (tan-cli#1317). It
+        # also neutralises empty/relative PYTHONPATH entries (they resolve
+        # against this empty directory).
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            return subprocess.run(
+                [
+                    python,
+                    "-c",
+                    console_filter_mod.BOOTSTRAP,
+                    "--filter",
+                    console_filter,
+                    # The spawn runs from an empty cwd, so a relative device path
+                    # must be made absolute first.
+                    os.path.abspath(port) if os.path.exists(port) else port,
+                    str(baud),
+                ],
+                stdout=_child_stdout(json_mode),
+                env=spawn_env(),
+                cwd=empty,
+            ).returncode
+    except OSError as err:
+        raise MonitorError(
+            "monitor.launch-failed",
+            f"failed to launch `{python} -c <miniterm bootstrap>`: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
+
+
 def _run_monitor(
-    port: str | None, baud: int, json_mode: bool
+    port: str | None,
+    baud: int,
+    json_mode: bool,
+    break_opts: tuple[bytes, bytes, float] | None = None,
+    non_interactive: bool = False,
+    console_filter: str = "colors",
+    capture_opts: tuple | None = None,
+    action_spec: object | None = None,
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
-    # `build_cmd._planner_python` -- NOT `sys.executable`, which under a
+    # `tan.core.sdk_discovery._planner_python` -- NOT `sys.executable`, which under a
     # PyInstaller freeze IS `tan` itself and would just re-enter this CLI.
     using_this_interpreter = not getattr(sys, "frozen", False) and bool(sys.executable)
     python = (
@@ -301,7 +398,13 @@ def _run_monitor(
         else _planner_python(str(Path.cwd()), None)
     )
 
-    if using_this_interpreter:
+    # `_TEST_PORTS_ENV` set means `_available_ports()` never touches real
+    # pyserial for this run (see its own comment), so this precheck -- whose
+    # only job is proving pyserial resolves in THIS interpreter -- would just
+    # make a contract golden depend on whether pyserial happens to be
+    # installed in whatever environment ran it, the exact host-dependence the
+    # seam exists to remove.
+    if using_this_interpreter and os.environ.get(_TEST_PORTS_ENV) is None:
         # This precheck only proves the interpreter about to be spawned --
         # THIS one -- has pyserial. It says nothing about a PATH `python`
         # resolved via `_planner_python()`, so skip it there; a missing
@@ -313,22 +416,31 @@ def _run_monitor(
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
+    problem = serial_url.port_url_problem(port)
+    if problem is not None:
+        raise MonitorError(
+            "monitor.bad-port",
+            f"bad --port: {problem}",
+            ExitCode.VALIDATION_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port},
+        )
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
+    if capture_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --capture)
+
+        return monitor_session.run_capture(port, baud, capture_opts, break_opts, action_spec)
+
+    if break_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
+
+        return monitor_session.run(
+            port, baud, json_mode, break_opts, non_interactive, console_filter
+        )
+
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    try:
-        rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
-            stdout=_child_stdout(json_mode),
-        ).returncode
-    except OSError as err:
-        raise MonitorError(
-            "monitor.launch-failed",
-            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
+    rc = _spawn_console(python, port, baud, console_filter, json_mode)
 
     data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     if rc != 0:
@@ -355,6 +467,84 @@ def monitor(
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
     ),
+    break_uboot: bool = typer.Option(
+        False,
+        "--break-uboot",
+        help="After opening the port, send the autoboot interrupt key repeatedly "
+        "until the U-Boot prompt appears or --break-timeout passes, then continue "
+        "in the interactive console on the same open port. With --non-interactive "
+        "it stops after the break-in instead (exit 0 if caught); the console "
+        "itself needs a terminal. --non-interactive is a shared flag (see "
+        "its own help line). Power-cycle the board yourself; works over "
+        "rfc2217:// and socket:// URLs. Use rfc2217:// against ser2net: socket:// "
+        "to a telnet/RFC2217 port delivers IAC negotiation bytes as data and "
+        "adds about 4 s.",
+    ),
+    break_key: str = typer.Option(
+        None,
+        "--break-key",
+        help="With --break-uboot: key that interrupts autoboot (default: a space; "
+        "escapes \\xNN \\r \\n \\t \\\\ allowed).",
+    ),
+    prompt: str = typer.Option(
+        None, "--prompt", help="With --break-uboot: prompt that ends it (default: '=> ')."
+    ),
+    break_timeout: float = typer.Option(
+        None,
+        "--break-timeout",
+        help="With --break-uboot: seconds to keep sending the key (default: 30).",
+    ),
+    capture: bool = typer.Option(
+        False,
+        "--capture",
+        help="Headless capture instead of an interactive console: no TTY needed, "
+        "works over pyserial URLs, stores raw bytes. Needs --duration and/or "
+        "--until; combine with --break-uboot to break in first. Never prompts "
+        "(--non-interactive is accepted and has no further effect).",
+    ),
+    duration: float = typer.Option(
+        None, "--duration", help="With --capture: seconds to read (default 30 with --until)."
+    ),
+    until: str = typer.Option(
+        None,
+        "--until",
+        help="With --capture: stop at the first line (or unterminated partial line, "
+        "e.g. a prompt) matching this regex; the envelope carries it. A line "
+        "longer than 4 KiB is searched on its last 4 KiB (complete or partial). A "
+        "regex cannot be interrupted inside one search. No match in time is an error.",
+    ),
+    log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),
+    send: list[str] = typer.Option(
+        None, "--send", metavar="TEXT",
+        help="With --capture: write TEXT to the console (repeatable, in order; escapes "
+        "\\xNN \\r \\n \\t \\\\, no newline added). All items go out as one burst, at the "
+        "start unless --send-after or --send-on says when.",
+    ),
+    send_after: float = typer.Option(
+        None, "--send-after", metavar="SECONDS", help="With --send: send the burst this long after the start."
+    ),
+    send_on: str = typer.Option(
+        None, "--send-on", metavar="REGEX",
+        help="With --send: send the burst on the first line (or partial line, e.g. a prompt) "
+        "matching this regex. Excludes --send-after.",
+    ),
+    send_gap: float = typer.Option(
+        None, "--send-gap", metavar="SECONDS", help="With --send: pause between items (default 0.2)."
+    ),
+    reopen_at: int = typer.Option(
+        None, "--reopen-at", metavar="BAUD",
+        help="With --on: change the baud (in place, else close and reopen) on the first complete "
+        "line matching --on, then keep capturing. Works over rfc2217:// and local serial.",
+    ),
+    on: str = typer.Option(None, "--on", metavar="REGEX", help="With --reopen-at: the trigger regex."),
+    console_filter: ConsoleFilter = typer.Option(
+        None,
+        "--filter",
+        help="Console output filter (default: colors): colors (colours render, every other escape "
+        "is neutralised), default/nocontrol/printable (strip control codes), "
+        "direct (raw bytes to the terminal: unsafe for untrusted targets). "
+        "colors cannot stop same-colour (invisible) text or \\b/\\r overdrawing.",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
@@ -364,7 +554,9 @@ def monitor(
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
-    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="With --break-uboot: stop after the break-in."
+    ),
     ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Open a serial console to the board."""
@@ -383,7 +575,7 @@ def monitor(
     # from `--help` because they do nothing. Same port-wide gap as
     # `clean_cmd.clean`/`new_som_cmd.new_som`.
     del project, board_yaml, sdk_root, target, all_targets
-    del verbose, quiet, no_color, non_interactive, ci
+    del verbose, quiet, no_color, ci
     json_mode = output_format == "json"
 
     def finish(data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
@@ -399,7 +591,21 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud, json_mode)
+        from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
+
+        opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
+        cap = monitor_session.capture_opts(
+            capture, duration, until, log, console_filter is not None
+        )
+        from tan.commands import monitor_actions  # noqa: PLC0415 (validation only)
+
+        spec = monitor_actions.action_opts(
+            capture, send, send_after, send_on, send_gap, reopen_at, on
+        )
+        data, issues, exit_code = _run_monitor(
+            port, baud, json_mode, opts, non_interactive,
+            console_filter.value if console_filter else "colors", cap, spec
+        )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return

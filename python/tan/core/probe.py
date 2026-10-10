@@ -13,12 +13,52 @@ traceback that would misrepresent a fixable environment problem as a tan bug.
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import re
 import subprocess
+import tempfile
+
+from tan.core.subprocess_env import spawn_env
 
 #: Every probe in this module gets the same ceiling: long enough for a slow
 #: but genuinely-answering tool, short enough that a hung one does not stall
 #: /a build's provenance read indefinitely.
 PROBE_TIMEOUT_S = 15
+
+
+_PYTHON_NAME = re.compile(r"^(py|python[\d.]*[tw]?)(\.exe)?$", re.IGNORECASE)
+#: `-c`, or a bundle ending in it (`-Ic`, `-Sc`, `-Bsc`).
+_DASH_C = re.compile(r"^-[A-Za-z]*c$")
+
+
+def isolated_cwd() -> "tempfile.TemporaryDirectory[str]":
+    """A fresh EMPTY directory to use as a child's cwd. `python -m <mod>` and
+    `python -c` put the cwd on `sys.path`, so a project directory can shadow
+    `pip`/`venv`/a stdlib module; every spawn that must not be hijackable runs
+    from here, with absolute path arguments (tan-cli#1317, #1331). The one
+    helper both the probes and `bootstrap_cmd.Runner.run(isolated=True)` use."""
+    return tempfile.TemporaryDirectory(prefix="tan-spawn-", ignore_cleanup_errors=True)
+
+
+def is_python_dash_c(argv: list[str]) -> bool:
+    """`<python> ... -c <code>`. With `-c`, `sys.path[0]` is the CWD, so a
+    `west.py`/`json.py` planted in the user's project or SDK dir would run
+    during a probe. Such probes run from a fresh EMPTY directory instead."""
+    return (
+        bool(argv)
+        and any(_DASH_C.match(a) for a in argv[1:])
+        and bool(_PYTHON_NAME.match(os.path.basename(argv[0])))
+    )
+
+
+def _absolute_for_new_cwd(argv: list[str], executable: str | None):
+    """The probe runs from a different cwd, so a RELATIVE program path (one with
+    a separator) must be made absolute first or it would stop resolving."""
+    def fix(p: str) -> str:
+        return os.path.abspath(p) if (os.sep in p or (os.altsep and os.altsep in p)) else p
+
+    return [fix(argv[0]), *argv[1:]], (fix(executable) if executable else executable)
 
 
 def probe_status(
@@ -52,19 +92,37 @@ def probe_status(
 
     See `probe()` for why each failure mode below is swallowed rather than
     raised.
+
+    `env=spawn_env()` (tan-cli#992): every probe in this module IS the
+    "does tan think this tool works" verdict, so a probe that leaked tan's
+    own bundled `LD_LIBRARY_PATH` into the child would report a perfectly
+    fine host tool as broken the moment its own bundled copy of some shared
+    library disagreed with the host's -- exactly the failure mode
+    `spawn_env` exists to close.
     """
+    isolate = is_python_dash_c(argv)
+    if isolate:
+        argv, executable = _absolute_for_new_cwd(argv, executable)
+    scratch = (
+        isolated_cwd()
+        if isolate
+        else contextlib.nullcontext(None)
+    )
     try:
-        out = subprocess.run(
-            argv,
-            executable=executable,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
+        with scratch as cwd:
+            out = subprocess.run(
+                argv,
+                executable=executable,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=timeout,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         # SubprocessError covers TimeoutExpired (the child is already killed by
         # `run`); ValueError catches an empty/garbage argv rather than letting

@@ -46,7 +46,9 @@ from typing import Any
 import typer
 
 from tan.commands.inspect_cmd import resolve_debug_project_context
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -264,8 +266,12 @@ def trace(
             # shape as `generate_cmd`/`model_cmd`: keep the two mechanisms that
             # do work (`--sdk-root`, a checkout beside the project), take the
             # third from NO_SDK_NEXT_STEPS so it cannot drift again.
-            "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
-            f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+            with_sdk_search(
+                "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
+                context.workspace_root,
+                sdk_root,
+            ),
             empty_data(target),
             ["trace: alp-sdk root is unresolved."],
         )

@@ -23,7 +23,7 @@ worktree's branch, not yet on `dev`), which is exactly the kind of mismatch
 RUNNING catches and reading `crates/` alone would not.
 
 **Which SDK ladder.** `inspect`/`trace` are two of the thirteen commands
-`build_cmd.resolve_sdk_root_ladder`'s own docstring names -- measured against
+`tan.core.sdk_discovery.resolve_sdk_root_ladder`'s own docstring names -- measured against
 the oracle -- as resolving the LATERAL/narrow ladder (the same one
 `doctor_cmd.doctor` uses), not the wide `init`/`generate`/`examples`
 one. This file calls `resolve_sdk_root_ladder` directly for that reason,
@@ -59,8 +59,8 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import _abs_posix, resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode

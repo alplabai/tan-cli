@@ -3,7 +3,7 @@
 # with a `machine:` resolves to yocto and an `m33` core with a `board:` to
 # zephyr, so this fixture is the one that makes `data.soms[].cores[].os` carry
 # two different values. The New Project wizard scaffolds IPC off exactly this.
-schema_version: 1
+schema_version: 2
 sku: E1M-V2N101
 display_name: E1M V2N101
 family: v2n

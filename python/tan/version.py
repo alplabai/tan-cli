@@ -28,10 +28,9 @@
 # have sorted EQUAL to the published tag.
 #
 # At release: drop the pre-release entirely (`0.5.0`), date CHANGELOG.md's
-# `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling) and
-# npm-shim/package.json (this exact string) with it --
-# `python/scripts/version_check.py --selftest --self --not-released` checks all
-# four together.
+# `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling)
+# with it -- `python/scripts/version_check.py --selftest --self
+# --not-released` checks all three together.
 #
 # 0.5.1: patch fix for the 27 camelCase issue codes v0.5.0 shipped in
 # `contract/issue-codes.json` (`doctor.boardYaml`, `support-
@@ -56,4 +55,35 @@
 # `X.devN` as "before X", so neither an actual rc2 nor the eventual 0.6.0 is
 # guaranteed by this string, only that both sort above it. CHANGELOG home is
 # `## [0.6.0] — Unreleased`, per `release_target()`.
-TAN_VERSION = "0.6.0"
+#
+# 0.6.1 RELEASE BUMP. The three prior notes above all record the same recurring
+# defect -- a development tree carrying a PUBLISHED tag's exact version -- and
+# are about moving OFF a released number. This one is the other direction: the
+# `.dev0` tail comes off because this tree is what `v0.6.1` will name. Per
+# `release_target()` a releasable version is its own CHANGELOG section verbatim,
+# and `## [0.6.1]` already exists (the 204 `changelog.d/` fragments were folded
+# into it in this same change), so no heading moves.
+#
+# The tag is NOT pushed by this change, deliberately. `release.yml`'s `build`
+# job is `needs: [verify-version, gates, python-gates]`, and `python-gates`
+# calls `parity.yml` with `python_only: true`, whose `release-sdk-parity` job
+# byte-compares tan's renders against alp-sdk's `releases/latest`. That is
+# `v0.16.0` today, against which `tests/parity/scaffold_byte_parity.py` exits 1
+# (8 of 10 trees, 23 files -- measured 2026-09-17). A tag pushed now would fail
+# `python-gates`, never reach `build`, and publish ZERO assets under an
+# immutable tag -- the exact shape `release.yml:300`'s own comment warns about.
+# tan-cli#1258 tracks the alp-sdk release that clears it; tag after that lands.
+#
+# RENUMBERED 0.6.1 -> 0.7.0 (maintainer decision). Everything above this line
+# is left as written -- it is the accurate record of how this tree came to
+# carry a plain, non-`.dev0` release number -- but the number itself was
+# wrong: this tree's content breaks v0.6.0 consumers, and pre-1.0 SemVer puts
+# a break in the MINOR, not the patch. `## [0.6.1]` becomes `## [0.7.0]` in
+# CHANGELOG.md (same section, same 204 folded fragments, renamed, then
+# extended with hand-written entries -- the floor, the doctor sub-bullet,
+# `debug-config.sdk-identity-appended`, the model-code removal -- and with
+# the preamble + BREAKING leads a follow-up review added), and
+# `python/pyproject.toml` moves with it. Nothing else about the readiness
+# picture above changes: the alp-sdk-floor blocker this file already
+# documented (tan-cli#1258) still gates the tag push, under the new number.
+TAN_VERSION = "0.7.0-rc1"

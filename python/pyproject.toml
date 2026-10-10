@@ -1,20 +1,25 @@
 [project]
-# DISTRIBUTION name is `alp-tan`, not `tan`: the name `tan` is already taken on
+# DISTRIBUTION name is `tan-cli`, not `tan`: the name `tan` is already taken on
 # PyPI ("The compromising code formatter", v23.7.0), so `pip install tan` would
 # fetch an unrelated package. The IMPORT package stays `tan` and the console
 # script stays `tan`, so a customer still types `tan build` -- only the install
 # line differs:
 #
-#     pip install alp-tan   ->   tan --version
+#     pip install tan-cli   ->   tan --version
 #
-# `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
-# artefacts are `alp-`prefixed.
-name = "alp-tan"
+# `alp-tan` was the first choice and was also free, preferred at the time
+# because the other Alp Lab artefacts are `alp-`prefixed. Reversed in
+# tan-cli#1054, before anything was ever uploaded under either name: this
+# distribution is published from `github.com/alplabai/tan-cli` and
+# authenticated by Trusted Publishing, which binds the PyPI project to that
+# exact repository. `pypi.org/project/tan-cli` <-> `github.com/alplabai/tan-cli`
+# is one name a reader can follow; `alp-tan` <-> `tan-cli` is two.
+name = "tan-cli"
 # The PEP 440 RENDERING of `python/tan/version.py`'s TAN_VERSION, which is the
 # source of truth -- never edited alone. `0.5.0-rc5.dev0` -> `0.5.0rc5.dev0`
 # (the two spellings are not interchangeable and cannot be string-compared);
 # `python/scripts/version_check.py` owns that mapping and CI runs it.
-version = "0.6.0"
+version = "0.7.0rc1"
 description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
 readme = "README.md"
 # PEP 639 SPDX-expression form, NOT the `{ text = ... }` table -- and it is
@@ -63,7 +68,7 @@ requires-python = ">=3.12"
 # 0.26.0** it does not (measured: PyPI `requires_dist` for 0.25.1 still lists
 # `click>=8.2.1`; 0.26.0's does not, and its wheel gained a vendored
 # `typer/_click/` package -- typer's OWN click-alike, not a re-export of the
-# public one). So a clean `pip install alp-tan` produced `ModuleNotFoundError:
+# public one). So a clean `pip install tan-cli` produced `ModuleNotFoundError:
 # No module named 'click'` on first run, and every local test suite passed
 # regardless because click was present for other reasons. A package that
 # imports a module must declare it; leaning on someone else's dependency graph
@@ -119,6 +124,14 @@ requires-python = ">=3.12"
 # absent or its platform verifier fails. Both are module-scope imports inside
 # `tan/net.py`, so both must be REQUIRED per the reasoning right below this
 # comment.
+# `cbor2` arrived WITH the relocated model engine (ADR-0028 Task 2,
+# `tan/model/manifest.py`): `.alpmodel` is a CBOR container, and
+# `Manifest.to_cbor`/`from_cbor` do a module-scope `import cbor2 as _cbor2` --
+# not lazy, not guarded -- so it is REQUIRED, matching alp-sdk's own
+# classification of the same distribution in its own `pyproject.toml`
+# (`cbor2>=5.0`, alongside PyYAML/jsonschema/click, never under
+# `optional-dependencies`). `tests/gates/test_declared_dependencies.py` fails on
+# this exact shape otherwise -- an eager import of an undeclared distribution.
 dependencies = [
   "typer>=0.26,<0.28",
   "rich>=13",
@@ -127,6 +140,7 @@ dependencies = [
   "click>=8.1",
   "truststore>=0.9",
   "certifi>=2024.2.2",
+  "cbor2>=5.0",
 ]
 
 # `pyserial` is OPTIONAL, not required: only `tan monitor` needs it, and a serial
@@ -158,6 +172,48 @@ classifiers = [
 # `[project.*]` TABLES below it.
 [project.optional-dependencies]
 monitor = ["pyserial>=3.5"]
+# Lightweight TFLite read/parse deps for `tan.model.tensorio.extract_io` (tensor
+# I/O extraction from a .tflite flatbuffer) -- pure-Python, no compiler toolchain.
+# `tflite` is a genuinely LAZY, guarded import (`tensorio.py`'s
+# `try: import tflite / except ImportError: return [], []`), so it stays an
+# extra rather than a required dependency -- `extract_io` degrades to "no I/O
+# metadata" rather than failing when it is absent. `flatbuffers` is not imported
+# by name anywhere under `tan/` (so `test_declared_dependencies.py` does not
+# require it), but it is `tflite`'s own declared runtime dependency (measured:
+# `pip show tflite` -> `Requires: flatbuffers, numpy`) -- pinned explicitly here,
+# not left to a transitive resolve, so `pip install tan-cli[model-io]` is a
+# working reader and not just a gate-satisfying stub. Pins mirror alp-sdk's own
+# `model-io` extra exactly (its `pyproject.toml`'s entry, due to be dropped once
+# `scripts/alp_model/` is deleted -- ADR-0028 Task 6) rather than inventing new
+# floors.
+model-io = ["tflite>=2.10", "flatbuffers>=23.1.21"]
+
+# Full host model-compile toolchain: adds the Arm Vela compiler `vela` needs
+# for `tan.model.adapters.ethos_u.VelaAdapter.compile()` (`shutil.which("vela")`
+# is the runtime gate; this extra is what puts it on PATH). NOT required for
+# `tan model build` to run -- every vendor adapter shells its compiler as an
+# external binary, never a Python import, so a bare `pip install tan-cli`
+# still works and only that one NPU backend's compile step is unavailable
+# (`is_available()` reports False; `doctor`/`check` explain why). Pins mirror
+# alp-sdk's own `model-compile` extra exactly (due to be dropped from
+# alp-sdk's `pyproject.toml` once `scripts/alp_model/` is deleted -- ADR-0028
+# Task 6) rather than inventing new floors. DEEPX's `dxcom` and DRP-AI's TVM
+# have no such extra on either side -- both are license-gated vendor
+# toolchains with no PyPI wheel to pin.
+model-compile = ["ethos-u-vela>=3.9", "tflite>=2.10", "flatbuffers>=23.1.21"]
+
+# Host-tier `tan model prep` / `run` / `ab` (tan-cli#1287): onnxruntime-based INT8
+# quantization and host reference runs. OPTIONAL and deliberately NOT in the
+# frozen release assets (`.[monitor]` only) -- onnxruntime publishes no macOS
+# x86_64 wheel and adds tens of MB for a verb most users never run. Every import
+# is lazy (`tan.model.prep`, `tan.model.measure`); `tan.core.model_host` turns a
+# missing one into the coded `model.model-extra-missing` refusal. `sympy` is
+# onnxruntime's symbolic shape-inference dependency for `quant_pre_process`.
+# Floors: `onnx>=1.16.0` is the release that fixed CVE-2024-27318 (path traversal
+# through external-data locations) -- `tan model prep` loads customer-supplied
+# models. `onnxruntime>=1.30.0` is the version the external-data and corrupt-
+# sample refusal tests were actually run against; a lower floor was not tested.
+model = ["onnxruntime>=1.30.0", "onnx>=1.16.0", "numpy>=1.26", "sympy>=1.12"]
 
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"

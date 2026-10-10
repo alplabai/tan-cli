@@ -1,0 +1,6 @@
+model
+check
+--sdk-root
+./sdk
+--format
+json

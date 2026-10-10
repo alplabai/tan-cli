@@ -57,18 +57,27 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 #: `communicate()` then waits out. Measured: at `30` each case took 30.2 s.
 _CHILD_SECONDS = "10"
 
-#: A plan whose single slice spawns that child. `appDir` must exist or the
-#: slice fails before it ever spawns.
-_PLAN = {
-    "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
-    "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
-    "slices": [{
-        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
-        "configArtefacts": [], "toolchain": None, "artifacts": {}, "debug": {},
-        "command": {"tool": "sleep", "args": [_CHILD_SECONDS], "cwd": None},
-        "env": {}, "envAppendPath": {},
-    }],
-}
+#: Upper bound on waiting for the slice's child to announce itself. Generous:
+#: under full-suite load tan's start-up plus the slice spawn can exceed any
+#: fixed sleep (tan-cli#1333); the wait returns the moment the marker exists.
+_READY_TIMEOUT = 60.0
+
+
+def _plan(marker):
+    """A plan whose single slice spawns that child. The child's first action is
+    to `touch` `marker`, which is the explicit readiness signal the test waits
+    on before sending SIGINT. `appDir` must exist or the slice fails before it
+    ever spawns."""
+    return {
+        "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+        "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+        "slices": [{
+            "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+            "configArtefacts": [], "toolchain": None, "artifacts": {}, "debug": {},
+            "command": {"tool": "sh", "args": ["-c", f"touch {marker}; exec sleep {_CHILD_SECONDS}"], "cwd": None},
+            "env": {}, "envAppendPath": {},
+        }],
+    }
 
 
 def test_the_interrupt_envelope_is_coded_and_in_contract_range():
@@ -96,7 +105,8 @@ def _interrupt(tmp_path, *argv):
     process boundary are exactly what is under test."""
     (tmp_path / "app").mkdir()
     plan = tmp_path / "plan.json"
-    plan.write_text(json.dumps(_PLAN), encoding="utf-8")
+    marker = tmp_path / "slice-ready"
+    plan.write_text(json.dumps(_plan(marker)), encoding="utf-8")
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(
@@ -108,7 +118,13 @@ def _interrupt(tmp_path, *argv):
         cwd=tmp_path, env=env, start_new_session=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    time.sleep(4.0)
+    deadline = time.monotonic() + _READY_TIMEOUT
+    while not marker.exists():
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            out, err = proc.communicate()
+            pytest.fail(f"slice never became ready: rc={proc.returncode} {out!r} {err!r}")
+        time.sleep(0.05)
     os.killpg(proc.pid, signal.SIGINT)
     stdout, stderr = proc.communicate(timeout=60)
     return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")

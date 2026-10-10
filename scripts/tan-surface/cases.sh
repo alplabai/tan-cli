@@ -7,15 +7,15 @@
 # destroys what the earlier phases produced -- so it runs last. Run a single
 # phase with `--phase <name>` when you only care about one link.
 #
-# Expectations target the `dev` TREE at 4838652, 2026-08-08 -- not a release.
-# The number they used to name, 0.5.2, is what the tree carried then
-# (0.5.2-rc1.dev0) but exists in no tag; it was renumbered to v0.6.0-rc1. A
-# re-derivation against CURRENT `dev` is due -- NOT against v0.6.0-rc1, which
-# predates tan-cli#848 and still registers `renode` that this file has already
-# dropped. Run every assertion below against the real binary/SDK before
-# trusting an OLDER recorded expectation; see the "--version" and
-# command-surface-drift steps right below, which exist to catch a case list
-# that fell out of sync. Every
+# Expectations target the `dev` TREE at 949045a9, 2026-10-10 -- not a release.
+# They were re-derived against that tree's `tan --help` (35 registered
+# commands, tan/cli.py) and are NOT a v0.6.0-rc1 record: that tag predates
+# tan-cli#848 and still registers `renode`, which this file has dropped. Run
+# every assertion below against the real binary/SDK before trusting an OLDER
+# recorded expectation; the "--version" and command-surface-drift steps right
+# below exist to catch a case list that fell out of sync, and the drift step
+# is what fails first when a command is registered but not listed here.
+# Every
 # `xstep`/`xstep_out` entry is a defect with an open issue: while the bug
 # stands the run is green, and the day it is fixed the harness reports XPASS,
 # exits non-zero, and names the entry to delete. Do not convert an XPASS back
@@ -28,14 +28,15 @@
 # exists to prevent. Prefer asserting the fixed behaviour positively with
 # `step`/`step_out` and keep `xstep_out` for output that genuinely disappears.
 #
-# `tan flash` is absent by design -- see lib.sh.
+# `tan flash` (and `reset`, and the live half of `probe`) is listed but never
+# DRIVEN against hardware -- see lib.sh.
 
 # The command surface `tan --help` is expected to list, one per line, group
-# headers excluded. `flash` is real and deliberately absent from this
-# harness (see lib.sh); everything else tan registers must be here. This is
+# headers excluded. `flash` is listed (it is registered) but never run by this
+# harness (see lib.sh); everything tan registers must be here. This is
 # still a hand-kept list -- there is no non-Python way to ask the binary for
 # its own registration table -- but check_command_surface() below proves it
-# against the binary's OWN --help output every run, so command 33 landing
+# against the binary's OWN --help output every run, so the next command landing
 # unlisted here is a loud FAIL, not silent drift (tan/cli.py's own
 # `_SUBCOMMAND_NAMES` derivation exists for exactly this reason on the Python
 # side; this is the shell-side equivalent).
@@ -62,7 +63,9 @@ monitor
 new-som
 pinmux
 presets
+probe
 quality
+reset
 run
 scaffold
 sdk
@@ -83,7 +86,7 @@ check_command_surface() {
     [ -n "$missing" ] && note "this file expects a command tan --help no longer lists: $(printf '%s' "$missing" | tr '\n' ' ')"
     _ledger FAIL "command-surface drift" KNOWN_COMMANDS "1" "" --help
   else
-    PASS=$((PASS+1)); _result PASS "command-surface drift" "tan --help matches KNOWN_COMMANDS (flash excluded by design)"
+    PASS=$((PASS+1)); _result PASS "command-surface drift" "tan --help matches KNOWN_COMMANDS (flash listed, never run)"
     _ledger PASS "command-surface drift" KNOWN_COMMANDS "0" "" --help
   fi
 }
@@ -120,7 +123,7 @@ phase_discovery() {
   # Every template the --help text advertises must actually explain. A template
   # that ships in the id list but has no catalog entry is a real break.
   local t
-  for t in minimal-app zephyr-app sensor-starter iot-starter edge-ai-starter board-diagnostics; do
+  for t in minimal-app zephyr-app sensor-starter iot-starter edge-ai-starter board-diagnostics multicore-mailbox; do
     step "explain template $t"         0 -- explain --template "$t" --sdk-root "$SDK"
   done
 
@@ -148,6 +151,11 @@ phase_discovery() {
   step "sdk list (offline)"            0 -- sdk list
   step "sdk install refuses"           1 -- sdk install 0.14.0
   step "sdk switch refuses"            1 -- sdk switch 0.14.0
+  # `sdk remove` is the one mutating verb that IS ported. Both cases are
+  # hardware-free and touch nothing: a missing argument refuses, and an absent
+  # version under a throwaway --destination is a reported no-op, exit 0.
+  step "sdk remove needs an argument"  1 -- sdk remove
+  step "sdk remove absent is a no-op"  0 -- sdk remove tan-surface-no-such-sdk --destination "$WORK/sdk-cache"
 
   local sh
   for sh in bash zsh fish; do
@@ -422,6 +430,24 @@ phase_diag() {
   envelope "monitor envelope"            -- monitor --port /dev/tan-surface-no-such-port
 
   step "model without a subcommand"    1 -- model --project "$PROJ" --sdk-root "$SDK"
+  step_out_rc "model unknown subcommand" 1 'Available: build, doctor, check, list, zoo, add, prep, run, ab' \
+      -- model bogus --project "$PROJ" --sdk-root "$SDK"
+  # run/ab/prep take an .onnx file; none given is a usage error (exit 2), never
+  # a traceback. The success paths need a real model + onnxruntime, so they
+  # are not walked here.
+  step "model run needs a model file"  2 -- model run --project "$PROJ" --sdk-root "$SDK"
+  step "model ab needs a model file"   2 -- model ab --project "$PROJ" --sdk-root "$SDK"
+  step "model prep needs a model file" 2 -- model prep --project "$PROJ" --sdk-root "$SDK"
+  step "model add needs an id"         2 -- model add --project "$PROJ" --sdk-root "$SDK"
+  # Read-only: zoo lists <sdk>/metadata/model_zoo, list reads the project.
+  step "model zoo"                     0 -- model zoo --project "$PROJ" --sdk-root "$SDK"
+  step "model list"                    0 -- model list --project "$PROJ" --sdk-root "$SDK"
+  envelope "model list envelope"         -- model list --project "$PROJ" --sdk-root "$SDK"
+  # `probe` is a READ-ONLY J-Link wrapper; only its argument validation is
+  # walked (no probe is ever contacted).
+  step "probe without a verb"          2 -- probe
+  step "probe rejects an unknown verb" 2 -- probe bogus
+  step "probe read needs an address"   2 -- probe read
   # `--out` is pinned to an ABSOLUTE path inside $WORK: model_cmd.py resolves a
   # relative `--out` against the *project* root (model_cmd.py:352-354), not the
   # harness's scratch dir, so an unpinned `--out` against a project whose

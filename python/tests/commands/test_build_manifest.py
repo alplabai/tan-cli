@@ -24,8 +24,8 @@ from tan.commands.build.manifest import (
     resolve_zephyr_artefact,
     write_post_build_manifest,
 )
-from tan.commands import build_cmd
-from tan.commands.build_cmd import (
+from tan.core import sdk_discovery
+from tan.core.sdk_discovery import (
     SdkRootResolution,
     _abs_posix,
     discover_sdk_root,
@@ -145,7 +145,7 @@ def test_discover_sdk_root_none_when_nothing_nearby(tmp_path, monkeypatch):
     to the filesystem root -- a developer machine with an alp-sdk checkout
     anywhere above the OS temp dir would red this test for reasons unrelated
     to the code under test."""
-    monkeypatch.setattr(build_cmd, "_is_sdk_root", lambda _path: False)
+    monkeypatch.setattr(sdk_discovery, "is_sdk_root", lambda _path: False)
     workspace = tmp_path / "myproj"
     workspace.mkdir()
     assert discover_sdk_root(workspace) is None
@@ -167,7 +167,7 @@ def test_discover_sdk_root_none_when_nothing_nearby(tmp_path, monkeypatch):
 
 
 def _write_pin(workspace: Path, target: Path) -> None:
-    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_discovery._pointer_target`
     reads -- a bare path string parses as invalid JSON and falls through."""
     (workspace / ".alp").mkdir(parents=True, exist_ok=True)
     (workspace / ".alp" / "sdk-path").write_text(
@@ -344,6 +344,15 @@ def test_write_post_build_manifest_reports_reason_when_board_yaml_missing(tmp_pa
         plan_build_root="build", results=[],
     )
     assert outcome.write_failed_reason is not None
+    assert outcome.native_sim_target is None
+
+
+def test_write_post_build_manifest_names_the_missing_board_yaml_when_sdk_resolved(tmp_path):
+    outcome = write_post_build_manifest(
+        sdk_root=str(tmp_path / "sdk"), board_yaml=None, base=str(tmp_path),
+        plan_build_root="build", results=[],
+    )
+    assert outcome.write_failed_reason == "the plan has no board.yaml to project it from"
     assert outcome.native_sim_target is None
 
 

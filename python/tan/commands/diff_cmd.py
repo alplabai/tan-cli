@@ -109,7 +109,9 @@ own spawn-and-analyze machinery (`analyze_validator_output`, the same
 `scripts/validate_board_yaml.py` argv, imported from `validate_cmd` rather
 than re-checked here) whenever an SDK has actually resolved: a non-clean
 verdict becomes a `ParseFailure("schema-violation", ...)`, flowing through
-the exact same failure path a structural mismatch already does. `diff` still
+the exact same failure path a structural mismatch already does. Since
+tan-cli#1484 the engine is the one `tan validate` selects (in-process by
+default, the spawn only under `TAN_VALIDATE_ENGINE=subprocess`). `diff` still
 never requires an SDK on its own -- with none resolved (or a stub checkout
 missing `validate_board_yaml.py` -- some of this module's own tests hand it
 exactly that) it falls back to the structural checks alone, exactly as
@@ -133,8 +135,14 @@ that reclassifies to `failed` rather than a silent skip, an unstartable
 subprocess that refuses as `spawn-failed` (`RUNTIME_FAILURE`) rather than a
 silent skip, and `ParseFailure(result.outcome, ...)` instead of a hardcoded
 `"schema-violation"` -- so `diff.failed`/`diff.missing-preset`/
-`diff.hardware-revision`/`diff.spawn-failed`/`diff.python-too-old` are now
-real, registered outcomes alongside `diff.schema-violation`. The ONLY
+`diff.hardware-revision`/`diff.hardware-revision-unknown`/
+`diff.hardware-revision-not-buildable`/`diff.spawn-failed`/
+`diff.python-too-old` are now real, registered outcomes alongside
+`diff.schema-violation`. The last two `hardware-revision-*` arrived with
+tan-cli#1262, which added validator exits 4 and 5 to the shared
+`_STATUS_OUTCOME` and so widened THIS command's wire as a side effect; both
+registry entries name this file as `emittedBy`, so this list is where a
+reader looking one of them up lands. The ONLY
 remaining silent no-op is the ORIGINAL one this section already documented:
 no `validate_board_yaml.py` at the resolved checkout at all -- there is
 nothing there to reuse, which is different in kind from a reuse attempt that
@@ -153,24 +161,26 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _planner_python_resolution
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.commands.validate_cmd import (
     OUTCOME_CLEAN,
     OUTCOME_FAILED,
     VALIDATOR_SCRIPT,
     VALIDATOR_TIMEOUT_S,
     _Finding,
+    run_in_process_engine,
+    subprocess_engine_requested,
     _synthesised_finding,
     analyze_validator_output,
 )
+from tan.core.sdk_discovery import _planner_python_resolution, sdk_resolution_issues
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 from tan.core.shapes import yaml_kind
+from tan.core.subprocess_env import spawn_env
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's
 #: own version, unrelated to `board.yaml`'s `schemaVersion:`.
@@ -541,7 +551,22 @@ def _data(
     its (always-empty) `changes` list -- verbatim from `diff.rs`'s `failure()`
     -- so `_emit_failure` passes it explicitly rather than letting an empty
     `changes: []` compute `unchanged: true` for a run that never got far
-    enough to answer that question."""
+    enough to answer that question.
+
+    **No `validatorExitStatus` here, knowingly (tan-cli#1262).** That change
+    gave `validate` a `data.validatorExitStatus` carrying the spawned
+    validator's raw returncode, so a consumer keeps the distinction when an
+    exit falls through `_STATUS_OUTCOME.get(..., OUTCOME_FAILED)`. `diff`
+    reuses the same `_spawn_validator`/`_STATUS_OUTCOME` and so inherited the
+    two new `hardware-revision-*` outcome codes -- but NOT the raw status,
+    because it never reaches this function on that path: the outcome travels
+    as a `ParseFailure.code` through `_emit_failure`, which builds its `data`
+    from `_data(...)` alone and has no channel for a number. So a `tan diff`
+    against an unmapped validator exit is still lossy, arriving as
+    `diff.failed` with nothing to re-derive it from. Threading the status
+    through `_spawn_validator` -> `ParseFailure` -> `_emit_failure` is a
+    second wire change on a second command and is tracked separately; it was
+    deliberately NOT folded into #1262."""
     return {
         "schemaVersion": DATA_SCHEMA_VERSION,
         "boardYamlPath": board_path,
@@ -629,6 +654,7 @@ def _spawn_validator(
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=VALIDATOR_TIMEOUT_S,
+            env=spawn_env(),
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -660,9 +686,10 @@ def _spawn_validator(
 
 
 def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path: str) -> None:
-    """Raise `ParseFailure(<outcome>, ...)` when the resolved SDK's own
-    `scripts/validate_board_yaml.py` -- the exact script/argv `validate`
-    spawns -- finds this board.yaml invalid, or its own environment cannot
+    """Raise `ParseFailure(<outcome>, ...)` when the validator engine `tan
+    validate` uses (the in-process port by default; the SDK's own
+    `scripts/validate_board_yaml.py` under `TAN_VALIDATE_ENGINE=subprocess`)
+    finds this board.yaml invalid, or its own environment cannot
     even answer that question (tan-cli#455; see the module docstring's "SDK
     cross-check" / "Review round" sections for the false-clean bug this
     closes and why the outcome, not a hardcoded `"schema-violation"`, is what
@@ -676,6 +703,21 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
     subprocess, a timeout -- refuses instead.
     """
     script = os.path.join(sdk_info.root, *VALIDATOR_SCRIPT)
+    if not subprocess_engine_requested():
+        # Same engine `tan validate` defaults to (tan tan-cli#1484): the
+        # in-process port, so the two commands cannot disagree. A checkout with
+        # no `metadata/` (a stub) has nothing to validate against -- a no-op.
+        if not os.path.isdir(os.path.join(sdk_info.root, "metadata")):
+            return
+        _status, _stderr, result = run_in_process_engine(board_path, Path(sdk_info.root))
+        if result.outcome == OUTCOME_CLEAN:
+            return
+        detail = "; ".join(finding.message for finding in result.findings)
+        raise ParseFailure(
+            result.outcome,
+            "board.yaml is not valid: the SDK's own validator rejects it -- run "
+            f"`tan validate` for full diagnostics: {detail}",
+        )
     if not os.path.isfile(script):
         return
     # tan-cli#652: `used_workspace_venv` is threaded through to
@@ -772,7 +814,11 @@ def diff(
 
     root, board_path = resolve_project_paths(project, board_yaml)
     sdk = resolve_sdk(sdk_root, root)
-    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk`, never a
+    # bare `None` -- `sdk.path` is what says whether a usable checkout
+    # resolved, so `sdk_info` guards on that instead of `sdk`'s own
+    # (now-unconditional) truthiness.
+    sdk_info = SdkInfo.from_resolution(sdk.path, sdk) if sdk.path is not None else None
     # tan-cli#478: `SdkInfo.from_resolution` above carries the pair, and
     # `Envelope.__init__` appends it to the JSON envelope for every command --
     # that seam alone is enough for `--format json`, and dedupes by code, so
@@ -781,10 +827,13 @@ def diff(
     # success branch below both write straight to stderr), so without this
     # the DEFAULT (non-JSON) path stayed silent -- tan-cli#478 review finding
     # 6. Computed here, once, and threaded into both text branches below.
-    sdk_context_issues: list[Issue] = (
-        sdk_resolution_issues(sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for)
-        if sdk is not None
-        else []
+    #
+    # Unconditional now (tan-cli#468): `sdk.broken_project_pin`/
+    # `sdk.foreign_global_default_for` are populated even when `sdk.path` is
+    # `None`, so a broken pin with nothing else resolving reaches `diff`'s
+    # text mode too, not only the resolved-checkout case.
+    sdk_context_issues: list[Issue] = sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
     )
     board_file = Path(board_path)
 

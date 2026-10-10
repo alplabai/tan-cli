@@ -1,0 +1,7 @@
+sdk
+remove
+v0.0.0-nonexistent
+--destination
+./sdk-cache
+--format
+json

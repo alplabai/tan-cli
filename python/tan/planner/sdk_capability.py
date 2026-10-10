@@ -104,9 +104,11 @@ class SdkCapability:
 def _read_json(path: Path) -> Any | None:
     """`None` on anything short of a parsed JSON value -- absent, unreadable,
     or malformed are all "this probe can't confirm the capability", not a
-    crash. A probe answering `False` when it can't tell is the safe
-    direction: it falls through to the ordinary authoring-gap message
-    instead of manufacturing an SDK-floor refusal from a read error."""
+    crash. A probe answering `False` when it can't tell is NOT neutral:
+    `require_capability` treats every `False` as the SDK-floor refusal, so
+    an unreadable or malformed probe file surfaces as `SdkTooOldError`
+    (the "upgrade alp-sdk" message), not as the caller's authoring-gap
+    message."""
     if not path.is_file():
         return None
     try:
@@ -175,6 +177,15 @@ AEN_ZEPHYR_PERIPHERALS_DTSI = SdkCapability(
     ),
 )
 
+AEN_SOM_POWER_DOMAINS = SdkCapability(
+    id="aen.som_power_domains",
+    issue="alp-sdk#2784",
+    description="the AEN SoM `power_domains:` block (on-module-links-v2)",
+    probe=schema_declares_property(
+        "on-module-links-v2.schema.json", "power_domains"
+    ),
+)
+
 
 def require_capability(metadata_root: Path, capability: SdkCapability) -> None:
     """No-op when the bound checkout carries *capability*; raises
@@ -182,7 +193,11 @@ def require_capability(metadata_root: Path, capability: SdkCapability) -> None:
 
     Answers ONLY "does the checkout know the concept" -- a caller still owns
     its own authoring-gap message for "the checkout knows it, but this
-    SoM/SoC/board's metadata doesn't declare it".
+    SoM/SoC/board's metadata doesn't declare it".  A probe that cannot read
+    its metadata file (absent, unreadable, malformed -- e.g. a partial
+    `--metadata-root` copy) answers False and so also raises
+    `SdkTooOldError`; the message cannot tell that apart from a genuinely
+    old checkout.
     """
     if not capability.probe(metadata_root):
         raise SdkTooOldError(capability)

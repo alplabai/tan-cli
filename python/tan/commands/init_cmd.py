@@ -45,8 +45,10 @@ to override is a hard error (`init.board-yaml-unsupported`) rather than a
 silent no-op that drops the caller's file. `--cores` (heterogeneous
 scaffolding) validates + splices companion cores and a default RPMsg channel
 into the SAME board.yaml `plan_template_files` already planned -- see
-`tan.core.scaffold.splice_companion_cores`. `--from-example` ignores both
-`--som` and `--cores`: the example ships its own board.yaml.
+`tan.core.scaffold.splice_companion_cores`. `--from-example` ignores `--cores`
+(by design: the example ships its own `cores:` topology) but DOES retarget
+`--som` onto the copied board.yaml's `som:` block (`retarget_board_yaml_som`,
+tan-cli#890/#1029) -- it is not ignored.
 
 **`--template`'s id space is NOT the SDK's example catalog.** `TEMPLATE_IDS`
 (`tan.core.scaffold`) is tan's own curated, vendored subset -- six starter
@@ -54,7 +56,8 @@ templates, five of which map onto five entries of the broader SDK catalog
 (`metadata/templates/catalog-v1.json`, alp-sdk) under DIFFERENT ids (its
 `minimal`/`sensor`/`iot`/`edge-ai`/`diagnostics` are this file's
 `zephyr-app`/`sensor-starter`/`iot-starter`/`edge-ai-starter`/
-`board-diagnostics`); `minimal-app` has no catalog counterpart at all, and the
+`board-diagnostics`). `multicore-mailbox` (tan-cli#864) is the one id spelled
+the SAME on both sides; `minimal-app` has no catalog counterpart at all, and the
 catalog's `peripheral`/`multicore-rpmsg`/`gateway` entries have no `--template`
 counterpart here -- reach them (and any other SDK example) with
 `--from-example` instead, which copies the example's own tree verbatim
@@ -68,6 +71,27 @@ gets no pointer to `--from-example` -- so the help text here says more than
 `test_help_distinguishes_template_ids_from_the_sdk_example_catalog`. This is
 NOT the same claim as the paragraph below: that one is about which FLAGS are
 listed at all, not about every flag's help wording matching byte-for-byte.
+
+**`--topology` selects a template BY hardware topology instead of by id or
+example path (alp-sdk#1652, tan-cli#996) -- and it is NOT `--cores`.**
+`--cores` (above) splices a companion core onto an ALREADY-CHOSEN template's
+board.yaml; `--topology core_id:os[,core_id:os...]` chooses WHICH template (or
+SDK example) to use in the first place, by asking the SDK catalog which
+record's own `cores:` declaration matches exactly -- a wizard that knows its
+hardware ("M55-HP running Zephyr, A55 running Yocto") but not the catalog's
+naming can ask this way instead of guessing a `--template`/`--from-example`
+value. Mutually exclusive with both `--template` and `--from-example` (all
+three answer the same question: which project to scaffold). Needs a resolved
+SDK checkout, like `--from-example` -- the topology lives only in the SDK's
+live catalog, never tan's own vendored set. Exactly one match resolves like
+`--from-example <that record's example path>` would; zero matches or more
+than one is a hard refusal (`init.topology-not-found` /
+`init.topology-ambiguous`) naming the topologies or candidates that ARE on
+offer -- silently picking the first of several candidates would hide the
+other option from a customer who never knew it existed. See
+`tan.core.example_catalog.find_example_by_cores`'s docstring for why this is
+a small standalone re-implementation of alp-sdk's `find_template_by_cores`
+rather than a call into `tan.planner.template`'s hand-ported copy.
 
 **`--all`, `--target`, `--verbose`, `--quiet`, `--no-color` are accepted and
 genuinely IGNORED here -- matching the oracle, not merely tolerated.** Every
@@ -88,6 +112,7 @@ clap's doc-comment text; only their presence is the contract.)
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -95,21 +120,41 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
+from tan.core.alp_conf_pregen import pregeneration_message
+from tan.core.system_manifest import load_yaml_document
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.example_catalog import (
+    AmbiguousCoresTopologyError,
+    CoresTopologyNotFoundError,
+    MalformedCatalogError,
+    catalog_unreadable,
+    find_example_by_cores,
+    parse_topology_arg,
+    unsupported_som,
+)
+from tan.core.som_buildability import hw_rev_not_buildable
+from tan.core.sdk_discovery import (
+    global_default_foreign_project_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
-    IOT_STARTER_SUPPORTED_SKU,
+    TEMPLATE_SUPPORTED_SKUS,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
     FileChange,
+    FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
+    SomBlockUnsupportedError,
     TemplateDataError,
+    UnreadableSomBlockError,
     UnsupportedSomError,
     collect_file_changes,
     is_plain_relative,
@@ -123,8 +168,10 @@ from tan.core.scaffold import (
     splice_companion_cores,
     vendored_app_core_key,
     vendored_core_ids,
+    vendored_som,
     write_files,
 )
+from tan.core.board_files import retarget_example_board_files
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -222,8 +269,35 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
-    """The envelope's `sdk` block for a resolved [`_Sdk`], or `None`.
+def _sdk_reportable(sdk: _Sdk | None) -> bool:
+    """Whether `sdk` is resolved AND a real checkout -- the one gate
+    `_sdk_block` used to apply internally before tan-cli#922 moved it to the
+    call site (see `_sdk_block`'s own docstring for why). Gated on the loader
+    marker, matching `build_output.resolve_project_context` ("the envelope's
+    `sdk` only records what core's own loader-marker check accepted"), and
+    NOT merely on `sdk is not None`. `_resolve_sdk_root` returns an explicit
+    `--sdk-root` unvalidated, and `_pin_sdk` then silently declines to pin a
+    path that is not a checkout -- so reporting `sdk` there would advertise a
+    checkout that is about to be pinned and is not."""
+    return sdk is not None and _is_sdk_checkout(sdk.path)
+
+
+def _sdk_block(sdk: _Sdk) -> SdkInfo:
+    """The envelope's `sdk` block for a resolved, checked-out [`_Sdk`] --
+    ALWAYS one, never a bare `None` (tan-cli#922: the same shape tan-cli#900
+    fixed for `examples_cmd._resolve_sdk`/`generate_cmd._resolve_sdk_root`,
+    applied here). Callers gate the CALL itself on `_sdk_reportable(sdk)`
+    rather than this function collapsing to `None` -- moving the "should the
+    envelope carry an `sdk` key at all" decision to the caller, the same
+    place every other resolution wrapper in this repo makes it
+    (`.path is None`), rather than folding it into this function's return
+    type. `SdkInfo.root` has no representable "unresolved" state of its own
+    (it is a bare `str`, unlike `_ResolvedSdk`/`_SdkResolution`/
+    `_ResolvedSdkRoot`'s `path: X | None`), so this function could never have
+    represented "not reportable" WITHIN an `SdkInfo` the way those do --
+    `| None` on the return was the only way to spell that, and spelling it
+    there instead of at the call site is exactly the shape
+    `tests/gates/test_sdk_resolution_wrapper_is_not_optional.py` flags.
 
     tan-cli#491 defect 5: `init` passed no `sdk=` to `Envelope(...)` on ANY
     path, so the key was absent from all four outcomes and at both resolution
@@ -232,13 +306,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
     only field naming WHICH checkout a run is about to permanently pin --
     `data.sdkPinned` is `null` on the preview, refusal and error paths.
-
-    Gated on the loader marker, matching `build_output.resolve_project_context`
-    ("the envelope's `sdk` only records what core's own loader-marker check
-    accepted"), and NOT merely on `sdk is not None`. `_resolve_sdk_root`
-    returns an explicit `--sdk-root` unvalidated, and `_pin_sdk` then silently
-    declines to pin a path that is not a checkout -- so reporting `sdk` there
-    would advertise a checkout that is about to be pinned and is not.
 
     `SdkInfo.from_resolution`, not a raw `SdkInfo(root, tier)`: `_Sdk` carries
     `tier` and `foreign_global_default_for`, which is the shape that
@@ -253,8 +320,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     persisted into `.alp/sdk-path` resolves against the wrong cwd later); this
     field simply reports the same value `data.sdkPinned` does.
     """
-    if sdk is None or not _is_sdk_checkout(sdk.path):
-        return None
     return SdkInfo.from_resolution(sdk.display, sdk)
 
 
@@ -287,7 +352,7 @@ def _emit_error(json_mode: bool, err: InitError, sdk: _Sdk | None = None) -> Non
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     else:
@@ -314,7 +379,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome, sdk: _Sdk | None = None) -
                 ),
                 outcome.issues,
                 outcome.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     elif outcome.preview:
@@ -475,7 +540,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     No `ALP_SDK_ROOT` tier (tried and reverted -- see
     `resolve_sdk_root_ladder`'s own docstring).
 
-    `build_cmd.resolve_sdk_root_wide`, not the narrow ladder its thirteen
+    `tan.core.sdk_discovery.resolve_sdk_root_wide`, not the narrow ladder its thirteen
     sibling commands take (tan-cli#263, measured against the oracle): where a
     workspace holds both a child `<ws>/alp-sdk` and a competing sibling
     `../alp-sdk`, the oracle's `init` pins the CHILD. The narrow ladder pinned
@@ -486,7 +551,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
 
     An explicit `--sdk-root` is expanded (`~`/`~user`) then anchored against
     the process's real cwd with `os.path.abspath` -- lexical only (matching
-    `build_cmd._abs_posix`'s own reasoning), never `Path.resolve()`, so a
+    `tan.core.sdk_discovery._abs_posix`'s own reasoning), never `Path.resolve()`, so a
     project reached through a symlink keeps the name the user typed and a
     not-yet-existing path still resolves. `expanduser` first: `abspath` alone
     does not expand `~`, so `--sdk-root ~/alp-sdk` would otherwise anchor to
@@ -569,6 +634,56 @@ def _sdk_root_flag_unresolved_issue(
     )
 
 
+def _example_som_catalog_issue(
+    resolved_sdk: _Sdk, example_src: str, som: str, subject_label: str
+) -> Issue | None:
+    """tan-cli#890/#1101: whether `--som som` against the SDK scaffold
+    catalog's record for `example_src` is (a) declared unsupported, (b)
+    could not be checked at all, or (c) neither -- extracted out of
+    `init()` itself (tan-cli#1101 review minor: this was inline and pushed
+    `init()` to the 6th-largest function in the tree) since the whole block
+    is exactly this seam: four already-resolved values in, one optional
+    `Issue` out, no other state.
+
+    `unsupported_som` returning `None` is ambiguous by its own documented
+    contract -- EITHER "checked, --som is fine (or there was no record to
+    check against)" OR "could not check at all". This second, narrower read
+    (`catalog_unreadable`) distinguishes the two, and returns its reason
+    ALREADY led correctly for which of its two shapes actually happened (a
+    genuinely unreadable catalog document vs. one that read fine but whose
+    matching record did not) -- see that function's own docstring, and the
+    module docstring section it points at, rather than re-deriving either
+    lead here. `ok`/`exitCode` and the scaffold itself stay exactly as they
+    are either way (refusing here would be the tightening tan-cli#1084
+    promised not to do) -- this only stops the envelope from claiming a
+    check that never ran.
+    """
+    supported = unsupported_som(resolved_sdk.path, example_src, som)
+    if supported is not None:
+        return Issue(
+            "init.example-som-unsupported",
+            "warning",
+            f"{subject_label} declares supported.som_skus "
+            f"{list(supported)} in the SDK scaffold catalog; --som "
+            f"'{som}' is outside that set, and `alp_project.py --emit "
+            f"scaffold` refuses the same pair. The files were still "
+            f"written -- check the scaffolded board.yaml against your "
+            f"SoM's topology before building, or widen som_skus in "
+            f"the catalog if the example really does support it.",
+        )
+    check_skipped_reason = catalog_unreadable(resolved_sdk.path, example_src)
+    if check_skipped_reason is not None:
+        return Issue(
+            "init.example-som-unchecked",
+            "warning",
+            f"{subject_label}: {check_skipped_reason}, so whether --som "
+            f"'{som}' is supported could not be checked. The files were "
+            f"still written -- verify '{som}' against {subject_label}'s "
+            f"supported SoMs before building.",
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The two planning paths
 # ---------------------------------------------------------------------------
@@ -579,14 +694,19 @@ def _plan_from_template(
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
-    # any other `--som` must be refused, never quietly rendered against it.
-    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
+    # Checked BEFORE anything is planned. A template whose SDK catalog entry
+    # restricts `supported.som_skus` must refuse every other `--som` here --
+    # never render it against the wrong family tree (silent, `exitCode 0`) and
+    # never let it fall through to `init.template-unreadable` (which blames
+    # the installation for a wrong argument). See TEMPLATE_SUPPORTED_SKUS.
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None and sku not in supported:
+        plural = "s" if len(supported) > 1 else ""
+        allowed = ", ".join(f"'{s}'" for s in supported)
         raise InitError(
             "init.invalid-som",
-            f"Template 'iot-starter' supports only SoM SKU "
-            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
+            f"Template '{template_id}' supports only SoM SKU{plural} "
+            f"{allowed}; got '{sku}'.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -608,6 +728,19 @@ def _plan_from_template(
         # frozen binary built without the template `--add-data`), not a project
         # problem, so INTERNAL_FAILURE rather than a validation code that would
         # send the customer looking at their own board.yaml.
+        raise InitError(
+            "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
+        ) from err
+    except SomBlockUnsupportedError as err:
+        # tan-cli#1029/#1041, defensive: every vendored tree's board.yaml is
+        # tan's OWN template data (`tan/templates/vendored/`, captured
+        # block-style, pinned by `test_scaffold_content_oracle_parity.py`),
+        # never reachable in practice -- ANY of `FlowStyleSomError`'s or
+        # `UnreadableSomBlockError`'s shapes here means the shipped template
+        # data itself is broken, not a customer argument, so this maps to
+        # the same code/exit as `TemplateDataError` above rather than the
+        # validation-failure `_plan_from_example` raises for the
+        # customer-reachable copy of these same shapes.
         raise InitError(
             "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
         ) from err
@@ -787,8 +920,22 @@ def _apply_board_yaml_override(
     ]
 
 
+def _copied_board_cores(files: list[PlannedFile]) -> object:
+    """The copied board.yaml's `cores:` mapping, or `None` when there is no
+    board.yaml or it does not parse -- `pregeneration_message` then names a
+    `<core-id>` placeholder instead of guessing."""
+    board = next((f.content for f in files if f.relative_path == "board.yaml"), None)
+    if board is None:
+        return None
+    try:
+        doc = load_yaml_document(board)
+    except Exception:  # noqa: BLE001 -- unparseable degrades to the placeholder
+        return None
+    return doc.get("cores") if isinstance(doc, dict) else None
+
+
 def _plan_from_example(
-    src: str, som: str | None, sdk: _Sdk | None
+    src: str, som: str | None, sdk: _Sdk | None, search_note: str = ""
 ) -> tuple[str, list[PlannedFile]]:
     """Copy an SDK example directory verbatim. The ONE init path that needs a
     checkout, because the thing it copies lives in one."""
@@ -811,7 +958,8 @@ def _plan_from_example(
             "init.sdk-root-unresolved",
             "alp-sdk root is unresolved. Use --sdk-root or run near an alp-sdk "
             "checkout to copy an example."
-            + (f" (tried '{sdk.display}')" if sdk is not None else ""),
+            + (f" (tried '{sdk.display}')" if sdk is not None else "")
+            + search_note,
             ExitCode.VALIDATION_FAILURE,
         )
 
@@ -855,15 +1003,117 @@ def _plan_from_example(
         )
 
     if som:
+        # tan-cli#1351: read BEFORE board.yaml is retargeted below, which
+        # would erase the example's own SKU. `boards/<old board>.{conf,
+        # overlay}` never applies on another SKU's board target.
+        files = retarget_example_board_files(files, som, sdk.path / "metadata")
         # Retarget the copied board.yaml onto the chosen SoM, so an example can
         # be scaffolded onto the customer's own module rather than the example's.
-        files = [
-            PlannedFile(f.relative_path, retarget_board_yaml_som(f.content, som))
-            if f.relative_path == "board.yaml"
-            else f
-            for f in files
-        ]
+        try:
+            files = [
+                PlannedFile(f.relative_path, retarget_board_yaml_som(f.content, som))
+                if f.relative_path == "board.yaml"
+                else f
+                for f in files
+            ]
+        except FlowStyleSomError as err:
+            # tan-cli#1029. Before this, a flow-style `som:` block
+            # (`som: {sku: ..., hw_rev: ...}`) made `retarget_board_yaml_som`
+            # silently return the example's board.yaml byte-for-byte
+            # unchanged -- `--som` discarded with `issues: []` and exit 0,
+            # indistinguishable from success. Refusing here means the files
+            # are never written rather than written wrong.
+            raise InitError(
+                "init.som-flow-style-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
+        except UnreadableSomBlockError as err:
+            # tan-cli#1041 (the amendment). Same symptom as the flow-style
+            # refusal immediately above -- `--som` silently discarded,
+            # `issues: []`, exit 0 -- for the three shapes that are not
+            # flow-style at all: a `*alias`, an un-overridden `<<:` merge
+            # key (inside the `som:` block or at the document root), and a
+            # flow mapping split across more than one physical line. A
+            # DIFFERENT code from `init.som-flow-style-unsupported`
+            # (rather than folding these into it) because the customer
+            # remediation reads the same but the diagnosis does not -- a
+            # tool consuming this code some day should not have to string-
+            # match the message to tell "your `som:` is flow style" apart
+            # from "your `som:` uses a YAML feature (alias/merge) this
+            # scaffolder does not follow".
+            raise InitError(
+                "init.som-block-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
+        except SomBlockUnsupportedError as err:
+            # tan-cli#1060 review: `SomBlockUnsupportedError`'s own docstring
+            # promises every call site catches THIS base, not either leaf
+            # above, so a THIRD leaf (the next `som:` spelling this file
+            # learns to refuse) needs no call site touched outside
+            # `scaffold.py`. Before this trailing clause that promise was
+            # false here specifically -- the two `except` blocks above catch
+            # only the two leaves that exist today, so an unenumerated third
+            # leaf would fall through uncaught and surface as
+            # `init.internal-failure` (measured with a temporary third leaf:
+            # exit code 5, message "init failed unexpectedly: ..."), loud but
+            # not the customer-actionable `ExitCode.VALIDATION_FAILURE` its
+            # two siblings give today. Same code as the generic
+            # `UnreadableSomBlockError` case just above (the customer
+            # remediation is the same "this `som:` block isn't one tan's
+            # scaffolder can retarget"); a leaf specific enough to need its
+            # own code/message earns its own `except` clause ahead of this
+            # one, same as `UnreadableSomBlockError` did.
+            raise InitError(
+                "init.som-block-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
     return f"example:{src}", files
+
+
+def _plan_from_topology(
+    topology_raw: str, som: str | None, sdk: _Sdk | None, search_note: str = ""
+) -> tuple[str, list[PlannedFile]]:
+    """Resolve `--topology` to a catalog record, then delegate to
+    `_plan_from_example` exactly as if `--from-example <record's example>`
+    had been given -- one resolution step ahead of the existing path, not a
+    second file-copying implementation."""
+    try:
+        cores = parse_topology_arg(topology_raw)
+    except ValueError as err:
+        raise InitError(
+            "init.invalid-topology", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        raise InitError(
+            "init.sdk-root-unresolved",
+            "alp-sdk root is unresolved. Use --sdk-root or run near an "
+            "alp-sdk checkout to select a template by --topology."
+            + (f" (tried '{sdk.display}')" if sdk is not None else "")
+            + search_note,
+            ExitCode.VALIDATION_FAILURE,
+        )
+    try:
+        src = find_example_by_cores(sdk.path, cores)
+    except MalformedCatalogError as err:
+        # tan-cli#1084: a malformed catalog escaped BOTH handlers below as a
+        # raw traceback. Handled on its own class, not on the shared
+        # `CoresTopologyError` base, so the envelope names the catalog
+        # rather than implying the requested topology was the problem.
+        raise InitError(
+            "init.catalog-malformed", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    except CoresTopologyNotFoundError as err:
+        raise InitError(
+            "init.topology-not-found", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    except AmbiguousCoresTopologyError as err:
+        raise InitError(
+            "init.topology-ambiguous", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    return _plan_from_example(src, som, sdk, search_note)
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +1147,13 @@ def _finish(
     sdk: _Sdk | None,
 ) -> _Outcome:
     changes = collect_file_changes(project_root, files)
+    # tan-cli#1484: an existing `.alp/sdk-path` that names a DIFFERENT checkout
+    # is a planned change like any other file, so the would-overwrite guard
+    # below covers it. Re-pinning the project to another SDK silently is the
+    # failure this prevents.
+    pin_change = _sdk_pin_change(project_root, sdk)
+    if pin_change is not None:
+        changes.append(pin_change)
 
     if preview:
         # Before the overwrite guard, deliberately: a preview touches no disk,
@@ -974,6 +1231,23 @@ def _finish(
         unchanged=result.unchanged,
         sdk_pinned=sdk_pinned,
     )
+
+
+def _sdk_pin_change(project_root: Path, sdk: _Sdk | None) -> FileChange | None:
+    """`update` for `.alp/sdk-path` when it already pins a different checkout
+    than the one this run resolved (or is unreadable); `None` otherwise."""
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        return None
+    pointer = project_root / ".alp" / "sdk-path"
+    if not pointer.is_file():
+        return None
+    try:
+        existing = json.loads(pointer.read_text(encoding="utf-8")).get("sdkPath")
+    except (OSError, ValueError, AttributeError):
+        existing = None
+    if existing == sdk.display:
+        return None
+    return FileChange(".alp/sdk-path", "update")
 
 
 def _pin_sdk(project_root: Path, sdk: _Sdk | None) -> str | None:
@@ -1077,7 +1351,29 @@ def init(
             "the plan's app core -- any other id can only be spliced in "
             "app-less, as `:off` or (on a Cortex-A id) `:yocto`, so a bare "
             "companion id like `m55_he` infers `:zephyr` and is refused "
-            "unless `m55_he` is the app core."
+            "unless `m55_he` is the app core. SPLICES onto an already-"
+            "chosen template/example -- to instead CHOOSE which template to "
+            "use by its hardware topology, see --topology. Mutually "
+            "exclusive with --topology, which has no already-chosen "
+            "template left for this to splice onto."
+        ),
+    ),
+    topology: str = typer.Option(
+        None,
+        "--topology",
+        metavar="TOPOLOGY",
+        help=(
+            "core_id:os[,core_id:os...] hardware topology (e.g. "
+            "'m55_hp:zephyr,m55_he:zephyr'); an alternative to --template/"
+            "--from-example that SELECTS whichever SDK catalog template's "
+            "own cores: topology matches exactly, instead of naming a "
+            "template id or example path directly. Not --cores, which "
+            "splices a companion core onto an ALREADY-CHOSEN template "
+            "instead of choosing one. Mutually exclusive with --template, "
+            "--from-example, AND --cores (there is no already-chosen "
+            "template left for --cores to splice onto -- add the extra "
+            "core to --topology itself instead); needs a resolved SDK "
+            "checkout."
         ),
     ),
     preview: bool = typer.Option(
@@ -1176,8 +1472,77 @@ def init(
         # declines to write `.alp/sdk-path` for it.
         sdk_root_invalid_issue = _sdk_root_flag_unresolved_issue(sdk_root, resolved_sdk)
 
-        if from_example is not None:
-            template_id, files = _plan_from_example(from_example, som, resolved_sdk)
+        # `--topology`, `--template`, `--from-example` all answer the same
+        # question (which project to scaffold) -- refuse rather than
+        # silently prefer one, the same posture `find_example_by_cores`
+        # itself takes for an ambiguous topology match (tan-cli#996).
+        _chosen = [n for n, v in (
+            ("--topology", topology), ("--template", template),
+            ("--from-example", from_example),
+        ) if v is not None]
+        if len(_chosen) > 1:
+            raise InitError(
+                "init.scaffold-input-conflict",
+                f"tan init takes at most one of --template, --from-example, "
+                f"--topology; got {', '.join(_chosen)}.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        # tan-cli#1001 review: `--topology` ALREADY selects the template by
+        # its full hardware topology -- `--cores` combined with it has
+        # nothing left to splice onto, since there is no "already-chosen
+        # template" yet for `--cores` to attach a companion core to (unlike
+        # the `--template`/default path below, where `_plan_from_template`
+        # genuinely reads `cores`). Before this check, `--cores` on the
+        # `--topology` path was silently discarded: `ok: true`, exit 0,
+        # `issues: []`, and no trace of the requested core in the written
+        # `board.yaml` -- measured. Refuse instead, the same posture the
+        # `_chosen` conflict above takes for two scaffold-source flags.
+        # `--from-example` + `--cores` is a DIFFERENT, pre-existing case
+        # (the example ships its own board.yaml, so `--cores` is silently
+        # ignored there too, documented at `_plan_from_example`'s call site
+        # below) -- not touched here; only the `--topology` combination is
+        # new in this PR and had no such note.
+        # tan-cli#1484: `--board-yaml` replaces the planned board.yaml
+        # verbatim AFTER `--cores` was spliced into it, so the core vanished
+        # with `ok: true`. Same silent-discard shape, same refusal.
+        if isinstance(board_yaml, str) and isinstance(cores, str):
+            raise InitError(
+                "init.scaffold-input-conflict",
+                "tan init --board-yaml supplies the whole board.yaml, so --cores "
+                "would be silently discarded. Put the core in your board.yaml, "
+                "or drop --board-yaml.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        if topology is not None and cores is not None:
+            raise InitError(
+                "init.scaffold-input-conflict",
+                "tan init --topology already selects the template by its "
+                "full hardware topology; --cores has nothing left to splice "
+                "onto and would be silently ignored. Add the extra core to "
+                "--topology instead (e.g. --topology "
+                "m55_hp:zephyr,a32_cluster:yocto), or drop --topology and "
+                "use --template/--from-example with --cores.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        # tan-cli#1463: where the ladder looked, appended to the unresolved
+        # refusal. An explicit `--sdk-root` is terminal (I-31), so it adds none.
+        # Computed only when a refusal needs it: `Path.absolute()` raises if the
+        # cwd has been removed, which a preview must still survive.
+        search_note = ""
+        if (topology is not None or from_example is not None) and (
+            resolved_sdk is None or not _is_sdk_checkout(resolved_sdk.path)
+        ):
+            search_note = with_sdk_search("", workspace_root, sdk_root)
+        if topology is not None:
+            template_id, files = _plan_from_topology(topology, som, resolved_sdk, search_note)
+            # `find_example_by_cores` resolved to an example, so this is the
+            # same shape `_plan_from_example` returns directly below.
+            subject_label = f"example '{template_id[len('example:') :]}'"
+        elif from_example is not None:
+            template_id, files = _plan_from_example(from_example, som, resolved_sdk, search_note)
             # `--cores` is ignored on this path (the example ships its own
             # board.yaml); `--board-yaml`'s subject names the example, not a
             # template id -- `template_id` here is `"example:<src>"`.
@@ -1186,8 +1551,15 @@ def init(
             template_id, files = _plan_from_template(template, som, cores)
             subject_label = f"template '{template_id}'"
 
+        # `--topology` resolves to an example the same way `--from-example`
+        # does (`template_id` starts "example:" either way), so both share
+        # the same `allow_add`/SoM-support/missing-board.yaml treatment below
+        # -- a topology-resolved example is not a template's own plan and can
+        # equally have no board.yaml or a supported.som_skus mismatch.
+        is_example_shaped = template_id.startswith("example:")
+
         files = _apply_board_yaml_override(
-            files, subject_label, board_yaml, allow_add=from_example is not None
+            files, subject_label, board_yaml, allow_add=is_example_shaped
         )
 
         # `tan build` discovers a project's board.yaml at its root; an example
@@ -1202,14 +1574,118 @@ def init(
         # when one was given. Every registered TEMPLATE plans its own
         # board.yaml (tan.core.scaffold), so this can only trip on
         # --from-example.
+        # tan-cli#890: this path retargets `--som` onto the copied board.yaml
+        # without asking the catalog whether the example supports that SKU.
+        # WARNS rather than refuses, for the same reason as the board.yaml
+        # case just below; `tan/core/example_catalog.py` carries the full
+        # reasoning and the "cannot tell means silent" rule.
+        example_som_issue = None
+        if is_example_shaped and som is not None and resolved_sdk is not None:
+            example_src = template_id[len("example:") :]
+            example_som_issue = _example_som_catalog_issue(
+                resolved_sdk, example_src, som, subject_label
+            )
+
         missing_board_yaml_issue = None
-        if from_example is not None and not any(f.relative_path == "board.yaml" for f in files):
+        if is_example_shaped and not any(f.relative_path == "board.yaml" for f in files):
             missing_board_yaml_issue = Issue(
                 "init.example-missing-board-yaml",
                 "warning",
                 f"{subject_label} has no board.yaml, so `tan build` will not "
                 f"find a board to build here; pass --board-yaml to add one.",
             )
+
+        # alp-sdk#866: the copied example may read a pre-generated
+        # `generated/alp.conf` its own prose cannot produce outside alp-sdk.
+        # `--from-example` copies verbatim, so say which command does -- see
+        # `tan.core.alp_conf_pregen`.
+        pregen_issue = None
+        if is_example_shaped and resolved_sdk is not None:
+            pregen_text = pregeneration_message(
+                files, _copied_board_cores(files), resolved_sdk.display, subject_label
+            )
+            if pregen_text is not None:
+                pregen_issue = Issue("init.alp-conf-pregeneration", "info", pregen_text)
+
+        # tan-cli#743: a scaffolded board.yaml with no explicit `hw_rev:`
+        # resolves, at validate/build time, to its SoM preset's own
+        # `default_hw_rev:` -- so a SoM whose default revision the SDK
+        # itself marks not-buildable (`status: reserved`/`tbd`/absent)
+        # produces a project whose FIRST `tan validate` hard-errors, with
+        # `init` never having said a word. `--board-yaml` renders customer
+        # content verbatim, whose effective SKU/hw_rev this command does not
+        # parse, so that path is left alone.
+        #
+        # tan-cli#1008 review majors 1+2: the SKU/hw_rev this check judges
+        # are read off the PLANNED board.yaml itself (`vendored_som`), not
+        # `--som`/`DEFAULT_SOM_SKU` -- `--som` alone missed a not-buildable
+        # SKU a bare `--from-example`/`--topology` already writes to disk
+        # (`--som` is `None` there), and `retarget_board_yaml_som` only drops
+        # an example's explicit `hw_rev:` on a CROSS-family retarget (review
+        # round 4) -- an unretargeted example's own value, or one surviving
+        # a same-family retarget, must be read rather than assumed absent.
+        # This also obsoletes the old `is_example_shaped` gate on
+        # `--som`-required-to-know-the-SKU: the file always carries a `sku:`
+        # once one has been planned, on every path (template, example,
+        # topology) alike.
+        hw_rev_issue = None
+        if board_yaml is None and resolved_sdk is not None:
+            board_file = next((f for f in files if f.relative_path == "board.yaml"), None)
+            if board_file is not None:
+                try:
+                    file_sku, file_hw_rev = vendored_som(board_file.content)
+                except SomBlockUnsupportedError:
+                    # tan-cli#1029/#1041. Only reachable here with no
+                    # `--som` at all (a `--som` retarget onto any of these
+                    # shapes already refused earlier, in
+                    # `_plan_from_example`) -- a `som:` block this advisory
+                    # check cannot read (flow style, an alias, an
+                    # un-overridden merge key -- see `SomBlockUnsupportedError`'s
+                    # two leaves), so it degrades the same way an unparsed
+                    # `--board-yaml` already does above: this specific pair
+                    # is simply not judged, not a hard failure.
+                    file_sku, file_hw_rev = None, None
+            else:
+                file_sku, file_hw_rev = None, None
+            effective_sku = file_sku if file_sku is not None else (
+                som if is_example_shaped else (som or DEFAULT_SOM_SKU)
+            )
+            if effective_sku is not None:
+                not_buildable = hw_rev_not_buildable(
+                    resolved_sdk.path, effective_sku, file_hw_rev
+                )
+                if not_buildable is not None:
+                    status_repr = (
+                        f"status: {not_buildable.status!r}"
+                        if not_buildable.status is not None
+                        else "carries no `status:` key"
+                    )
+                    if file_hw_rev is not None:
+                        resolution_clause = (
+                            f"the scaffolded board.yaml explicitly sets `hw_rev: "
+                            f"{file_hw_rev}`"
+                        )
+                        promotion_clause = "this hardware revision is promoted"
+                    else:
+                        resolution_clause = (
+                            "the scaffolded board.yaml sets no explicit `hw_rev:` "
+                            "and so resolves to this SoM's default"
+                        )
+                        promotion_clause = "its default hardware revision is promoted"
+                    alternative_clause = (
+                        ", or until board.yaml names a buildable `hw_rev:` explicitly"
+                        if not_buildable.has_buildable_alternative
+                        else ""
+                    )
+                    hw_rev_issue = Issue(
+                        "init.hw-rev-not-buildable",
+                        "warning",
+                        f"SoM {not_buildable.sku} hw_rev {not_buildable.hw_rev!r} "
+                        f"exists but is not buildable ({status_repr}) -- the check "
+                        f"`tan validate` will refuse next, since {resolution_clause}. "
+                        f"The files were still written -- `tan build` will not work "
+                        f"against this SoM until {promotion_clause}{alternative_clause}.",
+                    )
 
         outcome = _finish(
             template_id,
@@ -1221,14 +1697,20 @@ def init(
             force=force,
             sdk=resolved_sdk,
         )
+        if example_som_issue is not None:
+            outcome.issues.append(example_som_issue)
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
+        if hw_rev_issue is not None:
+            outcome.issues.append(hw_rev_issue)
         if divergence_issue is not None:
             outcome.issues.append(divergence_issue)
         if foreign_issue is not None:
             outcome.issues.append(foreign_issue)
         if sdk_root_invalid_issue is not None:
             outcome.issues.append(sdk_root_invalid_issue)
+        if pregen_issue is not None:
+            outcome.issues.append(pregen_issue)
     except InitError as err:
         _emit_error(json_mode, err, resolved_sdk)
         return

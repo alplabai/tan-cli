@@ -94,6 +94,7 @@ before anything is rendered, so a stale literal here fails LOUD --
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -101,15 +102,17 @@ from pathlib import Path
 import click
 import typer
 
-from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.metadata_schema import schema_errors
+from tan.core.new_som_ospi import is_alif_ensemble, render_ospi_memories_and_hyperram
+from tan.core.sdk_discovery import (
+    _planner_python,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_tiered,
 )
-from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
+from tan.core.shapes import SDK_MARKER, matches_glob_suffix, rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -119,8 +122,8 @@ _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
 _SOC_REF_RE = re.compile(r"^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$")
 _FAMILY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CORE_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
-#: `som-preset-v1.schema.json`'s own `default_hw_rev` pattern, verbatim
-#: (`metadata/schemas/som-preset-v1.schema.json` `properties.default_hw_rev
+#: `som-preset-v2.schema.json`'s own `default_hw_rev` pattern, verbatim
+#: (`metadata/schemas/som-preset-v2.schema.json` `properties.default_hw_rev
 #: .pattern`). tan-cli#496 defect 5: this used to be checked ONLY by the
 #: post-render schema self-check, which -- for a brand-new family, where the
 #: `_family_hw_revisions` cross-check below is skipped -- reported a bad
@@ -134,7 +137,7 @@ _HW_REV_RE = re.compile(r"^[a-z0-9_-]+$")
 #: Canonical backend keys already known to the device dispatcher, plus the
 #: schema-legal lowercase `tbd` placeholder -- verbatim from the original.
 INFERENCE_BACKENDS = ("ethos_u", "drpai", "deepx_dxm1", "tbd")
-ETHOS_U_VARIANTS = ("u55", "u65", "u85")
+ETHOS_U_VARIANTS = ("u55", "u85")
 
 #: `data.schemaVersion` for `--format json` (tan-cli#399). 1 because this is
 #: the first shape `new-som` has ever put on the wire -- there is no earlier
@@ -189,7 +192,7 @@ def _envelope(data, issues: list[Issue], exit_code: ExitCode) -> None:
 
 
 def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
-          json_mode: bool = False) -> None:
+          json_mode: bool = False, extra_issues: list[Issue] | None = None) -> None:
     """Refuse: one error to stderr (or one envelope under `--format json`) and
     exit -- 1 by default, the flat exit code the alp_cli original's `_fail`
     always used (`raise SystemExit(1)`) for every validation failure it can
@@ -218,10 +221,14 @@ def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
     That is the SAME generic forwarder-preflight shape `sdk_cli.rs::run`
     hands every `alp-*` forward it refuses before spawning a child (the
     class faultdecode/model/monitor share), not something specific to any
-    one refusal reason here."""
+    one refusal reason here.
+
+    `extra_issues` (tan-cli#926) PREPENDS ahead of `new-som.failed`, the
+    `clean_cmd._run` shape; `None` at every other call site in this file."""
     if json_mode:
         _envelope(
-            {"subcommand": "new-som"}, [Issue("new-som.failed", "error", message)], exit_code
+            {"subcommand": "new-som"},
+            [*(extra_issues or []), Issue("new-som.failed", "error", message)], exit_code,
         )
     else:
         typer.echo(f"new-som: {message}", err=True)
@@ -329,7 +336,7 @@ def _yaml_scalar(value: str) -> str:
 
 
 def _som_schema_path(sdk_root: Path) -> Path:
-    return sdk_root / "metadata" / "schemas" / "som-preset-v1.schema.json"
+    return sdk_root / "metadata" / "schemas" / "som-preset-v2.schema.json"
 
 
 def _soc_schema_path(sdk_root: Path) -> Path:
@@ -341,28 +348,115 @@ def _current_sku_pattern(schema_path: Path) -> str:
     return schema["properties"]["sku"]["pattern"]
 
 
+def _is_yaml_board_file(name: str) -> bool:
+    """True if @name has a ``.yaml`` suffix -- case-sensitively on POSIX,
+    case-INSENSITIVELY on Windows, matching ``Path.glob``'s own
+    ``case_sensitive=None`` default (platform casing rules) exactly.
+
+    tan-cli#1127 review round 2: replacing ``boards_dir.glob("*.yaml")``
+    with ``os.listdir`` plus a plain ``entry.endswith(".yaml")`` would have
+    silently NARROWED the match on Windows -- a ``Foo.YAML`` board file
+    that ``glob`` used to enumerate there is invisible to a case-sensitive
+    suffix compare, dropping its ``name:`` from the known set and turning a
+    legitimate ``--default-board`` into a hard scaffold failure. This
+    exists so the listing helper below matches exactly what it replaced,
+    not a narrower set that happens to agree on POSIX. tan-cli#1132 hit the
+    identical question twice more (``*.conf``/``*.overlay``, ``*.json``), so
+    the RULE itself now lives once in ``shapes.matches_glob_suffix`` and this
+    is its ``.yaml`` application -- name, signature and contract unchanged;
+    only the place the casing decision is written moved.
+    """
+    return matches_glob_suffix(name, ".yaml")
+
+
 def _known_board_names(sdk_root: Path) -> set[str] | None:
     """Board ``name:`` values from ``<sdk_root>/metadata/boards/``, or
-    ``None`` when the directory is missing -- the closed set of shared
-    carrier boards lives in the SDK checkout, not under ``--output-root``.
+    ``None`` when the directory is missing OR listable-but-empty/degenerate
+    (see the ``return names or None`` note below) -- the closed set of
+    shared carrier boards lives in the SDK checkout, not under
+    ``--output-root``.
+
+    tan-cli#1116 review round 2/3 replaced a ``boards_dir.is_dir()``
+    pre-flight with ``boards_dir.glob("*.yaml")`` wrapped in one ``except
+    OSError``. That primitive choice was itself only ACCIDENTALLY correct,
+    tan-cli#1127 found: ``Path.glob`` raises ``PermissionError`` for a
+    permission-denied parent OR grandparent directory on 3.12.3, so the
+    ``except OSError`` here was genuinely load-bearing THERE -- but on
+    3.13.15 AND 3.14.7 ``glob`` instead returns an EMPTY iterator for the
+    identical shape, silently (measured; driven against real
+    ``python-build-standalone`` 3.13.15/3.14.7 builds plus this project's
+    pinned 3.12.3). On those two interpreters the ``except OSError`` clause
+    never fired at all, and this function still answered ``None`` only
+    because ``return names or None`` below happens to treat "found nothing"
+    and "permission denied" as the same outcome. A refactor touching only
+    that return line (``return names or None`` -> ``return names``, which
+    reads as a harmless tidy-up) would have silently reintroduced the
+    escaping-``PermissionError`` defect on 3.13/3.14 while staying green on
+    3.12 -- nothing at the call site would have said why.
+
+    tan-cli#1127 makes the correctness deliberate: the listing now goes
+    through ``os.listdir``, which raises ``OSError`` (``PermissionError``
+    included) for a permission-denied ancestor -- parent or grandparent --
+    on all three measured interpreters, unlike ``Path.glob``. The ``except
+    OSError`` below is genuinely load-bearing on every supported
+    interpreter now, not only 3.12; nothing about this function's
+    permission-handling remains interpreter-dependent.
+
+    Review round 2 (PR #1129) caught a second, independent way the
+    primitive swap could have silently changed behaviour: ``Path.glob``'s
+    default ``case_sensitive=None`` matches by PLATFORM casing rules --
+    case-sensitive on POSIX, case-INSENSITIVE on Windows -- so
+    ``boards_dir.glob("*.yaml")`` used to enumerate a ``Foo.YAML`` on
+    Windows, and a plain ``entry.endswith(".yaml")`` over ``os.listdir``
+    would not (measured identically on all three interpreters run on this
+    POSIX box: ``glob("*.yaml")`` -> ``['lower.yaml']``,
+    ``glob("*.yaml", case_sensitive=False)`` -> ``['lower.yaml',
+    'upper.YAML']``, a plain ``endswith(".yaml")`` -> ``['lower.yaml']`` only).
+    ``_is_yaml_board_file`` above preserves that Windows matching exactly,
+    by delegating to ``shapes.matches_glob_suffix`` (tan-cli#1132, where
+    the case-fold moved) -- this function's contract is "list what
+    `Path.glob("*.yaml")` used to list, correctly, on every interpreter",
+    not "list what a case-sensitive suffix compare finds".
     """
     boards_dir = sdk_root / "metadata" / "boards"
-    if not boards_dir.is_dir():
-        return None
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
 
+    try:
+        entries = os.listdir(boards_dir)
+    except OSError:
+        return None
+    candidates = sorted(
+        boards_dir / entry for entry in entries if _is_yaml_board_file(entry)
+    )
     names: set[str] = set()
-    for path in sorted(boards_dir.glob("*.yaml")):
+    for path in candidates:
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (yaml.YAMLError, UnicodeDecodeError):
+        except (OSError, yaml.YAMLError, UnicodeDecodeError):
             # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not a
             # `yaml.YAMLError`, so a non-UTF-8 board file escaped this
             # best-effort scan as an unhandled traceback instead of being
             # skipped the same way an unparseable one already is.
+            #
+            # tan-cli#1116 review round 2: `OSError` is caught too -- a file
+            # this listing enumerated but cannot itself be READ (a per-file
+            # `chmod 000`, distinct from the containing-directory failure
+            # the `except OSError` around `os.listdir` above already
+            # covers) raised a raw `PermissionError` past this same
+            # best-effort scan (measured escaping before this fix).
             continue
         if isinstance(doc, dict) and isinstance(doc.get("name"), str):
             names.add(doc["name"])
+    # tan-cli#1127: still doing real work, not a vestige of the retired
+    # `Path.glob` accident. `os.listdir` above already turns "denied
+    # ancestor" into an explicit `None` via `except OSError`; this line's
+    # remaining job is coalescing a LISTABLE-BUT-EMPTY result (no `.yaml`
+    # files at all, or every one present failed to parse / carried no
+    # `name:`) into that same "not resolvable" `None` -- the caller
+    # (`board_names is not None and default_board not in board_names`)
+    # treats `None` as "can't verify, don't gate on it" and would otherwise
+    # hard-fail every scaffold against an empty `known:` list for a
+    # directory that is present but genuinely has nothing in it yet.
     return names or None
 
 
@@ -383,7 +477,7 @@ def _resolve_sku_family(sku: str, sdk_root: Path) -> str | None:
             "import sys; sys.path.insert(0, sys.argv[1]); "
             "from alp_project_loader import _sku_family; "
             "print(_sku_family(sys.argv[2]))",
-            str(sdk_root / "scripts"),
+            os.path.abspath(sdk_root / "scripts"),  # probe runs from an empty cwd
             sku,
         ]
     )
@@ -401,6 +495,42 @@ def _family_hw_revisions(
     None means "not resolvable at scaffold time" -- a brand-new family with
     no SKU-prefix mapping / no hw-revisions file yet (creating one is a
     porting-checklist step).
+
+    tan-cli#1116 review round 2/3: NOT a ``path.is_file()`` pre-flight --
+    that used to decide whether to try THIS root's candidate or fall
+    through to the next one, and it raised a raw ``PermissionError`` for a
+    permission-denied ancestor directory on 3.12.3 AND 3.13.15 (measured
+    escaping before this fix on both) -- NOT "every supported interpreter"
+    as an earlier draft of this note claimed: on 3.14.7 ``is_file()``
+    itself already returns ``False`` for that same shape (the same
+    swallowed-errno version skew the other round-2 fixes in this PR
+    describe; `is_file()` is not exempt from it after all), so the OLD
+    pre-flight would have silently taken the wrong branch there too -- not
+    a crash, but a permission failure on THIS root silently treated as
+    "not here, try the next root" instead of the genuine "found it, but
+    it's broken" this function's own docstring below distinguishes.
+    Reading straight through instead:
+    ``FileNotFoundError``/``IsADirectoryError``/``NotADirectoryError`` all
+    mean "not usable AT THIS ROOT", so they fall through to the next
+    candidate exactly as a ``False`` ``is_file()`` used to; any OTHER
+    failure (permission, a non-UTF-8 file, invalid YAML) means the file IS
+    there and IS the one for this SKU, so it stops the search with ``None``
+    rather than silently trying a second root that was never going to be
+    the right answer.
+
+    tan-cli#1127 re-checked this function against the ``_known_board_names``
+    finding next door and found it does NOT need the same
+    ``Path.glob``-to-``os.listdir`` swap: this function never calls
+    ``Path.glob`` (or any other directory-listing primitive) in the first
+    place -- it reads ``path.read_text()`` directly, with no stat-based
+    pre-flight, which is exactly the "read straight through" shape the
+    paragraph above already describes. ``Path.read_text()`` raises
+    ``PermissionError`` for a permission-denied ancestor identically on
+    3.12.3, 3.13.15 and 3.14.7 (measured, both for the immediate parent and
+    a grandparent directory denied) -- unlike ``Path.glob``/``Path.is_dir()``/
+    ``Path.is_file()``, plain reads were never subject to that version skew.
+    This function's permission-handling was ALREADY deliberate, not
+    accidental, before tan-cli#1127; nothing here changed.
     """
     family_dir = _resolve_sku_family(sku, sdk_root)
     if family_dir is None:
@@ -409,19 +539,23 @@ def _family_hw_revisions(
 
     for root in (output_root, sdk_root):
         path = root / "metadata" / "e1m_modules" / family_dir / "hw-revisions.yaml"
-        if path.is_file():
-            try:
-                doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            except (yaml.YAMLError, UnicodeDecodeError):
-                # tan-cli#415: same widening as `_known_board_names` above --
-                # `UnicodeDecodeError` is a `ValueError`, not a `yaml.YAMLError`,
-                # and previously escaped uncaught rather than resolving to
-                # "not resolvable".
-                return None
-            revs = doc.get("hw_revisions")
-            if isinstance(revs, dict):
-                return path, {str(k) for k in revs}
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            continue
+        except (OSError, yaml.YAMLError, UnicodeDecodeError):
+            # tan-cli#415: `UnicodeDecodeError` is caught alongside
+            # `yaml.YAMLError` -- it is a `ValueError`, not a
+            # `yaml.YAMLError`, and previously escaped uncaught rather than
+            # resolving to "not resolvable". `OSError` (tan-cli#1116 review
+            # round 2) covers a per-file `chmod 000`, distinct from the
+            # ancestor-directory case the `except` above now handles by
+            # falling through instead of stopping.
             return None
+        revs = doc.get("hw_revisions")
+        if isinstance(revs, dict):
+            return path, {str(k) for k in revs}
+        return None
     return None
 
 
@@ -539,11 +673,11 @@ def _render_preset(
     a("# primary source named next to each field -- NEVER guess (see")
     a("# docs/porting-new-som.md).")
     a("")
-    a("schema_version: 1")
+    a("schema_version: 2")
     a("")
     a("# SKU is assigned by Alp Lab product planning.  A brand-new family")
     a("# also needs one alternation added to the `sku:` pattern in")
-    a("# metadata/schemas/som-preset-v1.schema.json (porting guide step 3).")
+    a("# metadata/schemas/som-preset-v2.schema.json (porting guide step 3).")
     a(f"sku: {sku}")
     a("")
     a("# Human-readable family slug (NOT the directory name; the SKU-prefix")
@@ -564,7 +698,7 @@ def _render_preset(
     a("# Populated on-module chips -- the module BOM / schematic is")
     a("# authoritative.  Chip values are slugs matching a")
     a("# metadata/chips/<chip>.yaml manifest.  The legal role keys are the")
-    a("# CLOSED set in som-preset-v1.schema.json `on_module:` (pmic_main,")
+    a("# CLOSED set in som-preset-v2.schema.json `on_module:` (pmic_main,")
     a("# pmic_secondary, clock_generator, rtc_external, temperature_sensor,")
     a("# eeprom, secure_element, wifi_ble, supervisor_mcu, ethernet_phy,")
     a("# nor_flash, emmc, npu, pcie_mux, ospi_memories, hyperram,")
@@ -574,6 +708,8 @@ def _render_preset(
     a(f"  silicon:              {soc_ref}")
     a("  pmic_main:            TBD                    # main PMIC part (BOM)")
     a("  eeprom:               TBD                    # identity EEPROM part (BOM)")
+    if is_alif_ensemble(vendor_slug, family_slug):
+        lines.extend(render_ospi_memories_and_hyperram())
     a("  # i2c_devices:                               # per-bus I2C device tables;")
     a("  #   <bus_name>:                              # bus names are a per-family")
     a("  #     bus_master: TBD                        # fact (schematic).  Chip")
@@ -588,20 +724,22 @@ def _render_preset(
     a("  flash_mbit:           TBD                    # external non-volatile memory, Mbit")
     a("")
     a("# Inference-accelerator selection -- silicon-determined (SoC")
-    a("# datasheet), never customer-facing.  `tbd` is the schema-legal")
-    a("# placeholder backend; scripts/check_inference_backend_parity.py")
-    a("# cross-checks the value against the device dispatcher and accepts")
-    a("# `tbd` ONLY while `status.preliminary:` below is true, so this")
-    a("# scaffold commits green as-is.  Replace `tbd` with the real")
-    a("# canonical key (ethos_u, drpai, deepx_dxm1, ...) before clearing")
-    a("# the preliminary flag.")
+    a("# datasheet), never customer-facing.  `auto_order` is the ordered")
+    a("# ALP_INFERENCE_BACKEND_AUTO preference, best first; its first entry")
+    a("# IS the preferred backend, and `cpu` (the floor), when listed, goes")
+    a("# last.  `tbd` is the schema-legal placeholder backend;")
+    a("# scripts/check_inference_backend_parity.py cross-checks every entry")
+    a("# against the device dispatcher and accepts `tbd` ONLY while")
+    a("# `status.preliminary:` below is true, so this scaffold commits green")
+    a("# as-is.  Replace `tbd` with the real canonical keys (ethos_u, drpai,")
+    a("# deepx_dxm1, ..., then cpu) before clearing the preliminary flag.")
     a("inference:")
-    a(f"  preferred_backend:    {inference_backend}")
+    a(f"  auto_order:           [{inference_backend}]")
     if inference_backend == "ethos_u":
         # Primary variant only.  Which Ethos-U instances the part carries is
         # silicon-determined -- the SDK derives it from the SoC JSON npus[] /
         # capabilities.ethos_uNN_count -- so the preset does NOT enumerate them
-        # (the deprecated `npu_population` field is intentionally not scaffolded).
+        # (the removed `npu_population` field is never scaffolded).
         a(f"  ethos_u_variant:      {ethos_u_variant}")
     a("")
     a("# capabilities: -- OPTIONAL, omitted in the skeleton.  Declare ONLY")
@@ -622,7 +760,17 @@ def _render_preset(
     a("# Memory layout (SRAM banks + on-die flash) is derived from the SoC")
     a("# variant resolved via `silicon_variant:` -- see the SoC JSON")
     a("# `variants[].sram_banks_kb`.  Declare a memory_map: block here ONLY")
-    a("# for non-stock partitioning.")
+    a("# for non-stock partitioning.  Every row you author MUST carry")
+    a("# `write_authority:` (REQUIRED since som-preset v2; the schema")
+    a("# rejects a row without it).  It records WHO may write the region,")
+    a("# and when: customer_image (written only by the flash tool),")
+    a("# vendor_image (factory-provisioned), customer_runtime (writable by")
+    a("# the application; the ONLY value an IPC carve-out or runtime mount")
+    a("# may land on), secure_enclave (written by the Secure Enclave at")
+    a("# provisioning), none (an explicit no-writer, not a \"not sure yet\"")
+    a("# catch-all), composite (a whole-device alias spanning rows of")
+    a("# different authority).  Absent means unresolved, never")
+    a("# customer_runtime.  See docs/porting-new-som.md.")
     a("")
     a("# Vendor mailbox / IPC controller -- the vendor reference manual /")
     a("# hand-written HW config is authoritative.  The channel reservations")
@@ -640,14 +788,14 @@ def _render_preset(
     a("# schematic is available, either (a) list every E1M pad that routes")
     a("# through an on-module mediator chip (see E1M-V2N102.yaml), (b)")
     a("# declare an explicit empty list to assert \"no mediator, everything")
-    a("# is SoC-direct\" (see E1M-NX9101.yaml), or (c) list pads with")
+    a("# is SoC-direct\", or (c) list pads with")
     a("# `dispatch: TBD` while routing is pending.  Omitted, the loader")
     a("# treats every pad as SoC-direct -- resolve this before clearing")
     a("# status.partial_hw_config.")
     a("")
     a("# helper_firmware: -- OPTIONAL, omitted in the skeleton.  One entry")
-    a("# per independently-flashed on-module helper MCU image (see")
-    a("# E1M-V2N102.yaml `gd32_bridge`).  Omit when the module has none.")
+    a("# per independently-flashed on-module helper MCU image.")
+    a("# Omit when the module has none.")
     a("")
     a("# Must resolve against metadata/e1m_modules/<family-dir>/hw-revisions.yaml.")
     a(f"default_hw_rev:         {_yaml_scalar(default_hw_rev)}")
@@ -712,24 +860,17 @@ def _soc_skeleton(sku: str, soc_ref: str, vendor: str, cores: tuple[str, ...]) -
     }
 
 
-def _schema_errors(doc, schema_path: Path) -> list[str]:
-    """Validate ``doc`` against ``schema_path``; return error strings."""
-    # tan-cli#810: the only `jsonschema` call in the package, and it drags in
-    # `attr`, `referencing` and `jsonschema_specifications` behind it -- all of
-    # which every `tan` invocation used to load for this one line. Deferred
-    # here. (No per-module millisecond figure is quoted anywhere in this
-    # change: `-X importtime` cumulative charges a shared submodule to whoever
-    # imported it FIRST, so the per-module readings are order-dependent and do
-    # not sum to the measured total. The aggregate is in the PR and the budget
-    # log, where it was measured end to end.)
-    import jsonschema  # noqa: PLC0415
-
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
-    return [
-        f"{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}"
-        for err in sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
-    ]
+# tan-cli#964: the validator itself moved to `tan.core.metadata_schema` --
+# every READ consumer (`tan build`, `tan generate`, `tan presets`, `tan
+# size`, `tan bootstrap`) needed the SAME `jsonschema.Draft202012Validator`
+# call this file already had for its WRITE-path self-check, and a second
+# hand-rolled copy is exactly the per-consumer-guard drift #964 is about.
+# `_schema_errors` is kept as the local name (both call sites below are
+# unchanged) and still means exactly what it always has here: `source=None`,
+# so a validation failure is reported against the in-memory generated
+# skeleton (`pointer: message`), not a file on disk -- this scaffold has not
+# been written yet when either call below runs.
+_schema_errors = schema_errors
 
 
 def _rollback_write_failure(
@@ -913,11 +1054,12 @@ def new_som(
         if not json_mode:
             typer.echo(line)
 
-    def fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE) -> None:
+    def fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
+             extra_issues: list[Issue] | None = None) -> None:
         """`_fail` with this run's output mode bound, so no refusal site has to
         remember to pass it -- a forgotten one would silently print prose to
         stdout under `--format json` and leave the envelope to `cli.main`."""
-        _fail(message, exit_code, json_mode=json_mode)
+        _fail(message, exit_code, json_mode=json_mode, extra_issues=extra_issues)
 
     # Mirrors the original's `type=click.Choice(...)` flag-level validation --
     # a Click-usage error (exit 2) BEFORE anything else runs, same as the
@@ -942,6 +1084,13 @@ def new_som(
 
     workspace_root = Path.cwd() / project if project else Path.cwd()
     active = resolve_sdk_tiered(sdk_root, workspace_root)
+    # tan-cli#926: computed before the `.path is None` refusal below (tan-cli#900 fix).
+    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
+    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
+    resolution_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
+    if not json_mode:
+        for issue in resolution_issues:
+            typer.echo(f"new-som: warning: {issue.message}", err=True)
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
         # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
         # `resolve_sdk_tiered` is TERMINAL on the flag (I-31) and returns it
@@ -954,6 +1103,7 @@ def new_som(
             if sdk_root
             else _SDK_ROOT_UNRESOLVED,
             ExitCode.VALIDATION_FAILURE,
+            extra_issues=resolution_issues,
         )
         return
     resolved_sdk = Path(active.path)
@@ -962,19 +1112,11 @@ def new_som(
     # new SoM into the wrong checkout. Under `--format json` it rides the
     # envelope's `issues` as the already-frozen `sdk.project-pin-unresolved`
     # (tan-cli#399); in text mode it stays the stderr line it always was.
-    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
-    issues: list[Issue] = [] if pin_issue is None else [pin_issue]
-    if pin_issue is not None and not json_mode:
-        typer.echo(f"new-som: warning: {pin_issue.message}", err=True)
     # tan-cli#464: same reasoning -- this command writes metadata skeletons
     # into `resolved_sdk`, and a `globalDefault` answer a DIFFERENT project's
     # bootstrap relocation actually decided is exactly as dangerous here as a
     # silently-missed project pin.
-    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
-    if foreign_issue is not None:
-        issues.append(foreign_issue)
-        if not json_mode:
-            typer.echo(f"new-som: warning: {foreign_issue.message}", err=True)
+    issues: list[Issue] = list(resolution_issues)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a
     # pipe / CI, fail fast naming exactly what is missing instead of an
@@ -1093,7 +1235,7 @@ def new_som(
         fail(f"--cores has duplicate id(s) {dup_cores}; every core id must be unique")
         return
     if inference_backend == "ethos_u" and ethos_u_variant is None:
-        fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u65/u85)")
+        fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u85)")
         return
     if vendor is None:
         vendor = soc_ref.split(":")[0]
@@ -1188,7 +1330,7 @@ def new_som(
     try:
         sku_needs_pattern = re.match(_current_sku_pattern(som_schema_path), sku) is None
     except (OSError, UnicodeDecodeError) as exc:
-        # tan-cli#415: `som-preset-v1.schema.json` is SDK-supplied rather than
+        # tan-cli#415: `som-preset-v2.schema.json` is SDK-supplied rather than
         # user-supplied, but an unreadable or non-UTF-8 copy must still reach a
         # coded envelope -- never a bare traceback with zero bytes on stdout.
         # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it has to
@@ -1220,9 +1362,9 @@ def new_som(
         if sku_needs_pattern:
             errors = [e for e in errors if not e.startswith("sku:")]
         if errors:
-            _internal_error("preset", "som-preset-v1", errors, json_mode)
+            _internal_error("preset", "som-preset-v2", errors, json_mode)
         say(
-            "Preset skeleton validates against som-preset-v1"
+            "Preset skeleton validates against som-preset-v2"
             + (" (except the sku pattern -- see step below)" if sku_needs_pattern else "")
         )
     if soc_doc is not None:
@@ -1324,7 +1466,7 @@ def new_som(
     if sku_needs_pattern:
         steps.append(
             f"Extend the `sku:` pattern in "
-            f"metadata/schemas/som-preset-v1.schema.json to accept {sku} "
+            f"metadata/schemas/som-preset-v2.schema.json to accept {sku} "
             f"(docs/porting-new-som.md, schema-pattern step)."
         )
     steps.append(

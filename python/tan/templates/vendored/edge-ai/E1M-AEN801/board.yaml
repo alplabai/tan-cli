@@ -2,8 +2,9 @@
 #
 # A low-power M55 node reads the on-board BME280 temperature/humidity/pressure
 # sensor on a slow logging cadence, computes the cold-chain metrics (MKT,
-# dewpoint, excursion time), and classifies the integrity state.  Same source
-# targets the V2N DEEPX path when som.sku is flipped.
+# dewpoint, excursion time), and classifies the integrity state.  The V2N
+# DEEPX path is a separate scaffold (--som E1M-V2M101), not a som.sku flip
+# here -- see this project's README.
 
 libraries:
   - name: tflite-micro

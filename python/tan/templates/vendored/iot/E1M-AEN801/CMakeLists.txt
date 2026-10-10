@@ -2,47 +2,13 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-if(NOT DEFINED ALP_SDK_ROOT AND NOT DEFINED ENV{ALP_SDK_ROOT})
-    message(FATAL_ERROR
-        "ALP_SDK_ROOT is not set -- point it at your alp-sdk checkout, "
-        "e.g. `export ALP_SDK_ROOT=/path/to/alp-sdk` or `-DALP_SDK_ROOT=/path/to/alp-sdk`.")
-endif()
-if(NOT DEFINED ALP_SDK_ROOT)
-    set(ALP_SDK_ROOT $ENV{ALP_SDK_ROOT})
-endif()
-
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-set(_alp_generated ${CMAKE_BINARY_DIR}/generated/alp.conf)
-execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${ALP_SDK_ROOT}/scripts/alp_project.py
-            --input ${CMAKE_CURRENT_SOURCE_DIR}/board.yaml
-            --emit zephyr-conf --core m55_hp
-            --output ${_alp_generated}
-    RESULT_VARIABLE _alp_rv
-    OUTPUT_VARIABLE _alp_stdout
-    ERROR_VARIABLE  _alp_stderr
-)
-if(NOT _alp_rv EQUAL 0)
-    message(FATAL_ERROR
-        "alp_project.py failed (rv=${_alp_rv}); "
-        "check ${CMAKE_CURRENT_SOURCE_DIR}/board.yaml.\n"
-        "stderr: ${_alp_stderr}")
-endif()
-
-# PREPEND, not APPEND (tan-cli#379). Zephyr merges the EXTRA_CONF_FILE list in
-# order and the last assignment of a symbol wins, so appending the GENERATED
-# alp.conf parked it after a caller's own `-DEXTRA_CONF_FILE=native_sim.conf`
-# and silently overrode it -- measured, cache `-D` value plus `list(APPEND ...)`
-# yields `native_sim.conf;<build-dir>/generated/alp.conf`. That is backwards for
-# a generated baseline: this template's native_sim leg exists only to turn the
-# alp.conf-emitted `CONFIG_MBEDTLS=y` back off (see native_sim.conf), and could
-# not. Prepending keeps alp.conf winning over prj.conf (the whole list is merged
-# after it) while letting an explicit caller overlay win, which is what README.md's
-# build command and testcase.yaml's `extra_args` both already claimed happens.
-list(PREPEND EXTRA_CONF_FILE ${_alp_generated})
-
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(mqtt_telemetry LANGUAGES C)
 
 target_sources(app PRIVATE src/main.c)
+# Reusable SoM bring-up helper (cc3501e_bridge_bringup): the one-call CC3501E
+# bridge init this app uses so alp_wifi_open() can bind to a ready bridge on
+# E1M-AEN801 (#2112). Copyable template, same file as examples/aen/aen-cc3501e-*
+# -- see src/cc3501e_bridge.h. Built unconditionally; alp_gpio_open()/alp_spi_open()
+# fail fast (NULL, no matching backend) on native_sim, so this is a no-op there.
+target_sources(app PRIVATE src/cc3501e_bridge.c)

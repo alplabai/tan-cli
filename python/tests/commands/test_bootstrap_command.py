@@ -22,6 +22,7 @@ byte-identical; the four that did not are each pinned here with the reason:
 The install steps are exercised through `--dry-run`, which records the argv it
 WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 """
+import errno
 import hashlib
 import json
 import os
@@ -48,6 +49,7 @@ from tan.commands.bootstrap_cmd import (
     workspace_orphan_refusal,
 )
 from tan.core import atomic_write as atomic_write_mod
+from tan.core.sdk_default_registry import registry_path
 from tan.core.bootstrap import (
     INCOMPATIBLE,
     LINUX,
@@ -477,7 +479,7 @@ def test_the_envelope_key_set_and_sdk_omission(tmp_path):
     assert env["ok"] is (env["exitCode"] == 0)
     assert set(env["data"]) == {
         "schemaVersion", "sdkRoot", "workspaceDir", "venvDir", "zephyrBase",
-        "factsFromManifest", "zephyrPin", "noPip", "noWest", "printEnv",
+        "factsFromManifest", "zephyrPin", "noPip", "noWest", "noToolchain", "noPatches", "printEnv",
         "missingPrerequisites",
     }
     assert env["data"]["schemaVersion"] == "2"  # the STRING, not the number
@@ -536,6 +538,65 @@ def test_the_sdk_key_is_absent_not_null_when_nothing_resolves(tmp_path):
     assert env["data"]["missingPrerequisites"] is None
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_path):
+    """tan-cli#926 -- the `bootstrap` instance of the tan-cli#900 class
+    (`clean`/`presets` already had this; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` are the sixth and seventh).
+
+    `_run` used to return its `sdk-root-unresolved` refusal the moment
+    `resolved is None`, BEFORE `pin_issue`/`foreign_issue` were computed a
+    few lines further down -- so a workspace whose `.alp/sdk-path` names a
+    checkout that no longer exists, with no sibling for the ladder to fall
+    through to either, reported `bootstrap.sdk-root-unresolved` alone. The
+    customer was told the SDK root was unresolved but never that their own
+    broken project pin was the reason -- `presets`/`clean` disclose it from
+    the identical ladder.
+
+    Fails against dev: `codes(env)` there is `["bootstrap.sdk-root-
+    unresolved"]` alone, with no leading `sdk.project-pin-unresolved` and
+    `"gone-checkout"` nowhere in the envelope."""
+    ws = tmp_path / "ws"
+    (ws / ".alp").mkdir(parents=True)
+    (ws / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    proc = run_tan("bootstrap", "--format", "json", cwd=ws)
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["sdk.project-pin-unresolved", "bootstrap.sdk-root-unresolved"]
+    assert "gone-checkout" in env["issues"][0]["message"]
+    # Still no usable checkout -- still no `sdk` block.
+    assert "sdk" not in env
+
+
+def test_text_mode_renders_the_broken_project_pin_warning_json_already_carries(tmp_path):
+    """tan-cli#926's fix (see the test above) landed the `sdk.project-pin-
+    unresolved` warning in `--format json`'s `issues[]`, but the SAME
+    `sdk-root-unresolved` refusal's TEXT output (`_refusal`'s `text` is
+    `list(lines)` alone -- it never saw `issues`) stayed silent about the
+    broken pin: exactly the tan-cli#677 defect, recurring on this refusal path
+    instead of the success path #677 originally fixed.
+
+    Pre-fix, the JSON assertion above passes and this text assertion fails:
+    `.alp/sdk-path` and the dangling `gone-checkout` value never appear in
+    stderr even though the identical invocation's `--format json` carries
+    them."""
+    ws = tmp_path / "ws"
+    (ws / ".alp").mkdir(parents=True)
+    (ws / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    text = run_tan("bootstrap", cwd=ws)
+    assert text.returncode == 2
+    assert text.stdout == ""
+    assert ".alp/sdk-path" in text.stderr, (
+        f"DEFECT (tan-cli#677 recurrence): JSON carries sdk.project-pin-"
+        f"unresolved but text does not render it:\n{text.stderr}"
+    )
+    assert "gone-checkout" in text.stderr
+    assert "alp-sdk root is unresolved" in text.stderr
+
+
 def test_missing_prerequisites_is_null_or_populated_but_never_an_empty_list(tmp_path):
     """`[]` would spell "checked, nothing missing" -- which is what a successful
     run reports as `null`. One fact, one spelling."""
@@ -557,8 +618,94 @@ def test_missing_prerequisites_is_null_or_populated_but_never_an_empty_list(tmp_
     )
     assert refused["exitCode"] == 1  # RuntimeFailure, matching the oracle
     assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    # tan-cli#1066: `bootstrap`'s entries carry the same six keys `doctor`'s
+    # do. This fixture SDK's manifest names no such tool in
+    # `artifactProvenance`, so all four are `null` -- present, never omitted.
     assert refused["data"]["missingPrerequisites"] == [
-        {"tool": "tan-no-such-tool-xyz", "command": None}
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
+    ]
+
+
+def test_bootstrap_missing_prerequisites_carry_the_manifests_provenance(tmp_path):
+    """tan-cli#1066: `bootstrap`'s `missingPrerequisites[]` carries the same six
+    keys `doctor`'s does, from the same `MissingPrerequisite.as_dict`.
+
+    One field name must not mean two shapes depending on which command a
+    consumer read it from. The absent tool is given its OWN `artifactProvenance`
+    row here (rather than leaning on a real tool that happens to be absent on
+    this runner) so the join is deterministic on every host.
+    """
+    doc = json.loads(REAL_MANIFEST)
+    doc["artifactProvenance"]["tan-no-such-tool-xyz"] = {
+        "tier": "A",
+        "source": "https://example.invalid/tool",
+        "sizeBytes": 4096,
+        "licence": "Apache-2.0",
+    }
+    refused = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(
+                make_sdk(
+                    tmp_path / "p",
+                    manifest=json.dumps(doc, indent=2),
+                    tools=["tan-no-such-tool-xyz"],
+                )
+            ),
+            cwd=tmp_path / "p" / "ws",
+        )
+    )
+    assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    assert refused["data"]["missingPrerequisites"] == [
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": "A",
+            "licence": "Apache-2.0",
+            "sourceUrl": "https://example.invalid/tool",
+            # An int survives as an int -- the only field of the four that is
+            # not a string, and the one a `bool`/float guard exists for.
+            "sizeBytes": 4096,
+        }
+    ]
+
+
+def test_bootstrap_survives_a_manifest_whose_provenance_block_is_malformed(tmp_path):
+    """A bad `artifactProvenance` must not cost a customer their bootstrap. The
+    block is advisory display metadata; the refusal it rides on is the load-
+    bearing part, and it still arrives intact with all six keys."""
+    doc = json.loads(REAL_MANIFEST)
+    doc["artifactProvenance"] = ["not", "a", "mapping"]
+    refused = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(
+                make_sdk(
+                    tmp_path / "q",
+                    manifest=json.dumps(doc, indent=2),
+                    tools=["tan-no-such-tool-xyz"],
+                )
+            ),
+            cwd=tmp_path / "q" / "ws",
+        )
+    )
+    assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    assert refused["data"]["missingPrerequisites"] == [
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
     ]
 
 
@@ -840,6 +987,29 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     message = next(i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated")
     assert bootstrap_cmd._native(str(sdk)) in message
     assert bootstrap_cmd._native(str(new_sdk)) in message
+    # tan-cli#466: the "to change later" fix hint names BOTH the legacy
+    # pointer AND the registry, so deleting either (or both) by hand remains
+    # a safe, complete recovery -- naming only one would leave a reader
+    # editing the file that was not the one that actually answered.
+    #
+    # A bare `"sdk-default" in message` / `"sdk-defaults.json" in message`
+    # pair (the pre-#904-review shape) is VACUOUS here even with the full
+    # native path prepended: "sdk-default" is a literal PREFIX of
+    # "sdk-defaults.json", so ".../sdk-default" is already a substring of
+    # ".../sdk-defaults.json" -- the first assert cannot fail while the
+    # second passes, no matter how much identical directory prefix is added
+    # to both (measured: `test_sdk_command.py`'s own sibling avoids this only
+    # by using two NON-overlapping fake names, which this real, same-`.alp`-
+    # directory pair can't). Asserted instead on the exact compound substring
+    # `global_default_pointer_fix_hint` actually emits -- both full native
+    # paths, in the "X and/or Y" order the hint joins them in -- which cannot
+    # be satisfied by the registry path alone (mutation-confirmed: rewriting
+    # the hint to name only the registry breaks this exact assertion, where
+    # the old bare-substring pair stayed green).
+    home_alp = tmp_path / "fake-home" / ".alp"
+    pointer_native = bootstrap_cmd._native(home_alp / "sdk-default")
+    registry_native = bootstrap_cmd._native(registry_path(home_alp))
+    assert f"delete {pointer_native} and/or {registry_native} (tan falls" in message
     # The checkout really moved: gone from the old location, present (with its
     # own content) at the new one; `unrelated.txt` is untouched, still the
     # only other thing in the original parent.
@@ -865,6 +1035,176 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert global_doc["sdkPath"] == str(new_sdk)
     assert global_doc["writtenFor"] == str(sdk.parent).replace("\\", "/")
     assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+    # tan-cli#466: the origin-keyed sibling, written ALONGSIDE the legacy
+    # pointer, keyed by the same `written_for` origin (the workspace parent
+    # bootstrap ran in).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert registry.exists()
+    registry_doc = json.loads(registry.read_text(encoding="utf-8"))
+    # `.replace("\\", "/")` on the RHS too (review, #904 second round, blocker
+    # 2): the registry's `sdkPath` is now written through `_to_posix` at
+    # `bootstrap_cmd._write_global_sdk_registry`, forward-slashed on every
+    # platform -- unlike the LEGACY pointer's `sdkPath` two lines up, which
+    # keeps storing `sdk_root` native (pre-existing #464 behaviour, untouched
+    # here). A bare `str(new_sdk)` on the right compared native-vs-posix and
+    # only failed on the Windows shard.
+    assert registry_doc[str(sdk.parent).replace("\\", "/")]["sdkPath"] == str(new_sdk).replace(
+        "\\", "/"
+    )
+
+
+def test_write_global_sdk_registry_normalises_a_native_sdk_root_to_posix(tmp_path, monkeypatch):
+    """Review, #904 second round, blocker 2, proved DIRECTLY and
+    deterministically on every platform (not just reproduced on Windows CI):
+    `_write_global_sdk_registry`'s `sdk_root` argument is exactly
+    `str(new_root)` at its one production call site -- NATIVE rendering,
+    backslashes on Windows. `_to_posix`'s own replace is a plain string
+    operation with no OS dependency (`str(path).replace("\\\\", "/")`), so
+    passing a Windows-shaped, backslash-laden string here reproduces the
+    blocker on Linux too: pre-fix, this stored `sdk_root` byte-for-byte
+    (backslashes and all); post-fix, it always renders forward-slashed,
+    matching the origin KEY it sits beside in the same file.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    bootstrap_cmd._write_global_sdk_registry(
+        "C:\\Users\\dev\\alp-sdk", origin="/home/u/proj"
+    )
+
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
+    )
+    assert registry_doc["/home/u/proj"]["sdkPath"] == "C:/Users/dev/alp-sdk"
+
+
+def test_write_global_sdk_registry_prunes_an_origin_whose_directory_is_gone(
+    tmp_path, monkeypatch
+):
+    """tan-cli#905: the registry's own complaint was unbounded growth from
+    throwaway/CI origins whose directory was later deleted. `dead_origin`
+    below never exists on disk at all (a bootstrap that ran, then had its
+    whole workspace removed, exactly the CI-worktree case the issue names);
+    `live_origin` is a real directory, standing in for a project that is
+    merely not the caller of THIS write. A second `_write_global_sdk_registry`
+    call, for a third, unrelated origin, must drop the dead one and keep the
+    live one untouched -- proving the prune rides the existing write rather
+    than needing its own trigger.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    live_origin = tmp_path / "still-here"
+    live_origin.mkdir()
+    dead_origin = tmp_path / "deleted-project"  # never created -- origin is dead by construction
+    new_origin = tmp_path / "new-project"
+    new_origin.mkdir()
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-old"), origin=str(live_origin))
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-dead"), origin=str(dead_origin))
+    registry_before = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_before) == {str(live_origin), str(dead_origin)}
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-new"), origin=str(new_origin))
+
+    registry_after = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_after) == {str(live_origin), str(new_origin)}, (
+        "the dead origin must be pruned on the next write, and the live one "
+        "must survive it untouched"
+    )
+    assert registry_after[str(live_origin)]["sdkPath"] == str(tmp_path / "sdk-old").replace(
+        "\\", "/"
+    )
+
+
+def test_origin_exists_treats_a_symlink_loop_as_gone_not_inconclusive(tmp_path):
+    """A symlink loop can never resolve to a real directory a `workspace_root`
+    could sit under -- `Path.is_dir()` already returns `False` for it (ELOOP
+    is one of the errnos pathlib swallows internally), and that is the
+    correct answer for `_origin_exists` too, not a case needing degrade-to-
+    `True` treatment."""
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
+    assert bootstrap_cmd._origin_exists(str(loop)) is False
+
+
+def test_origin_exists_degrades_a_permission_error_to_true_not_a_raise(tmp_path):
+    """A permission error (`EACCES`, e.g. a parent directory this process
+    cannot even stat) must degrade to `True` (inconclusive, so the entry
+    survives), not raise out of a best-effort write and not silently prune a
+    project this process simply could not check. Skipped when running as
+    root, which bypasses directory permissions entirely and would make
+    `os.stat` succeed instead of raising."""
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("requires a non-root POSIX process to exercise EACCES")
+    parent = tmp_path / "unreadable"
+    parent.mkdir()
+    child = parent / "origin"
+    child.mkdir()
+    parent.chmod(0o000)
+    try:
+        assert bootstrap_cmd._origin_exists(str(child)) is True
+    finally:
+        parent.chmod(0o755)  # restore so tmp_path's own teardown can clean up
+
+
+def test_origin_exists_keeps_a_not_ready_volume_not_prunes_it(tmp_path, monkeypatch):
+    """review of #971: a live project on a volume that is merely not mounted
+    right now must NOT read as confirmed-dead. On POSIX this is an
+    unmounted mountpoint / autofs / NFS path surfacing as plain `ENOENT`
+    (already covered by the symlink-loop test above, which shares the same
+    errno) -- the shape this test targets is the Windows one, `WinError 21`
+    ("drive exists but is not accessible", `pathlib._WINERROR_NOT_READY`)
+    for a disconnected mapped or removable drive, which `pathlib` itself
+    absorbs the same way it absorbs `ENOENT`
+    (`pathlib._IGNORED_WINERRORS == (21, 123, 1921)` on the 3.12 stdlib this
+    repo floors at).
+
+    It cannot be created literally without a real not-ready Windows volume,
+    so it is simulated at the `os.stat` boundary this function calls
+    directly: a `winerror`-carrying `OSError`, regardless of its mapped
+    `errno`, must degrade to `True` (kept), never to `False` (pruned) --
+    the `winerror` check in `_origin_exists` runs BEFORE the errno check for
+    exactly this reason."""
+    origin = tmp_path / "on-a-disconnected-drive"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 21] The device is not ready")
+        err.errno = errno.ENOENT  # Windows commonly folds WinError 21 into ENOENT too
+        err.winerror = 21
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is True
+
+
+def test_origin_exists_treats_winderror_1921_as_gone_not_inconclusive(tmp_path, monkeypatch):
+    """review of #971, round 2: `windows-latest` CI caught this one LIVE, not
+    in review -- a self-referencing symlink's `os.stat` raises `WinError
+    1921` (`ERROR_CANT_RESOLVE_FILENAME`) on real Windows, not the `ELOOP`
+    errno this function's POSIX branch relies on. `1921` is one of
+    `pathlib._IGNORED_WINERRORS`, same bucket as the `WinError 21` test
+    above -- but it is NOT the same SHAPE: `21` is a drive that might come
+    back, `1921` is a symlink loop that can never resolve, on this host, no
+    matter how long this process waits -- the exact "confirmed-dead" fact
+    the POSIX symlink-loop test above already establishes for `ELOOP`. Kept
+    for a `WinError 21`-alike is correct; kept for THIS one silently
+    resurrects a genuinely dead entry, so it must read `False`, not `True`."""
+    origin = tmp_path / "on-a-loop"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 1921] The symbolic link cannot be followed")
+        err.errno = errno.EINVAL  # not one of the errnos this function checks either
+        err.winerror = 1921
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is False
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
@@ -907,31 +1247,49 @@ def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_p
     assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
 
 
-def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_path):
-    """tan-cli#464, the maintainer's own repro shape, driven through real,
-    independent subprocesses (never by inspecting pointer bytes -- that
-    coverage already existed and did not catch this):
+def test_a_second_projects_relocation_no_longer_repoints_the_first(tmp_path):
+    """tan-cli#464's own repro, now closed by tan-cli#466 (stage 2 of the same
+    issue), driven through real, independent subprocesses (never by
+    inspecting pointer bytes):
 
         A, right after A       sdk.root=<A's own checkout> tier=globalDefault
         (project B bootstraps and relocates)
-        A (the earlier one)    sdk.root=<B's checkout!>     tier=globalDefault
+        A (the earlier one)    sdk.root=<A's own checkout, STILL> tier=globalDefault
 
-    `~/.alp/sdk-default` is machine-global and last-writer-wins, so before
-    this fix project A silently started resolving project B's checkout the
-    moment B bootstrapped -- `ok: true`, `issues: []`, identical to the
-    correct case.
+    Before tan-cli#464, project A silently started resolving project B's
+    checkout the moment B bootstrapped -- `ok: true`, `issues: []`, because
+    `~/.alp/sdk-default` is one machine-global, last-writer-wins file. #464
+    (stage 1) made that DISCLOSED (`sdk.global-default-foreign-project`) but
+    left the ANSWER wrong: A still resolved B's SDK, just with a warning
+    attached. This test used to pin exactly that -- `current_a2` resolving
+    `new_sdk_b` -- as the correct, if disclosed, outcome.
+
+    #466 (stage 2) makes the answer correct instead: `tan bootstrap` now also
+    keys `origin -> sdkPath` into `~/.alp/sdk-defaults.json`, and
+    `resolve_sdk_tiered`'s `globalDefault` tier picks the DEEPEST registry key
+    that CONTAINS the caller's workspace before ever consulting the shared
+    single pointer. A's own bootstrap already wrote `proj_a -> new_sdk_a`
+    into that registry, so A queried from `proj_a` resolves ITS OWN checkout
+    no matter which project bootstrapped last -- `sourceTier` stays
+    `"globalDefault"` (a registry hit IS the machine-default mechanism, keyed,
+    not a new tier), but the root is A's, and the foreign warning does not
+    fire, because a caller a registry entry was written FOR is by
+    construction not reading someone else's answer.
+
+    The genuinely-foreign case -- a caller no registry entry covers at all --
+    still falls through to the legacy pointer and still discloses; that path
+    is `test_foreign_global_default_coverage.py`'s `two_projects` fixture,
+    which now queries from a location outside every registered origin for
+    exactly this reason.
 
     A per-project pin at bootstrap time (`.alp/sdk-path` written in the
-    directory bootstrap ran in) was tried and reverted on review: that
+    directory bootstrap ran in) was tried and reverted on review of #464: that
     directory is bootstrap's cwd, the workspace PARENT in the quickstart, not
     a project -- a bootstrap run from `$HOME` would have pinned inside tan's
-    OWN machine-global config dir, silencing this exact warning for
-    essentially every project the user owns. The fix that ships is
-    disclosure, not prevention: A's `sdk current` STILL resolves B's checkout
-    after B relocates -- that is what "last-writer-wins" means and stays true
-    -- but it now carries `sdk.global-default-foreign-project` naming whose
-    bootstrap actually decided the answer, closing the `issues: []` silence
-    without touching resolution.
+    OWN machine-global config dir. The registry keeps that same "cwd is not
+    necessarily a project" shape (an origin is just a directory bootstrap ran
+    in, not asserted to be a project root) but escapes the single-pointer
+    contention by keying on it instead of overwriting one shared slot.
 
     ONE shared HOME across the whole sequence (tan-cli#463's own lesson: an
     "isolated HOME" control that resets between calls never lets the
@@ -992,12 +1350,11 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
     pointer = home / ".alp" / "sdk-default"
     print(f"  pointer now: {pointer.read_text(encoding='utf-8').strip()}")
 
-    # A, queried again from the SAME directory: the shared global default now
-    # points at B, so A DOES resolve B's checkout -- the defect this test
-    # pins is not that resolution changed (it did not, and should not: layer
-    # 2 is a disclosure fix, not a prevention one), but that this is no
-    # longer SILENT. Pre-fix code has no `sdk.global-default-foreign-project`
-    # code at all, so this assertion fails against it.
+    # A, queried again from the SAME directory: tan-cli#466's whole point is
+    # that this STILL resolves A's own checkout, not B's -- the shared
+    # `~/.alp/sdk-default` pointer now names B, but A's own registry entry
+    # (`proj_a -> new_sdk_a`, written by A's own bootstrap above) is the
+    # deepest key covering `proj_a` and answers first.
     current_a2 = envelope(
         run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
     )
@@ -1005,16 +1362,27 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
         f"  A (the earlier one)    sdk.root={current_a2['sdk']['root']!r} "
         f"tier={current_a2['data']['sourceTier']}"
     )
-    assert current_a2["sdk"]["root"] == str(new_sdk_b).replace("\\", "/")
+    assert current_a2["sdk"]["root"] == str(new_sdk_a).replace("\\", "/"), (
+        "DEFECT (tan-cli#466): project A stopped resolving its OWN SDK after "
+        "an unrelated project B relocated its checkout"
+    )
     assert current_a2["data"]["sourceTier"] == "globalDefault"
-    assert "sdk.global-default-foreign-project" in codes(current_a2), (
-        "DEFECT: project A silently resolved project B's SDK with no warning"
+    assert "sdk.global-default-foreign-project" not in codes(current_a2), (
+        "a registry entry written FOR this workspace must never be reported "
+        "as a foreign global default"
     )
-    message = next(
-        i["message"] for i in current_a2["issues"]
-        if i["code"] == "sdk.global-default-foreign-project"
+
+    # And the registry FILE itself carries both origins, each naming its own
+    # relocated checkout -- the mechanism, not just the outcome.
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
     )
-    assert str(proj_b).replace("\\", "/") in message
+    assert registry_doc[str(proj_a).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_a
+    ).replace("\\", "/")
+    assert registry_doc[str(proj_b).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_b
+    ).replace("\\", "/")
 
 
 def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_path):
@@ -1585,6 +1953,11 @@ def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):
     # before this run).
     pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
     assert not pointer.exists()
+    # tan-cli#466: the origin-keyed registry sibling this same relocation
+    # would have written is restored to "absent" too -- `_undo_relocation`'s
+    # `previous_registry` branch, otherwise untested (review round, #904).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert not registry.exists()
     # tan-cli#284 majors: nothing reported in the envelope may still name the
     # vacated `elsewhere` location once the rollback succeeded -- `data.*`
     # paths and `project.root` must agree with where the checkout actually
@@ -1669,6 +2042,51 @@ def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as
     assert old_root.is_dir()
     assert (old_root / "marker").exists()
     assert not moved_to.exists()
+
+
+def test_a_registry_rollback_restores_the_previous_bytes_exactly(tmp_path, monkeypatch):
+    """tan-cli#904 third round, nit: the registry rollback branch of
+    `_undo_relocation` now writes via `atomic_write_bytes`
+    (`tan.core.atomic_write`), matching the forward write's own
+    `atomic_write_text` -- same file, same N-project blast radius, so both
+    must be crash-safe, not just the forward one.
+
+    `atomic_write_bytes`, not `atomic_write_text`, because the snapshot being
+    restored is a raw byte capture (`_read_global_sdk_registry_bytes`) that
+    `parse_registry` never required to be valid UTF-8 -- deliberately
+    non-UTF-8 here (an invalid continuation byte) to prove the rollback can
+    restore content `atomic_write_text` would raise `UnicodeDecodeError`
+    reconstructing a `str` from. Restored byte-for-byte, and via the temp-
+    sibling-then-`os.replace` shape, not a bare truncate-then-write."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    home_alp = tmp_path / "fake-home" / ".alp"
+    # Realistic precondition: `~/.alp` only ever has something to roll BACK
+    # to because an earlier write in the SAME run (`_write_global_sdk_
+    # registry`, which itself `mkdir(parents=True)`s this directory) already
+    # created it -- this rollback branch, unlike the forward write, does not
+    # create the directory itself.
+    home_alp.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_cmd, "_home_alp_dir", lambda: home_alp)
+
+    non_utf8_registry = b'{"/proj": {"sdkPath": "/sdk"}}\xff\xfe'
+    with pytest.raises(UnicodeDecodeError):
+        non_utf8_registry.decode("utf-8")  # the repro's own precondition
+
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, None, previous_registry=non_utf8_registry
+    )
+
+    assert result.moved_back is True
+    assert result.detail is None, f"the registry restore itself must not fail: {result.detail}"
+    registry_file = registry_path(home_alp)
+    assert registry_file.read_bytes() == non_utf8_registry
+    # No leftover `.tan-tmp` sibling -- the atomic write's temp file was
+    # renamed into place, not left behind.
+    assert list(home_alp.glob("*.tan-tmp")) == []
 
 
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):
@@ -1793,8 +2211,12 @@ def test_a_dry_run_writes_nothing_and_reports_every_step_it_would_have_run(tmp_p
 
     env = envelope(
         run_tan(
-            "bootstrap", "--dry-run", "--format", "json", "--sdk-root", str(sdk),
-            cwd=sdk.parent,
+            # `--no-toolchain`: this SDK fixture carries no
+            # `metadata/toolchains.json` (see `test_toolchain_*` below for
+            # that phase's own dry-run coverage), and the pip/west ordering
+            # this test asserts predates and is independent of it.
+            "bootstrap", "--dry-run", "--no-toolchain", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
         )
     )
     assert env["exitCode"] == 0
@@ -1811,6 +2233,125 @@ def test_a_dry_run_writes_nothing_and_reports_every_step_it_would_have_run(tmp_p
     assert planned[5].endswith("zephyr-export")
     assert planned[-2].endswith("-m pip install -q jsonschema imgtool")
     assert planned[-1].endswith(f"-m pip install -q -e {sdk}")
+
+
+def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp_path):
+    """tan-cli#990 review MAJOR: every one of `toolchain_phase`'s own 15
+    tests calls it DIRECTLY (`test_bootstrap_toolchain_phase.py`), never
+    through `_run`/`run_tan` -- so deleting the ONE call site that wires it
+    into `tan bootstrap` (`_run`'s `toolchain_phase(ws, log, runner,
+    sdk_root, venv, is_windows=is_windows)` line) left the whole suite
+    green. This is the missing end-to-end assertion the review asked for:
+    a REAL `tan bootstrap --dry-run` subprocess, with a real
+    `metadata/toolchains.json` on disk, must plan a `west sdk install`
+    command -- not a stubbed call into `toolchain_phase` that could still
+    pass with the wiring cut.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    # This gate runs on ubuntu/windows/macos-latest (ci.yml): the manifest
+    # must publish a row for WHICHEVER host is actually running it, or the
+    # phase takes its "no artifact for this host" clean-skip branch instead
+    # of planning anything, and the assertion below would be testing the
+    # wrong code path on two of the three platforms.
+    import platform as _platform
+
+    from tan.core import toolchain_provision as _tp
+
+    host_key = _tp.toolchain_host_key(sys.platform, _platform.machine())
+    assert isinstance(host_key, str), host_key  # this test host must be supported
+    (sdk / "metadata" / "toolchains.json").write_text(
+        json.dumps(
+            {
+                "zephyrSdk": {
+                    "version": "1.0.1",
+                    "baseUrl": "https://example.invalid/",
+                    "artifacts": [
+                        {
+                            "host": host_key, "component": "minimal-sdk",
+                            "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                        },
+                    ],
+                },
+                "measuredFootprint": {"extractedBytes": {"wholeSdk": 4096}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+    assert env["exitCode"] == 0
+
+    planned = env["data"]["plannedCommands"]
+    install_cmds = [
+        p for p in planned if "sdk" in p.split() and "install" in p.split()
+    ]
+    assert len(install_cmds) == 1, planned
+    assert "--no-gnu-toolchains" in install_cmds[0]
+    assert "--version 1.0.1" in install_cmds[0]
+    # tan-cli#1176: the published plan is what a customer copies and runs by
+    # hand, so the flag that makes the command work on a host without
+    # `file(1)` has to be visible here too, not only in the spawned argv.
+    assert "--no-hosttools" in install_cmds[0]
+
+
+def test_a_dry_run_never_puts_the_github_token_in_the_envelope(tmp_path):
+    """tan-cli#1143, end to end through a REAL `tan bootstrap` subprocess:
+    with a GitHub credential bound in the environment, the sentinel value
+    must appear nowhere in the process's whole output -- not in
+    `data.plannedCommands`, not in an issue message, not on stderr.
+
+    `--dry-run` is the sharp end of this. It is the ONE mode whose entire
+    product is the argv list tan would have spawned, published verbatim in
+    the envelope, so an implementation that reached for west's
+    `--personal-access-token` flag leaks here with no child process, no
+    network and no failure needed. The grep is over `stdout + stderr`
+    together rather than the parsed envelope, so a leak into a progress line
+    fails this too.
+    """
+    sentinel = "ghp_TANCLI1143SENTINELdoNotLeakThisValue"
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    import platform as _platform
+
+    from tan.core import toolchain_provision as _tp
+
+    host_key = _tp.toolchain_host_key(sys.platform, _platform.machine())
+    assert isinstance(host_key, str), host_key
+    (sdk / "metadata" / "toolchains.json").write_text(
+        json.dumps(
+            {
+                "zephyrSdk": {
+                    "version": "1.0.1",
+                    "baseUrl": "https://example.invalid/",
+                    "artifacts": [
+                        {
+                            "host": host_key, "component": "minimal-sdk",
+                            "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                        },
+                    ],
+                },
+                "measuredFootprint": {"extractedBytes": {"wholeSdk": 4096}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "bootstrap", "--dry-run", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+        env_extra={name: sentinel for name in _tp.SDK_TOKEN_ENV_VARS},
+    )
+    env = envelope(proc)
+    assert env["exitCode"] == 0
+    # The plan really did reach the SDK-install step -- otherwise "no leak"
+    # would be a statement about a command that was never planned.
+    planned = env["data"]["plannedCommands"]
+    assert any("sdk" in p.split() and "install" in p.split() for p in planned), planned
+    assert sentinel not in proc.stdout + proc.stderr
 
 
 def test_plannedcommands_appears_only_under_dry_run(tmp_path):
@@ -1995,7 +2536,7 @@ def test_a_broken_som_preset_never_fails_the_run(layout, tmp_path):
     elif layout == "garbage":
         preset.write_text("::: not yaml [\n", encoding="utf-8")
     else:
-        preset.write_bytes(b"schema_version: 1\nsku: \xff\n")
+        preset.write_bytes(b"schema_version: 2\nsku: \xff\n")
     project = sdk / "examples" / "p"
     project.mkdir(parents=True)
     (project / "board.yaml").write_text(
@@ -2006,6 +2547,99 @@ def test_a_broken_som_preset_never_fails_the_run(layout, tmp_path):
         "--project", str(project), cwd=sdk.parent,
     )
     assert envelope(proc)["exitCode"] == 0
+
+
+#: Deliberately narrower than the real `som-preset-v2.schema.json` -- the same
+#: narrowing rationale as `test_presets_command.py`'s own `_SOM_SCHEMA` and
+#: `test_metadata_schema_refuses_on_read.py`'s: enough to exercise the gate
+#: (`silicon:` typed), not a byte-for-byte mirror of a schema this file's
+#: coverage must not depend on never changing shape.
+_BOOTSTRAP_SOM_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 2},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def test_a_schema_invalid_som_preset_refuses_bootstrap(tmp_path):
+    """tan-cli#964 review (major 3): `bootstrap` reads a SoM preset
+    (`_read_som_topology` -> `presets_cmd.parse_som_preset`) to decide the
+    Yocto gate and to scaffold the workspace -- so, unlike `tan presets`'s
+    WARN-and-continue half of the same decided rule, a schema-invalid preset
+    here must REFUSE before anything is written, not silently degrade to an
+    empty topology.
+
+    Mutation-proven: reverting the `warnings=` threading added to
+    `_read_som_topology`/`read_board_runtimes`, or the `if schema_warnings:`
+    refusal in `bootstrap()` (byte copy restored after, never `git
+    checkout`), turns this test's `exitCode`/`codes` assertions red;
+    restoring turns them green.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    schemas = sdk / "metadata" / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    (schemas / "som-preset-v2.schema.json").write_text(
+        _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
+    )
+    modules = sdk / "metadata" / "e1m_modules"
+    modules.mkdir(parents=True, exist_ok=True)
+    preset = modules / "E1M-X1.yaml"
+    preset.write_text(
+        "schema_version: 2\nsku: E1M-X1\nsilicon: 7\ntopology:\n  a55_cluster: {}\n",
+        encoding="utf-8",
+    )
+    project = sdk / "examples" / "p"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-X1\ncores:\n  a55_cluster: {}\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json", "--sdk-root", str(sdk),
+        "--project", str(project), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert env["exitCode"] == 2
+    assert codes(env) == ["bootstrap.metadata-schema-invalid"]
+    message = env["issues"][0]["message"]
+    assert "does not validate against som-preset-v2" in message
+    assert "silicon: 7 is not of type 'string'" in message
+
+
+def test_a_schema_valid_som_preset_does_not_refuse_bootstrap(tmp_path):
+    """The control: a valid SoM preset, checked against the same schema, does
+    not refuse -- proving the new gate does not fire on the common case."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    schemas = sdk / "metadata" / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    (schemas / "som-preset-v2.schema.json").write_text(
+        _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
+    )
+    modules = sdk / "metadata" / "e1m_modules"
+    modules.mkdir(parents=True, exist_ok=True)
+    preset = modules / "E1M-X1.yaml"
+    preset.write_text(
+        "schema_version: 2\nsku: E1M-X1\nsilicon: vendor:family:part\n"
+        "topology:\n  a55_cluster: {}\n",
+        encoding="utf-8",
+    )
+    project = sdk / "examples" / "p"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-X1\ncores:\n  a55_cluster: {}\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json", "--sdk-root", str(sdk),
+        "--project", str(project), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert "bootstrap.metadata-schema-invalid" not in codes(env)
 
 
 @pytest.mark.parametrize("shape", ["directory", "garbage", "non-utf8"])
@@ -2095,9 +2729,27 @@ def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field == "from_manifest":
+        if field in ("from_manifest", "artifact_provenance"):
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
+
+    # `artifact_provenance` is the second exemption, and unlike `from_manifest`
+    # (a flag that differs by construction) it is a DELIBERATE divergence
+    # (tan-cli#1066). Every other field here is a stale-by-default
+    # transcription of the manifest, which is a safe thing to be wrong about:
+    # a stale tool list refuses a host that would have passed. A stale
+    # PROVENANCE entry is different in kind -- it is tan asserting a LICENCE,
+    # from a build-time constant, about an artefact this SDK never described.
+    # An SDK with no manifest publishes no such claim, so neither does tan;
+    # the empty table reports `null` for every field, which is true.
+    # Self-cancelling, like the `install` exemption before it: if anyone fills
+    # the fallback in, this fires instead of passing quietly.
+    assert fallback.artifact_provenance == {}
+    assert manifest.artifact_provenance, (
+        "the pinned manifest carries no artifactProvenance at all -- if "
+        "PINNED_SDK_TAG moved BACK before alp-sdk v0.16.0 this exemption is "
+        "vacuous and should be re-examined, not left asserting nothing"
+    )
 
     # Named explicitly on top of the loop above: `install` is the one field
     # that has been exempted before, and a nested dict compares equal on the
@@ -2740,8 +3392,21 @@ def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():
     # button needs something runnable.
     unusable = posix_venv_unusable()
     assert unusable.code == "venv-unusable"
+    # tan-cli#1066: `python3-venv` is a Debian PACKAGE name, not one of
+    # alp-sdk's `artifactProvenance` keys -- so all four provenance fields are
+    # `null` here, the same spelling an SDK predating the block yields. Pinned
+    # rather than loosened to a subset compare: a near-miss join onto
+    # `python3`'s row would attribute PSF-2.0 to a Debian package, and that
+    # would be a fabricated licensing claim, not a cosmetic slip.
     assert reported_missing(unusable.missing) == [
-        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"}
+        {
+            "tool": "python3-venv",
+            "command": "sudo apt-get install -y python3-venv",
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
     ]
     assert reported_missing(()) is None
 
@@ -3117,6 +3782,73 @@ def test_capture_tail_prefers_stderr_and_keeps_the_last_lines_in_order():
     assert "\ufffd" in capture_tail(b"", b"\xff\xfe boom\n")
 
 
+def test_capture_tail_lines_widens_the_window_without_changing_the_default():
+    """tan-cli#990 review: a real `west sdk install` CI failure produced a
+    message naming no cause at all -- the actual `tar`/`xz` error line sat
+    above the last 4 lines of `west`'s own Python traceback, and the default
+    window discarded it. `lines` lets ONE caller (`Runner.run(...,
+    tail_lines=...)`, `bootstrap_cmd.TOOLCHAIN_INSTALL_TAIL_LINES`) ask for
+    more without moving every other caller's still-4-line default."""
+    stderr = b"".join(f"line{i}\n".encode() for i in range(1, 11))
+    assert capture_tail(b"", stderr) == "line7 | line8 | line9 | line10"
+    assert capture_tail(b"", stderr, lines=6) == (
+        "line5 | line6 | line7 | line8 | line9 | line10"
+    )
+    wide = capture_tail(b"", stderr, lines=40)
+    assert wide == " | ".join(f"line{i}" for i in range(1, 11))
+    assert "line1" in wide  # would be lost at the 4-line default
+
+
+def test_runner_env_restores_ld_library_path_from_the_pyinstaller_orig_value(monkeypatch):
+    """tan-cli#990 review follow-up: the REAL cause of the "first install"
+    CI failure the PR's own body called an unproven "transient runner
+    hiccup" -- once `capture_tail`'s widened window (above) stopped
+    discarding it:
+
+        xz: /home/runner/.local/bin/tan-cli-lib/_internal/liblzma.so.5:
+        version `XZ_5.4' not found (required by xz)
+
+    `tan`'s own PyInstaller onedir freeze sets `LD_LIBRARY_PATH` to its
+    bundled lib dir; every child it spawns (`west`, and everything `west`
+    itself spawns, incl. `tar --xz`) inherited that, and the SYSTEM `xz`
+    picked up tan's older bundled `liblzma.so.5` instead of its own.
+    `LD_LIBRARY_PATH_ORIG` is PyInstaller's own preserved pre-bundle value;
+    `Runner._env` must restore it for every child, unconditionally."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/home/runner/.local/bin/tan-cli-lib/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/x86_64-linux-gnu")
+
+    env = bootstrap_cmd.Runner(json=True)._env()
+
+    assert env is not None
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
+
+
+def test_runner_env_drops_ld_library_path_when_pyinstaller_orig_was_empty(monkeypatch):
+    """PyInstaller sets `LD_LIBRARY_PATH_ORIG` to the EMPTY string, not
+    unset, when the host had no `LD_LIBRARY_PATH` before the bootloader
+    touched it -- the restore must drop the var entirely in that case, not
+    set it to an empty string (which some loaders treat as "search the
+    current directory")."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/home/runner/.local/bin/tan-cli-lib/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "")
+
+    env = bootstrap_cmd.Runner(json=True)._env()
+
+    assert env is not None
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_runner_env_is_untouched_on_an_ordinary_non_frozen_host(monkeypatch):
+    """`LD_LIBRARY_PATH_ORIG` absent -- every dev/CI/test run of `python -m
+    tan` from source, and every macOS/Windows host -- must take the SAME
+    fast `None` path as before this fix, not build an env dict for no
+    reason."""
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    assert bootstrap_cmd.Runner(json=True)._env() is None
+
+
 def test_die_appends_a_detail_only_when_there_is_one():
     """Text mode usually has none (the child's log already streamed), so the bare
     message is what the user sees there -- no dangling colon."""
@@ -3377,7 +4109,7 @@ def _run_with_a_blocked_zephyr_requirements_install(
         else "error: pkg-config package 'libusb-1.0 >= 1.0.9' not found"
     )
 
-    def fake_run(self, argv, cwd=None):  # noqa: ARG001 -- matches Runner.run's shape
+    def fake_run(self, argv, cwd=None, **_):  # noqa: ARG001 -- matches Runner.run's shape
         if "-r" in argv and str(requirements) in argv:
             return captured_detail
         if "venv" in argv:
@@ -3403,6 +4135,8 @@ def _run_with_a_blocked_zephyr_requirements_install(
         sdk_root_flag=str(sdk),
         no_pip=False,
         no_west=True,
+        no_toolchain=True,
+        no_patches=True,
         print_env=False,
         allow_partial=allow_partial,
         workspace=None,

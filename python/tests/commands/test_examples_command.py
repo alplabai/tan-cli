@@ -238,6 +238,172 @@ def test_json_envelope_shape(tmp_path):
     assert list(doc["data"]["examples"][0]) == ["id", "sourceDir", "title", "description"]
 
 
+# --------------------------------------------------------------------------
+# tan-cli#484: catalog.json-derived facets
+# --------------------------------------------------------------------------
+
+
+def _sdk_with_cataloged_example(root):
+    """Same example tree as `_sdk_with_example`, plus a `metadata/catalog.json`
+    carrying every optional facet -- the real alp-sdk shape (`gen_catalog.py`),
+    not a synthetic key set the reader was never measured against."""
+    _sdk_with_example(root)
+    write(
+        root / "metadata/catalog.json",
+        json.dumps(
+            {
+                "examples": {
+                    "multicore": [
+                        {
+                            "name": "rpmsg-v2n",
+                            "path": "examples/multicore/rpmsg-v2n",
+                            "som": "E1M-V2N101",
+                            "board": "e1m-evk",
+                            "cores": [
+                                {"id": "a55_cluster", "os": "yocto", "app": "./linux"},
+                                {"id": "m33_sm", "os": "zephyr", "app": "./m33_sm"},
+                            ],
+                            "coreCount": 2,
+                            "osSet": ["yocto", "zephyr"],
+                            "declares": {
+                                "chips": True,
+                                "ipc": True,
+                                "models": False,
+                                "peripherals": True,
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    return root
+
+
+def test_json_envelope_carries_catalog_facets_when_present(tmp_path):
+    """The property under test: the wire VALUES come from the catalog file on
+    disk, not a hardcoded/empty placeholder -- change any one field in the
+    fixture catalog above and this assertion must change with it."""
+    sdk = _sdk_with_cataloged_example(tmp_path / "sdk")
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    entry = doc["data"]["examples"][0]
+    assert entry["id"] == "multicore/rpmsg-v2n"
+    assert entry["category"] == "multicore"
+    assert entry["som"] == "E1M-V2N101"
+    assert entry["board"] == "e1m-evk"
+    assert entry["cores"] == [
+        {"id": "a55_cluster", "os": "yocto", "app": "./linux"},
+        {"id": "m33_sm", "os": "zephyr", "app": "./m33_sm"},
+    ]
+    assert entry["coreCount"] == 2
+    assert entry["osSet"] == ["yocto", "zephyr"]
+    assert entry["declares"] == {
+        "chips": True,
+        "ipc": True,
+        "models": False,
+        "peripherals": True,
+    }
+    # The four original keys stay first, in their original order -- an
+    # existing reader keying on position (not just presence) is unaffected.
+    assert list(entry)[:4] == ["id", "sourceDir", "title", "description"]
+    assert list(entry)[4:] == [
+        "category",
+        "som",
+        "board",
+        "cores",
+        "coreCount",
+        "osSet",
+        "declares",
+    ]
+
+
+def test_an_example_absent_from_the_catalog_keeps_the_original_four_keys(tmp_path):
+    """A directory `discover_examples` finds but `catalog.json` has no record
+    for (a newer example than a committed catalogue) is NOT held back --
+    it is listed, just without the extra keys."""
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(sdk / "metadata/catalog.json", json.dumps({"examples": {}}))
+    doc = json.loads(
+        runner.invoke(
+            app, ["examples", "--sdk-root", str(sdk), "--format", "json"]
+        ).stdout
+    )
+    entry = doc["data"]["examples"][0]
+    assert list(entry) == ["id", "sourceDir", "title", "description"]
+
+
+def test_a_malformed_catalog_degrades_the_facets_without_failing_the_command(tmp_path):
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(sdk / "metadata/catalog.json", "{not json")
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    entry = doc["data"]["examples"][0]
+    assert list(entry) == ["id", "sourceDir", "title", "description"]
+
+
+def test_a_catalog_with_non_mapping_cores_elements_does_not_crash_the_command(tmp_path):
+    """tan-cli#978 review, reproduced verbatim: `"cores": ["a55_cluster",
+    "m33_sm"]` (a list of strings, not the `cores[].{id,os,app}` mapping
+    contract) used to raise `ValueError` out of `as_dict`'s `dict(core)`
+    with no envelope at all -- directly contradicting this command's own
+    "degrades silently, never refuses `tan examples`" contract. The bad
+    elements are now dropped (an all-bad list collapses to an empty
+    `cores`, not a crash) and the command still returns a clean, `ok`
+    envelope."""
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(
+        sdk / "metadata/catalog.json",
+        json.dumps(
+            {
+                "examples": {
+                    "multicore": [
+                        {
+                            "name": "rpmsg-v2n",
+                            "cores": ["a55_cluster", "m33_sm"],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    entry = doc["data"]["examples"][0]
+    assert entry["cores"] == []
+    assert entry["category"] == "multicore"
+
+
+def test_discover_examples_attaches_facets_by_source_dir(tmp_path):
+    from tan.core.example_facets import ExampleFacets
+
+    write(tmp_path / "multicore/rpmsg-v2n/board.yaml", "x")
+    facets = {
+        "multicore/rpmsg-v2n": ExampleFacets(
+            category="multicore",
+            som="E1M-V2N101",
+            board="e1m-evk",
+            cores=None,
+            core_count=None,
+            os_set=None,
+            declares={"chips": False, "ipc": False, "models": False, "peripherals": False},
+        )
+    }
+    found = discover_examples(tmp_path, facets)
+    assert found[0].facets is facets["multicore/rpmsg-v2n"]
+    assert found[0].as_dict()["som"] == "E1M-V2N101"
+
+
 def test_a_sdk_root_that_is_not_a_checkout_is_an_empty_catalogue_not_a_failure(tmp_path):
     """`--sdk-root` is TERMINAL (I-31): a bad value must NOT fall through to
     discovery and list some other checkout's examples. And an unresolved SDK
@@ -354,6 +520,41 @@ def test_examples_category_filter_narrows_and_reports_an_empty_match():
     assert lines == ['examples: no example projects in category "nope".']
 
 
+def test_example_category_prefers_the_facet_over_the_id_prefix_when_they_disagree():
+    """tan-cli#978 review: the day tan forwards a `category` facet that
+    disagrees with the id prefix, the producer (`gen_catalog.py`) is right --
+    the same fallback order `alp-sdk-vscode`'s own `exampleCategory()` uses.
+    An id-derived-only implementation would answer `ai` here; the catalogue
+    facet says `renamed` and wins."""
+    from tan.commands.examples_cmd import Example, example_category, example_matches_category
+    from tan.core.example_facets import ExampleFacets
+
+    facets = ExampleFacets(
+        category="renamed",
+        som=None,
+        board=None,
+        cores=None,
+        core_count=None,
+        os_set=None,
+        declares=None,
+    )
+    entry = Example(
+        id="ai/cold-chain",
+        source_dir="ai/cold-chain",
+        title="Cold chain",
+        description="",
+        facets=facets,
+    )
+    assert example_category(entry) == "renamed"
+    assert example_matches_category(entry, "renamed")
+    assert not example_matches_category(entry, "ai")
+
+    # No facet at all (older SDK / catalogue miss) still falls back to the
+    # id prefix, unchanged from before this fix.
+    no_facet = Example(id="ai/cold-chain", source_dir="ai/cold-chain", title="x", description="")
+    assert example_category(no_facet) == "ai"
+
+
 # --------------------------------------------------------------------------
 # End-to-end: --category through the real command, not just the helpers
 # --------------------------------------------------------------------------
@@ -450,5 +651,42 @@ def test_the_no_flag_message_still_names_the_flag_as_the_remedy(tmp_path, monkey
     flag branch's wording."""
     monkeypatch.chdir(tmp_path)
     doc = json.loads(runner.invoke(app, ["examples", "--format", "json"]).stdout)
-    assert doc["issues"][0]["message"] == SDK_UNRESOLVED_MESSAGE
+    # tan-cli#1463: the message is unchanged; where the ladder looked follows it.
+    assert doc["issues"][0]["message"].startswith(f"{SDK_UNRESOLVED_MESSAGE} Neither `--sdk-root`")
     assert "pass --sdk-root <path> to name the checkout." in doc["issues"][0]["message"]
+
+
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#900. `_resolve_sdk` collapsed straight to a bare `None` the
+    moment `resolve_sdk_root_wide` came up empty, discarding
+    `.broken_project_pin` on the way -- the same shape tan-cli#468 fixed for
+    `presets_cmd.resolve_sdk`. A workspace whose `.alp/sdk-path` names a
+    checkout that no longer exists, with nothing else resolvable, reported
+    `examples.sdk-root-unresolved` alone: the customer was told the SDK could
+    not be resolved but not that their own project pin was the broken thing.
+
+    Fails against dev: `doc["issues"]` there is `examples.sdk-root-unresolved`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    write(
+        tmp_path / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    result = runner.invoke(app, ["examples", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert "sdk" not in doc
+    assert doc["data"]["examples"] == []
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "examples.sdk-root-unresolved",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+    text = runner.invoke(app, ["examples"]).stderr
+    assert "gone-checkout" in text

@@ -142,6 +142,7 @@ _ON_MODULE_NON_CHIP_FIELDS: frozenset[str] = frozenset({
     "silicon",             # e.g. "renesas:rzv2n:n44" — SoC identifier, not a driver
     "ethernet_phy_count",  # integer count, not a chip slug
     "i2c_devices",         # sub-block: handled by extracting chip: entries below
+    "dxm1",                # sub-block: DX-M1 strap/reset pins, not chip slugs
     "ospi_memories",       # sub-block: storage parts (flash/HyperRAM); MPNs have no chips/ driver -- excluded like nor_flash/emmc below
     # Storage-class fields encode the SoC controller / peripheral name
     # that reaches the on-module storage (e.g. `nor_flash: xspi` -> the
@@ -176,9 +177,24 @@ def _slugs_from_on_module(on_module: dict) -> list[str]:
     Zephyr's undefined-symbol guard).  Duplicate slugs and values of
     ``TBD`` / ``null`` are silently dropped.
 
+    A chip can ALSO be named by a plain top-level scalar field (e.g.
+    ``secure_element: optiga_trust_m``) naming which part the design
+    carries, distinct from the ``i2c_devices`` entry that records whether
+    THIS SKU actually has it fitted. Where both exist for the same chip,
+    ``i2c_devices[].assembled`` is the more precise source and wins: a
+    device marked ``assembled: false`` (hard DNP, e.g. E1M-AEN801's
+    Optiga -- footprint shared with E1M-AEN803, DNP=1 on this batch) or
+    ``assembled: optional`` (BOM-variant; the customer opts in via
+    `board.populated:`) must not auto-enable as a chip driver EVEN when
+    a scalar field also names the same chip (#1980 follow-up -- fixing
+    only the `i2c_devices` loop left the scalar-field path still leaking
+    `optiga_trust_m` into `_resolve_chip_states`' always-True SoM-intrinsic
+    set).
+
     Returns a sorted, deduplicated list of slug strings.
     """
     seen: set[str] = set()
+    not_auto_enable: set[str] = set()
 
     def _add(val: object) -> None:
         if not val or _is_tbd(val):
@@ -197,20 +213,27 @@ def _slugs_from_on_module(on_module: dict) -> list[str]:
 
     # 2. i2c_devices sub-block — each bus entry contains a `devices:`
     #    list; extract the `chip:` field from each device.
-    #    Devices marked `assembled: optional` are DNI (do-not-install)
-    #    on some builds and must NOT be auto-enabled as chip drivers —
-    #    the customer explicitly enables them via `board.populated:`.
+    #    Devices marked `assembled: false` (hard DNP) or `optional`
+    #    (BOM variant) must NOT be auto-enabled as chip drivers — the
+    #    customer explicitly enables an optional one via
+    #    `board.populated:`, and a hard-DNP one never auto-enables at all.
     i2c_buses = on_module.get("i2c_devices")
     if isinstance(i2c_buses, dict):
         for _bus, bus_entry in i2c_buses.items():
             if not isinstance(bus_entry, dict):
                 continue
             for dev in bus_entry.get("devices") or []:
-                if isinstance(dev, dict):
-                    if dev.get("assembled") == "optional":
-                        continue
-                    _add(dev.get("chip"))
+                if not isinstance(dev, dict):
+                    continue
+                chip = dev.get("chip")
+                assembled = dev.get("assembled", True)
+                if assembled is False or assembled == "optional":
+                    if isinstance(chip, str):
+                        not_auto_enable.add(chip)
+                    continue
+                _add(chip)
 
+    seen -= not_auto_enable
     return sorted(seen)
 
 
@@ -283,6 +306,7 @@ _CHIP_SUBSYSTEMS: dict[str, tuple[str, ...]] = {
     "optiga_trust_m":     ("I2C",),
     "eeprom_24c128":      ("I2C",),
     "tcal9538":           ("I2C",),
+    "ina228":             ("I2C",),
     "ina236":             ("I2C",),
     # pdm_mic helper has no subsystem dep declared in Kconfig
     # (uses <alp/i2s.h> when enabled at v0.2+).
@@ -341,9 +365,9 @@ _CHIP_SUBSYSTEMS: dict[str, tuple[str, ...]] = {
     "tlv320aic3204":      ("I2C",),
     "max98357a":          ("GPIO",),
     "es8388":             ("I2C",),
-    # SoM-intrinsic batch (issue #1487) -- act8760/tps628640/pca9451a/
+    # SoM-intrinsic batch (issue #1487) -- act8760/tps628640/
     # da9292/clk_5l35023b are I2C-only PMIC/clock parts; pi3dbs12212/
-    # murata_lbee5hy2fy/deepx_dxm1/gd32_swd are GPIO-only.  All ten were
+    # murata_lbee5hy2fy/deepx_dxm1/gd32_swd are GPIO-only.  All nine were
     # missing from this table despite each having a `config
     # ALP_SDK_CHIP_<NAME>` / `depends on` entry in
     # zephyr/kconfigs/chips.kconfig, so the loader turned the chip on
@@ -352,7 +376,6 @@ _CHIP_SUBSYSTEMS: dict[str, tuple[str, ...]] = {
     "act8760":            ("I2C",),
     "tps628640":          ("I2C",),
     "pi3dbs12212":        ("GPIO",),
-    "pca9451a":           ("I2C",),
     "da9292":             ("I2C",),
     "clk_5l35023b":       ("I2C",),
     "murata_lbee5hy2fy":  ("GPIO",),

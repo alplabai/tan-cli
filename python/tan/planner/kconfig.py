@@ -44,15 +44,20 @@ from typing import Any, Optional
 
 import yaml
 
+from . import cameras as _cameras
 from . import libraries as _library_layer
+from . import sdk_compat as _sdk_compat
+from .link_target import applies_to as link_applies_to
 from .loader import _library_alias_table
 from .models import BoardProject, OrchestratorError, Slice
+from .ownership import project_m33_overlay
 from .paths import REPO
 from .partition import resolve_storage_partitions
 from .slugs import (
     _BLOCK_SLUGS,
     _CHIP_SUBSYSTEMS,
     _board_define_slug,
+    _is_tbd,
     _slugs_from_helper_firmware,
     _slugs_from_on_module,
     _som_define_slug,
@@ -89,12 +94,20 @@ def _emit_extra_library_profile(
 
     Failures (malformed YAML, missing keys) emit a single `#`-prefixed
     diagnostic comment so the customer sees the failure in the slice's
-    alp.conf rather than getting silent drop-out.
+    alp.conf rather than silent drop-out.
     """
-    profile_path = (REPO / profile_rel).resolve()
+    # No longer a divergence: alp-sdk#1961 landed as alp-sdk PR #2005 and
+    # this repo's #1241 re-sync (to alp-sdk 15b2f32c) converged the two
+    # copies, so the RELOCATED marker that stood here is retired with
+    # tan-cli#1122. Upstream now spells these three lines identically --
+    # `.resolve()` dropped (nothing downstream needs a real path, only the
+    # read does) and `UnicodeDecodeError` in the clause, because it is a
+    # `ValueError` not an `OSError` and `read_text(encoding="utf-8")` would
+    # otherwise escape a function contracted never to raise.
     try:
+        profile_path = REPO / profile_rel
         doc = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as e:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         return [f"# extra_libraries[{name}] profile parse failed: {e}"]
     if not isinstance(doc, dict):
         return [f"# extra_libraries[{name}] profile is not a mapping"]
@@ -109,8 +122,6 @@ def _emit_extra_library_profile(
         soc_family_token = "alif_ensemble"
     elif family.startswith("renesas-rzv2n"):
         soc_family_token = "renesas_rzv2n"
-    elif family.startswith("nxp-imx9"):
-        soc_family_token = "nxp_imx9"
 
     # resolve_capabilities merges SoC-JSON defaults + SoM overrides.
     capabilities = resolve_capabilities(project.som_preset, project.effective_metadata_root())
@@ -237,7 +248,49 @@ def _resolve_console(value: Optional[str], os_: str,
     return _CONSOLE_ALIASES.get(v, "none")
 
 
-def _emit_zephyr_console(console: str, sim_console: bool = False) -> list[str]:
+#: Floor for `CONFIG_RAM_CONSOLE_BUFFER_SIZE` when `diagnostics.console: ram`
+#: selects the RAM console.  An app that sets a larger size in its own
+#: `prj.conf` keeps it (see `_app_ram_console_size`).  Only `prj.conf` is
+#: read: a size set in `boards/<board>.conf`, `prj_<board>.conf` or an app
+#: `EXTRA_CONF_FILE` is not seen and still loses to this floor.
+_RAM_CONSOLE_MIN_SIZE = 2048
+
+_RAM_CONSOLE_SIZE_RE = re.compile(
+    r"^\s*CONFIG_RAM_CONSOLE_BUFFER_SIZE\s*=\s*(0[xX][0-9a-fA-F]+|\d+)\s*(?:#.*)?$")
+
+
+def _app_ram_console_size(project: BoardProject, slice_: Slice) -> int:
+    """`CONFIG_RAM_CONSOLE_BUFFER_SIZE` the slice's own `prj.conf` sets, or 0.
+
+    The generated alp.conf is merged AFTER prj.conf, so a bare assignment
+    would clobber (and shrink) an app-set size -- the app's console then
+    wraps (tan-cli#1401).  Best effort: no source dir, no app, or an
+    unreadable prj.conf all read as "app sets nothing".  Limit: only
+    `prj.conf` is read, so sizes set in `boards/<board>.conf`,
+    `prj_<board>.conf` or an app `EXTRA_CONF_FILE` still lose.
+    """
+    if project.source_dir is None or not slice_.app:
+        return 0
+    from .orchestrator import _zephyr_app_dir  # lazy: orchestrator imports us
+    try:
+        prj = _zephyr_app_dir(slice_.app, project.source_dir) / "prj.conf"
+        text = prj.read_text(encoding="utf-8")
+    except (OSError, OrchestratorError, UnicodeDecodeError):
+        return 0
+    size = 0
+    for line in text.splitlines():
+        m = _RAM_CONSOLE_SIZE_RE.match(line)
+        if m:
+            # Last assignment wins, like Kconfig.  Kconfig reads an int symbol
+            # as hex with a 0x prefix, else base 10 -- `016384` is 16384,
+            # where int(x, 0) would raise ValueError.
+            tok = m.group(1)
+            size = int(tok, 16) if tok[:2] in ("0x", "0X") else int(tok, 10)
+    return size
+
+
+def _emit_zephyr_console(console: str, sim_console: bool = False,
+                         ram_size: int = _RAM_CONSOLE_MIN_SIZE) -> list[str]:
     """Kconfig lines for a Zephyr slice's resolved console backend.
 
     ``sim_console`` distinguishes a RAM console selected explicitly via
@@ -279,7 +332,7 @@ def _emit_zephyr_console(console: str, sim_console: bool = False) -> list[str]:
             "# LOG is routed to printk so the RAM backend still captures it.",
             "CONFIG_CONSOLE=y",
             "CONFIG_RAM_CONSOLE=y",
-            "CONFIG_RAM_CONSOLE_BUFFER_SIZE=2048",
+            f"CONFIG_RAM_CONSOLE_BUFFER_SIZE={ram_size}",
             "CONFIG_UART_CONSOLE=n",
             "",
         ]
@@ -518,7 +571,8 @@ def _emit_baseline(slice_: Slice, diagnostics: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _emit_console(diagnostics: dict[str, Any], slice_: Slice) -> list[str]:
+def _emit_console(diagnostics: dict[str, Any], slice_: Slice,
+                  project: Optional[BoardProject] = None) -> list[str]:
     """Console backend, auto-selected from the slice OS (overridable via
     board.yaml `diagnostics.console:`).  A Zephyr slice defaults to the
     Alp UART console so `west build && attach a terminal` just works;
@@ -542,7 +596,175 @@ def _emit_console(diagnostics: dict[str, Any], slice_: Slice) -> list[str]:
         and not slice_.hw_console and console == "none"
     if sim:
         console = "ram"
-    return _emit_zephyr_console(console, sim_console=sim)
+    # `diagnostics.link: itcm` (tan-cli#1350): a Flow C RAM-run's default
+    # observable is the RAM console, so an AUTO console is promoted to it.  An
+    # explicit `console: uart` is NOT promoted: it keeps the board UART console
+    # and `link_target.itcm_conf` emits no RAM-console bits for it
+    # (tan-cli#1374).  linux/none are refused by the loader (alp is a uart alias).
+    if auto and link_applies_to(diagnostics, slice_):
+        console = "ram"
+    ram_size = _RAM_CONSOLE_MIN_SIZE
+    if console == "ram" and project is not None:
+        ram_size = max(ram_size, _app_ram_console_size(project, slice_))
+    return _emit_zephyr_console(console, sim_console=sim, ram_size=ram_size)
+
+
+# Alif "high-perf"/"high-efficiency" M55 pair -> the "M55-HP"/"M55-HE"
+# short form the boot banner and Alif's own docs use, in place of the
+# fuller "Cortex-M55" every other core type gets (_core_display_label).
+_M55_SUBTYPE_SUFFIX = {"high-perf": "HP", "high-efficiency": "HE"}
+
+
+def _core_display_label(core: dict[str, Any]) -> str:
+    """Boot-banner label for one `soc_spec["cores"]` entry.
+
+    "Cortex-<X>" from the `type` field for the general case (e.g.
+    "cortex-a32" -> "Cortex-A32"); the Alif M55 HP/HE pair gets the
+    shorter "M55-HP"/"M55-HE" form instead, because that IS the name
+    Alif's own docs and the AEN board trees use for them -- printing
+    "Cortex-M55-HE" nobody else calls it that would be its own kind of
+    dishonesty.  Falls back to the bare (uppercased) type string when it
+    is not a "cortex-*" type at all (e.g. an NPU-only or vendor-specific
+    core class no SoC spec in the catalogue uses today).
+    """
+    ctype = str(core.get("type") or "").strip()
+    subtype = str(core.get("subtype") or "").strip().lower()
+    if ctype == "cortex-m55" and subtype in _M55_SUBTYPE_SUFFIX:
+        return f"M55-{_M55_SUBTYPE_SUFFIX[subtype]}"
+    if ctype.lower().startswith("cortex-"):
+        return "Cortex-" + ctype.split("-", 1)[1].upper()
+    return ctype.upper() if ctype else "core"
+
+
+def _soc_cpu_complement(soc_spec: dict[str, Any], active_core_id: Optional[str]) -> str:
+    """Pre-formatted core list for `CONFIG_ALP_SDK_SOC_CPUS`: every core
+    the SoC JSON declares, the active one marked and listed first --
+    e.g. "M55-HE @160MHz (active) + M55-HP @400MHz + 2x Cortex-A32
+    @800MHz".  A core with no `freq_mhz` (e.g. an internal-companion NPU
+    core with no independent clock in the SoC JSON) prints its label with
+    no `@...MHz` suffix rather than a fabricated frequency.
+    """
+    cores = list(soc_spec.get("cores") or [])
+    cores.sort(key=lambda c: 0 if c.get("id") == active_core_id else 1)
+    parts: list[str] = []
+    for core in cores:
+        label = _core_display_label(core)
+        count = core.get("count") or 1
+        freq = core.get("freq_mhz")
+        prefix = f"{int(count)}x " if isinstance(count, (int, float)) and count > 1 else ""
+        freq_str = f" @{int(freq)}MHz" if isinstance(freq, (int, float)) else ""
+        marker = " (active)" if core.get("id") == active_core_id else ""
+        # `|<cluster>` lets alp_banner.c move the marker to the core the
+        # image is actually built for (alp-sdk#2469) -- see
+        # src/zephyr/alp_soc_cpus.h.
+        cluster = core.get("zephyr_cpucluster")
+        tag = f"|{cluster}" if cluster else ""
+        parts.append(f"{prefix}{label}{freq_str}{marker}{tag}")
+    return " + ".join(parts)
+
+
+def _soc_npu_complement(soc_spec: dict[str, Any]) -> str:
+    """Pre-formatted NPU list for `CONFIG_ALP_SDK_SOC_NPUS`, e.g.
+    "Ethos-U85 + 2x Ethos-U55" -- same-`type` NPU instances (e.g. the
+    E8's two Ethos-U55s, one per M55 core) are grouped into a single
+    "Nx <Label>" entry rather than repeated, in the order their `type`
+    first appears in `soc_spec["npus"]`.
+    """
+    order: list[str] = []
+    counts: dict[str, int] = {}
+    for npu in (soc_spec.get("npus") or []):
+        ntype = str(npu.get("type") or "").strip()
+        if not ntype:
+            continue
+        label = "-".join(seg.capitalize() for seg in ntype.split("-"))
+        if label not in counts:
+            order.append(label)
+        counts[label] = counts.get(label, 0) + 1
+    return " + ".join(
+        f"{counts[label]}x {label}" if counts[label] > 1 else label
+        for label in order)
+
+
+def _soc_display_name(soc_spec: dict[str, Any]) -> str:
+    """Vendor + family + part for `CONFIG_ALP_SDK_SOC_NAME`, e.g. "Alif
+    Ensemble E8".  `vendor` contributes only its first word (Alif
+    Semiconductor -> Alif); `part` is dropped when it already restates
+    `family` verbatim as a prefix (e.g. family "Ensemble" / part "Ensemble E8"
+    would otherwise read "Alif Ensemble Ensemble E8").
+    """
+    vendor = str(soc_spec.get("vendor") or "").strip()
+    family = str(soc_spec.get("family") or "").strip()
+    part = str(soc_spec.get("part") or "").strip()
+    vendor_short = vendor.split()[0] if vendor else ""
+    if family and part and part.startswith(family):
+        segments = [vendor_short, part]
+    else:
+        segments = [vendor_short, family, part]
+    return " ".join(s for s in segments if s)
+
+
+def _emit_soc_summary(project: "BoardProject", slice_: "Slice") -> list[str]:
+    """Boot-banner identity + system-summary Kconfig (`CONFIG_ALP_SDK_
+    SOC_*` / `CONFIG_ALP_SDK_SOM_*_MBIT`, `zephyr/kconfigs/core.kconfig`).
+
+    Every field here is transcribed, never invented, from data this
+    project already resolved: the SoC spec JSON (`project.soc_spec` --
+    `cores[]`, `npus[]`, `soc_ram_kb`, `soc_flash_mb`, the on-die SRAM +
+    MRAM the SoC itself carries) for the CONFIG_ALP_SDK_SOC_* facts, and
+    the SoM preset's `memory:` block (off-SoC OSPI RAM/flash the SKU's
+    BOM actually populates -- distinct from the SoC facts above: two SKUs
+    on the identical PCB/silicon can differ here, e.g. E1M-AEN803's 512
+    Mbit HyperRAM + 256 Mbit NOR vs E1M-AEN801, which populates neither)
+    for CONFIG_ALP_SDK_SOM_{DRAM,FLASH}_MBIT.
+
+    `alp_banner.c` prefers these over its devicetree fallback (one
+    image's chosen sram/flash REGION size, not the SoM's actual
+    hardware) whenever `CONFIG_ALP_SDK_SOC_CPUS` is non-empty -- see that
+    file's module docstring.  A project whose SoC spec is missing a field
+    (no `npus`, no `soc_ram_kb`, ...) still gets whatever IS known; only
+    `CONFIG_ALP_SDK_SOC_NAME`/`_CPUS` gate the whole banner section on the
+    C side, so those two are the only ones this function must guarantee
+    non-empty whenever `project.soc_spec` resolves at all.
+    """
+    soc_spec = project.soc_spec or {}
+    lines: list[str] = [
+        "# Boot-banner SoC identity + system summary (from the SoC spec "
+        "JSON + SoM preset `memory:`; see alp_banner.c).",
+    ]
+
+    name = _soc_display_name(soc_spec)
+    if name:
+        lines.append(f'CONFIG_ALP_SDK_SOC_NAME="{name}"')
+
+    cpus = _soc_cpu_complement(soc_spec, slice_.core_id)
+    if cpus:
+        lines.append(f'CONFIG_ALP_SDK_SOC_CPUS="{cpus}"')
+
+    npus = _soc_npu_complement(soc_spec)
+    if npus:
+        lines.append(f'CONFIG_ALP_SDK_SOC_NPUS="{npus}"')
+
+    soc_ram_kb = soc_spec.get("soc_ram_kb")
+    if isinstance(soc_ram_kb, (int, float)) and soc_ram_kb > 0:
+        lines.append(f"CONFIG_ALP_SDK_SOC_SRAM_KB={int(soc_ram_kb)}")
+
+    soc_flash_mb = soc_spec.get("soc_flash_mb")
+    if isinstance(soc_flash_mb, (int, float)) and soc_flash_mb > 0:
+        lines.append(f"CONFIG_ALP_SDK_SOC_MRAM_KB={int(round(soc_flash_mb * 1024))}")
+
+    # Off-SoC OSPI memory the SoM SKU actually populates (som-preset
+    # `memory:` -- a MODULE fact, not a SoC one; see the SKU contrast
+    # above).  `is_tbd`/absent/non-positive all mean "don't claim it".
+    mem = project.som_preset.get("memory") or {}
+    dram_mbit = mem.get("dram_mbit")
+    if isinstance(dram_mbit, (int, float)) and not _is_tbd(dram_mbit) and dram_mbit > 0:
+        lines.append(f"CONFIG_ALP_SDK_SOM_DRAM_MBIT={int(dram_mbit)}")
+    flash_mbit = mem.get("flash_mbit")
+    if isinstance(flash_mbit, (int, float)) and not _is_tbd(flash_mbit) and flash_mbit > 0:
+        lines.append(f"CONFIG_ALP_SDK_SOM_FLASH_MBIT={int(flash_mbit)}")
+
+    lines.append("")
+    return lines
 
 
 def _emit_som_caps(
@@ -581,6 +803,38 @@ def _emit_som_caps(
                 "CONFIG_ALP_SDK_HW_INFO_EEPROM_OFFSET="
                 f"{hw_info_eeprom['offset']}")
         lines.append("")
+
+    # Build-time hw_rev this project resolved -- lets the boot banner warn
+    # when the LIVE EEPROM manifest disagrees (issue #1853).  Emitted
+    # unconditionally (not scoped to the `hw_info_eeprom` block above): a
+    # SKU with no on_module.eeprom today still gets the
+    # symbol, so it isn't silently dropped if that SKU gains an EEPROM
+    # later, and it stays harmless meanwhile (alp_hw_info_read() never
+    # returns ALP_OK without a bus, so the banner's compare never runs).
+    # Same `hw_rev or ... or "unknown"` fallback chain as
+    # alp_project_emit/hw_info.py's `_emit_hw_info_h` (project.hw_rev is
+    # already `som.hw_rev or default_hw_rev`; add the same "unknown"
+    # floor here so the two resolvers can't disagree on the empty case).
+    # Emit the composed board designator (`2626-r2`), not the bare revision key,
+    # because that is what the module's EEPROM identity carries -- and this symbol
+    # exists only to be compared against it.  Getting this wrong is not cosmetic:
+    # CONFIG_ALP_SDK_HW_REV_MISMATCH_FATAL promotes the banner's mismatch warning
+    # to k_panic(), so a write side that composes and a compare side that does not
+    # would halt boot on a correctly provisioned module.
+    #
+    # project.hw_rev itself stays the BARE key -- loader.py passes it to
+    # family_revision_known() as a lookup key into hw_revisions, where a composed
+    # value would not resolve.
+    _som_hw_rev = project.hw_rev
+    if _som_hw_rev:
+        from .loader import _sku_family_dir
+        _fam = _sku_family_dir(project.sku)
+        if _fam:
+            _som_hw_rev = _sdk_compat.board_designator(
+                _sdk_compat.load_family_table(project.effective_metadata_root(), _fam),
+                _som_hw_rev)
+    lines.append(f'CONFIG_ALP_SDK_SOM_HW_REV="{_som_hw_rev or "unknown"}"')
+    lines.append("")
 
     if kconfig:
         lines.append(f"# SoM silicon ({silicon} via {project.sku})")
@@ -1107,13 +1361,12 @@ def _emit_inference(
     the ALP_SDK_* parent it `depends on` in
     zephyr/kconfigs/iot-audio-inference.kconfig (issue #874 item 3):
 
-      - CONFIG_ALP_SDK_INFERENCE_ETHOS_U_VARIANT_{U55,U65,U85}=y -- derived
-        from the silicon capability counts (ethos_u{55,65,85}_count, resolved
+      - CONFIG_ALP_SDK_INFERENCE_ETHOS_U_VARIANT_{U55,U85}=y -- derived
+        from the silicon capability counts (ethos_u{55,85}_count, resolved
         from the SoC JSON npus[]), the single source for which NPUs the
         part carries.  U85 carries Arm's larger MAC array + TensorOptimized
-        kernels; U55 carries the smaller MAC + reference kernels; U65 is
-        i.MX 93-only.  U55/U85 depend on BACKEND_ETHOS_U_AEN; U65 depends
-        on BACKEND_ETHOS_U_N93.
+        kernels; U55 carries the smaller MAC + reference kernels.
+        U55/U85 depend on BACKEND_ETHOS_U_AEN.
 
       - CONFIG_ALP_SDK_INFERENCE_TFLM_KERNEL_{NEON,HELIUM,REF}=y -- picked
         from the SoC JSON's `cores[<slice.core_id>].vector_extension`
@@ -1166,12 +1419,28 @@ def _emit_inference(
     # NEON / HELIUM / REF based on the vector_extension field.  Defaults
     # to REF when the SoC JSON is silent (paper-correct on the scalar
     # M33s -- iMX 93 m33, V2N m33_sm).
+    #
+    # `c.get("type")` is UNVALIDATED against `soc-spec-v1.schema.json`'s own
+    # `"type": {"type": "string"}` -- the identical gap `presets_cmd.
+    # core_type_lookup` and `topology.core_os_topology` closed for
+    # tan-cli#957, same class, this call site missed by that sweep
+    # (tan-cli#962): a schema-invalid SoC JSON (hand-authored, mid-
+    # `porting-a-new-som`, or corrupted) with a truthy non-string `type`
+    # reaches `.lower()` here and raises `AttributeError`, aborting `tan
+    # build` for the whole slice on any board that reaches this branch
+    # (`_slice_wants_inference` -- examples/ai, examples/audio,
+    # examples/camera-vision). `isinstance`-guard to the same `""`
+    # unresolved sentinel a missing `type` already produces, matching
+    # `core_type_lookup`'s `c["type"] if isinstance(c.get("type"), str)
+    # else ""`.
     tflm_kernel_kc: str = "CONFIG_ALP_SDK_INFERENCE_TFLM_KERNEL_REF=y"
     for c in (project.soc_spec.get("cores") or []):
         if c.get("id") != slice_.core_id:
             continue
-        vec = (c.get("vector_extension") or "").lower()
-        ctype = (c.get("type") or "").lower()
+        raw_vec = c.get("vector_extension")
+        vec = raw_vec.lower() if isinstance(raw_vec, str) else ""
+        raw_type = c.get("type")
+        ctype = raw_type.lower() if isinstance(raw_type, str) else ""
         if vec == "neon" or ctype.startswith("cortex-a"):
             tflm_kernel_kc = "CONFIG_ALP_SDK_INFERENCE_TFLM_KERNEL_NEON=y"
         elif vec == "helium":
@@ -1183,33 +1452,23 @@ def _emit_inference(
 
     # ---- G-1 -- per-variant Ethos-U selector ---------------------
     # Which Ethos-U variants this SoM carries -- derived from the
-    # silicon-determined capability counts (ethos_u{55,65,85}_count, resolved
+    # silicon-determined capability counts (ethos_u{55,85}_count, resolved
     # from the SoC JSON npus[] via resolve_capabilities).  This is the single
     # source: an on-die NPU cannot be depopulated at the SoM level, so the SoM
-    # preset does NOT restate the variant list (the SoM `inference.npu_population`
-    # field is deprecated and no longer read here).
+    # preset does NOT restate the variant list.
     ethos_variants: set[str] = set()
     if (capabilities.get("ethos_u55_count") or 0) > 0:
         ethos_variants.add("u55")
-    if (capabilities.get("ethos_u65_count") or 0) > 0:
-        ethos_variants.add("u65")
     if (capabilities.get("ethos_u85_count") or 0) > 0:
         ethos_variants.add("u85")
     ethos_present = bool(ethos_variants)
     if ethos_present:
         # Per-silicon Ethos-U backend (Slice 3 registry layout):
         # Alif Ensemble (AEN) -> _BACKEND_ETHOS_U_AEN
-        # NXP i.MX 93        -> _BACKEND_ETHOS_U_N93
-        # Parent-gating (#874 item 3): only emit the variant switches that
-        # `depend on` the parent backend we're actually emitting on this
-        # silicon -- U55/U85 depend on BACKEND_ETHOS_U_AEN, U65 depends on
-        # BACKEND_ETHOS_U_N93 (zephyr/kconfigs/iot-audio-inference.kconfig).
-        if silicon == "nxp:imx9:imx93":
-            inference_lines.append("CONFIG_ALP_SDK_INFERENCE_BACKEND_ETHOS_U_N93=y")
-            allowed_variants = {"u65"}
-        else:
-            inference_lines.append("CONFIG_ALP_SDK_INFERENCE_BACKEND_ETHOS_U_AEN=y")
-            allowed_variants = {"u55", "u85"}
+        # Parent-gating (#874 item 3): the variant switches `depend on` the
+        # parent backend (zephyr/kconfigs/iot-audio-inference.kconfig).
+        inference_lines.append("CONFIG_ALP_SDK_INFERENCE_BACKEND_ETHOS_U_AEN=y")
+        allowed_variants = {"u55", "u85"}
         for v in sorted(ethos_variants & allowed_variants):
             inference_lines.append(f"CONFIG_ALP_SDK_INFERENCE_ETHOS_U_VARIANT_{v.upper()}=y")
         # Real Arm Ethos-U driver config -- the silicon-proven pair (bench:
@@ -1225,15 +1484,13 @@ def _emit_inference(
         # hooks (NOT CONFIG_ARM_ETHOS_U -- hal_alif's stale callback path);
         # CONFIG_DCACHE=n is the CPU<->NPU SRAM coherence mechanism; the
         # ethos_u driver's mutex/semaphore need a kernel heap (k_malloc).
-        # Pick the most-capable variant this silicon carries (U85 > U65 > U55),
+        # Pick the most-capable variant this silicon carries (U85 > U55),
         # then read its MAC config from the SoC's npus[] `mac_per_cycle` -- NOT a
         # hardcode.  The derived symbol must be a real ETHOS_U_NPU_CONFIG choice
         # member (hal_ethos_u), else it would silently no-op -- so validate and
         # fail loudly on a metadata mismatch.
         if "u85" in ethos_variants:
             variant_num = "85"
-        elif "u65" in ethos_variants:
-            variant_num = "65"
         else:
             variant_num = "55"
         npu_type = f"ethos-u{variant_num}"
@@ -1249,8 +1506,8 @@ def _emit_inference(
         # stream errors a 128-MAC NPU at invoke (register-proven on E8), so a
         # blind max() would mis-size the HE slice.  Prefer the core-paired
         # instance; fall back to the most-capable of the variant when the chosen
-        # variant is not core-paired (the E8 U85 on the shared HG subsystem) or
-        # the SoC JSON predates paired_core.
+        # variant is not core-paired (the E8 U85, a shared SoC-level NPU --
+        # Alif block name NPU_HG) or the SoC JSON predates paired_core.
         paired = [n["mac_per_cycle"] for n in npus_of_type
                   if n.get("paired_core") == slice_.core_id]
         macs   = [n["mac_per_cycle"] for n in npus_of_type]
@@ -1274,7 +1531,6 @@ def _emit_inference(
         accel = f"ETHOS_U{variant_num}_{mac}"
         _valid_accel = {
             "ETHOS_U55_64", "ETHOS_U55_128", "ETHOS_U55_256",
-            "ETHOS_U65_128", "ETHOS_U65_256", "ETHOS_U65_512",
             "ETHOS_U85_128", "ETHOS_U85_256", "ETHOS_U85_512",
             "ETHOS_U85_1024", "ETHOS_U85_2048",
         }
@@ -1293,6 +1549,13 @@ def _emit_inference(
     # M-class Zephyr slice cannot drive either (issues #58/#59), so it
     # gets TFLM only.  Their build wiring lives on the cmake-args /
     # Yocto emit paths (_slice_cmake_args below).
+    # SoM-declared AUTO accelerator order for the .alpmodel tiebreak
+    # (zephyr/CMakeLists.txt maps it to -DALP_SDK_INFERENCE_AUTO_ORDER, the
+    # same define name the Yocto and baremetal builds use).
+    auto_order = _inference_auto_order(project.som_preset)
+    if auto_order:
+        inference_lines.append(
+            f'CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER="{",".join(auto_order)}"')
     lines.append("# Inference dispatchers (from SoM capabilities -- "
                  "customer does not pick)")
     lines.extend(inference_lines)
@@ -1324,11 +1587,11 @@ def _emit_cross_core_shmem_cache(
     declares a matching carve-out:
 
       - `kind: rpmsg` is covered too (alp-sdk #1088's conservative fix),
-        for the identical reason `raw_shmem` is: `cfg->cacheable` is stored
-        on the backend struct (`src/backends/rpc/{zephyr,yocto}_drv.c`) and
-        never read again -- there is no `sys_cache_*` call anywhere under
-        `src/` or `include/`.  A `cacheable: true` rpmsg channel would
-        therefore select a code path with no maintenance behind it, so
+        for the identical reason `raw_shmem` is: `<alp/rpc.h>` has no
+        cache-maintenance layer (no `sys_cache_*` call anywhere under
+        `src/` or `include/`, and no per-channel cache field).  A
+        `cacheable: true` rpmsg channel would therefore select a path with
+        no maintenance behind it, so
         `loader.py` rejects `cacheable: true` on a `rpmsg` entry outright
         rather than silently honouring it -- any entry that reaches this
         function is already non-cacheable, and the D-cache goes off
@@ -1494,11 +1757,11 @@ def _split_server_url(url: str) -> tuple[str, Optional[int], Optional[str]]:
     a DNS lookup that can never resolve (alplabai/tan-cli#558).
 
     A value carrying no `://` is taken as an already-bare host and returned
-    verbatim -- that covers a plain hostname and a whole-value `${VAR}`
-    placeholder, which the build system substitutes later.  Host case is
-    preserved (DNS is case-insensitive, a `${VAR}` placeholder is not), so
-    this parses the authority by hand rather than through `urlsplit`, whose
-    `.hostname` lowercases.
+    verbatim.  A `${VAR}` placeholder passes through here too, but
+    `_slice_alp_conf` then refuses it: nothing substitutes a placeholder in a
+    Kconfig fragment (issue #2696, `_refuse_live_kconfig_placeholders`).  Host
+    case is preserved (DNS is case-insensitive), so this parses the authority
+    by hand rather than through `urlsplit`, whose `.hostname` lowercases.
 
     Raises OrchestratorError on anything that cannot be expressed as those
     three parts rather than emitting a value the client cannot use.
@@ -1630,8 +1893,10 @@ def _emit_ota(project: "BoardProject") -> list[str]:
     `_slice_local_conf`.  This handles the Zephyr side: per-slice
     Kconfig that compiles the matching client in.  Settings (server URL,
     poll interval, tenant token) thread through Kconfig string values
-    when declared in `ota:`; placeholders (${VAR}) pass through verbatim
-    so the build system substitutes at link time.
+    when declared in `ota:`.  A `${VAR}` placeholder may only land on a
+    commented line here (the Mender hints): Zephyr does not expand one in a
+    Kconfig fragment, so `_slice_alp_conf` refuses it on a live line
+    (issue #2696).
     """
     lines: list[str] = []
     ota = project.ota or {}
@@ -1915,7 +2180,8 @@ def _slice_alp_conf(project: BoardProject, slice_: Slice) -> str:
 
     lines: list[str] = []
     lines.extend(_emit_baseline(slice_, diagnostics))
-    lines.extend(_emit_console(diagnostics, slice_))
+    lines.extend(_emit_console(diagnostics, slice_, project))
+    lines.extend(_emit_soc_summary(project, slice_))
     lines.extend(_emit_som_caps(project, silicon, kconfig))
 
     chip_lines, chip_subsystems, resolved_chip_state = _emit_chips(
@@ -1931,7 +2197,8 @@ def _slice_alp_conf(project: BoardProject, slice_: Slice) -> str:
     # §D.lib.loader -- per-`libraries:` HW-accelerator backend wiring
     # (CONFIG_ALP_<LIB>_<BACKEND>=y). This is the single source both the
     # planner's build-plan `configArtefacts` and `alp_project.py --emit
-    # zephyr-conf --core <id>` (the CMakeLists.txt-driven path) now share
+    # zephyr-conf --core <id>` (what gen_example_alp_conf.py's pre-generation
+    # for twister / bare `west build` mirrors) share
     # -- folded in here (2026-07-20) so the two paths cannot silently
     # diverge on a `libraries:` entry with a hw_backends matcher; see
     # docs/adr/0020-sdk-owns-build-execution.md addendum.
@@ -1962,8 +2229,59 @@ def _slice_alp_conf(project: BoardProject, slice_: Slice) -> str:
     # only a real Kconfig symbol when THIS slice already switched the module
     # (and CONFIG_LOG) on -- see `_emit_diagnostics`.
     lines.extend(_emit_diagnostics(project, slice_, lines))
+    # Per-product core ownership: Kconfig for the assignable peripherals this
+    # project assigned to this (M33) core -- the board tree carries the nodes
+    # disabled, so only an owning project enables them.
+    own_kconfig = project_m33_overlay(project, slice_.core_id)[1]
+    if own_kconfig:
+        lines.append("# Assignable peripherals owned by this core (board.yaml "
+                     "`ownership:`).")
+        lines.extend(own_kconfig)
 
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    _refuse_live_kconfig_placeholders(text, slice_.core_id)
+    return text
+
+
+def _refuse_live_kconfig_placeholders(text: str, core_id: str) -> None:
+    """Refuse a `${NAME}` placeholder on a live line of a Zephyr fragment.
+
+    A board.yaml value written as a placeholder (`ota.server.tenant:
+    "${MENDER_TENANT_TOKEN}"`) is meant for the build host or the device to
+    fill.  A Zephyr Kconfig fragment can never do that: the pinned v4.4.1
+    `scripts/kconfig/kconfiglib.py` `_load_config` only unescapes a `.conf`
+    string value -- the `expandvars` call in that file belongs to the Kconfig
+    *source* tokenizer, not the `.conf` loader -- and nothing in Zephyr's CMake
+    expands a fragment either.  So a live `CONFIG_HAWKBIT_SERVER="${HOST}"`
+    would build firmware that carries the literal text `${HOST}` as its
+    server name, silently.  A commented line (the Mender-MCU-client hint lines
+    in `_emit_ota`) is inert and allowed.
+    """
+    # Imported here, not at the top: a new top-of-file line would shift every
+    # line number that changelog fragments cite in this module.
+    import re
+
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = re.search(r"\$\{[^}]*\}", line)
+        if match:
+            raise OrchestratorError(
+                f"core '{core_id}': the Zephyr config would carry the "
+                f"placeholder `{match.group(0)}` literally (`{line.strip()}`) "
+                f"-- Zephyr does not expand environment variables in a "
+                f"Kconfig fragment, so the firmware would use the text "
+                f"`{match.group(0)}` itself.  Write the real value in "
+                f"board.yaml, or set it in the app's own prj.conf")
+
+
+def _inference_auto_order(som_preset: dict) -> list[str]:
+    """The SoM preset's ordered AUTO accelerator preference, best first.
+
+    `inference.auto_order` is the single source: its first entry is the SoM's
+    preferred backend.
+    """
+    return list((som_preset.get("inference") or {}).get("auto_order") or [])
 
 
 def _slice_local_conf(project: BoardProject, slice_: Slice) -> str:
@@ -1994,6 +2312,9 @@ def _slice_local_conf(project: BoardProject, slice_: Slice) -> str:
     iot_lines = _yocto_iot_lines(project, slice_)
     if iot_lines:
         lines.extend(iot_lines)
+    # `cameras:` -> ALP_CAMERA_CAM<n>, the variable the kernel bbappend keys
+    # the sensor devicetree include on (same resolver as Zephyr's -DSHIELD).
+    lines.extend(_cameras.yocto_camera_lines(project, slice_))
     # Curated third-party libraries (top-level `libraries:`, ADR 0018) with a
     # Yocto integration section -- BOTH the project-wide entries and the ones
     # scoped to this core.  Every recipe name comes from the library's own
@@ -2013,6 +2334,13 @@ def _slice_local_conf(project: BoardProject, slice_: Slice) -> str:
     if library_pkgs:
         joined = " ".join(library_pkgs)
         lines.append(f'IMAGE_INSTALL:append = " {joined}"')
+    # SoM-declared AUTO accelerator preference.  Read by the alp-sdk recipe
+    # (EXTRA_OECMAKE -> -DALP_SDK_INFERENCE_AUTO_ORDER); only the
+    # .alpmodel selector (alp_model_select) consumes it, as a tiebreak.  Weak `?=` so a hand-edited
+    # local.conf wins; emitted only for presets that declare it.
+    auto_order = _inference_auto_order(project.som_preset)
+    if auto_order:
+        lines.append(f'ALP_SDK_INFERENCE_AUTO_ORDER ?= "{",".join(auto_order)}"')
     if slice_.image:
         lines.append(f"# bitbake target: {slice_.image}")
 
@@ -2029,8 +2357,19 @@ def _slice_local_conf(project: BoardProject, slice_: Slice) -> str:
         srv = ota.get("server") or {}
         if srv.get("url"):
             lines.append(f'MENDER_SERVER_URL ?= "{srv["url"]}"')
-        if srv.get("tenant"):
-            lines.append(f'MENDER_TENANT_TOKEN ?= "{srv["tenant"]}"')
+        tenant = str(srv.get("tenant") or "")
+        if "${" in tenant:
+            # A ${NAME} placeholder is never expanded by BitBake from the
+            # host environment, so a self-referencing `?=` would bake the
+            # literal text (or fail to expand).  Leave the token to the
+            # documented local.conf override instead.
+            lines.append(
+                "# MENDER_TENANT_TOKEN: set it in conf/local.conf "
+                "(meta-alp-sdk/README.md, Mender step 3); the board.yaml "
+                "placeholder is not expanded by BitBake."
+            )
+        elif tenant:
+            lines.append(f'MENDER_TENANT_TOKEN ?= "{tenant}"')
         sto = ota.get("storage") or {}
         if sto.get("device"):
             lines.append(f'MENDER_STORAGE_DEVICE_BASE ?= "{sto["device"]}"')
@@ -2077,6 +2416,10 @@ def _slice_cmake_args(project: BoardProject, slice_: Slice) -> str:
         lines.append(f"-DALP_BOARD_{_board_define_slug(project.board_name)}")
     if slice_.toolchain:
         lines.append(f"-DALP_TOOLCHAIN={slice_.toolchain}")
+    # `cameras:` -> the same -DSHIELD the build command carries.
+    shield = _cameras.shield_define_for_build(project, slice_)
+    if shield:
+        lines.append(f"-D{shield}")
     if capabilities.get("drp_ai"):
         # Must match the option name in src/yocto/CMakeLists.txt
         # (ALP_SDK_USE_DRPAI_V2N -- compiles inference_drpai.cpp).

@@ -19,7 +19,7 @@ already resolved. This port's real caller, `tan.commands.build_cmd._dispatch` /
 `_build`, now threads its own already-resolved `--sdk-root` straight through
 (`execute_slices(..., sdk_root=sdk_root)` -> [`write_post_build_manifest`]) --
 mirroring the oracle's `ProjectContext` exactly. The fallback below (the plan's
-own `boardYaml` field plus [`tan.commands.build_cmd.resolve_sdk_root_ladder`]'s
+own `boardYaml` field plus [`tan.core.sdk_discovery.resolve_sdk_root_ladder`]'s
 full precedence chain) stays for any OTHER caller of `execute_slices` that
 passes no `sdk_root` at all (every test in this port's own suite does exactly
 that), so the write is never permanently unreachable just because a caller
@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
+from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.system_manifest import (
     SliceRunResult,
     SystemManifestError,
@@ -96,6 +97,7 @@ def write_post_build_manifest(
     base: str,
     plan_build_root: str,
     results: Sequence[SliceRunResult],
+    plain_route: tuple[str, str] | None = None,
 ) -> PostBuildManifest:
     """Write `<base>/<plan_build_root>/system-manifest.yaml` after a build:
     fetch the plan-time projection from the SDK (`--emit system-manifest`),
@@ -132,13 +134,6 @@ def write_post_build_manifest(
     effective_sdk_root = sdk_root
     effective_board_yaml = board_yaml
     if effective_sdk_root is None and effective_board_yaml:
-        # Local import: `build_cmd.py` imports `tan.commands.build.execute`,
-        # which imports this module, at module level -- a module-level import
-        # of `resolve_sdk_root_ladder` here would be circular. Same pattern as
-        # the `tan.planner_root` import a few lines below and `tan.core.run`
-        # in `_native_sim_target_from_yaml`, deferred to call time instead of
-        # duplicating the candidate ladder.
-        #
         # The FULL ladder (`--sdk-root` > project pin > global default >
         # positional walk), not the positional walk alone: this fallback only
         # fires for a caller of `execute_slices` that passed no `sdk_root`
@@ -146,7 +141,11 @@ def write_post_build_manifest(
         # alone would let the post-build manifest record a DIFFERENT SDK root
         # than `resolve_sdk_root_ladder` resolved for the build itself the
         # moment a project pin or machine-global default was in play.
-        from tan.commands.build_cmd import resolve_sdk_root_ladder
+        # Imported at module level (tan-cli#408): `resolve_sdk_root_ladder`
+        # moved to `tan.core.sdk_discovery`, which `build_cmd.py` (and this
+        # module's own `tan.commands.build.execute` ancestor) no longer sit
+        # upstream of, so the import that used to be circular here is not
+        # any more.
 
         # `_broken_pin` unused: this fallback only fires for a caller that
         # passed no `sdk_root` at all (test-only, per the docstring above) --
@@ -157,7 +156,15 @@ def write_post_build_manifest(
         discovered = resolve_sdk_root_ladder(None, Path(effective_board_yaml).parent).path
         effective_sdk_root = str(discovered) if discovered else None
 
-    if effective_sdk_root is None or not effective_board_yaml:
+    if effective_sdk_root is not None and not effective_board_yaml and plain_route is None:
+        # A build with no board.yaml has nothing to project the manifest from
+        # (the plain `tan build --board` route has its own writer, below).
+        return PostBuildManifest(
+            write_failed_reason="the plan has no board.yaml to project it from",
+            native_sim_target=None,
+        )
+
+    if effective_sdk_root is None or (not effective_board_yaml and plain_route is None):
         return PostBuildManifest(
             write_failed_reason=(
                 "no alp-sdk checkout resolved for the post-build system-manifest emit"
@@ -203,9 +210,24 @@ def write_post_build_manifest(
             write_failed_reason=f"planner unavailable: {err}", native_sim_target=None
         )
     try:
-        yaml_text = _planner_emit(
-            "system-manifest", root=effective_sdk_root, board_yaml=Path(effective_board_yaml)
-        )
+        if plain_route is not None:
+            # tan-cli#1370: no board.yaml to project from -- a one-slice
+            # manifest from the board target's SoM preset instead.
+            from tan.planner_root import bind_sdk_root
+
+            bind_sdk_root(effective_sdk_root)
+            from tan.planner.plain_slice import plain_system_manifest
+
+            yaml_text = plain_system_manifest(
+                plain_route[0],
+                Path(effective_sdk_root) / "metadata",
+                fallback_core_id=plain_route[1],
+                elf_path=next((r.output_artefact for r in results if r.output_artefact), None),
+            )
+        else:
+            yaml_text = _planner_emit(
+                "system-manifest", root=effective_sdk_root, board_yaml=Path(effective_board_yaml)
+            )
     except Exception as err:  # noqa: BLE001 -- best-effort write, never escapes
         return PostBuildManifest(
             write_failed_reason=f"{type(err).__name__}: {err}", native_sim_target=None

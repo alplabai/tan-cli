@@ -62,5 +62,5 @@ jobs:
       # `--selftest --self` duplicates ci.yml's own step deliberately — this job
       # must fail with a complete picture (all four files, not just the tag
       # verdict), and the run costs a second.
-      - name: TAN_VERSION == pyproject == npm-shim == CHANGELOG, and not a published tag
+      - name: TAN_VERSION == pyproject == CHANGELOG, and not a published tag
         run: python python/scripts/version_check.py --selftest --self --not-released

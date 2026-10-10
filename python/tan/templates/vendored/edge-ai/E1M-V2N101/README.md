@@ -44,18 +44,31 @@ CC,768.0,CONDENSATION_RISK,5.0,95.0,4.3,5.0,0.0
 ## Build
 
 ```
-west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m33_sm --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
+west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash --host <board-ip>
 ```
 
-Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.
+The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103`
+-- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`, the same PCB without
+it. Pick either via
+`som.sku` in `board.yaml`.
 
 ## Model
 
+<!-- The ../cold-chain-monitor/ detour is deliberate: the scaffold
+     rewriter's _RELATIVE_LINK_RE only matches `../`-prefixed links, and
+     models/ is a child of this dir, not a sibling -- don't "fix" this. -->
+
 No model is shipped (stub + deterministic classifier/fallback). See
-`models/README.md` for the autoencoder training recipe.
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/examples/ai/cold-chain-monitor/models/README.md) for the
+autoencoder training recipe.
 
 ## Tests
+
+In the alp-sdk tree, unit tests live in
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain

@@ -54,9 +54,9 @@
 #    asset", but a pull request has no published release to download.
 #    CHOSEN: both, on different triggers.
 #      - `freeze-and-smoke` builds the freeze per-platform (exactly what
-#        `getting-started.yml` and `release.yml`'s `build` job already do) and
-#        runs on every PR/push/manual dispatch -- available PRE-TAG, which is
-#        when a defect like these six needs to be caught, before a customer
+#        `getting-started.yml` and `release.yml`'s `build` job already do), on
+#        Linux per PR and on all four hosts per merge_group/push/dispatch --
+#        PRE-TAG, when a defect like these six needs to be caught, before a customer
 #        ever sees the tag.
 #      - `release-asset-smoke` downloads the actual uploaded asset and runs
 #        the identical smoke test, on `release: published` + manual dispatch.
@@ -156,6 +156,7 @@ name: clean-host
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -181,6 +182,51 @@ permissions:
   contents: read
 
 jobs:
+  # tan-cli#1390: a `pull_request` freezes on Linux only; Windows and both
+  # macOS legs run on `merge_group` (and push / dispatch). None of these
+  # contexts is branch-protection-required, so the non-Linux legs simply do not
+  # exist on a PR rather than stub-passing. A matrix `include` cannot be
+  # filtered by an expression in place, so this job holds the full list below
+  # and emits it (Linux-only on a PR) for `freeze-and-smoke` to consume.
+  matrix-plan:
+    if: github.event_name != 'release'
+    name: "clean host (freeze): matrix plan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      - id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          full=$(python3 - <<'PYEOF'
+          import json
+          include = [
+              {"os": "windows-latest", "asset": "tan-x86_64-pc-windows-msvc.exe", "ext": ".exe"},
+              {"os": "macos-15-intel", "asset": "tan-x86_64-apple-darwin", "ext": ""},
+              {"os": "macos-15", "asset": "tan-aarch64-apple-darwin", "ext": ""},
+              {
+                  "os": "ubuntu-latest",
+                  "asset": "tan-x86_64-unknown-linux-gnu",
+                  "ext": "",
+                  # Pinned by digest, tag kept in the comment -- same reasoning
+                  # and digest as release.yml's `build` job (tan-cli#437); the
+                  # two MUST match.
+                  "container": "python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db",  # python:3.12-slim-bullseye
+              },
+          ]
+          print(json.dumps(include))
+          PYEOF
+          )
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            full=$(printf '%s' "$full" | python3 -c 'import json,sys; print(json.dumps([e for e in json.load(sys.stdin) if e["os"] == "ubuntu-latest"]))')
+          fi
+          echo "include=${full}" >> "$GITHUB_OUTPUT"
+          echo "event ${EVENT_NAME}: ${full}" >> "$GITHUB_STEP_SUMMARY"
+
   # PRE-TAG coverage: builds the freeze itself, exactly like getting-started.yml
   # and release.yml's `build` job do, then runs the four-command clean-host
   # sequence against it. Never runs on `release: published` -- that commit
@@ -188,27 +234,13 @@ jobs:
   # be a second, differently-built lookalike, not new coverage (see the header:
   # only `release-asset-smoke` proves anything about the uploaded bytes).
   freeze-and-smoke:
+    needs: matrix-plan
     if: github.event_name != 'release'
     name: "clean host (freeze): ${{ matrix.asset }}"
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            asset: tan-x86_64-pc-windows-msvc.exe
-            ext: .exe
-          # Same two macOS labels release.yml uses (macOS 13 is retired, 14 is
-          # deprecated) -- keeps the Intel/Apple-silicon pair comparable.
-          - os: macos-15-intel
-            asset: tan-x86_64-apple-darwin
-            ext: ""
-          - os: macos-15
-            asset: tan-aarch64-apple-darwin
-            ext: ""
-          - os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-gnu
-            ext: ""
-            container: python:3.12-slim-bullseye
+        include: ${{ fromJSON(needs.matrix-plan.outputs.include) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -240,25 +272,60 @@ jobs:
           VENV_PY=.venv-build/bin/python
           [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
           "$VENV_PY" -m pip install --quiet --upgrade pip
-          "$VENV_PY" -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+          # tan-cli#437: same hash-verified, locked install release.yml's
+          # `build` job uses -- this job freezes the identical artefact, so it
+          # must resolve from the identical lock or it stops being a
+          # pre-tag preview of what `build` actually does.
+          "$VENV_PY" -m pip install --quiet --require-hashes -r release-requirements.lock.txt
+          "$VENV_PY" -m pip install --quiet --no-deps --no-build-isolation ".[monitor]"
           PYTHON="$VENV_PY" bash scripts/build_binary.sh
 
       # Old-glibc container, same reasoning as release.yml: freezing on bare
       # ubuntu-latest links its glibc and ships a floor no supported distro
       # meets. `docker run` from a normal job (not a job-level `container:`)
       # so checkout/setup-python keep working on the host.
-      - name: freeze tan (python:3.12-slim-bullseye)
+      - name: freeze tan (python:3.12-slim-bullseye) + packaged-binary conformance + glibc floor
         if: ${{ matrix.container }}
         shell: bash
+        env:
+          CONTAINER_IMAGE: ${{ matrix.container }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src "${{ matrix.container }}" bash -euc '
-            bash /scripts/ci/apt-bounded.sh update -qq
-            bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
+          # Mirror first: Docker Hub rate-limits anonymous runner pulls.
+          IMG=$(bash scripts/ci/docker-pull.sh "${CONTAINER_IMAGE}")
+          docker run --rm -v "$PWD:/src" -w /src/python "${IMG}" bash -euc '
+            bash /src/scripts/ci/apt-bounded.sh update -qq
+            bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+            /tmp/venv/bin/pip install --quiet --require-hashes -r release-requirements.lock.txt
+            /tmp/venv/bin/pip install --quiet --no-deps --no-build-isolation ".[monitor]"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
+            # tan-cli#450. THE PR-TIME EXERCISE OF THE PACKAGING PATH.
+            # The three lines below are what the container leg in release.yml
+            # runs after its own build_binary.sh, and until now they ran there
+            # and NOWHERE else -- release.yml triggers on a v* tag, so a break
+            # in either could only be discovered by pushing a tag, and a tag
+            # cannot be un-pushed. v0.5.0 published zero assets for exactly
+            # that reason.
+            #
+            # This job is the right home rather than a new workflow: it already
+            # freezes the SAME artifact in the SAME container on every pull
+            # request, so the exercise costs three commands instead of a second
+            # freeze that could drift from the shipping recipe.
+            #
+            # The size ceiling needs nothing added here -- build_binary.sh
+            # sources artifact_ceilings.env and enforces it itself (see that
+            # file header: sourced, not copied), so the freeze line above
+            # already covers the ceiling on every PR.
+            #
+            # NOTE FOR EDITORS: every line in this docker body is inside
+            # bash -euc with SINGLE quotes. Do not write an apostrophe here --
+            # it closes the shell string. release.yml escapes one the hard way
+            # if you ever need to.
+            /tmp/venv/bin/pip install --quiet pytest pyelftools
+            /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
+            /tmp/venv/bin/python scripts/glibc_floor_scan.py
           '
 
       # The actual gate: --version / doctor / sdk list --online / bootstrap
@@ -291,10 +358,11 @@ jobs:
         shell: bash
         env:
           TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
+          TAN_EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
           if [ ! -f "$TAN_BIN" ]; then
-            echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${{ matrix.ext }}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
+            echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${TAN_EXT}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
             ls -la python/dist/tan 2>/dev/null || ls -la python/dist || echo "python/dist does not exist at all -- the freeze step above did not run or did not produce it."
             exit 1
           fi
@@ -313,6 +381,47 @@ jobs:
         env:
           TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
         run: python python/scripts/measure_startup.py --tan "$TAN_BIN"
+
+  # tan-cli#1392: ONE always-reported context that branch protection can
+  # require. After #1390 the Windows and both macOS legs exist only on
+  # `merge_group`/push/dispatch, and no `freeze-and-smoke` context is required,
+  # so a non-Linux freeze or smoke regression in a queued merge went red
+  # without blocking anything. Same shape as parity.yml's `python-tests`: a
+  # stub pass on `pull_request` (the context must report there for a PR to be
+  # enqueued at all), the real check everywhere else, where anything but
+  # `success` from the whole matrix -- a failed, cancelled or skipped leg, or a
+  # `matrix-plan` that never produced one -- fails this job.
+  freeze-and-smoke-all:
+    needs: [matrix-plan, freeze-and-smoke]
+    if: ${{ always() && github.event_name != 'release' }}
+    name: "clean host (freeze): all legs"
+    runs-on: ubuntu-latest
+    # Checks out nothing and evaluates two results; anything it cannot finish
+    # in 5 minutes is stuck, not slow (same reasoning as python-tests).
+    timeout-minutes: 5
+    steps:
+      - name: stub pass (non-Linux legs skipped on pull_request; run in merge_group)
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          msg="clean host (freeze): non-Linux legs skipped on pull_request; all legs run in merge_group"
+          echo "${msg}"
+          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: verify every freeze-and-smoke leg succeeded
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.matrix-plan.result }}
+          FREEZE_RESULT: ${{ needs.freeze-and-smoke.result }}
+        run: |
+          set -euo pipefail
+          echo "matrix-plan: ${PLAN_RESULT}; freeze-and-smoke rolled-up result: ${FREEZE_RESULT}"
+          if [ "${PLAN_RESULT}" != "success" ] || [ "${FREEZE_RESULT}" != "success" ]; then
+            echo "::error::clean host (freeze) did not fully pass (matrix-plan: ${PLAN_RESULT}, freeze-and-smoke: ${FREEZE_RESULT}) -- at least one leg failed, was cancelled, or the matrix was skipped. This job exists only to give branch protection one required context; reporting green here would let a queued merge land with a red Windows/macOS freeze."
+            exit 1
+          fi
 
   # POST-PUBLISH confirmation: downloads the asset `install.sh`/`install.ps1`
   # actually fetch and runs the identical smoke test against those exact
@@ -366,16 +475,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
           tag="${REQUESTED_TAG:-}"
           if [ -z "$tag" ]; then
             tag="$(gh release view --repo alplabai/tan-cli --json tagName -q .tagName)"
           fi
-          echo "testing published asset ${{ matrix.asset }} from tag ${tag}"
+          echo "testing published asset ${ASSET} from tag ${tag}"
           mkdir -p dl
           gh release download "$tag" --repo alplabai/tan-cli \
-              --pattern "${{ matrix.asset }}" --dir dl --clobber
+              --pattern "${ASSET}" --dir dl --clobber
 
       # tan-cli#349: the published asset is now an archive of a --onedir
       # freeze, not a raw executable -- unpack it before the smoke test can
@@ -387,11 +497,16 @@ jobs:
       # binary lands at dl/unpacked/tan/tan[.exe].
       - name: unpack the downloaded archive
         shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+          TAN_EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
-          python -c "import shutil; shutil.unpack_archive('dl/${{ matrix.asset }}', 'dl/unpacked')"
-          chmod +x "dl/unpacked/tan/tan${{ matrix.ext }}"
+          python -c "import shutil, sys; shutil.unpack_archive('dl/' + sys.argv[1], 'dl/unpacked')" "${ASSET}"
+          chmod +x "dl/unpacked/tan/tan${TAN_EXT}"
 
       - name: clean-host smoke against the downloaded asset
         shell: bash
-        run: python python/scripts/clean_host_smoke.py --tan "dl/unpacked/tan/tan${{ matrix.ext }}"
+        env:
+          TAN_EXT: ${{ matrix.ext }}
+        run: python python/scripts/clean_host_smoke.py --tan "dl/unpacked/tan/tan${TAN_EXT}"

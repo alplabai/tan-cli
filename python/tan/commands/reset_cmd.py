@@ -1,0 +1,354 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan reset` -- ONE bare nRESET pulse through J-Link (tan-cli#1452).
+
+Bench recovery from a non-waking STOP is a single clean pulse: `r0`, a pulse
+width (default 100 ms), `r1`. This is not the pin reset `tan flash` runs
+(`RSetType 2; r; g`, with retries): no connect, no halt, no connect-under-reset, no retry
+storm, so the target is not woken out of STOP and the VBAT/BKRAM evidence
+survives. See `tan.core.reset_plan` for the script rules.
+
+Probe handling is `tan probe`'s: the trusted J-Link binary (`resolve_jlink`),
+`--probe-serial` / `--probe-usb-path` and the `ShowEmuList` verification before
+the spawn, through `flash_cmd._execute`. `JLINK_RUN_PLACE` is read from the
+environment of THIS invocation, so the board-farm shim that wraps `JLinkExe`
+picks the place per command, exactly as for `tan flash`; the envelope reports
+the value in `data.place`.
+"""
+from __future__ import annotations
+
+import os
+import re
+import time
+import sys
+from typing import Any, Callable
+
+import typer
+
+from tan.commands import flash_cmd as fc
+from tan.commands import flash_raw
+from tan.commands import reset_confirm as rc_mod
+from tan.commands.monitor_cmd import MonitorError
+from tan.core import reset_plan as rp
+from tan.core import trusted_path
+from tan.core.flash_plan import FlashPlan, FlashPlanError
+from tan.core.global_flags import accept_global_flags
+from tan.core.jlink_probe import HANDSHAKE_PREFIX, USB_PATH_ENV, parse_handshakes
+from tan.core.jlink_binary import ENV_OVERRIDE as JLINK_ENV, resolve_jlink
+from tan.envelope import Envelope, Issue
+from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
+
+COMMAND = "reset"
+PLACE_ENV = "JLINK_RUN_PLACE"
+_SCHEMA_VERSION = fc._DATA_SCHEMA_VERSION
+_SCRIPT_PREFIX = "tan-reset-"
+#: Commander output that means the pulse did not happen, even when the closing
+#: "Script processing completed" banner is also printed.
+_FAILURE = re.compile(r"FAILED|Cannot connect|Could not open")
+_Result = tuple[ExitCode, dict[str, Any], list[Issue], list[str]]
+
+
+def _fail(data: dict[str, Any], issue: Issue, rc=ExitCode.RUNTIME_FAILURE) -> _Result:
+    return rc, data, [issue], [f"reset: {issue.message}"]
+
+
+def _select(data, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes):
+    """`(guard, echo, serial)` or a refusal `_Result`."""
+    ctx = fc._Context(
+        sku="", build_root="", sdk_root="", dry_run=False, skip_missing_tools=False,
+        force_confirm=False, capture=True, probe_serial=probe_serial,
+        probe_usb_path=probe_usb_path, project_dir=project_dir, jlink_path=jlink_path,
+        **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
+    )
+    flash_args, selection, snapshot = fc._flow_d_probe_selection({}, ctx)
+    echo = fc._probe_echo(selection, ctx)
+    if echo:
+        data["probe"] = echo
+    if selection is not None and selection.refusal_code is not None:
+        return _fail(data, Issue(f"flash.probe-{selection.refusal_code}", "error", selection.refusal or ""))
+    guard = None
+    if selection is not None and (selection.serial is not None or selection.visible is None):
+        guard = fc._ProbeGuard(selection, snapshot, ctx.enumerate_probes, echo,
+                               script_prefix=_SCRIPT_PREFIX)
+    return guard, flash_args.get("jlink_serial")
+
+
+def _spawn(guard, script, exe, usb_path, fast):
+    """One J-Link Commander spawn. `fast` (a masking wrapper is in use, named by
+    JLINK_RUN_PLACE, and --probe-usb-path was given): no ShowEmuList pass before
+    the pulse -- the wrapper itself refuses a TAN_PROBE_USB_PATH that is not its
+    place's port (exit 96) before opening any probe, and the pulse is judged
+    afterwards by the TAN_PROBE_ISOLATED_USB_PATH handshake. Otherwise the
+    pre-spawn probe guard of `tan flash` runs. The argv is the proven one
+    (`-NoGui 1 -CommanderScript`, plus -ExitOnError 1): no -if, no -autoconnect,
+    no -device; Commander opens the probe lazily on `r0`."""
+    argv = ("JLinkExe", "-NoGui", "1", "-ExitOnError", "1", "-CommanderScript")
+    if not fast:
+        return fc._execute(
+            FlashPlan(argv=argv, ok_message="", jlink_script=script),
+            True, None, None, guard, jlink_exe=exe, script_prefix=_SCRIPT_PREFIX,
+        )
+    return fc._spawn_jlink(
+        list(argv), script, True, fc._FLASH_TIMEOUT_S, None, None, exe,
+        extra_env={USB_PATH_ENV: usb_path}, script_prefix=_SCRIPT_PREFIX,
+    )
+
+
+def _verdict(data, out, guard, fast, usb_path) -> Issue | None:
+    """The refusal / failure for a finished spawn, else `None`."""
+    if guard is not None and guard.tripped and not fast:
+        return Issue(f"flash.probe-{guard.tripped_code}", "error", guard.tripped)
+    text = f"{out.stdout}\n{out.stderr}"
+    if not out.success or "Script processing completed" not in text or _FAILURE.search(text):
+        tail = fc._capture_tail(out) or "J-Link did not complete the script"
+        return Issue("reset.failed", "error", f"the nRESET pulse did not complete: {tail}")
+    if fast:
+        seen = parse_handshakes(text)
+        if seen != [usb_path]:
+            return Issue(
+                "flash.probe-verify-failed", "error",
+                f"the pulse ran, but the wrapper did not attest isolation to {usb_path} "
+                f"({HANDSHAKE_PREFIX} lines: {', '.join(seen) or 'none'}); it may have reached "
+                "the wrong board",
+            )
+        data.setdefault("probe", {})["isolation"] = f"wrapper-attested:{usb_path}"
+    return None
+
+
+def _finish_pulse(data, ser, confirm, pulse_ms, initial=b"", exit_ts=None, stuck=None) -> _Result:
+    place = f" on place {data['place']}" if data["place"] else ""
+    line = f"reset: nRESET pulsed for {pulse_ms} ms{place}"
+    if ser is None:
+        note = Issue("reset.boot-not-confirmed", "info",
+                     "pulse sent; boot not confirmed (pass --confirm-console PORT --expect REGEX)")
+        return ExitCode.SUCCESS, data, [note], [line + "; boot not confirmed"]
+    if stuck is not None:  # never run a second reader beside a stuck one
+        data["console"] = {"port": confirm.port, "observed": False, "error": str(stuck)}
+    else:
+        data["console"] = rc_mod.observe(ser, confirm, initial, exit_ts)
+    data["resetObserved"] = bool(data["console"]["observed"])
+    if "error" in data["console"]:
+        data["resetObserved"] = "unknown"
+        issue = Issue("reset.console-read-failed", "error",
+                      f"pulse sent, but reading {confirm.port} failed ({data['console']['error']}): "
+                      "reset not confirmed either way")
+        return _fail(data, issue)
+    if not data["resetObserved"]:
+        issue = Issue("reset.boot-not-observed", "error",
+                      f"pulse sent, but no console line matched --expect within the {confirm.window_s}s "
+                      f"confirm window on {confirm.port}: the board did not visibly reboot"
+                      + (f" (a late match at {data['console']['lateMatchAtSeconds']}s is not a reset)"
+                         if "lateMatchAtSeconds" in data["console"] else ""))
+        return _fail(data, issue)
+    return ExitCode.SUCCESS, data, [], [line + "; boot observed"]
+
+
+def _run(
+    pulse_ms: int,
+    probe_serial: str | None,
+    probe_usb_path: str | None,
+    jlink_path: str | None,
+    project_dir: str,
+    enumerate_probes: Callable[[], Any] | None = None,
+    confirm: "rc_mod.ConfirmSpec | None" = None,
+) -> _Result:
+    data: dict[str, Any] = {
+        "schemaVersion": _SCHEMA_VERSION, "pulseMs": pulse_ms,
+        "place": os.environ.get(PLACE_ENV) or None, "writes": False,
+        "resetObserved": "unknown",
+    }
+    try:
+        rp.check_pulse_ms(pulse_ms)
+    except rp.ResetArgError as err:
+        return _fail(data, Issue("reset.bad-argument", "error", str(err)), ExitCode.VALIDATION_FAILURE)
+    place = data["place"]
+    if place:
+        # A reservation place is named: the ONLY J-Link program tan may spawn is the trusted
+        # wrapper. Refuse before any spawn rather than run a raw ShowEmuList that enumerates
+        # other places' probes.
+        wrapper, why = trusted_path.configured_wrapper()
+        if wrapper is None:
+            data["wrapper"] = {"trusted": False, "reason": why}
+            return _fail(data, Issue(
+                "reset.wrapper-required", "error",
+                f"{PLACE_ENV} is set but no trusted wrapper is configured ({why}): set "
+                "TAN_JLINK_WRAPPER to the absolute path of the board-farm JLinkExe shim. "
+                "Nothing was spawned."))
+        from_wrapper_env = not jlink_path
+        jlink_path = jlink_path or wrapper  # an explicit --jlink wins, and is checked below
+    else:
+        from_wrapper_env = False
+    found = resolve_jlink(jlink_path, project_dir=project_dir)
+    exe = found.path if found is not None else None
+    # resolve_jlink() labels any path handed to it as "the --jlink flag"; name the real
+    # origin when tan itself defaulted to TAN_JLINK_WRAPPER (tan-cli#1467).
+    source = "TAN_JLINK_WRAPPER" if (found and from_wrapper_env) else (found.source if found else None)
+    data["jlink"] = {"binary": exe, "binarySource": source}
+    if exe is None:
+        return _fail(data, Issue("reset.failed", "error", fc._NO_TRUSTED_JLINK))
+    trusted, reason = trusted_path.is_configured_wrapper(exe)
+    data["wrapper"] = {"trusted": trusted, "reason": reason}
+    if place and not trusted:
+        return _fail(data, Issue(
+            "reset.wrapper-required", "error",
+            f"{PLACE_ENV} is set but the J-Link program is not the configured wrapper ({reason}); "
+            "nothing was spawned."))
+    if place:
+        # The wrapper's holder check is `<host>/<user>`, identical for every session of one
+        # user, so a pulse here could reset a board ANOTHER session holds (tan-cli#1457). Demand
+        # exactly what `tan flash --raw` demands: this session's lease nonce, labgrid showing
+        # us as the holder of this acquisition, and --probe-usb-path equal to the place's swd
+        # port. Refused before any spawn.
+        refusal, _verified = flash_raw._reservation_refusal(place, exe, probe_usb_path)
+        if refusal is not None:
+            return _fail(data, Issue(
+                "reset.reservation-required", "error",
+                f"refusing to pulse nRESET without a provably held bench reservation: {refusal} "
+                "Nothing was spawned."))
+    # Single-spawn mode only when the J-Link program IS the configured wrapper: a real SEGGER
+    # JLinkExe given JLINK_RUN_PLACE would skip ShowEmuList and pulse whichever probe
+    # enumerates first.
+    fast = bool(data["place"]) and probe_usb_path is not None and trusted
+    try:
+        picked = _select(data, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes)
+        if isinstance(picked, tuple) and len(picked) == 4:
+            return picked
+        guard, serial = picked
+        script = rp.pulse_script(None if fast else serial, pulse_ms)
+    except (FlashPlanError, rp.ResetArgError) as err:
+        return _fail(data, Issue("reset.failed", "error", str(err)))
+    data["script"] = fc._DISABLE_FW_UPDATE.splitlines() + script.splitlines()
+    data["singleSpawn"] = fast
+    ser = None
+    started = time.monotonic()
+    if confirm is not None:
+        try:
+            ser = rc_mod.open_console(confirm)
+        except MonitorError as err:
+            return _fail(data, Issue("reset.console-open-failed", "error", err.message))
+    drain = rc_mod.Drain(ser) if ser is not None else None
+    try:
+        spawn_started = time.monotonic()
+        out = _spawn(guard, script, exe, probe_usb_path, fast)
+        exit_ts = time.monotonic()
+        stuck = None
+        initial: list[bytes] = []
+        if drain is not None:
+            try:
+                initial = drain.stop(exit_ts)
+            except rc_mod.DrainStuck as err:
+                stuck = err
+        data["timing"] = {
+            "prepSeconds": round(spawn_started - started, 3),
+            "jlinkSpawnSeconds": round(time.monotonic() - spawn_started, 3),
+            "note": "jlinkSpawnSeconds includes any wrapper preamble before the pulse itself",
+        }
+        problem = _verdict(data, out, guard, fast, probe_usb_path)
+        if problem is not None:
+            return _fail(data, problem)
+        return _finish_pulse(data, ser, confirm, pulse_ms, b"".join(initial), exit_ts, stuck)
+    finally:
+        if drain is not None:
+            try:
+                drain.stop()
+            except rc_mod.DrainStuck:
+                pass
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001 -- observe() already closed it
+                pass
+
+
+def reset(
+    ctx: typer.Context,
+    project: str = typer.Option(None, "--project", metavar="PATH", help="Project root (defaults to '.')."),
+    pulse_ms: int = typer.Option(
+        rp.DEFAULT_PULSE_MS, "--pulse-ms", metavar="MS", show_default=True,
+        help=f"How long nRESET is held low ({rp.MIN_PULSE_MS}..{rp.MAX_PULSE_MS})."),
+    probe_serial: str = typer.Option(None, "--probe-serial", metavar="SN", help="J-Link serial for this run."),
+    probe_usb_path: str = typer.Option(
+        None, "--probe-usb-path", metavar="BUS-PORT",
+        help="Select the J-Link at this USB port path (e.g. 3-4.2). Without JLINK_RUN_PLACE it is "
+        "verified (ShowEmuList) before the JLinkExe spawn, as `tan flash` does. With JLINK_RUN_PLACE it "
+        "must equal the leased place's swd port (checked against labgrid before any spawn), there is "
+        "no ShowEmuList, and the wrapper's TAN_PROBE_ISOLATED_USB_PATH handshake is checked only "
+        "AFTER the pulse has run (TAN_PROBE_USB_PATH is exported for the masking wrapper)."),
+    confirm_console: str = typer.Option(
+        None, "--confirm-console", metavar="PORT",
+        help="Serial port (or rfc2217:// URL) to watch for the reboot; opened before the pulse. "
+        "Needs --expect. Without it the result is resetObserved: unknown."),
+    expect: str = typer.Option(
+        None, "--expect", metavar="REGEX",
+        help="With --confirm-console: a line printed after reset; only bytes that arrive after "
+        "J-Link exits count."),
+    confirm_baud: int = typer.Option(None, "--confirm-baud", metavar="BAUD", help="Console baud (default 115200)."),
+    confirm_timeout: float = typer.Option(
+        None, "--confirm-timeout", metavar="SECONDS", help="Overall read limit for --expect (default 30)."),
+    confirm_window: float = typer.Option(
+        None, "--confirm-window", metavar="SECONDS",
+        help="The FIRST --expect match must arrive this soon after J-Link exits (default 3); a later "
+        "one is recorded as lateMatchAtSeconds and is not a reset."),
+    jlink: str = typer.Option(
+        None, "--jlink", metavar="PATH",
+        help=f"The J-Link Commander binary (otherwise {JLINK_ENV}, PATH, then a SEGGER install root; "
+        "never the project .venv). With JLINK_RUN_PLACE set, TAN_JLINK_WRAPPER (the absolute path of "
+        "the board-farm shim) is used instead and any other program is refused (reset.wrapper-required)."),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
+) -> None:
+    """ONE bare nRESET pulse through J-Link: `r0`, wait --pulse-ms, `r1`. No connect, no halt, no
+    connect-under-reset, no retry; it does not flash. Set JLINK_RUN_PLACE (with --probe-usb-path) in the
+    environment to pick the board-farm place for this command; that requires the session lease
+    (reset.reservation-required otherwise).
+
+    \b
+    tan reset --probe-usb-path 3-4.2
+    JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2 --pulse-ms 200 --format json
+    tan reset --probe-usb-path 3-4.2 --confirm-console rfc2217://gw:4001 --expect 'Booting Zephyr'
+    (pick a banner printed some time AFTER reset: text emitted before J-Link exits is not counted)
+    (with JLINK_RUN_PLACE: also needs TAN_JLINK_WRAPPER, this session's TAN_LEASE_NONCE from
+    scripts/bench/tan-lease.sh, and labgrid-client showing you as the holder)
+    (the reset is only claimed with --confirm-console; otherwise resetObserved is "unknown")
+    """
+    json_mode = resolve_format(output_format, ctx.obj, choices=OutputFormat) == "json"
+    probe_serial = probe_serial if isinstance(probe_serial, str) else None
+    probe_usb_path = probe_usb_path if isinstance(probe_usb_path, str) else None
+    if probe_usb_path is not None and not fc.is_valid_usb_path(probe_usb_path):
+        raise typer.BadParameter(
+            f"{probe_usb_path!r} is not a USB port path like 3-4.2 (<bus>-<port>[.<port>...])",
+            param_hint="--probe-usb-path",
+        )
+    bad_port = None
+    confirm = None
+    try:
+        confirm = rc_mod.confirm_spec(confirm_console, expect, confirm_baud, confirm_timeout, confirm_window)
+    except rc_mod.BadPort as err:
+        bad_port = err
+    except rc_mod.ConfirmError as err:
+        raise typer.BadParameter(str(err)) from err
+    cwd = fc.workspace_root(project)
+    project_obj = fc._resolve_project(cwd, None)
+    try:
+        if bad_port is not None:
+            exit_code, data, issues, lines = _fail(
+                {"schemaVersion": _SCHEMA_VERSION, "port": confirm_console},
+                Issue("reset.bad-port", "error", str(bad_port)), ExitCode.VALIDATION_FAILURE)
+        else:
+            exit_code, data, issues, lines = _run(
+                pulse_ms, probe_serial, probe_usb_path,
+                jlink if isinstance(jlink, str) else None, cwd, confirm=confirm,
+            )
+    except Exception as err:  # noqa: BLE001 -- a tan bug is reported as one, with an envelope
+        exit_code = ExitCode.INTERNAL_FAILURE
+        data = {"schemaVersion": _SCHEMA_VERSION}
+        issues = [Issue("reset.internal-failure", "error", f"{type(err).__name__}: {err}")]
+        lines = ["reset: internal failure"]
+    if json_mode:
+        fc.emit(Envelope(COMMAND, project_obj, data, issues, exit_code))
+    else:
+        for line in lines:
+            print(line, file=sys.stderr if exit_code else sys.stdout)
+    raise typer.Exit(int(exit_code))
+
+
+reset = accept_global_flags(reset)

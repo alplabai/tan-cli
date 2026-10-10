@@ -89,3 +89,22 @@ is no second gate left to disagree with this golden and no red `cargo` job to
 "fix" by reverting it. The Python conformance harness is the only gate over
 this file, it pins the SHIPPING wire, and the release assets ARE the Python
 program (PyInstaller freezes of `python/`, tan-cli#271).
+
+Re-recorded on : 2026-08-30
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#945
+Branch         : fix/945-debug-config-programming-intent (off dev @ a0356f8a)
+
+What changed in the golden (second re-record)
+-----------------------------------------------
+One additive field, `data.schemaVersion` staying `"1"`:
+
+    + "data"."programsDevice": false
+
+native-host's `lldb` draft runs a binary on the HOST machine -- there is no
+target hardware to program at all (see
+`debug-config-preview-zephyr-mcu/PROVENANCE.txt`'s second re-record for the
+full tan-cli#945 rationale). `loadFiles` is a cortex-debug-only concept, so
+`data.configuration` is untouched by this change -- this target's adapter is
+`lldb`. `issues` is unchanged.

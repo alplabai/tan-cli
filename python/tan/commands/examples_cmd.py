@@ -46,6 +46,15 @@ nothing.
 
 No `--os`, no `--backend`, no SKU list, no hardware facts -- the catalogue is
 whatever directories carry a `board.yaml`, and nothing here reads one.
+
+**tan-cli#484** adds `category`/`som`/`board`/`cores`/`coreCount`/`osSet`/
+`declares` to each row, additively, when alp-sdk's generated
+`metadata/catalog.json` has an entry for that `sourceDir`
+(`tan.core.example_facets.load_example_facets`). That file is itself a
+pre-computed artefact of alp-sdk's topology resolver, so this still does not
+read a `board.yaml` or re-derive a hardware fact -- it reads one more
+generated JSON file, the same shape `tan.core.error_catalog` already reads
+`metadata/error-catalog.json` in.
 """
 
 from __future__ import annotations
@@ -58,10 +67,13 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import (
+from tan.core.example_facets import ExampleFacets, load_example_facets
+from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+    with_sdk_search,
 )
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
@@ -106,22 +118,46 @@ SDK_UNRESOLVED_CONSEQUENCE = "Returning an empty example catalogue."
 
 @dataclass(frozen=True)
 class Example:
-    """One catalogue entry. Field order is the emitted JSON order, matching
-    `ExampleEntry`'s declaration order in `examples.rs` (`id`, `sourceDir`,
-    `title`, `description`)."""
+    """One catalogue entry. `id`/`sourceDir`/`title`/`description` are the
+    emitted JSON order the frozen oracle also uses, matching `ExampleEntry`'s
+    declaration order in `examples.rs`. `facets` (tan-cli#484) is an ADDITIVE
+    Python-only extension the oracle never carried -- when
+    `metadata/catalog.json` has an entry for this `sourceDir`, its fields are
+    appended after the original four, in the order alp-sdk's own issue
+    illustrated: `category`, `som`, `board`, `cores`, `coreCount`, `osSet`,
+    `declares`. `facets is None` (an older SDK, or an example the catalogue
+    does not know about yet) reproduces the pre-#484 four-key wire shape
+    exactly -- no existing reader breaks."""
 
     id: str
     source_dir: str
     title: str
     description: str
+    facets: ExampleFacets | None = None
 
-    def as_dict(self) -> dict[str, str]:
-        return {
+    def as_dict(self) -> dict[str, object]:
+        out: dict[str, object] = {
             "id": self.id,
             "sourceDir": self.source_dir,
             "title": self.title,
             "description": self.description,
         }
+        facets = self.facets
+        if facets is not None:
+            out["category"] = facets.category
+            if facets.som is not None:
+                out["som"] = facets.som
+            if facets.board is not None:
+                out["board"] = facets.board
+            if facets.cores is not None:
+                out["cores"] = [dict(core) for core in facets.cores]
+            if facets.core_count is not None:
+                out["coreCount"] = facets.core_count
+            if facets.os_set is not None:
+                out["osSet"] = list(facets.os_set)
+            if facets.declares is not None:
+                out["declares"] = dict(facets.declares)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +206,10 @@ def _is_dir_no_follow(entry: os.DirEntry) -> bool:
         return False
 
 
-def discover_examples(examples_root: Path) -> list[Example]:
+def discover_examples(
+    examples_root: Path,
+    facets_by_source_dir: dict[str, ExampleFacets] | None = None,
+) -> list[Example]:
     """Scan `<sdk>/examples` exactly two levels deep for `<category>/<name>`
     directories carrying a `board.yaml`, sorted by source dir.
 
@@ -178,7 +217,14 @@ def discover_examples(examples_root: Path) -> list[Example]:
     "no examples" are the same renderable answer, and `tan examples` returning
     exit 0 with `examples: []` is what lets the New Project flow say "no
     examples available" instead of showing a failure.
+
+    `facets_by_source_dir` (tan-cli#484, `tan.core.example_facets`) is looked
+    up by the SAME `source_dir` this function derives -- a directory this walk
+    finds but the catalogue does not know about (a newer example than the
+    checkout's committed `metadata/catalog.json`) simply gets no facets, same
+    as an omitted or unreadable catalogue; discovery is never gated on it.
     """
+    facets_by_source_dir = facets_by_source_dir or {}
     found: list[Example] = []
     for category in _subdirectories(examples_root):
         for project in _subdirectories(category):
@@ -199,6 +245,7 @@ def discover_examples(examples_root: Path) -> list[Example]:
                     source_dir=source_dir,
                     title=example_title_from_readme(readme, source_dir),
                     description=example_description_from_readme(readme),
+                    facets=facets_by_source_dir.get(source_dir),
                 )
             )
     found.sort(key=lambda e: e.source_dir)
@@ -287,9 +334,17 @@ def example_matches_filter(entry: Example, needle: str) -> bool:
 
 
 def example_category(entry: Example) -> str:
-    """The catalogue's top-level directory -- `ai` for `ai/cold-chain-monitor`.
-    Derived from the id rather than carried as a field: the SDK emits no
-    category, and the id prefix IS the tree it came from."""
+    """The example's top-level directory -- `ai` for `ai/cold-chain-monitor`.
+    Prefers the catalogue's `category` facet (tan-cli#484) when the bound
+    checkout's `metadata/catalog.json` carries one for this example -- the
+    same producer-wins fallback order `alp-sdk-vscode`'s own
+    `exampleCategory()` uses ("the day tan forwards a category that
+    disagrees with the directory, the producer is right") -- and falls back
+    to the id prefix only when no facet is present (an older SDK, or an
+    example the catalogue does not know about yet)."""
+    facets = entry.facets
+    if facets is not None:
+        return facets.category
     return entry.id.split("/", 1)[0]
 
 
@@ -368,24 +423,40 @@ def render_examples_text(
 @dataclass(frozen=True)
 class _ResolvedSdk:
     """`_resolve_sdk`'s own return shape -- a named result, not a growing
-    tuple (the same reasoning `build_cmd.SdkRootResolution` documents): a fact
+    tuple (the same reasoning `tan.core.sdk_discovery.SdkRootResolution` documents): a fact
     one caller needs (`foreign_global_default_for`, tan-cli#464) must not
-    force every field before it to be re-counted by position."""
+    force every field before it to be re-counted by position.
 
-    path: Path
-    display: str
+    `.path`/`.display` are `None` together, on the SAME two conditions
+    `SdkRootResolution.path` itself is `None` for: no `--sdk-root` and
+    nothing else resolved, or a rejected `--sdk-root` (tan-cli#900). Never a
+    bare `_resolve_sdk(...) is None` any more -- see that function's own
+    docstring for why."""
+
+    path: Path | None
+    display: str | None
     tier: str
     broken_project_pin: str | None = None
     foreign_global_default_for: str | None = None
 
 
-def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdk | None:
-    """The resolved checkout as a [`_ResolvedSdk`], or `None`.
+def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdk:
+    """The resolved checkout as a [`_ResolvedSdk`] -- ALWAYS one, never a bare
+    `None` (tan-cli#900; the same fix tan-cli#468 made to
+    `presets_cmd.resolve_sdk`, applied here to this command's own WIDE ladder
+    instead of copying its narrow one). Collapsing to `None` the moment
+    nothing resolved is exactly what discarded `.broken_project_pin`/
+    `.foreign_global_default_for` on that path: a workspace whose
+    `.alp/sdk-path` names a checkout that no longer exists, with nothing else
+    resolvable, reported `examples.sdk-root-unresolved` alone -- the customer
+    was told the SDK could not be resolved but not that their own project pin
+    was the broken thing. Callers now check `.path is None`, the same
+    "unresolved" signal `SdkRootResolution.path` itself already carries.
 
-    `--sdk-root` is TERMINAL (I-31): a value that is not a real checkout resolves
-    to nothing rather than falling through to discovery, so a typo'd flag yields
-    an empty catalogue instead of silently listing some other checkout's
-    examples.
+    `--sdk-root` is TERMINAL (I-31): a value that is not a real checkout
+    resolves to `.path is None` rather than falling through to discovery, so a
+    typo'd flag yields an empty catalogue instead of silently listing some
+    other checkout's examples.
 
     `.display` is separate from `.path` because they are not interchangeable:
     `Path("./sdk")` stringifies to `sdk`, dropping the `./` the caller typed,
@@ -394,15 +465,16 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdk | N
     `.broken_project_pin` (tan-cli#263 review) is `None` on the `--sdk-root`
     branch (nothing to fall through from), else whatever
     `resolve_sdk_root_wide` carried through -- `examples()` turns it into the
-    shared `sdk.project-pin-unresolved` warning. `.foreign_global_default_for`
-    (tan-cli#464) is the same carry-through for the `globalDefault` tier's own
-    silence; `examples()` turns it into `sdk.global-default-foreign-project`.
+    shared `sdk.project-pin-unresolved` warning, unconditionally, whether or
+    not `.path` resolved. `.foreign_global_default_for` (tan-cli#464) is the
+    same carry-through for the `globalDefault` tier's own silence;
+    `examples()` turns it into `sdk.global-default-foreign-project`.
     """
     if sdk_root:
         path = Path(sdk_root)
         if (path / "scripts" / "alp_project.py").is_file():
             return _ResolvedSdk(path, sdk_root, "sdkRootFlag")
-        return None
+        return _ResolvedSdk(None, None, "sdkRootFlag")
     # `.alp/sdk-path` project pin > the machine-global default
     # (`~/.alp/sdk-default`) > the WIDE positional walk
     # (`resolve_sdk_root_wide`) -- previously this went straight to the
@@ -413,11 +485,12 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdk | N
     # `resolve_sdk_root_ladder`'s own docstring).
     resolution = resolve_sdk_root_wide(None, workspace_root)
     found = resolution.path
-    if found is None:
-        return None
     return _ResolvedSdk(
-        found, str(found).replace("\\", "/"), resolution.tier,
-        resolution.broken_project_pin, resolution.foreign_global_default_for,
+        found,
+        str(found).replace("\\", "/") if found is not None else None,
+        resolution.tier,
+        resolution.broken_project_pin,
+        resolution.foreign_global_default_for,
     )
 
 
@@ -452,18 +525,31 @@ def examples(
         # which directory the sibling `alp-sdk` is looked for beside.
         workspace_root = Path.cwd() / project if project else Path.cwd()
         sdk = _resolve_sdk(sdk_root, workspace_root)
-        if sdk is not None:
-            found = discover_examples(sdk.path / "examples")
-            pin_issue = project_pin_issue(sdk.broken_project_pin, sdk.tier)
-            if pin_issue is not None:
-                issues.append(pin_issue)
-            # tan-cli#464: the catalogue this command just listed can come from
-            # a `globalDefault` pointer a DIFFERENT project's bootstrap
-            # relocation actually wrote -- the same silence `sdk.project-
-            # pin-unresolved` above closes one tier up.
-            foreign_issue = global_default_foreign_project_issue(sdk.foreign_global_default_for)
-            if foreign_issue is not None:
-                issues.append(foreign_issue)
+        # tan-cli#900: computed unconditionally, BEFORE the `sdk.path is None`
+        # branch below -- `_resolve_sdk` always returns a `.broken_project_pin`/
+        # `.foreign_global_default_for` pair now, whether or not `.path`
+        # resolved, and a workspace pinned to a gone checkout with nothing
+        # else resolvable deserves the same disclosure a resolved run gets,
+        # not silence just because nothing happened to fall back to.
+        pin_issue = project_pin_issue(sdk.broken_project_pin, sdk.tier)
+        if pin_issue is not None:
+            issues.append(pin_issue)
+        # tan-cli#464: the catalogue this command just listed can come from
+        # a `globalDefault` pointer a DIFFERENT project's bootstrap
+        # relocation actually wrote -- the same silence `sdk.project-
+        # pin-unresolved` above closes one tier up.
+        foreign_issue = global_default_foreign_project_issue(sdk.foreign_global_default_for)
+        if foreign_issue is not None:
+            issues.append(foreign_issue)
+        if sdk.path is not None:
+            # tan-cli#484: an OPTIONAL enrichment pass, looked up by
+            # `sourceDir` -- `load_example_facets` never raises, so a
+            # checkout predating `metadata/catalog.json` (or one where it
+            # fails to parse) still lists every example exactly as before,
+            # just without the extra keys.
+            found = discover_examples(
+                sdk.path / "examples", load_example_facets(sdk.path)
+            )
             # tan-cli#407: the catalogue this command just listed can come from
             # a different checkout than `tan build` plans against, with both
             # envelopes reporting `sourceTier: "discovery"`. `sdk_root` is the
@@ -493,7 +579,7 @@ def examples(
                     "warning",
                     rejected_sdk_root_message(sdk_root, SDK_UNRESOLVED_CONSEQUENCE)
                     if sdk_root
-                    else SDK_UNRESOLVED_MESSAGE,
+                    else with_sdk_search(SDK_UNRESOLVED_MESSAGE, workspace_root),
                 )
             )
         if filter_ is not None:
@@ -532,11 +618,16 @@ def examples(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo.from_resolution(sdk.display, sdk) if sdk is not None else None,
+                sdk=(
+                    SdkInfo.from_resolution(sdk.display, sdk)
+                    if sdk is not None and sdk.path is not None
+                    else None
+                ),
             )
         )
     else:
-        for line in render_examples_text(found, filter_, category, verbose, sdk is not None):
+        resolved = sdk is not None and sdk.path is not None
+        for line in render_examples_text(found, filter_, category, verbose, resolved):
             print(line, file=sys.stderr)
         for issue in issues:
             print(f"examples: {issue.message}", file=sys.stderr)

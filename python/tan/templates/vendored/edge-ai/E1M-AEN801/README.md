@@ -44,18 +44,31 @@ CC,768.0,CONDENSATION_RISK,5.0,95.0,4.3,5.0,0.0
 ## Build
 
 ```
-west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
+west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
 ```
 
-Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.
+For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template
+edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,
+`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host
+the `renesas-rzv2n-deepx` family) and `tan validate` refuses it.
 
 ## Model
 
+<!-- The ../cold-chain-monitor/ detour is deliberate: the scaffold
+     rewriter's _RELATIVE_LINK_RE only matches `../`-prefixed links, and
+     models/ is a child of this dir, not a sibling -- don't "fix" this. -->
+
 No model is shipped (stub + deterministic classifier/fallback). See
-`models/README.md` for the autoencoder training recipe.
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/examples/ai/cold-chain-monitor/models/README.md) for the
+autoencoder training recipe.
 
 ## Tests
+
+In the alp-sdk tree, unit tests live in
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain

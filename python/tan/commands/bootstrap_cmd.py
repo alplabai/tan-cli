@@ -47,38 +47,63 @@ timeout.
 
 **Text mode writes to stderr only.** stdout is the envelope channel; a single
 stray byte there breaks the extension silently.
+
+**This module is over 5.5x the size guideline and needs its own split, which
+is not any one PR's to do.** `tests/gates/_module_size_budget_core.py` sets
+`MODULE_CAP = 800`; this file is over 4,400 lines (and its worst function is
+819, itself over sixteen times `FUNCTION_CAP = 50`), and the ratchet in
+`module_size_budget.d/` records that as a baseline rather than a target. For
+scale, tan-cli#1142 was filed for `planner/template.py` at 2.58x. Every
+increment lands here for a locally correct reason -- a phase's IO belongs
+beside the other phases' IO -- and the sum of locally correct reasons is
+this. A successor issue tracks the split; do not treat a passing ratchet as
+this module being the right size.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import platform
 import shutil
+import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+import tempfile
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import typer
 
+from tan.core.sdk_discovery import (
+    _home_alp_dir,
+    _to_posix,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+)
 from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
-from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
+    SEVEN_ZIP_PROGRAMS,
     _read_text,
     on_path,
     probe,
     zephyr_python_floor,
 )
-from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
-    _home_alp_dir,
-    global_default_foreign_project_issue,
-    global_default_pointer_fix_hint,
-    project_pin_issue,
+from tan.core import toolchain_provision
+from tan.core.host_python import probe_host_python as shared_probe_host_python
+from tan.core.probe import isolated_cwd, probe_status
+from tan.core.subprocess_env import (
+    ld_library_path_needs_restore,
+    restore_ld_library_path,
+    spawn_env,
 )
-from tan.core.atomic_write import atomic_write_text
+from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_pointer_fix_hint
+from tan.core.atomic_write import atomic_write_bytes, atomic_write_text
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -114,7 +139,6 @@ from tan.core.bootstrap import (
     posix_refusal,
     posix_venv_unusable,
     print_env_block,
-    python_candidates,
     python_ceiling_warning,
     python_floor_skew_warning,
     python_too_old,
@@ -132,10 +156,18 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
+from tan.commands.bootstrap_patches import patches_phase
 from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import sdk_pointer_json
-from tan.core.timestamp import generated_at_iso
+from tan.core.scaffold import sdk_pointer_json, top_level_key_name
+from tan.core.sdk_default_registry import (
+    load_raw,
+    prune_dead_origins,
+    registry_path,
+    registry_text,
+    with_entry,
+)
+from tan.core.timestamp import generated_at_iso, wall_clock_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -169,6 +201,18 @@ def _native(path: Path | str) -> str:
     return rendered.replace("/", "\\") if os.name == "nt" else rendered
 
 
+def _global_default_fix_hint() -> str:
+    """`global_default_pointer_fix_hint`, called with both files this run may
+    have just written (tan-cli#466): the legacy `~/.alp/sdk-default` pointer
+    AND its origin-keyed sibling `~/.alp/sdk-defaults.json`. One helper so
+    the three sites below (the relocation notice, and the two rollback-
+    failure messages) cannot drift into naming only one file."""
+    home = _home_alp_dir()
+    return global_default_pointer_fix_hint(
+        _native(home / "sdk-default"), _native(registry_path(home))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Progress reporting
 # ---------------------------------------------------------------------------
@@ -194,7 +238,19 @@ def _native(path: Path | str) -> str:
 #: to this being a byte-for-byte port of the oracle's 3-element const, so
 #: adding a 4th member would be a parity DIVERGENCE, not a bug fix -- flagged
 #: for the maintainer to decide, not changed unilaterally here.
-WORKSPACE_BLOCKING: tuple[str, ...] = ("zephyr-requirements", "sdk-extras", "editable-install")
+#:
+#: `toolchain-install` (issue #474, ADR 0021 Lane 1 P1) is a DELIBERATE 4th
+#: member, not a divergence from that 3-element parity set: the frozen v0.4.1
+#: Rust oracle never acquired a cross toolchain at all -- this phase postdates
+#: it entirely, so there is no oracle constant to stay byte-for-byte with
+#: here. It blocks for the same reason the other three do: a `tan build` for
+#: real silicon with no `arm-zephyr-eabi` compiler fails deep in a CMake
+#: configure naming neither ADR 0021 nor a remedy -- exactly the failure this
+#: phase exists to move up front.
+WORKSPACE_BLOCKING: tuple[str, ...] = (
+    "zephyr-requirements", "sdk-extras", "editable-install", "toolchain-install",
+    "west-patches-failed", "toolchain-pin-mismatch", "toolchain-pin-unverified",
+)
 
 
 class Log:
@@ -320,38 +376,23 @@ class HostPython:
         return " ".join(self.argv)
 
 
-def probe_host_python(minimum: tuple[int, int]) -> HostPython | None:
-    """Walk `python_candidates` and take the first that RUNS and is at least
-    `minimum`, falling back to the first that merely ran -- so a too-old message
-    can name a real version rather than "did not run". `None` when none runs.
+def probe_host_python(minimum: tuple[int, int], env=None) -> HostPython | None:
+    """The host interpreter, through the ONE shared resolver `tan doctor` and
+    `tan build` use (`core.host_python`): every `python3.N` on PATH on POSIX,
+    `py -3`/`python`/`python3` on Windows, each located by `resolve_tool` (the
+    cwd is never searched, so a planted `py.exe`/`python.exe` cannot run) and
+    spawned by absolute path. The first that clears `minimum` wins, else the
+    first that merely ran, so a too-old message can name a real version.
 
-    "Actually runs" is the whole point on Windows: the Microsoft Store
-    `python.exe` alias sits on PATH and satisfies any presence check, but
-    executing it prints nothing and opens the Store. Requiring parseable output
-    rejects it, and the `py -3` candidate ahead of it means a launcher-only
-    machine still bootstraps.
-
-    The version PREFERENCE is what keeps that ordering safe: `py -3` resolves to
-    the launcher's default, routinely an older install than the bare `python` on
-    PATH.
+    The returned `argv` is the ABSOLUTE `sys.executable` the interpreter
+    reported, so the later `-m venv` spawn is never a bare name either.
+    `None` when none runs (the Windows Store `python.exe` alias prints nothing
+    and is rejected by the probe, as before).
     """
-    first_that_ran: HostPython | None = None
-    for candidate in python_candidates(os.name == "nt"):
-        out = probe(
-            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
-            timeout=PROBE_TIMEOUT_S,
-        )
-        if out is None:
-            continue
-        version = _parse_two_dotted(out)
-        if version is None:
-            continue
-        entry = HostPython(tuple(candidate), version)
-        if version >= minimum:
-            return entry
-        if first_that_ran is None:
-            first_that_ran = entry
-    return first_that_ran
+    best = shared_probe_host_python(minimum, env)
+    if best is None:
+        return None
+    return HostPython((best.interpreter,), best.version)
 
 
 def _parse_two_dotted(raw: str) -> tuple[int, int] | None:
@@ -500,7 +541,11 @@ def check_prerequisites(
     ]
     if missing:
         refuse = windows_refusal if is_windows else posix_refusal
-        return None, refuse(missing, install)
+        # tan-cli#1066: `bootstrap`'s `missingPrerequisites[]` carries the same
+        # six keys `doctor`'s does. One field name, one shape, whichever command
+        # a consumer read it from -- `facts` is the SAME manifest doctor joins
+        # against, so nothing here re-resolves an SDK to get it.
+        return None, refuse(missing, install, facts.artifact_provenance)
 
     # Probe against the floor that will actually be ENFORCED. Probing to a lower
     # bar would stop at the first candidate clearing 3.10 (`py -3`, often the
@@ -551,9 +596,39 @@ class Runner:
     planned: list[list[str]] = field(default_factory=list)
 
     def _env(self, extra_env: dict[str, str] | None = None) -> dict[str, str] | None:
-        if not self.clear_zephyr_base and not extra_env:
+        # tan-cli#990 review follow-up, tan-cli#992: the REAL root cause of
+        # the "first install" CI failure the PR's own body called an
+        # unproven "transient runner hiccup" -- found only once
+        # `capture_tail`'s wider window (above) stopped discarding it.
+        # Verbatim from the CI envelope:
+        #   xz: /home/runner/.local/bin/tan-cli-lib/_internal/liblzma.so.5:
+        #   version `XZ_5.4' not found (required by xz)
+        #   /usr/bin/tar: Child returned status 1
+        # `tan`'s own PyInstaller ONEDIR freeze (`install.sh`'s install
+        # target) sets `LD_LIBRARY_PATH` to its bundled `_internal/` lib dir
+        # so the FROZEN `tan` binary finds its OWN shared libs -- and every
+        # child `tan` spawns inherits that same env var. `west sdk install`
+        # spawns `tar --xz`, which dynamically links the SYSTEM `xz` binary
+        # against `liblzma.so.5` and picks up tan's older BUNDLED one first,
+        # which lacks a symbol version the system `xz` needs. Nothing to do
+        # with disk, network, or runner flakiness: 100% reproducible on any
+        # frozen install whose bundled liblzma is older than the host's
+        # `xz`. The restore itself -- [`restore_ld_library_path`], the SAME
+        # primitive every OTHER spawn site under `python/tan/` now calls
+        # (tan-cli#992) rather than each working out this rule on its own --
+        # is unconditional here, not opt-in per call site: every child this
+        # class ever spawns (`python -m venv`, `pip`, `west`, and everything
+        # `west` itself spawns) is a SYSTEM program, never a bundled one.
+        # `LD_LIBRARY_PATH_ORIG` (not merely "frozen") is the trigger -- see
+        # that function's own docstring for why -- so this never touches a
+        # host that never had the problem, and never guesses at a value to
+        # fall back to.
+        # tan-cli#1189: keyed off `LD_LIBRARY_PATH_ORIG is None` until that
+        # proxy was measured wrong. See `ld_library_path_needs_restore`.
+        if not self.clear_zephyr_base and not extra_env and not ld_library_path_needs_restore():
             return None
         env = dict(os.environ)
+        restore_ld_library_path(env)
         if self.clear_zephyr_base:
             env.pop("ZEPHYR_BASE", None)
         if extra_env:
@@ -575,6 +650,9 @@ class Runner:
         argv: list[str],
         cwd: Path | None = None,
         extra_env: dict[str, str] | None = None,
+        tail_lines: int = 4,
+        *,
+        isolated: bool = False,
     ) -> str | None:
         """Run to completion. `None` on success; otherwise a string carrying
         whatever detail is recoverable -- the captured tail in JSON mode, a
@@ -586,10 +664,31 @@ class Runner:
         `extra_env` overlays on top of the inherited environment (or the
         `clear_zephyr_base`-filtered copy of it) -- see `force_git_long_paths`
         for the one caller that uses it.
+
+        `tail_lines` forwards to `capture_tail` -- 4 for every ordinary
+        caller, wider for `west sdk install` (tan-cli#990 review: see
+        `capture_tail`'s own docstring for why that ONE call needs it).
+
+        `isolated` (tan-cli#1331) runs the child from a fresh EMPTY directory
+        instead of the inherited cwd. Every `python -m <mod>` puts the cwd on
+        `sys.path`, so a `pip.py`/`venv.py` planted in the project would run in
+        place of the real module (the #1317 hijack, for the spawns #1326 did
+        not reach). The caller must therefore pass ABSOLUTE path arguments
+        (`_abs`); `cwd` must be unset.
         """
         self.planned.append(list(argv))
         if self.dry_run:
             return None
+        if isolated:
+            if cwd is not None:
+                raise ValueError("an isolated spawn has no caller-chosen cwd")
+            with isolated_cwd() as empty:
+                return self._spawn(argv, Path(empty), extra_env, tail_lines)
+        return self._spawn(argv, cwd, extra_env, tail_lines)
+
+    def _spawn(
+        self, argv: list[str], cwd: Path | None, extra_env: dict[str, str] | None, tail_lines: int
+    ) -> str | None:
         try:
             if self.json:
                 out = subprocess.run(
@@ -603,7 +702,7 @@ class Runner:
                 )
                 if out.returncode == 0:
                     return None
-                return capture_tail(out.stdout, out.stderr)
+                return capture_tail(out.stdout, out.stderr, lines=tail_lines)
             out = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd else None,
@@ -640,6 +739,36 @@ class Runner:
         except (OSError, ValueError, subprocess.SubprocessError):
             return ""
         return out.stdout.decode("utf-8", "replace") + out.stderr.decode("utf-8", "replace")
+
+    def run_status(self, argv: list[str], cwd: Path | None = None) -> tuple[int | None, str, str]:
+        """Run capturing `(returncode, stdout, stderr)` -- for a caller that
+        must tell exit codes APART (`verify_west_patches.py`: 0/1/2/3 are four
+        different verdicts), which `run` collapses to success/failure and
+        `capture` drops. `returncode` is `None` when nothing ran: a dry run
+        (still recorded in `planned`) or a launch failure/timeout (the reason
+        is then `stderr`)."""
+        self.planned.append(list(argv))
+        if self.dry_run:
+            return None, "", ""
+        try:
+            out = subprocess.run(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                # The verifier prints non-ASCII; the SDK's own scripts pin this
+                # for their west child for the same reason.
+                env=self._env({"PYTHONIOENCODING": "utf-8"}),
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as err:
+            return None, "", f"failed to run {argv[0]}: {err}"
+        return (
+            out.returncode,
+            out.stdout.decode("utf-8", "replace"),
+            out.stderr.decode("utf-8", "replace"),
+        )
 
 
 @dataclass(frozen=True)
@@ -713,6 +842,43 @@ PIP_ABSENT = "absent"
 PIP_INCONCLUSIVE = "inconclusive"
 
 
+def _abs(path: str | os.PathLike[str]) -> str:
+    """`path` made absolute against the CURRENT cwd (no symlink resolution).
+    Required for every argument of an isolated spawn (`Runner.run(isolated=...)`):
+    the child starts in an empty directory, so a relative path would silently
+    point at nothing -- or, worse, at something else."""
+    return os.path.abspath(os.fspath(path))
+
+
+def _looks_like_path(spec: str) -> bool:
+    """pip's own rule (`pip._internal.req.constructors._looks_like_path`): a
+    spec is a path only if it carries a separator or starts with `.`. A bare
+    name is a PyPI requirement EVEN WHEN a same-named file/dir exists in the
+    cwd -- pip never installs `./west` for `west`."""
+    if os.sep in spec or (os.altsep and os.altsep in spec):
+        return True
+    return spec.startswith(".")
+
+
+def _abs_spec(spec: str) -> str:
+    """A pip requirement spec, made absolute only when pip itself would read it
+    as a path (`./vendor/wheel`, `vendor/pkg.whl`). A plain name or specifier
+    (`west>=1.0`, `jsonschema`) is returned untouched, even if a same-named
+    entry exists in the cwd: rewriting it to an absolute path would turn a
+    PyPI requirement into a local (project-planted) install -- the very hijack
+    the isolated spawn exists to close. Relative `-e`/`-c` lines INSIDE a
+    requirements file and relative `PIP_CONSTRAINT`/`PIP_FIND_LINKS`/
+    `PIP_CONFIG_FILE` environment values still resolve against the empty cwd --
+    a documented limit, not something tan rewrites."""
+    return _abs(spec) if _looks_like_path(spec) else spec
+
+
+def _abs_exe(arg: str) -> str:
+    """An interpreter argv[0]: a bare command name is left for PATH lookup, a
+    relative path (it has a separator) is made absolute."""
+    return _abs(arg) if (os.sep in arg or (os.altsep and os.altsep in arg)) else arg
+
+
 def _probe_venv_pip(venv: VenvBin, runner: Runner) -> str:
     """Three-state answer to "can this venv's own interpreter run `pip`?".
 
@@ -731,16 +897,20 @@ def _probe_venv_pip(venv: VenvBin, runner: Runner) -> str:
     if runner.dry_run:
         return PIP_USABLE
     try:
-        out = subprocess.run(
-            [str(venv.python), "-m", "pip", "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            check=False,
-        )
+        # Empty cwd: `-m` puts the cwd on sys.path (module hijack, tan-cli#1317).
+        with isolated_cwd() as empty:
+            out = subprocess.run(
+                [_abs(venv.python), "-m", "pip", "--version"],
+                cwd=empty,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         # SubprocessError covers TimeoutExpired (the child is already killed by
         # `run`); ValueError catches an empty/garbage argv. None of these is a
@@ -873,15 +1043,15 @@ def ensure_venv(
 
     venv = ws.venv_bin()
     upgrade = [
-        str(venv.python),
+        _abs(venv.python),
         "-m",
         "pip",
         "install",
         "--upgrade",
         "-q",
-        *ws.facts.pip_bootstrap_upgrade,
+        *(_abs_spec(spec) for spec in ws.facts.pip_bootstrap_upgrade),
     ]
-    if runner.run(upgrade) is not None:
+    if runner.run(upgrade, isolated=True) is not None:
         log.warn("pip-upgrade", "pip/wheel upgrade reported a problem")
     return venv, None
 
@@ -892,7 +1062,9 @@ def _create_venv(ws: Workspace, log: Log, runner: Runner, host: HostPython) -> s
     slightly different copy is how the two end up disagreeing about what
     "created" means."""
     log.line(f"Creating workspace venv at {_native(ws.venv_dir)}")
-    detail = runner.run([*host.argv, "-m", "venv", str(ws.venv_dir)])
+    detail = runner.run(
+        [_abs_exe(host.argv[0]), *host.argv[1:], "-m", "venv", _abs(ws.venv_dir)], isolated=True
+    )
     if detail is None:
         return None
     return die(f"{host.display()} -m venv {_native(ws.venv_dir)} failed", detail)
@@ -985,7 +1157,8 @@ def west_phase(
     if not _is_file(venv.west):
         log.line("Installing west into the workspace venv")
         detail = runner.run(
-            [str(venv.python), "-m", "pip", "install", "--upgrade", "-q", ws.facts.west_pip_spec]
+            [_abs(venv.python), "-m", "pip", "install", "--upgrade", "-q", _abs_spec(ws.facts.west_pip_spec)],
+            isolated=True,
         )
         if detail is not None:
             return die("pip install west (venv) failed", detail)
@@ -1070,8 +1243,8 @@ def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner, host: str)
     # would make the plan a lie, which is worse than an honest gap.
     if _is_file(requirements):
         log.line("Installing Zephyr Python requirements into the venv")
-        argv = [str(venv.python), "-m", "pip", "install", "-q", "-r", str(requirements)]
-        detail = runner.run(argv)
+        argv = [_abs(venv.python), "-m", "pip", "install", "-q", "-r", _abs(requirements)]
+        detail = runner.run(argv, isolated=True)
         if detail is not None:
             # Non-fatal, but "check manually" told the reader nothing. Measured
             # on a stock ubuntu-24.04 runner the failure is `hidapi` building
@@ -1099,23 +1272,1072 @@ def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner, host: str)
     extras = list(ws.facts.pip_sdk_extras)
     rendered = ", ".join(extras) if ws.is_windows else " ".join(extras)
     log.line(f"Installing alp-sdk Python extras into the venv ({rendered})")
-    if runner.run([str(venv.python), "-m", "pip", "install", "-q", *extras]) is not None:
+    if runner.run([_abs(venv.python), "-m", "pip", "install", "-q", *map(_abs_spec, extras)], isolated=True) is not None:
         log.warn("sdk-extras", "alp-sdk extras install reported a problem -- check manually")
 
-    # tan's Python backend -- editable, so a `git pull` in the checkout updates
-    # the backend in place.
-    editable = Tokens(str(ws.repo_root), str(ws.workspace_dir)).apply(
-        ws.facts.pip_editable_install
+    # alp-sdk's own Python tooling -- `alp_cli` + `alp_mcp`, which is what puts the
+    # `alp-mcp` console script (the MCP server) into the venv -- installed
+    # editable so a `git pull` in the checkout updates it in place. NOT what makes
+    # planning or the west forwarders work: tan renders the build plan in-process
+    # (`tan.planner`), and the one west extension that still runs the planner
+    # (`alp-emit`) finds it through an explicit `PYTHONPATH`, not this install
+    # (tan-cli#270). Non-fatal either way.
+    editable = _abs(
+        os.path.join(
+            str(ws.repo_root),
+            Tokens(str(ws.repo_root), str(ws.workspace_dir)).apply(ws.facts.pip_editable_install),
+        )
     )
     log.line(
-        f"Installing the tan CLI's Python backend into the venv "
-        f"(pip install -e {_native(editable)})"
+        f"Installing alp-sdk's Python tooling (alp_cli, alp_mcp: the alp-mcp server) into the "
+        f"venv (pip install -e {_native(editable)})"
     )
-    argv = [str(venv.python), "-m", "pip", "install", "-q", "-e", editable]
-    if runner.run(argv) is not None:
+    argv = [_abs(venv.python), "-m", "pip", "install", "-q", "-e", editable]
+    if runner.run(argv, isolated=True) is not None:
         log.warn(
-            "editable-install", "alp_cli editable install reported a problem -- check manually"
+            "editable-install",
+            "alp-sdk's editable install reported a problem -- the alp-mcp server may be "
+            "missing from the venv; check manually",
         )
+
+
+# ---------------------------------------------------------------------------
+# Cross-toolchain acquisition (ADR 0021 Lane 1 P1, issue #474) -- the FINAL
+# phase, after the checkout and venv resolve. Reads
+# `<sdkRoot>/metadata/toolchains.json` at RUN TIME -- tan carries no copy of
+# this pin, so a customer who bumps their alp-sdk checkout gets the new
+# toolchain on their next `tan bootstrap` with zero tan changes.
+# ---------------------------------------------------------------------------
+
+
+def _toolchain_manifest_path(sdk_root: str) -> Path:
+    return Path(sdk_root) / "metadata" / "toolchains.json"
+
+
+def load_toolchain_manifest(
+    sdk_root: str,
+) -> tuple[toolchain_provision.ToolchainManifest | None, str | None]:
+    """`(manifest, None)` on success; `(None, message)` naming exactly why not
+    -- a missing file and a malformed one are both "cannot proceed", but the
+    MESSAGE always says which, mirroring `load_facts`'s own contract for
+    `bootstrap.json`."""
+    path = _toolchain_manifest_path(sdk_root)
+    text = _read_text(path)
+    if text is None:
+        return None, f"{_native(path)} is missing or unreadable"
+    try:
+        return toolchain_provision.parse_toolchain_manifest(text), None
+    except toolchain_provision.ToolchainManifestError as err:
+        return None, f"{_native(path)} is malformed: {err}"
+
+
+def _toolchain_root_and_leaf(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> tuple[Path, str, bool]:
+    """`(root, leaf_name, adopted)` -- see `toolchain_provision.
+    resolve_toolchain_root` for `adopted`'s meaning (`$ALP_TOOLCHAIN_ROOT`
+    set)."""
+    resolved = toolchain_provision.resolve_toolchain_root(
+        _env("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    )
+    leaf = toolchain_provision.store_dir_name(manifest.version)
+    return Path(resolved.path_str), leaf, resolved.adopted
+
+
+def _read_toolchain_stamp(store_dir: Path) -> toolchain_provision.ToolchainStamp | None:
+    text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
+    return toolchain_provision.parse_stamp(text) if text is not None else None
+
+
+def _free_disk_bytes(root: Path) -> int | None:
+    """`shutil.disk_usage` against the nearest EXISTING ancestor of `root` --
+    `root` (usually `~/.alp/toolchains`) does not exist yet on a fresh host,
+    and `disk_usage` raises on a path that is not there. `None` when nothing
+    above it resolves either (a moved/deleted home directory); the caller
+    treats that as "cannot preflight", never as "no space"."""
+    probe_path = root
+    for _ in range(64):
+        if _is_dir(probe_path):
+            break
+        parent = probe_path.parent
+        if parent == probe_path:
+            return None
+        probe_path = parent
+    try:
+        return shutil.disk_usage(probe_path).free
+    except OSError:
+        return None
+
+
+def _augment_with_low_disk_note(root: Path, detail: str) -> str:
+    """Append [`toolchain_provision.low_disk_note`] when this volume is
+    critically low RIGHT NOW -- a `west sdk install` failure whose own
+    message says nothing about space (tan-cli's `capture_tail` keeps only
+    the last 4 non-empty lines of a failed child's output, which can cut off
+    a `tar`/`xz` "No space left on device" line sitting above a longer
+    traceback) still gets the hint. Best-effort: `_free_disk_bytes` returning
+    `None` (nothing above `root` resolves) leaves `detail` unchanged rather
+    than guessing.
+    """
+    free = _free_disk_bytes(root)
+    if free is None:
+        return detail
+    note = toolchain_provision.low_disk_note(free)
+    return f"{detail} {note}" if note else detail
+
+
+def _zephyr_base_path(facts: BootstrapFacts, tokens: Tokens) -> str | None:
+    """`$ZEPHYR_BASE` AS THE MANIFEST DECLARES IT, token-substituted -- or
+    `None` when the manifest declares no such key, or declares it blank.
+
+    Never re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key,
+    the envelope's `zephyrBase`, the printed export line and the tripwire below
+    all have to follow it together. One derivation, two callers, so a repoint
+    cannot leave `_data` and `_west_sdk_netrc_drift` reading different trees.
+
+    **TEXT, not a `Path`** (tan-cli#1170 review). `Path()` normalises, and
+    neither caller wants that: `_data` puts this on the wire, where a declared
+    trailing slash is the manifest's to keep and not tan's to drop, and a blank
+    declaration would become `"."` -- which would send `_west_sdk_netrc_drift`
+    to read `./scripts/west_commands/sdk.py` relative to the process CWD and
+    judge the workspace by whatever unrelated tree it found. Blank is `None`
+    on both counts, so `_data` renders `""` exactly as it does for an absent
+    key and that read cannot happen. No manifest declares it blank today; this
+    is a guard, not a fix.
+    """
+    for key, raw in facts.env:
+        if key == "ZEPHYR_BASE":
+            resolved = tokens.apply(raw)
+            return resolved if resolved else None
+    return None
+
+
+def _west_sdk_netrc_drift(ws: Workspace, var: str, version: str) -> str | None:
+    """The `bootstrap.sdk-credential-unverified` message when this workspace's
+    `west sdk install` no longer matches the shape tan's netrc route was
+    reasoned about -- `None` when it does, or when there is nothing to read.
+
+    **The RUNTIME half of `toolchain_provision.NETRC_ENV_VAR`'s residual-risk
+    note** (tan-cli#1154). Deliberately not a CI gate: `requests` is not a tan
+    dependency and `ci.yml` checks out alp-sdk but never zephyr, so a gate
+    would skip in CI and on every developer box -- a gate that cannot fail.
+    This runs only where the artifact exists, which on the path that matters
+    (a `tan bootstrap` about to spend several minutes on an authenticated
+    download) is always.
+
+    Silent on `OSError`. Refusing to claim authentication needs evidence that
+    the assumption BROKE, and "could not look" is not that -- warning on it
+    would train the reader to ignore the code on the one run where it means
+    something. **Not, as an earlier revision of this docstring claimed,
+    because it "would fire on every `--no-west` workspace"** (tan-cli#1170
+    review): a `--no-west` run never reaches here at all. `toolchain_phase` has
+    exactly one caller and it sits in the `else:` of `elif no_west:`, which
+    logs "Skipping cross-toolchain acquisition (--no-west: ...)" and calls
+    nothing. The cases that DO reach an unreadable `sdk.py` are ordinary and
+    all of them mean "not yet", never "broken": an adopted topdir whose zephyr
+    is not at the `$ZEPHYR_BASE` the manifest declares, a `west update` that
+    part-failed or was interrupted before the zephyr repo landed, and a Zephyr
+    that moved `scripts/west_commands` out from under the path this reads.
+    """
+    base = _zephyr_base_path(ws.facts, Tokens(str(ws.repo_root), str(ws.workspace_dir)))
+    if base is None:
+        return None
+    try:
+        source = (Path(base) / "scripts" / "west_commands" / "sdk.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    if toolchain_provision.west_sdk_netrc_assumptions_hold(source):
+        return None
+    return toolchain_provision.west_sdk_netrc_drift_message(var, version)
+
+
+@dataclass(frozen=True)
+class _SdkCredential:
+    """A GitHub credential staged on disk for ONE `west sdk install` run.
+
+    `source` is the NAME of the environment variable the token came from --
+    the only half of the credential that is ever printed or reported. The
+    secret itself lives in the file `extra_env` points at and in nothing
+    else tan holds.
+    """
+
+    #: The environment variable the token was read from. Safe to print.
+    source: str
+    #: What `Runner.run(extra_env=...)` receives: `NETRC=<path>`, nothing more.
+    extra_env: dict[str, str]
+    #: The private directory `_discard_sdk_credential` must delete afterwards.
+    scratch_dir: Path
+    #: Whether tan could still see the shape the netrc route depends on when
+    #: this was staged -- `False` exactly when this run raised
+    #: `bootstrap.sdk-credential-unverified` (tan-cli#1170). It travels ON the
+    #: credential rather than being recomputed downstream so that no later
+    #: surface can reach a different verdict about the same download than the
+    #: warning the user already read; `toolchain_provision.rate_limit_note`
+    #: is the one consumer.
+    verified: bool = True
+
+
+def _stage_sdk_credential(
+    token: toolchain_provision.SdkToken, root: Path
+) -> _SdkCredential | None:
+    """Write `token` into a private netrc and return the env that points the
+    child's HTTP client at it -- or `None` when the file cannot be written,
+    in which case the download proceeds unauthenticated exactly as it did
+    before tan-cli#1143.
+
+    **Why a file and an env var rather than `--personal-access-token`.**
+    `Runner.run` appends every argv it is given to `self.planned`, which IS
+    `data.plannedCommands` in the JSON envelope and the `--dry-run` output,
+    and a failed child's output is kept by `capture_tail` -- so an argv
+    element is the one shape a secret must never take here. `west sdk
+    install` reads a token from that flag and from no environment variable
+    of its own (Zephyr v4.4.1 `scripts/west_commands/sdk.py:473`), but its
+    GitHub call goes through `requests`, which reads a netrc path from
+    `$NETRC` and applies it unless the call passes `auth=` or the session sets
+    `trust_env=False` -- NOT "whenever the request carries no `Authorization`
+    header", as an earlier revision said; a header does not suppress it, the
+    netrc match overwrites one (`toolchain_provision.NETRC_ENV_VAR`).
+
+    The file is created `O_EXCL` at mode 0600 inside a fresh `mkdtemp`
+    directory (0700), so it can never be read by another user and can never
+    land on a path another process pre-created. Windows honours neither mode,
+    but the toolchain root is inside the calling user's own profile.
+
+    **Under `root`, not `$TMPDIR`** (tan-cli#1148 review): the `finally`
+    that deletes this cannot run on SIGKILL, so the residue needs a sweep,
+    and a sweep is only safe over a directory tan owns -- see
+    `toolchain_provision.netrc_scratch_glob_pattern` for that argument in
+    full, and `_reclaim_sdk_credential_wreckage` for the sweep.
+    """
+    try:
+        scratch_dir = Path(
+            tempfile.mkdtemp(prefix=toolchain_provision.NETRC_SCRATCH_PREFIX, dir=root)
+        )
+    except OSError:
+        return None
+    path = scratch_dir / "netrc"
+    try:
+        with os.fdopen(
+            os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(toolchain_provision.netrc_text(token.value))
+    except OSError:
+        _discard_sdk_credential(scratch_dir)
+        return None
+    return _SdkCredential(
+        token.source, {toolchain_provision.NETRC_ENV_VAR: _native(path)}, scratch_dir
+    )
+
+
+def _discard_sdk_credential(scratch_dir: Path) -> None:
+    """Delete the staged netrc, best-effort and never raising. Called from a
+    `finally`, so no exit path out of the install -- success, failure, retry
+    exhaustion, an exception from `west` itself -- leaves the token on
+    disk."""
+    shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def _sdk_credential_seen() -> str | None:
+    """The name of a `SDK_TOKEN_ENV_VARS` variable that HELD something this
+    run did not end up authenticating with -- usable-but-unstageable, or set
+    but unusable. `None` when the environment named no credential at all.
+
+    Read fresh from `os.environ` rather than threaded down from
+    `_sdk_credential`: this is only ever consulted on the failure path, and a
+    second lookup of the same three variables is cheaper than another field
+    on `_SdkCredential` that exists solely to describe its own absence.
+    """
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    if token is not None:
+        return token.source
+    rejected = toolchain_provision.rejected_sdk_token_vars(os.environ)
+    return rejected[0] if rejected else None
+
+
+def _sdk_credential_is_possibly_live(candidate: Path, now: float) -> bool:
+    """`True` when `candidate` is young enough that another `tan bootstrap`
+    could still be using it -- see `SDK_CREDENTIAL_LIVE_WINDOW_S`, defined
+    below beside the three retry constants it is derived from rather than
+    here, because it is a fact about how long the retry loop can run.
+
+    Anything unreadable counts as LIVE: refusing to delete what cannot be
+    measured is the safe answer for a credential.
+
+    The subtraction is deliberately NOT `abs()`-wrapped: a backwards clock
+    skew (or a file dated into the future) yields a negative age, which
+    compares as "too young to touch". Both fail-safes are pinned --
+    `test_an_unreadable_credential_directory_is_left_alone` and
+    `test_a_credential_with_a_future_mtime_is_kept_not_swept` -- because a
+    fail-safe documented as deliberate and left undriven is indistinguishable
+    from one nobody meant (tan-cli#1148 round 3)."""
+    try:
+        return now - candidate.stat().st_mtime < SDK_CREDENTIAL_LIVE_WINDOW_S
+    except OSError:
+        return True
+
+
+def _reclaim_sdk_credential_wreckage(root: Path) -> None:
+    """Delete any staged credential a PRIOR run left behind, before a new one
+    is written -- the crash-residue half of `_discard_sdk_credential`
+    (tan-cli#1148 review).
+
+    `_discard_sdk_credential` runs in a `finally`, which covers every exit
+    path the interpreter reaches; it does not cover the ones it does not --
+    SIGKILL, the OOM killer, power loss. Without this, one netrc per crash
+    accumulates with nothing ever reclaiming it. Modes make each copy
+    unreadable to other users, but "unreadable secrets pile up forever" is
+    still the wrong steady state for a credential.
+
+    Structured like `_reclaim_toolchain_wreckage` beside it, for the same
+    reason: the naming pattern is the proof of provenance, so this can only
+    ever delete a directory tan created for exactly this purpose, and it
+    never raises.
+
+    ONE deliberate difference from that sibling: this one discriminates on
+    LIVENESS (`SDK_CREDENTIAL_LIVE_WINDOW_S`) and that one does not. The
+    sibling can afford not to -- a concurrent run whose `.tmp-*` install
+    directory is deleted underneath it FAILS LOUDLY, with a `west sdk
+    install` error and a `toolchain-install` warning. Deleting a live netrc
+    produces no error at all: the download simply proceeds anonymous, after
+    the run has already said it was authenticating. Silent is the difference,
+    and it is why the extra check is here and not there.
+    """
+    now = time.time()
+    try:
+        for candidate in root.glob(toolchain_provision.netrc_scratch_glob_pattern()):
+            try:
+                if candidate.is_dir() and not _sdk_credential_is_possibly_live(candidate, now):
+                    shutil.rmtree(candidate)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _sdk_credential(
+    ws: Workspace, log: Log, runner: Runner, root: Path, version: str
+) -> _SdkCredential | None:
+    """The staged credential for this `west sdk install`, or `None` when the
+    environment names none -- in which case the download is exactly as
+    unauthenticated as it has always been (tan-cli#1143 acceptance: the
+    no-token path is unchanged).
+
+    Never staged under `--dry-run`: nothing is spawned, so writing a secret
+    to disk would buy nothing, and `data.plannedCommands` must be
+    byte-identical with and without a token in the environment.
+
+    A downgrade to unauthenticated is a `log.warn`, never a `log.line`
+    (tan-cli#1148 review): `Log.line` prints nothing at all in JSON mode, so
+    an extension user got zero signal and was then told by the failure note
+    to set a token they could see was already set. `sdk-credential-unstaged`
+    is deliberately NOT in `WORKSPACE_BLOCKING` -- an unauthenticated
+    download usually still succeeds, and failing a whole workspace over a
+    missed optimisation would be its own defect.
+
+    **Every warning is raised AFTER the staging it describes, never before**
+    (tan-cli#1148 round 2). The refused-variable loop used to run first, so
+    with `TAN_GITHUB_TOKEN` holding a quoted `.env` value and a perfectly
+    good `GH_TOKEN` behind it, a registered issue code went out on the
+    envelope saying the download "will go out unauthenticated" while it went
+    out authenticated on `GH_TOKEN`. A wire surface asserting the opposite of
+    what happened is worse than the silence this warning replaced, so the
+    order here is resolve -> stage -> report, and every message is rendered
+    from the outcome rather than from the intent.
+
+    Every line here names the VARIABLE, never the value.
+    """
+    if runner.dry_run:
+        return None
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    credential = _stage_sdk_credential(token, root) if token is not None else None
+    for name in toolchain_provision.shadowed_sdk_token_vars(os.environ, token):
+        log.warn(
+            "sdk-credential-unstaged",
+            toolchain_provision.unusable_token_message(
+                name, authenticated_as=credential.source if credential is not None else None
+            ),
+        )
+    if token is not None and credential is None:
+        log.warn(
+            "sdk-credential-unstaged",
+            f"the ${token.source} credential could not be staged for `west sdk "
+            "install`; the Zephyr SDK download will go out unauthenticated.",
+        )
+    if credential is not None:
+        # tan-cli#1154: the claim is made ONLY when tan can still see the shape
+        # the netrc route depends on. An inert credential is worse than an
+        # absent one -- it removes the symptom that would send the reader to
+        # find a token -- so a drifted west downgrades this line to a warning
+        # rather than printing an assurance tan can no longer stand behind.
+        drift = _west_sdk_netrc_drift(ws, token.source, version)
+        if drift is not None:
+            log.warn("sdk-credential-unverified", drift)
+            # tan-cli#1170: recorded ON the credential, not left to be
+            # recomputed later. `rate_limit_note`'s authenticated branch
+            # otherwise tells the same reader, minutes later in the same run,
+            # that "tan already handed this download the credential in
+            # $<var>" -- the assurance this branch just withdrew.
+            credential = replace(credential, verified=False)
+        else:
+            log.line(
+                f"Authenticating the Zephyr SDK download with the token in ${token.source}"
+            )
+    return credential
+
+
+def _reclaim_toolchain_wreckage(root: Path, leaf: str) -> None:
+    """Best-effort cleanup of a PRIOR interrupted attempt's `.tmp-*` sibling,
+    before a new one starts. Never raises, and only ever touches a name
+    matching `wreckage_glob_pattern` -- nothing else under this root ever
+    produces that suffix, so this can never delete a directory tan did not
+    create for exactly this purpose. Applied even under `$ALP_TOOLCHAIN_ROOT`
+    (`adopted`): the naming pattern itself is proof of provenance, unlike a
+    bare unstamped `store_dir`, which is NOT reclaimed under an adopted root
+    -- see `_finish_toolchain_install`.
+    """
+    try:
+        for candidate in root.glob(toolchain_provision.wreckage_glob_pattern(leaf)):
+            try:
+                if candidate.is_dir():
+                    shutil.rmtree(candidate)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _read_installed_sdk_version(store_dir: Path) -> str | None:
+    text = _read_text(store_dir / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+    return text.strip() if text else None
+
+
+def _probe_toolchain_compiler(store_dir: Path, *, is_windows: bool) -> str | None:
+    """`arm-zephyr-eabi-gcc --version` run FROM the store -- the one check
+    that proves a real, executable compiler landed there, not just a
+    directory tree `west sdk install` happened to create. Returns the
+    banner's first line, or `None` on ANY failure to run (binary absent,
+    unspawnable, non-zero exit, empty output)."""
+    gcc = store_dir.joinpath(*toolchain_provision.gcc_binary_relpath(is_windows=is_windows))
+    if not _is_file(gcc):
+        return None
+    # `probe_status`, NOT the single-value `probe` -- this is the one call
+    # site in this file that needs "did it even run" split from "what did it
+    # print" (`probe`'s own docstring: a thin wrapper for callers that do
+    # not). Measured live: `probe(...)` returns a bare `str | None`, and
+    # `ran, out = probe(...)` unpacks THAT STRING's characters -- exactly the
+    # `ValueError: too many values to unpack (expected 2)` this phase's own
+    # first real end-to-end CI run crashed the whole command with.
+    ran, out = probe_status([str(gcc), "--version"])
+    if not ran or not out:
+        return None
+    lines = out.splitlines()
+    return lines[0].strip() if lines and lines[0].strip() else None
+
+
+def _finish_toolchain_install(
+    log: Log,
+    manifest: toolchain_provision.ToolchainManifest,
+    tmp_dir: Path,
+    store_dir: Path,
+    *,
+    root_adopted: bool,
+    is_windows: bool,
+) -> None:
+    """`tmp_dir` is the directory `west sdk install --install-dir` just wrote
+    to (its own name never matches an existing sibling, so its move here can
+    never merge with one). Verify version + a real compiler probe, THEN move
+    into place, THEN stamp -- so a directory-exists check can never mistake
+    this for done: [`toolchain_provision.stamp_matches_pin`] is the only
+    verdict, and nothing here writes a stamp before every prior step in this
+    function has already succeeded.
+
+    tan-cli#990 review MINOR, fixed: the probe now runs on `tmp_dir`, BEFORE
+    the move, matching this docstring's own stated order (the code used to
+    move first and probe `store_dir` after, contradicting it). Not
+    cosmetic: probing `store_dir` meant a failed probe left an UNVERIFIED
+    tree at the CANONICAL path, and under an adopted `$ALP_TOOLCHAIN_ROOT`
+    the guard right above (`root_adopted`) then refuses to touch that path
+    on every later run, forever -- a dead end only a manual `rm -rf` clears.
+    A `tmp_dir` name always carries `toolchain_provision.TMP_SUFFIX_PREFIX`
+    (`_reclaim_toolchain_wreckage`'s own naming contract), so a failed probe
+    left there is automatically reclaimed by the NEXT `tan bootstrap`
+    attempt regardless of adoption -- the ordinary, self-healing path.
+    """
+    installed_version = _read_installed_sdk_version(tmp_dir)
+    if installed_version != manifest.version:
+        log.warn(
+            "toolchain-install",
+            f"west sdk install exited 0, but {_native(tmp_dir)} reports SDK version "
+            f"{installed_version!r}, not the pinned {manifest.version!r} -- leaving it "
+            f"in place for inspection rather than trusting it. Remove that directory "
+            f"and re-run `tan bootstrap` once you know why they disagree.",
+        )
+        return
+    triple = _probe_toolchain_compiler(tmp_dir, is_windows=is_windows)
+    if triple is None:
+        log.warn(
+            "toolchain-install",
+            f"west sdk install exited 0 and reports the correct SDK version, but "
+            f"arm-zephyr-eabi-gcc did not run from {_native(tmp_dir)} -- NOT moving "
+            f"it into place or stamping it as verified (a directory existing is not "
+            f"evidence it works). Re-run `tan bootstrap` to retry.",
+        )
+        return
+    if _is_dir(store_dir):
+        if root_adopted:
+            log.warn(
+                "toolchain-install",
+                f"{_native(store_dir)} already exists and carries no valid tan "
+                f"verification stamp -- ALP_TOOLCHAIN_ROOT points at an adopted "
+                f"directory tan does not delete on your behalf. Remove it yourself, "
+                f"or unset ALP_TOOLCHAIN_ROOT, then re-run `tan bootstrap`.",
+            )
+            return
+        try:
+            shutil.rmtree(store_dir)
+        except OSError as err:
+            log.warn(
+                "toolchain-install",
+                f"cannot replace the stale directory at {_native(store_dir)}: {err}",
+            )
+            return
+    try:
+        os.replace(tmp_dir, store_dir)
+    except OSError as err:
+        log.warn(
+            "toolchain-install", f"cannot move {_native(tmp_dir)} into place: {err}"
+        )
+        return
+    stamp_text = toolchain_provision.render_stamp(
+        toolchain_provision.ToolchainStamp(manifest.version, manifest.digest(), triple, True)
+    )
+    try:
+        atomic_write_text(store_dir / toolchain_provision.STAMP_FILENAME, stamp_text)
+    except OSError as err:
+        log.warn(
+            "toolchain-install",
+            f"cross toolchain installed at {_native(store_dir)} but the verification "
+            f"stamp could not be written: {err} -- it will be re-verified next run.",
+        )
+        return
+    log.line(
+        f"Cross toolchain {manifest.version} installed, version and compiler checked, "
+        f"and stamped: {_native(store_dir)} -- the toolchain archive was hashed against "
+        f"alp-sdk's pin; the minimal SDK bundle was verified by west against the release "
+        f"sha256.sum (which tan compared with the pin), and tan did not see its bytes."
+    )
+
+
+#: Retried the same number of times, with the same backoff shape, as
+#: `.github/workflows/getting-started.yml`'s OWN manual `west sdk install`
+#: step already does -- measured flaky in this exact CI, not a guess: its own
+#: comment records BOTH network legs failing independently (`fetch_releases`
+#: hitting GitHub's unauthenticated per-IP rate limit, and the SEPARATE
+#: `setup.sh -t arm-zephyr-eabi` GNU-toolchain fetch failing with no relation
+#: to the first), and this phase's own first real end-to-end CI run hit a
+#: THIRD failure mode in the same family (`tar --xz` extraction inside
+#: west's own temp dir returning exit status 2). **Not asserted to be a
+#: "transient runner hiccup"** -- tan-cli#990 review caught that claim
+#: unproven: `capture_tail`'s old 4-line default discarded the actual
+#: subprocess error line, leaving no evidence either way, and a
+#: byte-identical local extraction of the real released archive (this repo's
+#: own verification, not west's) succeeded cleanly, which only rules out a
+#: broken tar invocation or a corrupt upstream release -- it says nothing
+#: about what happened on that specific runner. `TOOLCHAIN_INSTALL_TAIL_LINES`
+#: below exists so the NEXT occurrence is diagnosable instead of guessed at.
+#: One `west sdk install` attempt is not the reliability bar a fresh
+#: customer's FIRST command should be held to, so the retry stays regardless.
+TOOLCHAIN_INSTALL_ATTEMPTS = 3
+
+#: Seconds, multiplied by the (1-based) attempt number just finished --
+#: `getting-started.yml`'s own `sleep $((attempt * 15))`.
+TOOLCHAIN_RETRY_BACKOFF_S = 15
+
+#: `Runner.run`'s `tail_lines` for the `west sdk install` call specifically --
+#: see `capture_tail`'s own docstring. Deliberately wider than the 4-line
+#: default every other bootstrap phase still uses; 40 is small next to a
+#: multi-hundred-line traceback but wide enough to keep the real subprocess
+#: stderr line the traceback's closing frames sit on top of.
+TOOLCHAIN_INSTALL_TAIL_LINES = 40
+
+#: A staged credential younger than this is treated as possibly LIVE and is
+#: never reclaimed (tan-cli#1148 round 2). The extension shells `tan`, so two
+#: concurrent `tan bootstrap` runs are not exotic, and without this the
+#: second run's sweep deletes the first run's in-use netrc -- silently
+#: downgrading it to anonymous AFTER it printed "Authenticating the Zephyr
+#: SDK download...". A silent downgrade is the exact shape the rest of this
+#: work exists to remove, so the sweep must not be able to cause one.
+#:
+#: An AGE window rather than a PID liveness probe, deliberately: a PID check
+#: is racy (reuse), is not portable in the same shape across POSIX and
+#: Windows, and answers a harder question than this needs. The lifetime of a
+#: live staged credential is BOUNDED BY CONSTRUCTION -- it is written once
+#: and discarded when `_run_west_sdk_install_with_retries` returns, and that
+#: cannot exceed `TOOLCHAIN_INSTALL_ATTEMPTS` timeouts plus the backoff
+#: between them, because `Runner.run` kills the child at `INSTALL_TIMEOUT_S`.
+#: That worst case is `3 * 3600 + (15 + 30)` = 10,845s; `SAFETY_FACTOR`
+#: doubles it, so the window is **21,690s = 6.03 hours**.
+#:
+#: The doubling is a RULE, not a taste: a bound computed from three constants
+#: that a later PR may retune must not become exact, and mtime granularity, a
+#: laptop suspended mid-download and a slow network filesystem all push the
+#: observed age of a live credential above the arithmetic worst case. Pinned
+#: by `test_the_live_window_keeps_a_real_margin_over_the_worst_case_lifetime`,
+#: which recomputes the worst case independently and requires the factor --
+#: without it the window would equal the worst case exactly and a credential
+#: alive for one second longer than the arithmetic allows would be swept.
+#:
+#: A clock that skews backwards makes `age` negative, which reads as "too
+#: young to touch" -- the safe direction, and pinned by
+#: `test_a_credential_with_a_future_mtime_is_kept_not_swept` (an `abs()`
+#: around the subtraction would sweep it, which is why that test exists).
+#:
+#: Cost of the window: residue from a crash within it survives until the NEXT
+#: `tan bootstrap` after it ages out -- at most 6.03 hours of extra dwell for
+#: a file that is already `0o600`. The sweep runs on every invocation of the
+#: phase, so that is a delay, not a leak.
+#: The margin multiplier above. Named rather than inlined so the rule and the
+#: test that pins it refer to the same number.
+SDK_CREDENTIAL_LIVE_SAFETY_FACTOR = 2
+
+SDK_CREDENTIAL_LIVE_WINDOW_S = SDK_CREDENTIAL_LIVE_SAFETY_FACTOR * (
+    TOOLCHAIN_INSTALL_ATTEMPTS * INSTALL_TIMEOUT_S
+    + TOOLCHAIN_RETRY_BACKOFF_S * TOOLCHAIN_INSTALL_ATTEMPTS * (TOOLCHAIN_INSTALL_ATTEMPTS - 1) // 2
+)
+
+
+def _run_west_sdk_install_with_retries(
+    ws: Workspace, log: Log, runner: Runner, argv: list[str], tmp_dir: Path,
+    *, extra_env: dict[str, str] | None = None,
+) -> str | None:
+    """`runner.run(argv, ...)`, retried up to `TOOLCHAIN_INSTALL_ATTEMPTS`
+    times on ANY failure -- the same blind, unconditional retry policy
+    `getting-started.yml`'s own step already applies ("still fails loudly if
+    the network is genuinely unavailable"); a permanent failure (bad
+    version, no artifact for this host) already returned before this
+    function is ever reached, so everything that gets here is presumptively
+    worth a second try. Returns the LAST attempt's `runner.run` result --
+    `None` on eventual success, the final failure detail otherwise.
+
+    A single call under `--dry-run`: `Runner.run` returns `None` immediately
+    without spawning, so the loop breaks after attempt 1 -- one planned
+    command, not `TOOLCHAIN_INSTALL_ATTEMPTS` copies of it.
+
+    `extra_env` carries the staged GitHub credential (tan-cli#1143), on
+    EVERY attempt: a rate limit is exactly what this loop retries, and an
+    authenticated first attempt falling back to anonymous retries would
+    defeat it.
+    """
+    detail: str | None = None
+    for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
+        if attempt > 1 and not runner.dry_run:
+            # West's OWN internal extraction tempdir is already cleaned up by
+            # its own `tempfile.TemporaryDirectory` context manager on any
+            # exit path; only OUR named sibling can still be sitting there
+            # from a failed attempt (e.g. the SDK component landed but the
+            # LATER `setup.sh -t` toolchain-component fetch failed) -- clear
+            # it before retrying, or `west`'s own `shutil.move` onto an
+            # already-existing `tmp_dir` moves INTO it instead of replacing
+            # it, corrupting the next probe.
+            if _is_dir(tmp_dir):
+                try:
+                    shutil.rmtree(tmp_dir)
+                except OSError:
+                    pass
+            time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
+        detail = runner.run(
+            argv, cwd=ws.workspace_dir, extra_env=extra_env, tail_lines=TOOLCHAIN_INSTALL_TAIL_LINES
+        )
+        if detail is None or runner.dry_run:
+            return detail
+        if attempt < TOOLCHAIN_INSTALL_ATTEMPTS:
+            log.line(
+                f"west sdk install attempt {attempt}/{TOOLCHAIN_INSTALL_ATTEMPTS} "
+                f"failed; retrying"
+            )
+    return detail
+
+
+def _host_artifacts(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> tuple[toolchain_provision.ToolchainArtifact, ...]:
+    host_key = toolchain_provision.toolchain_host_key(sys.platform, platform.machine())
+    if isinstance(host_key, toolchain_provision.UnsupportedHost):
+        return ()
+    return manifest.artifacts_for_host(host_key)
+
+
+def _check_release_sum(
+    log: Log, manifest: toolchain_provision.ToolchainManifest, *, when: str
+) -> str | None:
+    """tan-cli#1496: fetch the release `sha256.sum` and compare alp-sdk's pins with it
+    (`when` = "before"/"after" `west sdk install`). Returns the sum text when it agrees,
+    `None` when refused (warned, blocking). An unreachable sum file is a refusal, not a
+    pass. What this does and does not prove: see `tan.core.toolchain_pin`."""
+    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    artifacts = _host_artifacts(manifest)
+    if not artifacts:
+        return ""
+    url = toolchain_pin.sum_url(manifest)
+    text, why = fetch_sum_text(url)
+    if text is None:
+        log.warn(
+            "toolchain-pin-unverified",
+            f"cannot acquire the cross toolchain: could not fetch {url} to check the "
+            f"archives against alp-sdk's sha256 pins ({why}) {when} `west sdk install`. "
+            f"Check ALL_PROXY/HTTPS_PROXY/NO_PROXY or retry on a network that reaches "
+            f"github.com; `--no-toolchain` skips this phase.",
+        )
+        return None
+    findings = toolchain_pin.pin_findings(artifacts, toolchain_pin.parse_sum_file(text))
+    if findings:
+        log.warn("toolchain-pin-mismatch", toolchain_pin.refusal_message(findings, url, when=when))
+        return None
+    return text
+
+
+def _plan_tan_downloads(
+    runner: Runner,
+    manifest: toolchain_provision.ToolchainManifest,
+    when: str,
+    *,
+    archive: bool = False,
+) -> None:
+    """--dry-run: tan's OWN network fetches are not subprocess argvs, so list them in
+    `plannedCommands` as `# tan downloads ...` lines to keep the preview complete."""
+    from tan.commands.bootstrap_toolchain_fetch import toolchain_artifact  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    artifacts = _host_artifacts(manifest)
+    if not artifacts:
+        return
+    art = toolchain_artifact(artifacts)
+    if not archive:
+        runner.planned.append(
+            ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), f"({when}; compared with alp-sdk's pins)"]
+        )
+        return
+    if art is not None:
+        runner.planned.append(
+            ["#", "tan", "downloads", manifest.base_url.rstrip("/") + "/" + art.filename,
+             f"(sha256 checked against alp-sdk's pin {art.sha256})"]
+        )
+    runner.planned.append(
+        ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), "(re-fetched after west; must be unchanged)"]
+    )
+
+
+def _recheck_release_sum(
+    log: Log, manifest: toolchain_provision.ToolchainManifest, first_text: str
+) -> bool:
+    """After west ran: the sum must be byte-identical to the one tan verified before, so
+    west cannot have been served a different sum than tan was (check-then-use)."""
+    from tan.core.toolchain_pin import SUM_FILENAME  # noqa: PLC0415
+
+    again = _check_release_sum(log, manifest, when="after")
+    if again is None:
+        return False
+    if again != first_text:
+        log.warn(
+            "toolchain-pin-mismatch",
+            f"cannot acquire the cross toolchain: the release {SUM_FILENAME} "
+            f"changed while `west sdk install` ran, so the minimal SDK bundle west "
+            f"verified cannot be tied to the sum tan checked. Nothing was stamped; "
+            f"re-run `tan bootstrap`.",
+        )
+        return False
+    return True
+
+
+def _install_pinned_toolchain(
+    log: Log,
+    manifest: toolchain_provision.ToolchainManifest,
+    tmp_dir: Path,
+    root: Path,
+    leaf: str,
+) -> bool:
+    """West ran with `--no-gnu-toolchains`; fetch the toolchain archive ourselves and hash it
+    against alp-sdk's pin (west's `setup.sh` would fetch it with no check at all)."""
+    from tan.commands import bootstrap_toolchain_fetch as fetch  # noqa: PLC0415
+
+    art = fetch.toolchain_artifact(_host_artifacts(manifest))
+    if art is None:
+        log.warn(
+            "toolchain-install",
+            f"alp-sdk's metadata/toolchains.json lists no single {fetch.TOOLCHAIN_ARTIFACT_COMPONENT} "
+            f"artifact for this host, so the toolchain cannot be fetched and verified.",
+        )
+        return False
+    log.line(f"Downloading {art.filename} and checking its sha256 against alp-sdk's pin")
+    # Same blind retry the west step gets, for transport failures ONLY ("unverified"):
+    # a hash mismatch or an extraction failure is never retried.
+    for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
+        outcome = fetch.install_pinned_toolchain(manifest.base_url, art, tmp_dir, root, leaf)
+        if outcome.kind != "unverified":
+            break
+    if outcome.kind == "ok":
+        return True
+    if outcome.kind == "mismatch":
+        log.warn(
+            "toolchain-pin-mismatch",
+            f"cannot acquire the cross toolchain: {outcome.message}. Nothing was stamped. "
+            f"Do not bypass this; update the pin in alp-sdk only after the new archive is reviewed.",
+        )
+    elif outcome.kind == "unverified":
+        log.warn(
+            "toolchain-pin-unverified",
+            f"cannot acquire the cross toolchain: could not download {art.filename} to "
+            f"check it against alp-sdk's pin ({outcome.message}). Check "
+            f"ALL_PROXY/HTTPS_PROXY/NO_PROXY or re-run `tan bootstrap`.",
+        )
+    else:
+        log.warn("toolchain-install", f"cannot acquire the cross toolchain: {outcome.message}")
+    return False
+
+
+def _acquire_toolchain(
+    ws: Workspace,
+    log: Log,
+    runner: Runner,
+    manifest: toolchain_provision.ToolchainManifest,
+    root: Path,
+    leaf: str,
+    store_dir: Path,
+    *,
+    root_adopted: bool,
+    west: str,
+    is_windows: bool,
+) -> None:
+    """`west sdk install --install-dir <tmp-sibling-of-store_dir>` (retried,
+    see `_run_west_sdk_install_with_retries`), then hand off to
+    `_finish_toolchain_install` for the version/probe/stamp sequence.
+
+    The tmp-sibling IS the atomicity belt ADR 0021 asks for around a tool
+    this code does not control the internals of: a kill mid-`west` run (a
+    laptop sleep, Ctrl-C, an OOM-kill) leaves the `.tmp-*` sibling, never
+    `store_dir` itself, so a second `tan bootstrap` can never mistake a
+    half-installed toolchain for a working one.
+    """
+    if not runner.dry_run:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
+            return
+        _reclaim_toolchain_wreckage(root, leaf)
+    sum_text: str | None = ""
+    if runner.dry_run:
+        _plan_tan_downloads(runner, manifest, "before west sdk install")
+    else:
+        sum_text = _check_release_sum(log, manifest, when="before")
+        if sum_text is None:
+            return
+    tmp_dir = root / f"{leaf}{toolchain_provision.TMP_SUFFIX_PREFIX}{os.getpid()}"
+    argv = toolchain_provision.west_sdk_install_argv(
+        west, version=manifest.version, install_dir=_native(tmp_dir)
+    )
+    log.line(
+        f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
+        f"(this can take several minutes on a slow link)"
+    )
+    credential = _sdk_credential(ws, log, runner, root, manifest.version)
+    try:
+        detail = _run_west_sdk_install_with_retries(
+            ws,
+            log,
+            runner,
+            argv,
+            tmp_dir,
+            extra_env=credential.extra_env if credential is not None else None,
+        )
+    finally:
+        if credential is not None:
+            _discard_sdk_credential(credential.scratch_dir)
+    if detail is not None:
+        augmented = toolchain_provision.augment_acquisition_failure(detail)
+        augmented = _augment_with_low_disk_note(root, augmented)
+        # tan-cli#1143, the same shape `_augment_with_low_disk_note` above
+        # already establishes: keep the child's message verbatim and append
+        # the remedy in TAN's vocabulary. West's own rate-limit line names
+        # `--personal-access-token`, a flag on a command the customer never
+        # typed and which `tan bootstrap` does not accept, so the message
+        # they see today points at a lever that does not exist for them.
+        # `credential`, not the resolved token: the question the note has to
+        # answer is whether THIS download was authenticated, and a staging
+        # failure means it was not, however many token variables the
+        # environment carries. `credential_seen` is the second half of that
+        # (tan-cli#1148 review): an environment that HELD a credential tan
+        # could not use must not be told to go and set one.
+        # `verified` (tan-cli#1170) is the third axis: a credential that was
+        # staged and passed but whose transport this run already declined to
+        # vouch for. Without it the authenticated branch renders an assurance
+        # the `sdk-credential-unverified` warning printed above this one has
+        # already withdrawn, and the customer reads two wire surfaces
+        # disagreeing about one download.
+        rate_limited = toolchain_provision.rate_limit_note(
+            augmented,
+            authenticated_as=credential.source if credential is not None else None,
+            credential_seen=_sdk_credential_seen() if credential is None else None,
+            verified=credential.verified if credential is not None else True,
+        )
+        if rate_limited is not None:
+            augmented = f"{augmented} {rate_limited}"
+        # tan-cli#990 review MAJOR: this is the phase's MOST LIKELY failure
+        # (a flaky download/extraction survives the retry) and, until this
+        # fix, the ONLY refusal in this function that named no remedy --
+        # `Log.warn` has no `fix` channel (unlike `doctor_cmd.Check`), so
+        # every other refusal here (7-Zip, disk, adopted root) already
+        # folds its command into the message text itself; this one must
+        # too. Built from `manifest.version` in scope here, never
+        # `doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION` -- that is a SEPARATE,
+        # hardcoded fallback constant that can desync from the pin THIS run
+        # actually resolved.
+        remedy = (
+            f"run `west sdk install --version {manifest.version} -t "
+            f"{toolchain_provision.TOOLCHAIN_COMPONENT}` by hand from your west "
+            f"workspace's top-level directory (see docs/getting-started.md), or "
+            f"re-run `tan bootstrap`."
+        )
+        log.warn("toolchain-install", f"west sdk install failed: {augmented} {remedy}")
+        return
+    if runner.dry_run:
+        _plan_tan_downloads(runner, manifest, "after west sdk install", archive=True)
+        return
+    if not _recheck_release_sum(log, manifest, sum_text or ""):
+        return
+    if not _install_pinned_toolchain(log, manifest, tmp_dir, root, leaf):
+        return
+    _finish_toolchain_install(
+        log, manifest, tmp_dir, store_dir, root_adopted=root_adopted, is_windows=is_windows
+    )
+
+
+def toolchain_phase(
+    ws: Workspace,
+    log: Log,
+    runner: Runner,
+    sdk_root: str,
+    venv: VenvBin | None,
+    *,
+    is_windows: bool,
+) -> None:
+    """ADR 0021 Lane 1 P1. Every exit here is either a plain `log.line` -- a
+    clean, non-blocking skip that changes nothing about the run's verdict
+    (already installed with a valid stamp and compiler, an unsupported host, no artifact for
+    this host at the pinned version) -- or `log.warn("toolchain-install",
+    ...)`, which IS `WORKSPACE_BLOCKING`: reported, and blocks `complete.`
+    unless `--allow-partial`, because a customer whose FIRST real-silicon
+    build then fails on a missing compiler -- discovered minutes or days
+    later, far from this command -- is exactly the failure ADR 0021 exists
+    to close.
+
+    `venv` may be `None` (a workspace bootstrapped with `--no-pip --no-west`
+    reaches here only via a caller that already gates on `--no-west`, so in
+    practice this is always a real venv; the fallback to a bare PATH `west`
+    exists only so this function has no unchecked assumption of its own).
+    """
+    # tan-cli#990 review MINOR, considered and kept: a `sdk_root` with no
+    # readable `metadata/toolchains.json` at all reports `WORKSPACE_BLOCKING`
+    # here -- an alp-sdk checkout that predates issue #474's manifest field
+    # (or one with the file simply missing/malformed) makes `tan bootstrap`
+    # exit non-zero on its own, including under `--dry-run`, where it used
+    # to exit 0. Deliberate, not an oversight: `WORKSPACE_BLOCKING` already
+    # means "this workspace cannot do what it was bootstrapped for", and a
+    # workspace that cannot even attempt the toolchain acquisition ADR 0021
+    # Lane 1 P1 exists for fits that description as much as a failed
+    # `west sdk install` does. The escape hatch is the same one every other
+    # refusal in this phase has: `--no-toolchain` (or `--allow-partial`)
+    # skips this phase outright, so an older checkout stays bootstrappable
+    # on request, just not silently.
+    manifest, manifest_err = load_toolchain_manifest(sdk_root)
+    if manifest is None:
+        log.warn("toolchain-install", f"cannot acquire the cross toolchain: {manifest_err}")
+        return
+
+    host_key = toolchain_provision.toolchain_host_key(sys.platform, platform.machine())
+    if isinstance(host_key, toolchain_provision.UnsupportedHost):
+        log.line(f"Skipping cross-toolchain acquisition: {host_key.reason}")
+        return
+    if toolchain_provision.artifacts_missing_for_host(manifest, host_key):
+        log.line(
+            f"Skipping cross-toolchain acquisition: the pinned Zephyr SDK "
+            f"{manifest.version} publishes no {host_key} artifact -- see "
+            f"docs/cross-platform-setup.md for this host's manual install."
+        )
+        return
+
+    root, leaf, root_adopted = _toolchain_root_and_leaf(manifest)
+    store_dir = root / leaf
+    if not runner.dry_run:
+        # Here, not in `_acquire_toolchain` beside the `.tmp-*` sweep it
+        # mirrors: this is ABOVE the already-installed early return below,
+        # which is the branch a bootstrapped machine takes every time. A
+        # crash-residue sweep that only ran on the runs that install
+        # something would leave a stale credential on disk for as long as the
+        # pin held (tan-cli#1148 review).
+        _reclaim_sdk_credential_wreckage(root)
+    # A stamp alone is not enough: the compiler under it may have been deleted
+    # since (tan-cli#1483), and then the install must be repaired, not skipped.
+    if toolchain_provision.stamp_matches_pin(
+        _read_toolchain_stamp(store_dir), manifest
+    ) and toolchain_provision.store_compiler_present(store_dir, is_windows=is_windows):
+        checked = _read_toolchain_stamp(store_dir)
+        provenance = (
+            "toolchain archive hashed against the alp-sdk pin at install"
+            if checked is not None and checked.pin_checked
+            else "installed before tan compared archives with the alp-sdk pin, so its archives were never checked against it"
+        )
+        log.line(
+            f"Cross toolchain already installed and stamped: {_native(store_dir)} ({provenance})"
+        )
+        return
+
+    # tan-cli#1498: an adopted root's canonical dir that is present but NOT
+    # verified can never be installed over (`_finish_toolchain_install`
+    # refuses to delete it). Refuse HERE, before the multi-minute download,
+    # with the accurate reason -- not after, with a stamp message that
+    # blames the wrong thing.
+    if root_adopted and _is_dir(store_dir):
+        log.warn(
+            "toolchain-install",
+            f"{_native(store_dir)} already exists but is not a verified tan "
+            f"toolchain (no valid verification stamp, or its compiler is missing) "
+            f"-- ALP_TOOLCHAIN_ROOT points at an adopted directory tan does not "
+            f"delete or repair on your behalf, so nothing was downloaded. Remove "
+            f"it yourself, or unset ALP_TOOLCHAIN_ROOT, then re-run `tan bootstrap`.",
+        )
+        return
+
+    if is_windows and not any(on_path(program) for program in SEVEN_ZIP_PROGRAMS):
+        log.warn(
+            "toolchain-install",
+            "No 7-Zip on PATH -- `west sdk install` extracts the toolchain with "
+            "patoolib, which has no pure-Python fallback on native Windows. Install "
+            "it (`tan doctor --fix`, or `winget install -e --id 7zip.7zip`), then "
+            "re-run `tan bootstrap`.",
+        )
+        return
+
+    needed = toolchain_provision.required_bytes(manifest)
+    if needed is not None and not runner.dry_run:
+        free = _free_disk_bytes(root)
+        if free is not None:
+            refusal = toolchain_provision.disk_preflight_refusal(free, needed)
+            if refusal is not None:
+                log.warn("toolchain-install", f"cannot acquire the cross toolchain: {refusal}")
+                return
+
+    west = str(venv.west) if venv is not None else "west"
+    _acquire_toolchain(
+        ws, log, runner, manifest, root, leaf, store_dir,
+        root_adopted=root_adopted, west=west, is_windows=is_windows,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1532,11 +2754,23 @@ def _rename_hint(err: OSError) -> str:
 # ---------------------------------------------------------------------------
 
 
-def read_board_runtimes(board_yaml: str | None, sdk_root: str | None) -> list[str]:
+def read_board_runtimes(
+    board_yaml: str | None, sdk_root: str | None, *, warnings: list[str] | None = None
+) -> list[str]:
     """The runtimes this project puts in play. `[]` for every way that can fail,
-    which the Yocto gate treats as "unresolvable, proceed"."""
+    which the Yocto gate treats as "unresolvable, proceed".
+
+    *warnings* (tan-cli#964), when given, collects every `som-preset-v2`
+    schema violation found while reading `sku`'s SoM preset -- threaded
+    through to `_read_som_topology` -> `parse_som_preset`, the same
+    `metadata_root`/`source`/`warnings` convention `tan presets` uses. The
+    caller (`bootstrap`) REFUSES on a non-empty result rather than warning
+    and continuing, per tan-cli#964's decided rule: unlike `tan presets`,
+    which only lists what it read, `tan bootstrap` scaffolds a workspace off
+    this topology.
+    """
     cores, board_os, sku = _read_board_slice(board_yaml)
-    topology = _read_som_topology(sku, sdk_root)
+    topology = _read_som_topology(sku, sdk_root, warnings=warnings)
     return in_play_runtimes(cores, board_os, topology)
 
 
@@ -1598,7 +2832,12 @@ def _scan_board_slice(
 ) -> tuple[dict[str, str | None] | None, str | None, str | None]:
     """The no-PyYAML reader: the top-level `os:`, `som: sku:`, and the `cores:`
     block's ids plus each one's `os:`. Deliberately not a YAML parser -- it
-    answers only what the Yocto gate consumes."""
+    answers only what the Yocto gate consumes.
+
+    tan-cli#1008 review round 5: `section` (the top-level key) is derived
+    from `tan.core.scaffold.top_level_key_name`, the same rule
+    `generate_cmd._scan_som_sku`/`scaffold._is_som_key_line` use -- not a
+    fourth independent copy of "what is this line's top-level key"."""
     cores: dict[str, str | None] = {}
     top_os: str | None = None
     sku: str | None = None
@@ -1614,7 +2853,7 @@ def _scan_board_slice(
         key = key.strip()
         cleaned = value.strip().strip("'\"")
         if indent == 0:
-            section = key
+            section = top_level_key_name(stripped)
             current_core = None
             core_indent = -1
             if key == "os" and sep:
@@ -1639,7 +2878,9 @@ def _scan_board_slice(
     return cores or None, top_os, sku
 
 
-def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
+def _read_som_topology(
+    sku: str | None, sdk_root: str | None, *, warnings: list[str] | None = None
+) -> dict[str, str]:
     """`{core id: runtime}` for `sku`, from the SDK metadata. Supports both
     layouts the SDK has used -- a flat `<sku>.yaml` or an `<sku>/som.yaml`
     directory. `{}` when anything is missing or unparseable, which the caller
@@ -1649,17 +2890,27 @@ def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
     `board:`->zephyr / `machine:`->yocto / core-id-heuristic mapping. A second
     copy here is how `tan presets` and `tan bootstrap` would come to disagree
     about which host can build a project.
+
+    *warnings* (tan-cli#964) is threaded straight to `parse_som_preset`'s own
+    `metadata_root`/`source`/`warnings` triple, bound to the SoM preset file
+    this call actually found (`candidate`, not the caller's `sdk_root`) so a
+    violation names the exact file it came from. `sdk_root` doubles as the
+    metadata_root's parent here (`<sdk_root>/metadata`), the same layout the
+    `directory` line above already assumes.
     """
     cleaned = (sku or "").strip()
     if not cleaned or not sdk_root:
         return {}
-    directory = Path(sdk_root) / "metadata" / "e1m_modules"
+    metadata_root = Path(sdk_root) / "metadata"
+    directory = metadata_root / "e1m_modules"
     for candidate in (directory / f"{cleaned}.yaml", directory / cleaned / "som.yaml"):
         text = _read_text(candidate)
         if text is None:
             continue
         try:
-            som = parse_som_preset(text)
+            som = parse_som_preset(
+                text, metadata_root=metadata_root, source=candidate, warnings=warnings
+            )
         except Exception:  # noqa: BLE001 -- one bad preset must not fail the whole run
             continue
         return {core.id: core.os for core in som.cores}
@@ -1671,9 +2922,18 @@ def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunPaths:
-    """Mutable run state the envelope reports, threaded through the phases."""
+    """The paths this run reports, rebound (never mutated) as phases change them.
+
+    Frozen on purpose (tan-cli#991). The paths genuinely change mid-run -- the
+    venv name is only final once the manifest is read, a `--workspace` run
+    physically moves the checkout, a `$ZEPHYR_BASE` topdir can be adopted, and
+    a failure rolls all of it back -- but each of those is now an explicit
+    `replace()` rebinding in `_run`, so `grep 'paths = '` there IS the complete
+    history. It used to be eleven field assignments spread over five phases,
+    one of them written through a function PARAMETER whose call site showed no
+    assignment at all."""
 
     repo_root: Path
     workspace_dir: Path
@@ -1692,7 +2952,7 @@ def _data(
     paths: RunPaths | None,
     facts: BootstrapFacts,
     pin: str,
-    missing: list[dict[str, str | None]] | None = None,
+    missing: list[dict[str, str | int | None]] | None = None,
     planned: list[list[str]] | None = None,
 ) -> dict[str, object]:
     """The `data` payload.
@@ -1700,20 +2960,17 @@ def _data(
     `zephyrBase` is RENDERED FROM THE MANIFEST (`env.ZEPHYR_BASE`), never
     re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key the
     printed export line follows it, and a second derivation here would hand a
-    consumer a path nothing else in the run agrees with. Absent key -> `""`,
-    like every other unresolved path field.
+    consumer a path nothing else in the run agrees with. Absent -- or declared
+    blank -- key -> `""`, like every other unresolved path field, and the
+    declared text is put on the wire unnormalised (see `_zephyr_base_path`).
 
     `missingPrerequisites` is an explicit `null` on every run with no missing
     tool to name -- NEVER `[]`, which would be a second spelling of the fact a
     successful run already reports as `null`.
     """
     tokens = paths.tokens() if paths else Tokens("", "")
-    zephyr_base = ""
-    if paths is not None:
-        for key, raw in facts.env:
-            if key == "ZEPHYR_BASE":
-                zephyr_base = _native(tokens.apply(raw))
-                break
+    resolved = _zephyr_base_path(facts, tokens) if paths is not None else None
+    zephyr_base = _native(resolved) if resolved is not None else ""
     data: dict[str, object] = {
         "schemaVersion": DATA_SCHEMA_VERSION,
         # `_native` like the other three: a consumer comparing `sdkRoot` against
@@ -1726,6 +2983,8 @@ def _data(
         "zephyrPin": pin,
         "noPip": args["no_pip"],
         "noWest": args["no_west"],
+        "noToolchain": args["no_toolchain"],
+        "noPatches": args["no_patches"],
         "printEnv": args["print_env"],
         "missingPrerequisites": missing,
     }
@@ -1763,16 +3022,22 @@ def _refusal(
     The join is why `data.missingPrerequisites` has to exist: an install command
     contains the same spaces the join used, so the split is not recoverable.
 
-    `issues` mirrors `_fatal`'s own parameter and the same reasoning applies:
-    it is ALWAYS `log.take_issues()` at a call site reachable after a
-    `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this loss on `_fatal`;
-    the `host_python is None` refusal below is the one `_refusal` call site
-    that comes after `log.warn("yocto-host", ...)` / `log.warn(*skew)`, and
-    would otherwise discard both silently, the same way the relocation refusal
-    once did). It defaults to `None` because most `_refusal` call sites in this
-    file run before `log` has recorded anything, so passing nothing there is a
-    correct no-op, not an oversight -- unlike `_fatal`, where `issues` has no
-    default and every call site must say so explicitly.
+    `issues` mirrors `_fatal`'s own parameter and much the same reasoning
+    applies, but NOT universally: at most call sites it is `log.take_issues()`
+    reachable after a `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this
+    loss on `_fatal`; the `host_python is None` refusal below is the one
+    `_refusal` call site that comes after `log.warn("yocto-host", ...)` /
+    `log.warn(*skew)`, and would otherwise discard both silently, the same way
+    the relocation refusal once did). The `sdk-root-unresolved` refusal above
+    is the one exception (tan-cli#926): `pin_issue`/`foreign_issue` are raw
+    `Issue`s that never touched `log` -- there is nothing to warn through, since
+    they are computed before `resolved`/`log` exist at all -- which is exactly
+    why they also need the caller-side `warning_lines` prepend onto `.text`
+    (tan-cli#677): this helper's `text` is `list(lines)` alone and has no path
+    from `issues` to stderr. It defaults to `None` because most `_refusal` call
+    sites in this file run before `log` has recorded anything, so passing
+    nothing there is a correct no-op, not an oversight -- unlike `_fatal`,
+    where `issues` has no default and every call site must say so explicitly.
     """
     return Outcome(
         exit_code,
@@ -1921,13 +3186,22 @@ class WorkspacePlan:
     #: Drop `$ZEPHYR_BASE` from every child -- set only when the ambient value
     #: was REFUSED, so a foreign tree cannot hijack `west init`.
     clear_zephyr_base: bool = False
+    #: The repointed paths when `adopted`, else `None`. Returned rather than
+    #: written through the `paths` argument (tan-cli#991): the caller rebinds,
+    #: so the adoption is visible at the call site instead of being a silent
+    #: side effect of a call whose result looked like it was only a plan.
+    adopted_paths: "RunPaths | None" = None
 
 
 def _select_workspace(
     log: Log, is_windows: bool, pin: str, facts: BootstrapFacts, paths: RunPaths
 ) -> WorkspacePlan:
-    """Workspace selection over the `$ZEPHYR_BASE` tree; repoints
-    `paths.workspace_dir`/`venv_dir` at it when adopted.
+    """Workspace selection over the `$ZEPHYR_BASE` tree; RETURNS the repointed
+    paths on `WorkspacePlan.adopted_paths` when a topdir is adopted.
+
+    Does not touch the `paths` it is given -- it used to write through that
+    parameter while its only call site assigned just the plan, so the
+    repointing was invisible there (tan-cli#991).
 
     Three outcomes for a tree whose manifest IS this checkout: on the pinned
     Zephyr it is reused untouched; on a DIFFERENT one it is adopted and
@@ -1948,13 +3222,12 @@ def _select_workspace(
 
     if choice == REUSE:
         # Never modify the user's tree: adopt it and skip init/update.
-        paths.workspace_dir = top
-        paths.venv_dir = top / facts.venv_dir_name
+        adopted = replace(paths, workspace_dir=top, venv_dir=top / facts.venv_dir_name)
         log.line(
             f"Reusing compatible alp-sdk workspace from {var}: "
-            f"{_native(paths.workspace_dir)} (Zephyr {version})"
+            f"{_native(adopted.workspace_dir)} (Zephyr {version})"
         )
-        return WorkspacePlan(reuse=True, adopted=True)
+        return WorkspacePlan(reuse=True, adopted=True, adopted_paths=adopted)
 
     if choice == STALE:
         # This IS bootstrap's own workspace, just left behind by an SDK pin bump.
@@ -1963,15 +3236,14 @@ def _select_workspace(
         # aggressive option either -- it is byte-for-byte the command a bootstrap
         # with no $ZEPHYR_BASE set would run over this same topdir, gated on a
         # manifest that already proved the tree belongs to this SDK.
-        paths.workspace_dir = top
-        paths.venv_dir = top / facts.venv_dir_name
+        adopted = replace(paths, workspace_dir=top, venv_dir=top / facts.venv_dir_name)
         log.warn(
             "zephyr-base-stale",
-            f"{var} workspace ({_native(paths.workspace_dir)}) is on Zephyr {version} "
+            f"{var} workspace ({_native(adopted.workspace_dir)}) is on Zephyr {version} "
             f"but this alp-sdk pins {pin} -- refreshing it with 'west update' (this also "
             f"moves the other west.yml projects to their pins)",
         )
-        return WorkspacePlan(adopted=True)
+        return WorkspacePlan(adopted=True, adopted_paths=adopted)
 
     if choice == MANIFEST_MISMATCH:
         log.warn(
@@ -2105,8 +3377,12 @@ class RelocationUndo:
     #: The envelope `project` this run would have reported had it never
     #: relocated anything.
     project: Project
-    workspace_dir: Path
-    venv_dir: Path
+    #: The whole `RunPaths` as it stood before the move. One frozen snapshot
+    #: instead of the two duplicated fields this used to carry: the
+    #: field-by-field copy existed only because an unfrozen `RunPaths` would
+    #: have aliased live state, and every future undo site would have had to
+    #: re-avoid that trap independently (tan-cli#991).
+    paths: RunPaths
     #: tan-cli#644: the project's own `.alp/sdk-path` root this run rewrote to
     #: follow the relocated checkout, and its bytes before the rewrite --
     #: `None` unless the SDK this run moved was resolved through the
@@ -2115,6 +3391,11 @@ class RelocationUndo:
     #: its own to touch, and a rewrite that itself failed left nothing to undo).
     project_pin_root: str | None = None
     previous_project_pin: bytes | None = None
+    #: `~/.alp/sdk-defaults.json`'s bytes before this run's own origin entry
+    #: was written into it (tan-cli#466); `None` when the registry did not
+    #: exist yet (the common first-relocation-ever case). Snapshotted the
+    #: SAME moment as `previous_pointer`, for the same reason.
+    previous_registry: bytes | None = None
 
 
 def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see below
@@ -2124,13 +3405,15 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     sdk_root_flag: str | None,
     no_pip: bool,
     no_west: bool,
+    no_toolchain: bool,
+    no_patches: bool,
     print_env: bool,
     allow_partial: bool,
     workspace: str | None,
     dry_run: bool,
     json_mode: bool,
 ) -> tuple[Outcome, Project, SdkInfo | None]:
-    """The whole command, as a sequence of early refusals then the three phases.
+    """The whole command, as a sequence of early refusals then the four phases.
 
     Deliberately one long function rather than a pipeline of small ones: the
     order of the gates is the contract (a refusal must leave NOTHING on disk, so
@@ -2140,7 +3423,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     is_windows = os.name == "nt"
     host = detect_host_os(sys.platform)
     log = Log(json_mode)
-    flags = {"no_pip": no_pip, "no_west": no_west, "print_env": print_env}
+    flags = {
+        "no_pip": no_pip, "no_west": no_west, "no_toolchain": no_toolchain,
+        "no_patches": no_patches,
+        "print_env": print_env,
+    }
 
     root, board_path = resolve_project_paths(project, board_yaml)
     # tan-cli#236: `board_yaml` is reported only when a file is really there --
@@ -2165,28 +3452,53 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     active_tier = active_resolution.tier
     broken_project_pin = active_resolution.broken_project_pin
     foreign_global_default_for = active_resolution.foreign_global_default_for
+    # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
+    # against whichever checkout this resolved -- a silently-missed
+    # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
+    # (`--print-env`, and the full run) as every other non-fatal notice this
+    # command reports; not `log.warn`, which always prefixes `bootstrap.` and
+    # would misname this shared code.
+    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
+    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
+    # this run sets up a whole venv/west workspace against it, the same as
+    # every other command on this ladder.
+    pin_issue = project_pin_issue(broken_project_pin, active_tier)  # tan-cli#926
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
     active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
     resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
+        outcome = _refusal(
+            ExitCode.VALIDATION_FAILURE,
+            "sdk-root-unresolved",
+            [
+                # `tan sdk switch`/`tan sdk install` both refuse in this
+                # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
+                # either here left a clean host with no way forward at
+                # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
+                # actually resolves an SDK, shared with `doctor_cmd`.
+                f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
+            ],
+            _data(
+                args=flags,
+                sdk_root="",
+                paths=None,
+                facts=fallback_facts(_manifest_absent_floor()),
+                pin="",
+            ),
+            issues=[i for i in (pin_issue, foreign_issue) if i is not None],
+        )
+        # tan-cli#677 (see the success path's own `warning_lines`, ~700 lines
+        # below): `issues=` above reaches the JSON envelope, but `_refusal`'s
+        # `text` is `list(lines)` alone -- the same JSON-only asymmetry #677
+        # fixed on the success path never reached this refusal. Prepended, not
+        # joined into `lines`, so `bootstrap.sdk-root-unresolved`'s own
+        # `issues[]` message stays exactly what `--format json` already ships.
+        warning_lines = [
+            f"{issue.severity}: {issue.message}" for issue in (pin_issue, foreign_issue) if issue
+        ]
         return (
-            _refusal(
-                ExitCode.VALIDATION_FAILURE,
-                "sdk-root-unresolved",
-                [
-                    # `tan sdk switch`/`tan sdk install` both refuse in this
-                    # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
-                    # either here left a clean host with no way forward at
-                    # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
-                    # actually resolves an SDK, shared with `doctor_cmd`.
-                    f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
-                ],
-                _data(
-                    args=flags,
-                    sdk_root="",
-                    paths=None,
-                    facts=fallback_facts(_manifest_absent_floor()),
-                    pin="",
-                ),
+            Outcome(
+                outcome.exit_code, outcome.data, outcome.issues, warning_lines + outcome.text
             ),
             # The only refusal that predates project resolution in the oracle.
             Project(root=None, board_yaml=None),
@@ -2210,18 +3522,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # is a no-op for them.
     sdk_root = os.path.abspath(os.path.expanduser(resolved))
     sdk = SdkInfo(sdk_root, active_tier)
-    # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
-    # against whichever checkout this resolved -- a silently-missed
-    # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
-    # (`--print-env`, and the full run) as every other non-fatal notice this
-    # command reports; not `log.warn`, which always prefixes `bootstrap.` and
-    # would misname this shared code.
-    pin_issue = project_pin_issue(broken_project_pin, active_tier)
-    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
-    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
-    # this run sets up a whole venv/west workspace against it, the same as
-    # every other command on this ladder.
-    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`
@@ -2250,7 +3550,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             sdk,
         )
     # `venv.dirName` is a manifest fact, so the venv path is only final now.
-    paths.venv_dir = paths.workspace_dir / facts.venv_dir_name
+    # The manifest-refusal above deliberately reported the GUESSED `.venv` --
+    # it is the one read that must see the pre-manifest value, and rebinding
+    # here (rather than mutating in place) is what keeps that true by
+    # construction instead of by ordering luck.
+    paths = replace(paths, venv_dir=paths.workspace_dir / facts.venv_dir_name)
     # ONE pin authority, shared with `build`'s preflight zephyrVersion check.
     pin = resolve_zephyr_pin(_read_text(paths.repo_root / "west.yml"), facts.zephyr_version)
 
@@ -2467,7 +3771,28 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # a project whose every in-play core is Yocto, on a non-Linux host: a
     # mixed board still bootstraps -- nothing here is Yocto-specific (venv +
     # west + Zephyr requirements) and its Zephyr cores need exactly this.
-    runtimes = read_board_runtimes(board_path, sdk_root)
+    # tan-cli#964, the REFUSE half of the decided rule: `bootstrap` is on the
+    # list of commands that put the topology this reads to WORK -- the
+    # scaffolding below is keyed off `runtimes`/the Yocto gate itself, so a
+    # schema-invalid SoM preset must not silently degrade to "no cores in
+    # play" the way `tan presets`'s WARN half is allowed to. Checked here,
+    # before `runtimes` is used for anything, and before every write below.
+    schema_warnings: list[str] = []
+    runtimes = read_board_runtimes(board_path, sdk_root, warnings=schema_warnings)
+    if schema_warnings:
+        return (
+            _refusal(
+                ExitCode.VALIDATION_FAILURE,
+                "metadata-schema-invalid",
+                [
+                    "SoM preset does not validate against som-preset-v2:\n"
+                    + "\n".join(f"  - {w}" for w in schema_warnings)
+                ],
+                payload(),
+            ),
+            reported_project,
+            sdk,
+        )
     gate = yocto_gate(runtimes, host)
     if gate == GATE_REFUSE:
         return (
@@ -2545,13 +3870,19 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
             # is wrong for a `--workspace` run over an ADOPTED
             # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
-            old_workspace_dir = paths.workspace_dir
-            old_venv_dir = paths.venv_dir
+            # ONE frozen snapshot now, not a field-by-field copy: `RunPaths`
+            # is immutable, so binding the object cannot alias live state
+            # (tan-cli#991).
+            old_paths = paths
             old_project = reported_project
             previous_pointer = _read_global_sdk_pointer()
-            paths.repo_root = new_root
-            paths.workspace_dir = target
-            paths.venv_dir = target / facts.venv_dir_name
+            previous_registry = _read_global_sdk_registry_bytes()
+            paths = replace(
+                paths,
+                repo_root=new_root,
+                workspace_dir=target,
+                venv_dir=target / facts.venv_dir_name,
+            )
             sdk_root = str(new_root)
             sdk = SdkInfo(sdk_root, active_tier)
             move_verb = "would move" if dry_run else "moved"
@@ -2565,7 +3896,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # `tan sdk switch --global` refuses in this build (tan-cli#305) --
                 # naming the pointer mechanism itself instead of a subcommand
                 # keeps this true even once that changes.
-                f"(to change later: {global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))}) "
+                f"(to change later: {_global_default_fix_hint()}) "
                 f"(tan-cli#185)",
             )
             # The project may live INSIDE the checkout, so rebase any
@@ -2590,6 +3921,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # dir, silencing the warning for essentially every project the
                 # user owns.
                 _write_global_sdk_pointer(sdk_root, written_for=root)
+                # tan-cli#466: the origin-keyed sibling, ALONGSIDE (never
+                # instead of) the legacy pointer just above -- old tans read
+                # only the legacy file (skew-safe), new tans consult this
+                # registry first so a LATER bootstrap under a different
+                # `root` no longer steals THIS project's resolution the way
+                # the shared, last-writer-wins legacy pointer alone did.
+                _write_global_sdk_registry(sdk_root, origin=root)
             # tan-cli#644: narrower than that rejected idea -- REWRITE an
             # EXISTING project pin, and only when `active_tier == "projectPin"`
             # means this project already had a working pin naming exactly the
@@ -2606,10 +3944,10 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 old_root=old_root,
                 previous_pointer=previous_pointer,
                 project=old_project,
-                workspace_dir=old_workspace_dir,
-                venv_dir=old_venv_dir,
+                paths=old_paths,
                 project_pin_root=project_pin_root,
                 previous_project_pin=previous_project_pin,
+                previous_registry=previous_registry,
             )
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
@@ -2636,6 +3974,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         log.line("Dry run (--dry-run): planning only, nothing will be installed or written")
 
     plan = _select_workspace(log, is_windows, pin, facts, paths)
+    if plan.adopted_paths is not None:
+        paths = plan.adopted_paths
     ws = Workspace(is_windows, facts, paths.repo_root, paths.workspace_dir, paths.venv_dir)
     runner = Runner(json_mode, plan.clear_zephyr_base, dry_run)
 
@@ -2653,6 +3993,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         checkout moved back when `_undo_relocation` reports it did not. No-op
         when this run never relocated anything.
         """
+        nonlocal paths
         nonlocal sdk_root, sdk, reported_project
         if relocation_undo is None:
             return
@@ -2663,6 +4004,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             relocation_undo.previous_pointer,
             relocation_undo.project_pin_root,
             relocation_undo.previous_project_pin,
+            relocation_undo.previous_registry,
         )
         if undo.moved_back:
             # The checkout itself is back; anything the failed step already
@@ -2696,12 +4038,14 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     f"moved it back to {_native(relocation_undo.old_root)}, but "
                     f"{undo.detail}. The default SDK pointer may still name the "
                     f"vacated path -- "
-                    f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                    f"{_global_default_fix_hint()} "
                     f"(to point at {_native(relocation_undo.old_root)}).",
                 )
-            paths.repo_root = Path(relocation_undo.old_root)
-            paths.workspace_dir = relocation_undo.workspace_dir
-            paths.venv_dir = relocation_undo.venv_dir
+            # `nonlocal` because this is a CLOSURE over `_run`'s `paths`, not
+            # a mutation of a shared object -- the rebinding has to reach the
+            # enclosing scope the way the old in-place writes did. The
+            # read-only `payload` closure needs no such declaration.
+            paths = relocation_undo.paths
             sdk_root = relocation_undo.old_root
             sdk = SdkInfo(sdk_root, active_tier)
             reported_project = relocation_undo.project
@@ -2715,7 +4059,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"could NOT move it back to {_native(relocation_undo.old_root)} "
                 f"({undo.detail}); the checkout is still at {_native(moved_to)} and the "
                 f"default SDK still points there. Move it back by hand, then "
-                f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                f"{_global_default_fix_hint()} "
                 f"(to point at {_native(relocation_undo.old_root)}).",
             )
 
@@ -2811,8 +4155,27 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             log.warn(*ceiling)
         pip_phase(ws, venv, log, runner, host)
 
-    # NOTE: this does NOT install the Zephyr SDK (the cross toolchains). Real
-    # silicon targets need it -- run `west sdk install` from the workspace once.
+    # tan-cli#1296: AFTER pip (`west patch` imports pykwalify, which the pip
+    # phase installs) and independent of the toolchain phase below -- neither
+    # one's failure skips the other.
+    if no_patches:
+        log.line("Skipping zephyr/patches.yml (--no-patches) -- it is NOT applied")
+    elif venv is not None and not no_west:
+        patches_phase(ws, venv, log, runner, sdk_root)
+
+    # ADR 0021 Lane 1 P1 (issue #474): the FINAL phase, deliberately -- it
+    # reads `<sdkRoot>/metadata/toolchains.json` at runtime and needs the west
+    # workspace the west phase (further up) resolved (or reused).
+    if no_toolchain:
+        log.line("Skipping cross-toolchain acquisition (--no-toolchain)")
+    elif no_west:
+        log.line(
+            "Skipping cross-toolchain acquisition (--no-west: no west workspace to "
+            "run `west sdk install` from)"
+        )
+    else:
+        toolchain_phase(ws, log, runner, sdk_root, venv, is_windows=is_windows)
+
     venv_bin_dir = venv.bin_dir if venv else facts.venv_bin_dir(is_windows)
     text = optional_libs_block(facts, host)
     text.append("")
@@ -2938,6 +4301,179 @@ def _read_global_sdk_pointer() -> bytes | None:
         return pointer.read_bytes() if pointer.is_file() else None
     except Exception:  # noqa: BLE001 -- best-effort, like _write_global_sdk_pointer
         return None
+
+
+def _read_global_sdk_registry_bytes() -> bytes | None:
+    """`~/.alp/sdk-defaults.json`'s current bytes, or `None` when absent --
+    the tan-cli#466 sibling of `_read_global_sdk_pointer`, snapshotted the
+    same moment and for the same reason: a later rollback restores exactly
+    what was there, and `None` restores "absent", not an empty file, for the
+    common case of a first relocation ever run on the machine."""
+    try:
+        path = registry_path(_home_alp_dir())
+        return path.read_bytes() if path.is_file() else None
+    except Exception:  # noqa: BLE001 -- best-effort, like _read_global_sdk_pointer
+        return None
+
+
+#: `pathlib._IGNORED_WINERRORS` on the 3.12 stdlib this repo floors at
+#: (`pyproject.toml: requires-python = ">=3.12"`) folds all three of these
+#: `winerror` codes into the SAME `False` a genuinely gone path produces --
+#: but they are not the same SHAPE, and `_origin_exists` deliberately tells
+#: them apart rather than reproducing `Path.is_dir()`'s answer:
+#:
+#: * `21` is `pathlib._WINERROR_NOT_READY` ("drive exists but is not
+#:   accessible") -- the exact shape a disconnected mapped or removable
+#:   drive raises. TRANSIENT: the drive can come back, so this is
+#:   inconclusive, not confirmed-dead.
+#: * `123` (`ERROR_INVALID_NAME`) and `1921` (`ERROR_CANT_RESOLVE_FILENAME`)
+#:   are PERMANENT structural dead ends -- a malformed path string, or (CI
+#:   caught this one live on `windows-latest`, review of #971 round 2: a
+#:   self-referencing symlink's `os.stat` raises `WinError 1921` on real
+#:   Windows, not an errno this function's own confirmed-dead errno set
+#:   would otherwise catch) a symlink loop. Both are the Windows-side
+#:   sibling of the POSIX `ENOTDIR`/`ELOOP` cases just below: the path can
+#:   never resolve, on this host, no matter how long this process waits --
+#:   the same "dead" fact this function already treats a symlink loop as.
+_INCONCLUSIVE_WINERRORS = (21,)
+_DEAD_WINERRORS = (123, 1921)
+
+
+def _origin_exists(origin: str) -> bool:
+    """`prune_dead_origins`'s injected filesystem check, production shape:
+    does `origin` -- a registry key, always an absolute directory
+    `sdk_default_registry`'s own module docstring already establishes as the
+    only kind of value that can appear there -- still exist as a directory on
+    this host.
+
+    **Deliberately `os.stat` plus an explicit errno/winerror check, not
+    `Path.is_dir()`** (review of #971, tan-cli#464 the second time around).
+    `Path.is_dir()` degrades an INCONCLUSIVE stat to `False` exactly as
+    readily as a CONFIRMED-absent one: besides `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` (a missing path, a parent that turned out to be a file, a bad
+    descriptor, a symlink loop -- these four stay treated as confirmed-dead
+    below, same as before), it also folds in `WinError 21` -- a live
+    project on a volume that is merely unmounted or offline right now (a
+    disconnected mapped or removable drive) reads as gone. That is the
+    exact tan-cli#464 wrong-answer this registry exists to prevent -- the
+    project falls back to the last-writer-wins `globalDefault` tier --
+    except reached by symptom (a cable unplugged mid-session) instead of by
+    cause (no origin key at all).
+
+    So the check here is spelled out rather than delegated to `Path.is_dir()`,
+    and the two Windows-specific tables above are checked in the same
+    breath as, not folded into, the POSIX errno set: `_INCONCLUSIVE_WINERRORS`
+    (checked FIRST, always wins over any `errno` the same `OSError` also
+    carries -- a not-ready drive's failure can carry an `ENOENT`-shaped
+    `errno` alongside `WinError 21`, and the `winerror` is the more
+    specific, more correct signal) degrades to `True`; `_DEAD_WINERRORS`,
+    checked next, degrades to `False` for the same reason a POSIX symlink
+    loop does (see below) -- confirmed, not merely unavailable. Only then
+    does `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` count as confirmed-dead, same as
+    `Path.is_dir()` already treated them (a symlink loop or a broken link
+    can never again resolve to a real directory a `workspace_root` could
+    sit under, so treating it the same as "gone" is not overreach).
+    Everything else -- most notably a permission error (`EACCES`, e.g. an
+    unreadable parent directory) -- degrades to `True`: an origin this
+    process could not conclusively resolve is inconclusive, not
+    confirmed-dead, and `prune_dead_origins` drops an entry only on a
+    confirmed absence. A stat that succeeds but names a non-directory (the
+    origin's directory was replaced by a plain file) is a real, confirmed
+    answer -- no exception to catch -- so it returns `False` directly.
+    """
+    try:
+        mode = os.stat(origin).st_mode
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror in _INCONCLUSIVE_WINERRORS:
+            return True
+        if winerror in _DEAD_WINERRORS:
+            return False
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+            return False
+        return True
+    return stat.S_ISDIR(mode)
+
+
+def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
+    """Key `origin -> sdk_root` into `~/.alp/sdk-defaults.json`, ALONGSIDE
+    (never instead of) the legacy `_write_global_sdk_pointer` write this
+    always runs beside (tan-cli#466). `origin` is the same absolute project
+    root `_write_global_sdk_pointer`'s own `written_for` already records --
+    the directory THIS bootstrap ran in.
+
+    **Also prunes every DEAD origin in the same read-modify-write**
+    (tan-cli#905): before `with_entry` keys in this run's own origin, every
+    existing entry whose origin directory no longer exists
+    (`sdk_default_registry.prune_dead_origins`, `_origin_exists` above) is
+    dropped. Riding this call rather than a new command or a new lock is
+    deliberate -- it is already the one place that reads, modifies, and
+    atomically rewrites this file, so pruning here adds no new race the
+    concurrency paragraph below does not already cover, and needs no new CLI
+    surface: the registry shrinks back down on the cadence it already grows
+    on, one relocating bootstrap at a time.
+
+    A concurrent second `tan bootstrap` on the host could race this
+    read-modify-write (no file lock -- matching every other pointer write in
+    this file, none of which locks either), so the LOSER of that race drops
+    the winner's entry rather than merging it. Accepted for the same reason
+    the legacy pointer's own last-writer-wins race already is: two bootstraps
+    finishing within the same instant on one machine is rare enough that a
+    lock free-for-all here would add real complexity against a race that,
+    worst case, degrades one of the two entries back to tan-cli#464's
+    disclosed-but-foreign path -- never to a crash or a corrupt file, since
+    the read half already tolerates any malformed content
+    (`sdk_default_registry.parse_registry`). The prune added by tan-cli#905
+    carries the SAME tolerance and no more: it can only race away a
+    concurrent write's just-added entry if that entry's own origin somehow
+    failed `_origin_exists` in the same instant it was written (it cannot --
+    the writer only ever runs `_origin_exists` against a directory a
+    bootstrap just finished running in), so in practice a losing prune only
+    ever re-drops an ALREADY-dead entry the winner's own read had not yet
+    pruned, which the winner's own next bootstrap removes anyway.
+
+    Best-effort, like `_write_global_sdk_pointer`: a permission error or a
+    full disk here degrades silently to "no registry entry for this origin",
+    which resolves exactly like tan-cli#464 already did before this issue --
+    not a failed bootstrap, since the checkout itself already moved
+    successfully by the time this runs.
+
+    **Written via `atomic_write_text` (review, #904, minor 2), not a bare
+    `write_text` truncate-then-write.** The legacy `~/.alp/sdk-default`
+    pointer's own bare `write_text` matched its risk profile while it held
+    ONE project's answer: an interrupted or crash-timed write there loses
+    only that one pointer, and the caller already re-derives it on the next
+    `tan bootstrap`. This registry holds EVERY project's answer on the host,
+    so the same bare-write shape now has an N-project blast radius -- an
+    interrupted write here (or a read racing a half-written file on a
+    filesystem with no atomic-rename semantics, the read side already
+    tolerates that) would degrade every origin back to tan-cli#464's
+    disclosed-but-foreign path at once, not just the one this call is
+    updating. `atomic_write_text` writes the temp sibling then `os.replace`s
+    it into place, so a reader never observes a partial file at all.
+
+    `sdk_root` posix-normalised, `updatedAt` millisecond-precision (review, #904 second round).
+
+    **`updatedAt` comes from `wall_clock_iso`, not `generated_at_iso`**
+    (review, #904 third round, major). This field is the recency tie-break
+    key `sdk_default_registry.deepest_covering_entry` compares across
+    entries -- machine-local runtime state, never a reproducible artefact --
+    so it must NOT let `SOURCE_DATE_EPOCH` win: two bootstraps inside one
+    `SOURCE_DATE_EPOCH`-pinned shell (exactly what CI and reproducible-build
+    setups export) would otherwise stamp the identical `updatedAt`, silently
+    reopening the tie `deepest_covering_entry`'s recency rule exists to
+    break. See `wall_clock_iso`'s own docstring for the measured repro.
+    """
+    try:
+        path = registry_path(_home_alp_dir())
+        raw = path.read_text(encoding="utf-8") if path.is_file() else None
+        stamp, posix_root = wall_clock_iso(millis=True), _to_posix(Path(sdk_root))
+        pruned = prune_dead_origins(load_raw(raw), origin_exists=_origin_exists)
+        registry = with_entry(pruned, origin=origin, sdk_root=posix_root, updated_at=stamp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(path), registry_text(registry))
+    except Exception:  # noqa: BLE001 -- best-effort by contract
+        pass
 
 
 def _project_pin_file(project_root: str) -> Path:
@@ -3093,18 +4629,21 @@ def _undo_relocation(
     previous_pointer: bytes | None,
     project_pin_root: str | None = None,
     previous_project_pin: bytes | None = None,
+    previous_registry: bytes | None = None,
 ) -> RelocationUndoResult:
     """Rollback of a relocation THIS run performed, for when a step after it
     -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
     after all (tan-cli#284): move the checkout back to where it was, and
     restore (or remove) the global default-SDK pointer this run overwrote --
     plus, tan-cli#644, the project's own `.alp/sdk-path` pin, when THIS run
-    also rewrote that (`project_pin_root` is `None` whenever it did not).
-    Restoring the project pin matters here for the same reason restoring the
-    global pointer already did: the checkout is moving back to `old_root`, so
-    a pin left naming the vacated `sdk_root` this run set would be exactly
-    the stale, unresolvable pin tan-cli#644 exists to stop leaving behind --
-    just introduced by the rollback instead of by a completed relocation.
+    also rewrote that (`project_pin_root` is `None` whenever it did not) --
+    plus, tan-cli#466, this run's own entry in `~/.alp/sdk-defaults.json`.
+    Restoring the project pin and the registry both matter here for the same
+    reason restoring the legacy pointer already did: the checkout is moving
+    back to `old_root`, so anything left naming the vacated `sdk_root` this
+    run set would be exactly the stale, unresolvable state those two features
+    exist to stop leaving behind -- just introduced by the rollback instead
+    of by a completed relocation.
 
     `moved_back=False` means `relocate_checkout` itself refused -- e.g.
     because the vacated original path was recreated in the meantime, which
@@ -3129,6 +4668,24 @@ def _undo_relocation(
             pointer.write_bytes(previous_pointer)
     except OSError as err:
         failures.append(f"the default SDK pointer could not be restored: {err}")
+    try:
+        registry_file = registry_path(_home_alp_dir())
+        if previous_registry is None:
+            registry_file.unlink(missing_ok=True)
+        else:
+            # `atomic_write_bytes`, not a bare `write_bytes` (review, #904
+            # third round, nit): the registry's N-project blast radius is the
+            # exact argument `_write_global_sdk_registry` already made for
+            # its own forward write, and it applies unchanged to this
+            # rollback -- same file, same readers, same interrupted-write
+            # hazard. `atomic_write_bytes`, not `atomic_write_text`, because
+            # `previous_registry` is a byte snapshot the read side never
+            # required to be valid UTF-8 (`parse_registry`'s own
+            # never-raises-on-malformed-content contract), and this rollback
+            # must be able to restore it unchanged either way.
+            atomic_write_bytes(str(registry_file), previous_registry)
+    except OSError as err:
+        failures.append(f"the default SDK registry could not be restored: {err}")
     project_pin_failure = _restore_project_pin(project_pin_root, previous_project_pin)
     if project_pin_failure is not None:
         failures.append(project_pin_failure)
@@ -3149,6 +4706,24 @@ def bootstrap(
     ),
     no_pip: bool = typer.Option(False, "--no-pip", help="Skip the pip dependency installs."),
     no_west: bool = typer.Option(False, "--no-west", help="Skip the west init/update step."),
+    no_toolchain: bool = typer.Option(
+        False,
+        "--no-toolchain",
+        help=(
+            "Skip acquiring the arm-zephyr-eabi cross toolchain (ADR 0021 Lane 1 P1). "
+            "The workspace venv/west/pip steps are unaffected; native_sim builds do "
+            "not need the cross toolchain at all."
+        ),
+    ),
+    no_patches: bool = typer.Option(
+        False,
+        "--no-patches",
+        help=(
+            "Skip applying the SDK's zephyr/patches.yml to the Zephyr and module "
+            "trees (tan-cli#1296). Builds that need those patches will not compile; "
+            "use it only to leave an adopted workspace's module trees untouched."
+        ),
+    ),
     print_env: bool = typer.Option(
         False, "--print-env", help="Print the environment-variable lines and exit."
     ),
@@ -3207,6 +4782,8 @@ def bootstrap(
             sdk_root_flag=sdk_root,
             no_pip=no_pip,
             no_west=no_west,
+            no_toolchain=no_toolchain,
+            no_patches=no_patches,
             print_env=print_env,
             allow_partial=allow_partial,
             workspace=workspace,

@@ -164,6 +164,10 @@ class Slice:
     # its console.  Consumed by the console emitter for `diagnostics.
     # sim_console:` (issue #686).
     hw_console: bool = True
+    # `diagnostics.link: itcm` (tan-cli#1350): set by the loader on the one
+    # slice the knob retargets (the Zephyr M55-HE). Such a slice links at 0x0
+    # and must never be flashed to MRAM -- `_slice_flash_recipe` keys off it.
+    link_target: Optional[str] = None
     # SEGGER J-Link **part-number flash-device** profile for this slice's
     # SoC variant (soc-spec-v1 `variants[].debug.jlink_flash_device`) --
     # unlocks the built-in Alif MRAM loader (Flow D), distinct from the
@@ -412,6 +416,9 @@ class BoardProject:
     ota: dict[str, Any] = field(default_factory=dict)
     storage: list[StorageEntry] = field(default_factory=list)
     security: dict[str, Any] = field(default_factory=dict)
+    # Resolved per-product core ownership ({E1M instance: core}); empty when
+    # the SoM family declares no `assignable:` block (ownership.resolve_ownership).
+    ownership: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     # The metadata tree this project was RESOLVED against (tan-cli#573).
     # `load_board_yaml(..., metadata_root=...)` records its caller's root
@@ -423,6 +430,11 @@ class BoardProject:
     # `storage[].flash_device` the resolver then blocks.
     # `None` means "the bound root" -- see `effective_metadata_root()`.
     metadata_root: Optional[Path] = None
+    # Directory of the board.yaml this project was loaded from; anchors a
+    # slice's relative `app:` so the emitters can read the app's own
+    # `prj.conf` (e.g. to avoid shrinking an app-set RAM console size,
+    # tan-cli#1401).  `None` for a project built without a file.
+    source_dir: Optional[Path] = None
 
     def effective_metadata_root(self) -> Path:
         """The metadata tree to read SoM/SoC facts from for THIS project.
@@ -477,6 +489,7 @@ class SystemManifest:
     partitions: list[ResolvedPartition] = field(default_factory=list)
     boot_order: list[dict[str, Any]] = field(default_factory=list)
     helper_mcus: list[dict[str, Any]] = field(default_factory=list)
+    memory_regions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         hw_info: dict[str, Any] = {
@@ -506,4 +519,15 @@ class SystemManifest:
         }
         if self.partitions:
             out["storage"] = [p.to_manifest_entry() for p in self.partitions]
+        # `memory` is OMITTED, never emitted empty (#1365 item 3): the schema
+        # makes an absent pane mean "this producer does not emit it yet",
+        # so `memory: []` would tell a consumer a SoM whose silicon_variant
+        # is still `TBD` has no memory regions.  Rows arrive already shaped
+        # by memory.resolve_memory_regions() -- unlike ipc/storage there is
+        # no per-row dataclass, matching the helper_mcus precedent.
+        if self.memory_regions:
+            out["memory"] = list(self.memory_regions)
+        # Additive, omitted when the SoM declares no assignable resources.
+        if self.project.ownership:
+            out["ownership"] = dict(self.project.ownership)
         return out

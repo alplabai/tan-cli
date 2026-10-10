@@ -190,7 +190,10 @@ def test_rejects_a_malformed_command(command_json, fragment):
 # the real invariant on every platform instead of only ever exercising the
 # POSIX branch (the trap that made `/usr/bin/west` a Windows CI failure:
 # `PureWindowsPath("/usr/bin/west").is_absolute()` is False -- no drive --
-# even though `ntpath.isabs` says True).
+# even though `ntpath.isabs` said True on the 3.12 floor this was written
+# against; from 3.13 on it says False too, tan-cli#1126. The trap is
+# `is_absolute()`'s answer, which has not moved on any measured
+# interpreter -- the `ntpath` aside was only ever the contrast).
 _HOST_ABSOLUTE_TOOL = "C:\\tools\\west.exe" if os.name == "nt" else "/usr/bin/west"
 _FOREIGN_ABSOLUTE_TOOL = "/usr/bin/west" if os.name == "nt" else "C:\\tools\\west.exe"
 

@@ -7,6 +7,17 @@ the target class + server, resolve what this project's own build already knows
 `<workspace>/.vscode/launch.json`. A malformed existing launch.json -> exit 5;
 a failed write -> exit 3.
 
+A write also reads and (best-effort) rewrites one more file:
+`<workspace>/.alp/debug-launch-provenance.json` (tan-cli#518) -- a
+content-hash record of which `configFiles`/`setupCommands` list entries THIS
+command itself wrote, so a LATER merge can tell its own prior output apart
+from the customer's without guessing from position. See `tan.core.
+launch_provenance`'s module docstring for the full design and
+`debug_launch.create_launch_json_write_plan`'s for how it gates the merge.
+Losing that file (deleted, corrupted, never written) never blocks a write and
+never risks customer content -- it only makes the NEXT merge more
+conservative.
+
 Everything else this command refuses is the CALLER's own precondition or flag
 value to fix, not a tan crash, so it exits `VALIDATION_FAILURE` (2)
 (tan-cli#462, matching the distinction tan-cli#262 settled for `tan
@@ -58,6 +69,19 @@ indistinguishable, to the extension, from tan producing nothing at all -- it
 renders an empty panel with no error -- so the outer guard in [`debug_config`]
 converts any unexpected exception into `debug-config.internal-failure` at exit
 5 rather than letting it escape.
+
+**The written profile now says whether it programs the device (tan-cli#945).**
+Two additive facts close the gap alp-sdk-vscode#586 found: a cortex-debug
+`configuration` always carries an explicit `loadFiles` key (naming the
+artefact it programs -- `create_launch_draft` never omits it, matching the
+adapter's own default exactly rather than leaving it implicit), and every
+`data` payload carries `programsDevice: bool` (`tan.core.debug_launch.
+programs_device`), true for zephyr-mcu/baremetal-mcu, false for
+yocto-userspace (a cppdbg attach to an already-deployed gdbserver) and
+native-host (no target hardware exists). Neither field changes which profiles
+this command writes to a workspace it did not author -- a hand-written
+cortex-debug entry is still owed the same inference the extension already
+does for it (see the issue's own "Scope, honestly").
 """
 
 from __future__ import annotations
@@ -71,7 +95,18 @@ from typing import Any
 import typer
 
 from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
+# The openocd-on-PATH probe is BORROWED, not rebuilt (tan-cli#1179). Both
+# names are private to `support_bundle_cmd`, and importing them is still the
+# right call: `_RUNTIME_EXECUTABLES[OPENOCD]` is the candidate-name table and
+# `_first_on_path` resolves it through `doctor_cmd.on_path` -- the same single
+# lookup `tan support-bundle` reports. A second, independently written probe
+# here would be free to disagree with the bundle a customer attaches to the
+# bug report about this very note, and to miss a second openocd spelling the
+# table later learns. No cycle: nothing under `tan/commands/` imports this
+# module, and `cli.py` already pulls `support_bundle_cmd` into every graph.
+from tan.commands.support_bundle_cmd import _RUNTIME_EXECUTABLES, _first_on_path
 from tan.core.atomic_write import atomic_write_text
+from tan.core.flash_plan import FlashPlanError, fa_str_checked, validate_identifier
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     GDBSERVER,
@@ -90,16 +125,21 @@ from tan.core.debug_launch import (
     create_launch_draft,
     create_launch_json_write_plan,
     explicit_core_unknown_message,
+    multi_core_without_core_message,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
     is_unresolved_placeholder,
     launch_preview_document,
     launch_preview_notes,
+    load_files_preserved,
     manifest_slices,
     parse_server_kind,
     parse_target_kind,
+    programs_device,
     sdk_identity_overwrites,
+    sdk_identity_stranded_appends,
 )
+from tan.core import launch_provenance
 from tan.core.global_flags import accept_global_flags
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import is_native_sim_board, native_sim_exe_beside
@@ -317,6 +357,19 @@ def _select_slice(
     )
 
 
+def _slice_jlink_serial(slice_: dict[str, Any]) -> str | None:
+    """The slice's `flash_args.jlink_serial` -- the probe `tan flash` selects --
+    or `None` when absent or malformed (validated the way `tan flash` does, so
+    a value it would refuse is never written into launch.json)."""
+    try:
+        serial = fa_str_checked(slice_.get("flash_args"), "jlink_serial", False)
+        if serial is not None:
+            validate_identifier(serial, "jlink_serial")
+    except FlashPlanError:
+        return None
+    return serial
+
+
 def _runner_arg_values(argv: Any, flag: str) -> list[str]:
     """Every value a runner's argv gives for `flag`, in either form west emits:
     `--device=Cortex-M55` (inline) or `--config <path>` (separate token).
@@ -395,6 +448,9 @@ def _resolve_from_build(
             artefact = native_sim_exe_beside(artefact)
         resolution.executable = _workspace_relative(workspace_root, artefact)
 
+    if server == JLINK:
+        resolution.probe_serial = _slice_jlink_serial(slice_)
+
     build_dir = _str_or_none(slice_.get("build_dir"))
     if build_dir is None:
         return resolution, [], core_id
@@ -422,7 +478,10 @@ def _resolve_from_build(
     return resolution, _str_list(runners.get("runners")), core_id
 
 
-def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
+def _sdk_variant_debug_block(
+    sdk_root: str, sku: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> dict[str, Any] | None:
     """The resolved SoC-JSON `variants[].debug` block for `sku`'s SoM preset,
     or `None` when any step of the walk fails to resolve one.
 
@@ -435,9 +494,23 @@ def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
     `tan size` itself relies on -- a drifted/`TBD` preset must resolve NO
     identity rather than possibly a WRONG one that still connects a live debug
     session to the wrong part (alp-sdk#1026 review finding #7).
+
+    *warnings* (tan-cli#964 review, major 5): threaded straight through to
+    `read_sdk_som_and_soc`, which threads it into both leaf readers'
+    `validate_document` calls -- the same `metadata_root`/`warnings`
+    convention `tan size` already uses. Before this, `tan debug-config`
+    called `read_sdk_som_and_soc` with no `warnings` at all, so it validated
+    NOTHING despite the PR body's own claim that it inherited #964's WARN
+    half "transitively" -- it did not, until this parameter existed.
+
+    *skipped* (tan-cli#964 review, major 6): same threading, for the
+    "skip-but-disclose" collector -- a note when the schema file itself is
+    simply absent, rather than the silent `[]` that used to be.
     """
     metadata_root = os.path.join(sdk_root, "metadata")
-    walked = read_sdk_som_and_soc(metadata_root, sku)
+    walked = read_sdk_som_and_soc(
+        metadata_root, sku, warnings=warnings, skipped=skipped, explain_unsupported=True
+    )
     if walked is None:
         return None
     _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
@@ -461,11 +534,17 @@ def _board_som_sku(board_yaml_path: str) -> str | None:
     return sku if isinstance(sku, str) and sku != "" else None
 
 
-def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozenset[str]:
+def _sdk_published_cores(
+    sdk_root: str | None, board_yaml_path: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> frozenset[str]:
     """Every core id this project's SoM publishes, per the SDK -- the SoC
     JSON's own `cores[].id`, unioned with the `variants[].debug.jlink_device`
     keys. Empty whenever the walk resolves nothing, which the caller reads as
     "cannot be asked", never as "this SoM has no cores".
+
+    *warnings*/*skipped*: see `_sdk_variant_debug_block`'s own doc -- same
+    threading, same reason (tan-cli#964 review, majors 5/6).
 
     tan-cli#477 major 2. `--core` pre-build is NOT decoration: with no
     `build/system-manifest.yaml` to check against, it selects which core's
@@ -478,9 +557,9 @@ def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozense
 
     `cores[].id` is the authority; the `jlink_device` union only widens it for
     a SoC JSON that omits `cores` entirely. Measured across every SoC JSON in
-    alp-sdk `metadata/socs/**` (alif e3-e8, deepx dx/m1, nxp imx9/imx93,
+    alp-sdk `metadata/socs/**` (alif e3-e8, deepx dx/m1,
     renesas rzv2n/n44): the `jlink_device` keys are a SUBSET of `cores[].id`
-    in all nine, so on real metadata the union IS `cores[].id`. It is kept
+    in all of them, so on real metadata the union IS `cores[].id`. It is kept
     because the frozen contract fixture
     `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity/sdk` --
     which cannot be edited -- publishes `jlink_device` and no `cores` at all,
@@ -496,7 +575,10 @@ def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozense
     sku = _board_som_sku(board_yaml_path)
     if sku is None:
         return frozenset()
-    walked = read_sdk_som_and_soc(os.path.join(sdk_root, "metadata"), sku)
+    walked = read_sdk_som_and_soc(
+        os.path.join(sdk_root, "metadata"), sku, warnings=warnings, skipped=skipped,
+        explain_unsupported=True,
+    )
     if walked is None:
         return frozenset()
     _silicon, silicon_variant, variants, _soc_flash_mb, soc_cores = walked
@@ -590,6 +672,9 @@ def _fill_debug_probe_identity_from_sdk(
     sdk_root: str | None,
     board_yaml_path: str,
     core_id: str | None,
+    *,
+    warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[bool, frozenset[str]]:
     """alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
     `config_files` gaps from the SDK's published per-variant debug-probe
@@ -619,13 +704,16 @@ def _fill_debug_probe_identity_from_sdk(
     resolved to index with" or "the given core id has no entry in this SoM's
     published map" -- two distinct, both-fixable-by-`--core` causes the caller
     cannot tell apart, or name the known cores for, without this set.
+
+    *warnings*/*skipped*: see `_sdk_variant_debug_block`'s own doc -- same
+    threading, same reason (tan-cli#964 review, majors 5/6).
     """
     if sdk_root is None:
         return False, frozenset()
     sku = _board_som_sku(board_yaml_path)
     if sku is None:
         return False, frozenset()
-    debug = _sdk_variant_debug_block(sdk_root, sku)
+    debug = _sdk_variant_debug_block(sdk_root, sku, warnings=warnings, skipped=skipped)
     if debug is None:
         return False, frozenset()
     jlink_device = debug.get("jlink_device")
@@ -754,8 +842,170 @@ def _has_placeholder(value: Any) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#1179: the OpenOCD-without-host-tools note.
+# tan-cli#1194 review: the note's WORDING, split three ways so each spelling
+# is true in the state it is emitted in.
+#
+# THE SILENT SHAPE THIS CLOSES. Zephyr writes `config.openocd` /
+# `config.openocd_search` into `runners.yaml` only inside `if(OPENOCD)`
+# (`cmake/flash/CMakeLists.txt`), and `OPENOCD` is a bare, optional
+# `find_program(OPENOCD openocd)` (`cmake/modules/FindHostTools.cmake`, whose
+# own comment reads "openocd is an optional dependency") that normally finds
+# the SDK's copy through `list(APPEND CMAKE_PREFIX_PATH ${HOST_TOOLS_HOME}/usr)`
+# in the SDK's own `cmake/zephyr/host-tools.cmake`. Since tan-cli#1176/#1178
+# `tan bootstrap` passes `--no-hosttools`, so there is no `hosttools/` to find.
+# CMake's `if()` reads `OPENOCD-NOTFOUND` as false, so both keys are ABSENT
+# rather than present-and-empty; both `serverpath` and `searchDir` are ADDITIVE
+# keys in `apply_launch_resolution`, and neither appears as a `<resolved-...>`
+# placeholder in the OpenOCD draft, so `_has_placeholder` never sees them and
+# the "Placeholder fields" note never fires. Contrast `svdFile`/`svdPath`,
+# which ARE placeholders and ARE deleted -- that is the path that would have
+# warned. `NO_HOSTTOOLS_FLAG` in `tan.core.toolchain_provision` is where the
+# flag itself is decided, and records the same degradation from that side.
+#
+# A NOTE, NOT A FAILURE. The emitted configuration is valid and `configFiles`
+# still resolves (from `board.cmake`, not from `hosttools/`). What is missing
+# is one advisory field, so this rides in `data.notes` and `tan debug-config`
+# still exits 0 with `ok: true`.
+#
+# THREE CONDITIONS, ALL LOAD-BEARING -- see `doctor_cmd.west_check`'s own
+# account of the lesson ("a warning that fires on every correct install trains
+# users to ignore warnings"):
+#
+# * `server` AND the draft's `servertype` are both OpenOCD. `server` is what
+#   the caller asked for; `servertype` is what the FINAL draft emits, and a
+#   yocto-userspace (cppdbg) draft has no `serverpath` field to be missing in
+#   the first place -- warning there would be noise about a key that target
+#   kind never carries.
+# * `serverpath` is absent from the draft. That is the resolution's own
+#   answer, read the same way the rest of `_preview_notes_for` reads the final
+#   draft: `apply_launch_resolution` inserts the key if and only if
+#   `runners.yaml` gave it one.
+# * No `openocd` on PATH. This is what keeps a correctly-provisioned host
+#   quiet, including the MIXED host measured in tan-cli#1179 (system OpenOCD
+#   on PATH, no `hosttools/`), which is silenced twice over: with
+#   `find_program` succeeding, `runners.yaml` DOES carry `config.openocd` --
+#   alongside an `openocd_search` pointing at the SDK's nonexistent
+#   `share/openocd/scripts`, from `set_ifndef(OPENOCD_DEFAULT_PATH ...)`,
+#   measured benign because OpenOCD still loads off its built-in scripts
+#   directory -- so `serverpath` is present AND the probe finds one. A host
+#   that has OpenOCD but built before installing it stays quiet too:
+#   cortex-debug's own PATH lookup will find it, so there is nothing to tell
+#   that developer.
+#
+# WHICH WORDING (tan-cli#1194 review). The first spelling of this note
+# asserted "this project's runners.yaml has no 'config.openocd' key" in EVERY
+# state it fired in, including the state it fires in most often: before the
+# first build, where `_resolve_from_build` returns at its missing-manifest
+# branch and never opens a `runners.yaml` at all. That is the command's own
+# primary documented use ("`debug-config` must still emit its draft before
+# the first build", `_resolve_from_build`'s docstring), and it is the state the
+# `debug-config-preview-baremetal-mcu` contract golden records -- which
+# alp-sdk-vscode surfaces to the user VERBATIM. So:
+#
+# * `registered_runners` is the "was a build read" signal, and it is the right
+#   one because `_resolve_from_build` returns `[]` from every branch that
+#   opened no readable `runners.yaml`: no manifest / no matching slice, a
+#   slice with no `build_dir`, and a `runners.yaml` that is missing or not a
+#   mapping. It over-approximates by exactly one contrived shape -- a
+#   `runners.yaml` that parses as a mapping but carries no `runners:` list --
+#   which is not a document any Zephyr build writes, and which by definition
+#   also carries no `config.openocd`, so both spellings describe a build that
+#   recorded nothing either way.
+# * `baremetal-mcu` gets NEITHER Zephyr spelling. It is a plain-CMake, no-OS
+#   backend (`os: baremetal` -> `baremetal_cmake_flash`,
+#   `BAREMETAL_PROJECT_INCLUDE`), so no Zephyr SDK, no `find_program(OPENOCD
+#   openocd)` and no `--no-hosttools` install is in its story at all, and
+#   `_resolve_from_build` only ever reads `<build_dir>/zephyr/runners.yaml` --
+#   which that backend does not write. Handing that target kind a paragraph
+#   about the Zephyr SDK's host tools sends the reader to fix a thing that is
+#   not their problem. It still gets the actionable half (install `openocd`,
+#   put it on PATH, cortex-debug will find it), because a host with no
+#   `openocd` genuinely cannot start this session.
+# * Only `zephyr-mcu` and `baremetal-mcu` can reach here at all:
+#   `SERVERS_BY_TARGET` offers `openocd` to those two and no others, and the
+#   `servertype` condition above already excludes every non-cortex-debug
+#   draft.
+# ---------------------------------------------------------------------------
+#: The half both Zephyr spellings end with: what to do about it. Factored out
+#: so the advice has exactly one spelling and cannot drift between the two.
+_OPENOCD_ZEPHYR_ADVICE = (
+    "tan bootstrap installs the Zephyr SDK with --no-hosttools, so the SDK "
+    "ships no OpenOCD of its own and Zephyr's optional find_program(OPENOCD "
+    "openocd) has none to record -- OpenOCD has to come from the system on "
+    "this host. Install it (your package manager's 'openocd', or a vendor "
+    "build), put it on PATH, and build this project so tan can fill "
+    "'serverpath' in; PATH alone is already enough for a session, because "
+    "cortex-debug falls back to its own PATH lookup when 'serverpath' is "
+    "absent."
+)
+
+#: A BUILD WAS READ and its `runners.yaml` carries no `config.openocd`. Kept
+#: at module scope so the emitter and the tests that pin it have exactly one
+#: spelling.
+OPENOCD_NO_HOSTTOOLS_NOTE = (
+    "No OpenOCD executable could be resolved for this build, so this profile "
+    "carries no 'serverpath' (and no 'searchDir'): this project's runners.yaml "
+    "has no 'config.openocd' key, and no 'openocd' is on PATH here either. "
+    + _OPENOCD_ZEPHYR_ADVICE
+    + " Nothing else about this configuration is missing -- 'configFiles' "
+    "resolves from board.cmake, not from the SDK's host tools."
+)
+
+#: NO BUILD WAS READ -- the pre-build state, and the one the contract golden
+#: records. Says there is no `runners.yaml` to have read a key out of, rather
+#: than asserting something about a file that does not exist. The closing
+#: sentence differs on purpose: pre-build EVERYTHING is still a placeholder,
+#: so "nothing else is missing" would be false here.
+OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD = (
+    "No OpenOCD executable could be resolved for this draft, so it carries no "
+    "'serverpath' (and no 'searchDir'): this project has no build output for "
+    "tan to read a runners.yaml out of yet, and no 'openocd' is on PATH here "
+    "either. "
+    + _OPENOCD_ZEPHYR_ADVICE
+    + " The rest of this draft is unresolved for the ordinary pre-build "
+    "reason the placeholder note above gives, not for want of host tools."
+)
+
+#: `baremetal-mcu`: no Zephyr, so no Zephyr-SDK paragraph. The actionable half
+#: only, plus the real reason `serverpath` is absent on this target kind.
+OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL = (
+    "No OpenOCD executable could be resolved for this draft, so it carries no "
+    "'serverpath' (and no 'searchDir'), and no 'openocd' is on PATH here "
+    "either. This is a baremetal target, built by tan's plain-CMake backend "
+    "rather than by Zephyr, and tan fills 'serverpath' in only from a Zephyr "
+    "build's runners.yaml -- so nothing here recorded an OpenOCD path and it "
+    "has to come from the system. Install it (your package manager's "
+    "'openocd', or a vendor build) and put it on PATH; that alone is enough "
+    "for a session, because cortex-debug falls back to its own PATH lookup "
+    "when 'serverpath' is absent."
+)
+
+
+def _openocd_hosttools_note(
+    draft: dict[str, Any], server: str, registered_runners: list[str], target: str
+) -> str | None:
+    """The OpenOCD-without-a-`serverpath` note for the state this run is
+    actually in, or `None` when OpenOCD was not asked for, the resolution
+    produced a `serverpath`, or an `openocd` is on PATH. Which of the three
+    spellings, and why the wording is split at all, is in the block comment
+    above."""
+    if server != OPENOCD or draft.get("servertype") != OPENOCD:
+        return None
+    if "serverpath" in draft:
+        return None
+    if _first_on_path(_RUNTIME_EXECUTABLES[OPENOCD]) is not None:
+        return None
+    if target == BAREMETAL_MCU:
+        return OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL
+    if not registered_runners:
+        return OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD
+    return OPENOCD_NO_HOSTTOOLS_NOTE
+
+
 def _preview_notes_for(
-    draft: dict[str, Any], registered_runners: list[str], server: str
+    draft: dict[str, Any], registered_runners: list[str], server: str, target: str
 ) -> list[str]:
     """The preview notes, minus the "still needs resolution" warning once nothing
     is left to resolve. Keyed off the FINAL draft rather than off "did anything
@@ -782,6 +1032,9 @@ def _preview_notes_for(
             f"This build registers no '{runner}' runner (runners.yaml: {rendered}), "
             "so its fields could not be resolved."
         )
+    hosttools_note = _openocd_hosttools_note(draft, server, registered_runners, target)
+    if hosttools_note is not None:
+        notes.append(hosttools_note)
     return notes
 
 
@@ -898,6 +1151,57 @@ def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_valu
     )
 
 
+def _sdk_identity_appended_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
+    """tan-cli#982 review finding #2: the accepted degradation
+    [`sdk_identity_stranded_appends`] exists to name -- an existing `field`
+    entry `provenance` could not prove was tan's own prior output was left in
+    place, and the value resolved this run from the SDK's published
+    debug-probe identity (alp-sdk#987) was APPENDED beside it rather than
+    replacing it. Severity `info`, same family as
+    `debug-config.comments-dropped` / `debug-config.legacy-entry-untouched`:
+    nothing failed, but a customer never told two `configFiles` entries now
+    sit on the same launch configuration has no way to know one is stale --
+    OpenOCD sources every `-f`, so two board configs on one TAP fail the
+    debug session outright, the same failure class this write just created
+    silently."""
+    return Issue(
+        "debug-config.sdk-identity-appended",
+        "info",
+        f'This write left the existing `{field}` value "{existing_value}" in place '
+        f'and appended "{incoming_value}", resolved from the SDK\'s published '
+        "debug-probe identity (alp-sdk#987), instead of replacing it -- tan could "
+        f'not prove "{existing_value}" was its own prior output (no recorded '
+        "`.alp/` provenance for it), so it left it rather than risk overwriting a "
+        "value you filled in by hand. If it is stale, delete it from "
+        ".vscode/launch.json yourself.",
+    )
+
+
+def _load_files_preserved_issue(existing_value: str, incoming_value: str) -> Issue:
+    """tan-cli#1020 review: the ``loadFiles`` sibling of
+    ``debug-config.sdk-identity-appended`` above -- ``loadFiles`` names ONE
+    deliberate artefact list per configuration, not a set of independently
+    owned entries, so its own merge rule (``debug_launch._merge_load_files``)
+    never appends beside an unproven existing value the way
+    `configFiles`/`setupCommands` do; it leaves the existing value untouched,
+    wholesale. Severity ``info``, same family as its siblings: nothing
+    failed, but a tool that silently keeps a customer's value at `exit 0`
+    with `issues: []` -- including a customer's own deliberate attach-only
+    ``[]`` -- has told them nothing about the divergence between what is on
+    disk and what this run would otherwise have written."""
+    return Issue(
+        "debug-config.load-files-preserved",
+        "info",
+        f'This write left the existing `loadFiles` value "{existing_value}" in place '
+        f'instead of replacing it with "{incoming_value}", resolved from this run\'s '
+        "own draft -- tan could not prove the existing value was its own prior output "
+        "(no recorded `.alp/` provenance for it), so it left it rather than risk "
+        "overwriting a value that may have been filled in by hand, including an "
+        "explicit `[]` for an attach-only session. If it is stale, update it in "
+        ".vscode/launch.json yourself.",
+    )
+
+
 def _comments_dropped_issue() -> Issue:
     """tan-cli#182 review finding #2: this write dropped a comment (or trailing
     comma) sitting inside a span it rewrote. Severity `info` -- nothing failed
@@ -933,6 +1237,21 @@ def _data(
         "preview": preview,
         "launchJsonPath": launch_json_path,
         "replaced": replaced,
+        # tan-cli#945: producer-stated, so a consumer never has to re-derive
+        # "does starting this profile write real hardware" from cortex-debug's
+        # own adapter schema (its `loadFiles` default, or one of thirteen
+        # `*Commands` lists that could carry a bare `load`) the way
+        # alp-sdk-vscode#586 had to before its consent dialog could even ask
+        # the question. Derived from `target` alone (`programs_device`), so it
+        # is present on every outcome this command can report, including a
+        # failure before a `configuration` was ever built -- but on one of
+        # the internal-failure backstop paths (`_internal_failure` and its
+        # siblings), `target` is a fixed `zephyr-mcu`/`none` placeholder that
+        # never learned what was actually asked for (tan-cli#1020 review),
+        # so there `programsDevice` is present and CONSERVATIVE (`true`,
+        # fail-safe), not necessarily an accurate answer for the target the
+        # caller actually named.
+        "programsDevice": programs_device(target),
         "notes": notes,
         # The launch configuration itself -- the very thing the command
         # produces. Additive: the envelope used to describe the write (path,
@@ -1215,6 +1534,24 @@ def _target_kind_ambiguous_failure(
     )
 
 
+def _core_required_failure(
+    generated_at: str, target: str, server: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#1488: `--core` omitted on a build with several cores of the
+    target class. The caller's own precondition (exit 2), like `tan probe` /
+    `tan flash`, which refuse the same case."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-required",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _no_debuggable_target_class_failure(
     generated_at: str, message: str, launch_json_path: str
 ) -> _Outcome:
@@ -1292,6 +1629,20 @@ def _success_text(
             lines.append(f"debug-config: {issue.message}")
     for issue in issues:
         if issue.code == "debug-config.comments-dropped":
+            lines.append(f"note: {issue.message}")
+    # tan-cli#1020 round 4: `debug-config.load-files-preserved` is the
+    # `flash-path`/`safety` disclosure this whole issue exists for -- a
+    # customer at a terminal (the DEFAULT output mode, not `--format json`)
+    # must be told `executable` and the actually-programmed `loadFiles` now
+    # disagree, the same way `comments-dropped` already is. Emitting it only
+    # under `--format json` left `launch_provenance.py`'s own "disclosed,
+    # every run" claim true for a consumer that never reads text output and
+    # false for one that does: measured, a terminal run over the residual
+    # (sidecar-lost-with-key-present) case printed three routine `note:`
+    # lines and exited 0 with no hint `loadFiles` had gone stale. Always
+    # shown, even under `--quiet`, for the same reason `comments-dropped` is.
+    for issue in issues:
+        if issue.code == "debug-config.load-files-preserved":
             lines.append(f"note: {issue.message}")
     if not quiet:
         lines.extend(f"note: {n}" for n in notes)
@@ -1448,6 +1799,23 @@ def _run(
             generated_at, str(err), cwd_launch_path, target, server
         )
 
+    # tan-cli#964 review (major 5): collects every `som-preset-v2`/
+    # `soc-spec-v1` schema violation found while EITHER SDK-metadata walk
+    # below reads this project's SoM preset/SoC JSON -- `_sdk_published_cores`
+    # (the --core guard, just below) and `_fill_debug_probe_identity_from_sdk`
+    # (the identity fallback, further down) share this one list rather than
+    # each collecting -- and reporting -- its own, so a violation both walks
+    # would hit is not folded into two `debug-config.metadata-schema-invalid`
+    # issues.  Before this, `tan debug-config` passed no `warnings` to either
+    # walk and validated NOTHING, despite #964's PR body claiming it inherited
+    # the WARN half "transitively" through `read_sdk_som_and_soc`.
+    schema_warnings: list[str] = []
+    # tan-cli#964 review (major 6, "skip-but-disclose"): the same shared-list
+    # convention as `schema_warnings` above, for the OTHER half -- a note
+    # when the schema file itself is simply absent, rather than the silent
+    # `[]` that used to be indistinguishable from "validated clean".
+    schema_skipped: list[str] = []
+
     # tan-cli#489 (5): an EXPLICIT --target-kind bypasses `infer_target_kind`
     # entirely, so its own --core-vs-manifest guard (the `core-unknown` refusal
     # above) never runs for this path. Without this check, --core naming no
@@ -1503,7 +1871,9 @@ def _run(
             refusal_sdk = _sdk_core_refusal_authority(
                 sdk_root, sdk_source_tier, foreign_global_default_for
             )
-            published_cores = _sdk_published_cores(refusal_sdk, board_yaml)
+            published_cores = _sdk_published_cores(
+                refusal_sdk, board_yaml, warnings=schema_warnings, skipped=schema_skipped
+            )
             if published_cores and core not in published_cores:
                 return _explicit_core_unknown_failure(
                     generated_at,
@@ -1514,6 +1884,17 @@ def _run(
                     ),
                     launch_json_path,
                 )
+
+    # tan-cli#1488: several cores of this class and no --core -> refuse instead
+    # of silently programming the first slice's core.
+    if core is None:
+        multi_core = multi_core_without_core_message(
+            target, manifest_slices(_load_yaml(Path(workspace_root, "build", "system-manifest.yaml")))
+        )
+        if multi_core is not None:
+            return _core_required_failure(
+                generated_at, target, server, multi_core, launch_json_path
+            )
 
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a
@@ -1538,7 +1919,8 @@ def _run(
     target_id_before_identity = resolution.target_id
     config_files_empty_before_identity = not resolution.config_files
     identity_debug_block_found, known_jlink_cores = _fill_debug_probe_identity_from_sdk(
-        resolution, sdk_root, board_yaml, identity_core
+        resolution, sdk_root, board_yaml, identity_core,
+        warnings=schema_warnings, skipped=schema_skipped,
     )
     # Which launch-configuration JSON keys the SDK fallback (not a real build)
     # just populated -- the ONLY fields `sdk_identity_overwrites` below is
@@ -1586,7 +1968,25 @@ def _run(
     # one, or a field the fallback itself just resolved would misreport as
     # still absent. Advisory about resolution state, so it fires on
     # `--preview` too, not just a write.
-    identity_issues: list[Issue] = []
+    identity_issues: list[Issue] = [
+        # tan-cli#964 review (major 5): the WARN half of #964's decided rule,
+        # same shape `presets_cmd.py`/`size_cmd.py` already use -- one issue
+        # per violation, naming the file, the JSON pointer, and what was
+        # found. `debug-config` already degrades a schema-invalid preset/SoC
+        # JSON to its existing placeholder behaviour (nothing above refuses
+        # on `schema_warnings`); this makes that degrade visible instead of
+        # silent.
+        Issue("debug-config.metadata-schema-invalid", "warning", w)
+        for w in schema_warnings
+    ]
+    # tan-cli#964 review (major 6, "skip-but-disclose"): `info`, not
+    # `warning` -- nothing here says a document is wrong, only that a schema
+    # to check it against is absent. Deduplicated: both walks above can each
+    # find the same missing schema.
+    identity_issues.extend(
+        Issue("debug-config.metadata-schema-unchecked", "info", w)
+        for w in dict.fromkeys(schema_skipped)
+    )
     if identity_debug_block_found:
         field = _SERVER_IDENTITY_FIELD.get(server)
         if field is not None and _has_placeholder(draft.get(field)):
@@ -1620,7 +2020,7 @@ def _run(
                 )
             else:
                 identity_issues.append(_sdk_identity_key_absent_issue(field))
-    notes = _preview_notes_for(draft, registered_runners, server)
+    notes = _preview_notes_for(draft, registered_runners, server, target)
     # tan-cli#456 review: say when target/server were DERIVED, not requested --
     # otherwise silent, unlike the --svd/--gdbserver-address no-op notes right
     # below. Never fires for the no-signal native-host default (no manifest to
@@ -1735,12 +2135,61 @@ def _run(
                 cwd_launch_path,
             )
 
+    # tan-cli#518: the `.alp/` provenance sidecar, read the SAME best-effort
+    # way `_write_project_sdk_pointer`'s own reads are (`bootstrap_cmd.py`) --
+    # ANY failure (absent file, a read error, unparsable/unrecognised JSON;
+    # see `launch_provenance.load`'s own docstring) degrades to `empty()`,
+    # never to "everything is ours". This is deliberately NOT held to the
+    # same read-error-must-refuse-to-write bar as `launch.json` itself just
+    # above: losing provenance only makes the NEXT merge more conservative
+    # (append instead of overwrite), never destructive, so there is nothing
+    # here worth refusing the write over.
+    provenance_path = launch_provenance.sidecar_path(workspace_root)
+    provenance_content: str | None = None
+    # tan-cli#1116 review round 2: no `is_file()` pre-flight -- `Path.is_file()`
+    # (pre-3.14) swallows ENOENT/ENOTDIR/EBADF/ELOOP but not EACCES, and on
+    # 3.14+ it swallows EVERY OSError including EACCES and returns `False`,
+    # which would have taken this "absent" arm for a permission-denied
+    # sidecar instead of the "read error" one two paragraphs up documents.
+    # `UnicodeDecodeError` is caught alongside `OSError` for the same reason
+    # named there: it is a `ValueError`, not an `OSError`, so a non-UTF-8
+    # sidecar used to escape this "ANY failure ... degrades to empty()"
+    # contract raw.
+    try:
+        with open(provenance_path, encoding="utf-8") as handle:
+            provenance_content = handle.read()
+    except (OSError, UnicodeDecodeError):
+        provenance_content = None
+    provenance = launch_provenance.load(provenance_content)
+
     # alp-sdk#1026 review finding #1: compute this BEFORE the write, against
     # the file as it stood -- `create_launch_json_write_plan` below already
     # performs the same overwrite (that part of its behaviour is intentional,
     # see `_merge_configuration`'s own doc comment), this only detects it so
-    # it can be disclosed.
-    overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
+    # it can be disclosed. tan-cli#518: `provenance` is passed through so a
+    # LIST field (`configFiles`) is only reported as overwritten when the
+    # real merge below would actually do that -- see `sdk_identity_overwrites`'s
+    # own doc comment on why an honest "would this actually happen" beats an
+    # unconditional "the values differ".
+    overwrites = sdk_identity_overwrites(
+        existing, draft, sdk_filled_json_fields, provenance=provenance
+    )
+    # tan-cli#982 review finding #2: the OTHER outcome that same merge can
+    # produce for a list field -- an existing value provenance could not
+    # prove was tan's own is left in place and the new one is appended
+    # beside it, rather than replaced. `sdk_identity_overwrites` above
+    # correctly stays silent about this shape (nothing concrete was lost);
+    # this discloses the append instead, so it is not silent everywhere.
+    stranded_appends = sdk_identity_stranded_appends(
+        existing, draft, sdk_filled_json_fields, provenance=provenance
+    )
+    # tan-cli#1020 review: the SAME "mirror the real merge, then disclose"
+    # discipline as the two calls above, for the ONE field neither of them
+    # covers -- `loadFiles` is populated by the draft itself (tan-cli#945),
+    # never by the SDK-identity fallback those two are scoped to, and its
+    # own merge rule (`_merge_load_files`) protects a hand-authored value
+    # WHOLESALE rather than appending beside it.
+    preserved_load_files = load_files_preserved(existing, draft, provenance)
 
     # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
     # entirely (`create_launch_draft` builds it, then deletes it), which is
@@ -1752,7 +2201,9 @@ def _run(
     explicit_omissions = frozenset({"preLaunchTask"}) if pre_launch_task == "" else frozenset()
 
     try:
-        plan = create_launch_json_write_plan(existing, draft, explicit_omissions)
+        plan = create_launch_json_write_plan(
+            existing, draft, explicit_omissions, provenance=provenance
+        )
     except DebugConfigError as err:
         # A malformed existing launch.json surfaces as an internal failure in TS.
         return _internal_failure(generated_at, str(err), cwd_launch_path)
@@ -1776,6 +2227,20 @@ def _run(
             generated_at, target, server, launch_json_path, str(err)
         )
 
+    # tan-cli#518: persist the updated provenance sidecar AFTER launch.json
+    # itself is safely on disk, and best-effort -- a failure here never fails
+    # the command (the launch.json write is the one that matters and it
+    # already succeeded) and never leaves a half-written sidecar
+    # (`atomic_write_text` again), it just means the NEXT run degrades back
+    # to `launch_provenance.empty()`'s conservative default for whatever this
+    # write recorded, exactly as if this run had never touched the sidecar
+    # at all.
+    try:
+        provenance_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(provenance_path), launch_provenance.render(plan.provenance))
+    except OSError:
+        pass
+
     issues: list[Issue] = list(identity_issues)
     if plan.migrated_from is not None:
         issues.append(_migrated_issue(plan.migrated_from, draft.get("name", "")))
@@ -1792,6 +2257,12 @@ def _run(
         issues.append(
             _sdk_identity_overwrite_issue(field, existing_value, incoming_value)
         )
+    for field, existing_value, incoming_value in stranded_appends:
+        issues.append(
+            _sdk_identity_appended_issue(field, existing_value, incoming_value)
+        )
+    if preserved_load_files is not None:
+        issues.append(_load_files_preserved_issue(*preserved_load_files))
 
     return success(
         replaced=plan.replaced,

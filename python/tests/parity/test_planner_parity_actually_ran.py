@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from tests.conftest import REAL_ENVIRON, sdk_root
 
 #: The variables `sdk_root()` consults, in its own precedence order.
@@ -75,6 +77,34 @@ ORCHESTRATOR_PACKAGE = ("scripts", "alp_orchestrate", "__init__.py")
 #: skip. `sdk_root()`'s own docstring states the rule; the measurement is what
 #: enforced it. `test_planner_emit_parity.py` binds it the same way.
 SDK = sdk_root()
+
+#: tan-cli#509's replacement layer. When alp-sdk has genuinely retired
+#: `scripts/alp_orchestrate/`, the byte-parity module below CANNOT run and its
+#: absence stops being a defect -- but only if something replaced it. These two
+#: are what "replaced" means, and both are required: a bound checkout supplying
+#: the frozen INPUTS, and the checked-in goldens supplying the expected OUTPUT.
+#: Read at import time for the same reason `SDK` is.
+ORACLE_ROOT_VAR = "ALP_PLANNER_ORACLE_ROOT"
+_ORACLE_RAW = REAL_ENVIRON.get(ORACLE_ROOT_VAR, "").strip()
+ORACLE_ROOT = Path(_ORACLE_RAW) if _ORACLE_RAW else None
+ORACLE_FIXTURE = (Path(__file__).resolve().parents[1]
+                  / "fixtures" / "planner_oracle" / "emits")
+
+
+def _replacement_layer_is_live() -> bool:
+    """True only when tan-cli#509's frozen-oracle layer can actually compare.
+
+    Deliberately checks the SAME two things
+    `test_planner_oracle_regression.py` checks, and not a proxy for them. This
+    predicate is the ONLY thing standing between "alp-sdk retired the planner,
+    and the replacement is running" and "alp-sdk retired the planner, and
+    nothing is running" -- the second is the coverage cliff tan-cli#500 exists
+    to red, and a proxy that answered yes for it would reopen the hole this
+    file was written to close.
+    """
+    if ORACLE_ROOT is None or not (ORACLE_ROOT / "metadata").is_dir():
+        return False
+    return ORACLE_FIXTURE.is_dir() and any(ORACLE_FIXTURE.rglob("*.json"))
 
 
 def test_a_bound_sdk_root_still_ships_the_planner_oracle() -> None:
@@ -113,6 +143,19 @@ def test_a_bound_sdk_root_still_ships_the_planner_oracle() -> None:
 
     oracle = sdk.joinpath(*ORCHESTRATOR_PACKAGE)
     preflight = sdk / "scripts" / "alp_project.py"
+    if not oracle.is_file() and _replacement_layer_is_live():
+        # alp-sdk retired the planner AND tan-cli#509's frozen-oracle layer is
+        # bound with its fixture present, so the coverage this file guards is
+        # being provided by `test_planner_oracle_regression.py` instead. This
+        # is the ONE widening that is not a silencing: it is satisfied only by
+        # the replacement actually being there, never by the absence alone.
+        pytest.skip(
+            f"{'/'.join(ORCHESTRATOR_PACKAGE)} is absent from {sdk} (alp-sdk "
+            f"retired it), and the tan-cli#509 frozen-oracle layer IS bound "
+            f"({ORACLE_ROOT_VAR}={ORACLE_ROOT}) with its fixture present, so "
+            "the byte-parity coverage is being provided by "
+            "test_planner_oracle_regression.py"
+        )
     assert oracle.is_file(), (
         f"ALP_SDK_ROOT is bound to {sdk} and "
         f"{preflight.name} is {'present' if preflight.is_file() else 'absent'} "
@@ -127,5 +170,11 @@ def test_a_bound_sdk_root_still_ships_the_planner_oracle() -> None:
         f"If alp-sdk has genuinely retired scripts/alp_orchestrate/, this "
         f"failure is the intended signal: the oracle is gone and the parity "
         f"layer needs replacing, not skipping. Do not silence it by widening "
-        f"the skip -- that restores the exact hole tan-cli#500 closed."
+        f"the skip -- that restores the exact hole tan-cli#500 closed.\n\n"
+        f"The replacement exists (tan-cli#509). Bind {ORACLE_ROOT_VAR} to an "
+        f"alp-sdk checkout at the ref named in "
+        f"tests/fixtures/planner_oracle/PROVENANCE.txt and this skips in "
+        f"favour of test_planner_oracle_regression.py. It is bound to "
+        f"{ORACLE_ROOT!r} on this run, and the fixture is "
+        f"{'present' if ORACLE_FIXTURE.is_dir() else 'ABSENT'}."
     )

@@ -145,6 +145,14 @@ and then refusing them at exit 1 via `deferred_cmd.py`'s `cli.command-deferred`
 is strictly worse than listing them honestly. They stay visible; only the
 wording changes.
 
+> **Superseded by tan-cli#427.** That issue's later resolution hides those
+> five (plus `--target`/`--all`) from `build --help` after all, via
+> `accept_global_flags` rather than `_DEFERRED_HELP` -- they accept-and-drop
+> instead of refusing, so hiding them is no longer the "worse than listing
+> them honestly" tradeoff this section rejected. Kept as the historical
+> record of this task's own decision; see `build_cmd.py`'s module docstring
+> for the shipped behaviour.
+
 **Test impact.** Help-text assertions only. No envelope, no parity.
 
 ## Item 4 — a next step on each dead-end refusal

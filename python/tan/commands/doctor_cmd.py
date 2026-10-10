@@ -111,6 +111,21 @@ removed: both `alp-sdk-vscode` call sites (`["doctor", "--build"]`,
 relies on does not need to keep doing something to still be worth accepting
 without error.
 
+**One name out of that unported `--build` vocabulary came BACK, deliberately
+and partially (tan-cli#1192): `dtc`, and only as `devicetreeLint`.** The
+sentence above still holds for `git`/`cmake`/`ninja`/`gperf`/`vendorToolchain`
+-- none of those is ported and none is planned -- but `dtc`'s premise changed
+underneath it. When this paragraph was written the Zephyr SDK put a `dtc` in
+CMake's reach on every install, so probing for one could only restate what
+`zephyrSdk` already said. Since tan-cli#1176/#1178 `tan bootstrap` acquires
+the SDK with `--no-hosttools`, the SDK ships no `dtc`, and Zephyr's
+devicetree LINT pass (`dts.cmake`'s `if(DTC)` block) silently stopped running
+with nothing on either side saying so. `devicetreeLint` is not the oracle's
+`dtc` check re-ported -- that one was a bare is-it-on-PATH presence probe,
+which after #1178 would warn on every correct install -- it is the narrower
+question that probe cannot answer; see `devicetree_lint_check` for the
+predicate and the severity argument.
+
 `--fix` is a separate, NOT-yet-ported flag gap (it is not part of this one):
 the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
 running `tan bootstrap`, and nothing here does that yet.
@@ -122,29 +137,22 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import (
-    SDK_DISCOVERY_DIVERGENT,
-    _abs_posix,
-    discover_sdk_root,
-    resolve_sdk_root_ladder,
-    resolve_sdk_root_wide,
-)
+from tan.commands.build.toolchain import _is_toolchain_wreckage, _toolchain_store_scan_root
+from tan.commands.flash_cmd import _tool_available
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
-    _has_loader_script,
-    _home_alp_dir,
-    _pointer_target,
-    global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     parse_sdk_version_yaml,
-    project_pin_issue,
 )
+from tan.core import artifact_provenance
+from tan.core.artifact_provenance import ArtifactProvenance
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
     MissingPrerequisite,
@@ -161,6 +169,7 @@ from tan.core.bootstrap import (
     select_linux_install,
 )
 from tan.core.consent import can_prompt
+from tan.core import devicetree_lint
 from tan.core.doctor_git import (
     _git_behind_upstream,
     _git_core_longpaths,
@@ -169,46 +178,61 @@ from tan.core.doctor_git import (
     _resolve_git_executable,
     classify_git_core_longpaths,
 )
+from tan.core.doctor_stale import StaleVerdict, running_tan_verdict
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
+from tan.core.doctor_setools import (
+    FLOW_A_METHOD,
+    FLOW_D_METHOD,
+    project_flash,
+)
+from tan.core.doctor_setools import verdict as setools_verdict
 from tan.core.global_flags import accept_global_flags
+from tan.core.inert import COMPATIBILITY, inert_help
+from tan.core.python_floor import (
+    FALLBACK_PYTHON_FLOOR,
+    ZEPHYR_PYTHON_FLOOR,
+    effective_python_floor,
+    zephyr_python_floor,
+)
+from tan.core.host_python import (
+    describe_unsuitable,
+    probe_all_host_pythons,
+    select_host_python,
+)
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
+from tan.core.subprocess_env import spawn_env
+from tan.core.sdk_default_registry import registry_path
+from tan.core.sdk_discovery import (
+    SDK_DISCOVERY_DIVERGENT,
+    _abs_posix,
+    _has_loader_script,
+    _home_alp_dir,
+    _pointer_target,
+    discover_sdk_root,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+    resolve_sdk_root_wide,
+)
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
+from tan.core import toolchain_provision
 from tan.core.tool_lookup import resolve_tool
-from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
+from tan.commands.workspace_patch_check import (
+    APPLIED as WORKSPACE_PATCHES_APPLIED,
+    MISSING as WORKSPACE_PATCHES_MISSING,
+    PatchCheck,
+    check_workspace_patches,
+)
+from tan.core.west_patches import describe_unapplied, patch_fix_text, zephyr_base_note
+from tan.core.venv import find_workspace_venv, venv_bin_dir, west_program, west_workspace_dir
+from tan.core.west_workspace_refusal import unresolved_workspace_verdict
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
-
-#: Zephyr's own floor, from `<zephyr>/cmake/modules/python.cmake`'s
-#: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. The LAST-resort fallback --
-#: `zephyr_python_floor` reads the real file when a workspace resolves, and
-#: (tan-cli#606) prefers alp-sdk's own manifest-declared
-#: `zephyr.pythonMinVersion` over this constant when no workspace resolves but
-#: a manifest does; this is what is left once BOTH are unavailable, so a
-#: Zephyr bump raises the floor on the customer's machine without waiting for
-#: a tan release only via one of those two live reads, never this one.
-ZEPHYR_PYTHON_FLOOR = (3, 12)
-
-#: The floor `metadata/bootstrap.json` is assumed to declare when no manifest
-#: resolves at all -- used ONLY as the `manifest_floor` input to `max()` below,
-#: never as a verdict by itself. It mirrors `crate::util::MIN_PYTHON`
-#: (`crates/tan-cli/src/util.rs`), which is frozen at 3.10 and does NOT track
-#: `metadata/bootstrap.json` -- that Rust constant and the manifest's declared
-#: `pythonMinVersion` are two independently-edited numbers, not one fact, and
-#: they can and do drift apart (the manifest is mid-raise to 3.12 as of this
-#: writing; the oracle constant is not). The manifest is the authority: when it
-#: resolves AND declares `pythonMinVersion`, that number is read live and this
-#: constant is not consulted for the verdict -- but a manifest that resolves
-#: while omitting the key still falls back to this same constant (see
-#: `resolve_manifest_python_floor`/`_collect` below), so this is not a
-#: no-manifest-only fallback. `ZEPHYR_PYTHON_FLOOR` above still composes with
-#: it via `max()` either way, so a resolvable SDK checkout with the key present
-#: never depends on this value being current.
-FALLBACK_PYTHON_FLOOR = (3, 10)
 
 #: The SETOOLS executables `alif_flash.py` looks for inside `$SETOOLS_DIR`
 #: (its `--app-gen-toc` / `--app-write-mram` defaults).
@@ -326,8 +350,10 @@ class Check:
     detail: str
     fix: str | None = None
     code: str | None = None
-    missing: list[dict[str, str | None]] | None = None
-    fix_missing: list[dict[str, str | None]] | None = None
+    #: `str | int | None` values since tan-cli#1066: an entry carries
+    #: `sizeBytes` (an int, or `null`) alongside its two string fields.
+    missing: list[dict[str, str | int | None]] | None = None
+    fix_missing: list[dict[str, str | int | None]] | None = None
     scope: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -438,84 +464,6 @@ def _parse_two(raw: str) -> tuple[int, int] | None:
     if match is None:
         return None
     return (int(match.group(1)), int(match.group(2)))
-
-
-def zephyr_python_floor(
-    zephyr_base: str | None, *, manifest_zephyr_floor: tuple[int, int] | None = None
-) -> tuple[tuple[int, int], str]:
-    """The floor Zephyr's CMake will actually enforce, and where it came from.
-
-    Read from `<zephyr_base>/cmake/modules/python.cmake` when that resolves,
-    because THAT is the file whose `PYTHON_MINIMUM_REQUIRED` aborts the build --
-    a constant compiled into tan goes stale the moment Zephyr bumps it, and a
-    stale floor here reintroduces exactly the silent gap this command exists to
-    close.
-
-    When it does NOT resolve, `manifest_zephyr_floor` -- alp-sdk's OWN declared
-    `zephyr.pythonMinVersion` (tan-cli#606), when the caller's manifest read
-    found one -- is now preferred over `ZEPHYR_PYTHON_FLOOR`: a fact alp-sdk
-    already publishes beats a constant compiled into tan, the same reasoning
-    that prefers `python.cmake` itself one level up. `ZEPHYR_PYTHON_FLOOR`
-    remains the LAST resort, for an SDK whose manifest predates that key (or
-    when no manifest resolves at all) -- every host at `tan bootstrap` time
-    used to land here unconditionally; now only a manifest-less one does.
-
-    `zephyr_base` is a plain path in, not necessarily `$ZEPHYR_BASE` itself --
-    THIS function has no opinion on where it came from, only `_collect` (this
-    module's `hostPython`/`pythonFloor` caller) does. As of tan-cli#301,
-    `_collect` passes the resolved workspace's `zephyr/` subtree -- the SAME
-    `tan.core.venv.west_workspace_dir` result `zephyrWorkspace` reports -- when
-    one resolved, a literal `$ZEPHYR_BASE` read only when no workspace resolved
-    at all, and `None` (landing on `ZEPHYR_PYTHON_FLOOR` below) when neither
-    does; that is the three-way split the resulting `source` string names. The
-    OTHER caller, `tan.commands.bootstrap_cmd.resolve_python_floor`, still
-    passes a literal `$ZEPHYR_BASE` read directly -- `tan bootstrap` runs before
-    any workspace can have resolved, so there is nothing else for it to prefer.
-
-    **The fallback names WHICH of three causes fired (tan-cli#488 defect 7).**
-    It used to be one hardcoded string -- "no $ZEPHYR_BASE workspace on this
-    host to read `cmake/modules/python.cmake` from" -- for every way the read
-    could fail, but only ONE of the three causes below makes that true. A
-    `.west` workspace mid-`west update` (`zephyr_workspace_check`'s own
-    "legitimate, working-in-progress host state") resolves a real
-    `zephyr_base` whose `cmake/modules/python.cmake` simply is not there yet
-    -- reported by `_collect` as `workspace`/`zephyrWorkspace` BOTH passing,
-    in the same envelope that then blamed a `$ZEPHYR_BASE` env var never
-    consulted for this call (`_collect` feeds this function the RESOLVED
-    workspace's own `zephyr/` subtree, never `$ZEPHYR_BASE` itself, once a
-    workspace resolves -- see above). `jlink_flash_device` fixed the identical
-    shape for its own three-cause fallback in tan-cli#310; this mirrors it.
-    """
-    if manifest_zephyr_floor is not None:
-        fallback_floor = manifest_zephyr_floor
-        fallback_label = (
-            f"alp-sdk metadata/bootstrap.json zephyr.pythonMinVersion "
-            f"{fallback_floor[0]}.{fallback_floor[1]}"
-        )
-    else:
-        fallback_floor = ZEPHYR_PYTHON_FLOOR
-        fallback_label = f"tan's built-in pin {fallback_floor[0]}.{fallback_floor[1]}"
-
-    if zephyr_base:
-        path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
-        text = _read_text(path)
-        if text is not None:
-            match = re.search(r"PYTHON_MINIMUM_REQUIRED\s+(\d+)\.(\d+)", text)
-            if match is not None:
-                return (int(match.group(1)), int(match.group(2))), str(path)
-            return fallback_floor, (
-                f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} was "
-                f"read but did not declare a parseable PYTHON_MINIMUM_REQUIRED"
-            )
-        return fallback_floor, (
-            f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} could not "
-            f"be read (a `.west` workspace mid-`west update` is a legitimate, "
-            f"working-in-progress host state, not a broken one)"
-        )
-    return fallback_floor, (
-        f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- no $ZEPHYR_BASE "
-        f"workspace on this host to read `cmake/modules/python.cmake` from"
-    )
 
 
 def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
@@ -675,6 +623,35 @@ def python_check(
     )
 
 
+def host_python_check(
+    found: tuple[str, tuple[int, int]] | None,
+    floor: tuple[int, int],
+    floor_source: str,
+    has_workspace_venv: bool,
+    candidates: list | None = None,
+) -> Check:
+    """`hostPython` as `python_check` judges it, downgraded to `warn` (same id,
+    no code) when it would pass but `tan build` would have no usable
+    interpreter: no workspace venv, and no PATH Python that is >= `floor` AND
+    imports `west` (tan-cli#1317, same resolver as the build)."""
+    check = python_check(found, floor, floor_source)
+    if check.status != "pass" or has_workspace_venv:
+        return check
+    if candidates is None:
+        candidates = probe_all_host_pythons()
+    candidates = list(candidates)
+    best = select_host_python(candidates, floor, need_west=True)
+    if best is not None and best.version >= floor and best.has_west:
+        return check
+    return Check(
+        "hostPython",
+        "warn",
+        f"{check.detail} But {describe_unsuitable(candidates, floor)}",
+        "Run `tan bootstrap` (or activate the Zephyr workspace venv).",
+        scope="host",
+    )
+
+
 def python_floor_skew_check(
     manifest_floor: tuple[int, int],
     effective_floor: tuple[int, int],
@@ -764,6 +741,7 @@ def prerequisites_check(
     venv_refusal: PrereqFailure | None = None,
     *,
     available: Callable[[str], bool] | None = None,
+    provenance: dict[str, ArtifactProvenance] | None = None,
 ) -> Check:
     """`hostPrerequisites` -- the manifest's own tool list, on PATH, PLUS
     (Linux only) whether the interpreter's `venv` module can actually create
@@ -795,6 +773,16 @@ def prerequisites_check(
     this function) means `missing` and `fix_missing` are identical -- no
     guard at all, matching this function's pre-#760 behaviour exactly.
 
+    `provenance` (tan-cli#1066) is the manifest's own `artifactProvenance`
+    table, `tool -> {tier, licence, sourceUrl, sizeBytes}`, joined onto each
+    entry by `tool` -- the identity the entry already carries. It reaches BOTH
+    `missing` and `fix_missing`, unlike `available` above: the two differ over
+    what tan may promise to RUN, and a licence is not a promise. `None` (every
+    caller before #1066, and the fallback manifest, which publishes no
+    provenance at all) reports the same `null`s a tool with no entry does --
+    `west`, `zephyrSdk`, `setools`, `jlink` and `python3-venv` have none in
+    alp-sdk v0.16.0, and that gap is alp-sdk#1574's, not tan's to fill in.
+
     This split exists because `run_fix` has done its OWN on_path resolution
     and reported `doctor.fix-installer-not-found` since tan-cli#360: handing
     it the CONFIRMED (already-nulled) dict instead of the raw one would make
@@ -803,8 +791,18 @@ def prerequisites_check(
     Homebrew, a Windows image with no usable winget) #360 exists for
     (tan-cli#760 review, MAJOR 1).
     """
-    raw_entries = tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
+    raw_entries = tuple(
+        MissingPrerequisite(
+            tool, install.get(tool), artifact_provenance.for_tool(provenance, tool)
+        )
+        for tool in missing
+    )
     if venv_refusal is not None:
+        # `posix_venv_unusable()`'s own entry keeps its `UNKNOWN` provenance:
+        # `python3-venv` is a Debian PACKAGE name, not one of alp-sdk's
+        # `artifactProvenance` keys, so there is nothing to join and a
+        # near-miss join (`python3`'s row) would attribute one artefact's
+        # licence to another (tan-cli#1066).
         raw_entries = raw_entries + venv_refusal.missing
     fix_missing = reported_missing(raw_entries)
 
@@ -889,17 +887,21 @@ def _posix_venv_capable(argv: list[str], executable: str | None = None) -> bool:
     always comes from a candidate `_probe_host_python` already ran once.
     """
     try:
-        result = subprocess.run(
-            [*argv, "-c", "import ensurepip"],
-            executable=executable,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            check=False,
-        )
+        # Empty cwd: `-c` puts the cwd on sys.path (module-hijack, tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-probe-") as empty:
+            result = subprocess.run(
+                [*argv, "-c", "import ensurepip"],
+                cwd=empty,
+                executable=executable,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         return True
     return result.returncode == 0
@@ -1187,7 +1189,19 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     # Named HERE rather than added to the manifest's `prerequisites`, because
     # `tan bootstrap` genuinely does not need it and succeeds without it --
     # promoting it there would refuse hosts over a tool the bootstrap never
-    # uses. This is the message immediately preceding the failure, which is
+    # uses. What MAKES that claim true is that `tan bootstrap`'s automatic
+    # acquisition path passes `--no-hosttools`
+    # (`tan.core.toolchain_provision.west_sdk_install_argv`), so it never runs
+    # the SDK's host-tools step and never reaches `file` at all; between
+    # tan-cli#990 (which added that path) and tan-cli#1176 (which added the
+    # flag) the sentence above was FALSE -- `tan bootstrap` ran the very
+    # command this note is about and failed on exactly these two lines. Do not
+    # delete the flag without moving `file` into the prerequisites manifest.
+    # The command in `zephyr_sdk_install_command()` above carries no
+    # `--no-hosttools` on purpose (it mirrors the Rust oracle verbatim), which
+    # is why the note below still applies to it.
+    #
+    # This is the message immediately preceding the failure, which is
     # where it is actionable. Same shape as `seven_zip_check` above: a
     # host-tool prerequisite of `west sdk install` itself, surfaced beside the
     # command that needs it rather than folded into the bootstrap gate.
@@ -1207,6 +1221,341 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
         f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
         "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+        scope="host",
+    )
+
+
+def _toolchain_store_dir(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> Path:
+    root = toolchain_provision.resolve_toolchain_root(
+        os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    )
+    return Path(root.path_str) / toolchain_provision.store_dir_name(manifest.version)
+
+
+def _toolchain_root_adopted() -> bool:
+    """`$ALP_TOOLCHAIN_ROOT` is set: tan did not necessarily create that root
+    and `tan bootstrap` never deletes or repairs an unverified store
+    directory in it (tan-cli#1498)."""
+    return toolchain_provision.resolve_toolchain_root(
+        os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    ).adopted
+
+
+def _adopted_store_remedy(store_dir: Path) -> str:
+    return (
+        f"ALP_TOOLCHAIN_ROOT is an adopted root, so `tan bootstrap` will not repair "
+        f"it -- remove {store_dir} yourself (or unset ALP_TOOLCHAIN_ROOT), then run "
+        f"`tan bootstrap`."
+    )
+
+
+def _host_toolchain_matching_pin(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> Path | None:
+    """The already-installed host toolchain root (`_zephyr_sdk_detected_root`
+    -- `ZEPHYR_SDK_INSTALL_DIR` or a scanned `zephyr-sdk*` directory, same
+    precedence `zephyrSdk` above trusts) IF its own `sdk_version` file names
+    the exact version `manifest` pins; else `None`.
+
+    `SDK_VERSION_FILE_RELPATH` is `west sdk install`'s own top-level marker
+    (`toolchain_provision`'s own docstring: measured against a real extracted
+    1.0.1 tree, exact byte content `"1.0.1\\n"`) -- read back and STRING-
+    compared, matching `toolchain_phase`'s own post-install verification, so
+    this reuses the identical trust boundary rather than a fresh directory-
+    name guess. A missing or unreadable `sdk_version` -- an unusual layout
+    `_zephyr_sdk_root_valid` still validated on compiler-binary presence
+    alone -- is honestly "does not match", not a guessed pass.
+
+    **Never returns an entry inside tan's OWN ADR 0021 store for THIS pin
+    (`_toolchain_store_dir(manifest)`) -- this adoption path is for a
+    toolchain tan did NOT install (tan-cli#990's `~/zephyr-sdk-1.0.1` case),
+    where a version-string match is the only signal available. Since
+    tan-cli#1186 widened `_zephyr_sdk_scan_roots` to also cover that store
+    (for `zephyrSdk`'s sake), `_zephyr_sdk_detected_root` can now return an
+    entry living INSIDE it too -- and that entry is already governed by the
+    stricter, digest-precise `stamp_matches_pin` check `toolchain_check` runs
+    first. A store directory can carry a real compiler and a `sdk_version`
+    matching the pin's nominal version while its stamp names a DIFFERENT
+    digest (the pin moved without the version string changing, ADR 0021's
+    own "stamped 1.0.1 against a moved pin" case) -- measured: without this
+    guard that combination made this function return the store entry as a
+    version-string match, turning the correct stamp-based `fail` a few lines
+    below in `toolchain_check` into a `pass` it never reaches. Trusting the
+    stamp alone for anything inside tan's own store, and never re-deriving a
+    looser verdict for it here, keeps the two checks from disagreeing on the
+    same directory.
+
+    Deliberately keyed on `_toolchain_store_dir(manifest)` -- the one
+    per-version LEAF tan's own installs use -- rather than the broader
+    `_toolchain_store_scan_root()` (the whole configured root, `~/.alp/
+    toolchains` or `$ALP_TOOLCHAIN_ROOT` verbatim). `resolve_toolchain_root`
+    takes an env override VERBATIM as the root, with no `/toolchains`
+    suffix (`toolchain_provision.resolve_toolchain_root`), so ADR 0021's own
+    documented bench/CI escape hatch -- `$ALP_TOOLCHAIN_ROOT` pointed at an
+    ancestor like `$HOME` or `/opt` -- makes the store root coincide with a
+    directory a hand-installed host toolchain also legitimately lives under.
+    Excluding the whole root there would misread that adopted toolchain as
+    "inside tan's own store" and refuse to adopt it, turning a
+    previously-passing configuration into a `toolchain` FAIL; excluding only
+    the specific `<root>/<store leaf for this manifest version>` directory
+    keeps the guard narrow enough to still hold under that escape hatch.
+    """
+    try:
+        store = _toolchain_store_dir(manifest).resolve()
+    except OSError:
+        store = None
+    for root in _zephyr_sdk_detected_roots():
+        try:
+            if store is not None and root.resolve().is_relative_to(store):
+                continue
+        except OSError:
+            pass
+        version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+        if version_text is not None and version_text.strip() == manifest.version:
+            return root
+    return None
+
+
+def toolchain_check(sdk_root: str | None) -> Check:
+    """`toolchain` -- STAMP-vs-PIN, never directory-exists (issue #474, ADR
+    0021 Lane 1 P1's own words: "a stamped 1.0.1 store against a moved pin is
+    a Fail with a fix, not 'a toolchain exists'"). Calls
+    `toolchain_provision.stamp_matches_pin` -- the SAME function `tan
+    bootstrap`'s own skip-if-already-installed step calls -- so this check
+    and `bootstrap` cannot independently drift on what "still valid" means,
+    the same `zephyr_python_floor`-is-imported-not-re-derived pattern this
+    file already applies one layer up.
+
+    Distinct from `zephyrSdk` above, which answers "does ANY working
+    toolchain exist on this host" unconditionally, with no SDK checkout
+    needed (an env var or a scanned install dir). This one answers a
+    narrower, PIN-specific question -- "does THIS checkout's pinned
+    cross-toolchain version exist here, verified" -- so it needs `sdk_root`
+    and reports `unknown` without one: there is no pin to check against.
+
+    `scope="project"` on every arm (never `"host"`, unlike `zephyrSdk`): a
+    single check NAME may not carry two scopes (`tests/gates/
+    test_doctor_check_scope.py`), and this one is inherently
+    project-scoped -- it cannot answer at all without a resolved
+    `sdk_root` to read `metadata/toolchains.json`'s PIN from.
+
+    **Has an adoption path (tan-cli#990 review, the tan-cli#299
+    false-refusal class): an unstamped store is not the only way to satisfy
+    this check.** Before either `fail` branch, `_host_toolchain_matches_pin`
+    asks whether a toolchain THIS HOST ALREADY HAS -- found by the SAME
+    `ZEPHYR_SDK_INSTALL_DIR`/scan `zephyrSdk` above already trusts -- reports
+    the pinned version in ITS OWN `sdk_version` file. If so this is a `pass`,
+    never a `fail`: a stamp is tan's own bookkeeping for what IT installed,
+    not the only proof a working, correctly-versioned toolchain exists. Before
+    this, a host with a hand-installed or pre-existing SDK at the exact pinned
+    version -- `zephyrSdk` passing right above it -- got a `toolchain` FAIL
+    whose only prescribed fix, `tan bootstrap`, downloads a SECOND ~1.9 GiB
+    copy of a toolchain already on disk, and cannot even do that on an
+    offline host or the README's own hand-`west sdk install` path (this
+    check's one stamp-writing producer is `tan bootstrap` alone).
+    """
+    if sdk_root is None:
+        return Check(
+            "toolchain",
+            "unknown",
+            "no alp-sdk checkout resolved -- cannot read metadata/toolchains.json to "
+            "know which cross-toolchain version is pinned.",
+            scope="project",
+        )
+    manifest_path = Path(sdk_root) / "metadata" / "toolchains.json"
+    text = _read_text(manifest_path)
+    if text is None:
+        return Check(
+            "toolchain",
+            "unknown",
+            f"{manifest_path} is missing or unreadable -- cannot determine the "
+            f"pinned cross-toolchain version.",
+            scope="project",
+        )
+    try:
+        manifest = toolchain_provision.parse_toolchain_manifest(text)
+    except toolchain_provision.ToolchainManifestError as err:
+        return Check(
+            "toolchain", "unknown", f"{manifest_path} is malformed: {err}", scope="project",
+        )
+    store_dir = _toolchain_store_dir(manifest)
+    stamp_text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
+    stamp = toolchain_provision.parse_stamp(stamp_text) if stamp_text is not None else None
+    adopted = _toolchain_root_adopted()
+    if toolchain_provision.stamp_matches_pin(stamp, manifest):
+        if not toolchain_provision.store_compiler_present(store_dir, is_windows=os.name == "nt"):
+            if adopted:
+                return Check(
+                    "toolchain",
+                    "fail",
+                    f"{store_dir} carries a verification stamp for {manifest.version} "
+                    f"but its arm-zephyr-eabi-gcc is gone -- "
+                    f"{_adopted_store_remedy(store_dir)}",
+                    scope="project",
+                )
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for {manifest.version} but "
+                f"its arm-zephyr-eabi-gcc is gone -- run `tan bootstrap` to repair it.",
+                "tan bootstrap",
+                scope="project",
+            )
+        return Check(
+            "toolchain", "pass",
+            f"arm-zephyr-eabi {manifest.version} installed at {store_dir}; version and "
+            f"compiler were checked at install, but "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}"
+            + ("." if stamp is not None and stamp.pin_checked else " (this install predates the check)."),
+            scope="project",
+        )
+    host_root = _host_toolchain_matching_pin(manifest)
+    if host_root is not None:
+        return Check(
+            "toolchain",
+            "pass",
+            f"arm-zephyr-eabi {manifest.version} detected at {host_root} -- not tan's "
+            f"own store, but its `sdk_version` matches this checkout's pin, so this "
+            f"host already has what `tan bootstrap` would otherwise download again.",
+            scope="project",
+        )
+    if stamp is not None:
+        if adopted:
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for a different pin (this "
+                f"checkout now pins {manifest.version}) -- "
+                f"{_adopted_store_remedy(store_dir)}",
+                scope="project",
+            )
+        return Check(
+            "toolchain",
+            "fail",
+            f"{store_dir} carries a verification stamp for a different pin (this "
+            f"checkout now pins {manifest.version}) -- run `tan bootstrap` to "
+            f"acquire the current pin.",
+            "tan bootstrap",
+            scope="project",
+        )
+    if adopted and store_dir.is_dir():
+        return Check(
+            "toolchain",
+            "fail",
+            f"no verified arm-zephyr-eabi {manifest.version} toolchain at {store_dir} "
+            f"-- {_adopted_store_remedy(store_dir)}",
+            scope="project",
+        )
+    return Check(
+        "toolchain",
+        "fail",
+        f"no verified arm-zephyr-eabi {manifest.version} toolchain at {store_dir} -- "
+        f"run `tan bootstrap` to acquire it (ADR 0021 Lane 1 P1).",
+        "tan bootstrap",
+        scope="project",
+    )
+
+
+def devicetree_lint_check(resolution: devicetree_lint.DtcResolution) -> Check:
+    """`devicetreeLint` -- will Zephyr's diagnostics-only `dtc` pass actually
+    run for a build on this host (tan-cli#1192)?
+
+    See `tan.core.devicetree_lint` for the two CMake mechanisms this mirrors
+    (`find_program(DTC dtc)` over the SDK's `hosttools` prefix then `PATH`,
+    then `find_package(Dtc 1.4.6)`'s silent `DTC-NOTFOUND` reset) and for the
+    tan-cli#1176/#1178 premise change that made the question worth asking.
+
+    **This partially reverses this module's own recorded decision that
+    `dtc`/`gperf` were deliberately NOT ported from the frozen Rust oracle's
+    `--build` vocabulary** (see the module docstring). That decision was right
+    when it was made and its premise is gone: `dtc` used to arrive with the
+    Zephyr SDK on every install, so a `dtc` probe could only restate what
+    `zephyrSdk` already reported. Since tan-cli#1178 `tan bootstrap` passes
+    `--no-hosttools`, the SDK ships no `dtc`, and the lint pass stopped
+    running with nothing anywhere saying so. `gperf` stays unported; only
+    `dtc` is reopened, and only as this question.
+
+    **The severity, which is the whole difficulty.** A naive "is `dtc` on
+    PATH" `warn` would fire on EVERY correctly-bootstrapped host, which is the
+    anti-pattern `west_check`'s own docstring records ("a warning that fires
+    on every correct install trains users to ignore warnings", tan-cli#299).
+    So the no-`dtc` arm is a `pass`: it is the ordinary, supported, documented
+    state, the build genuinely succeeds, and `tan bootstrap` is not a remedy
+    for it -- bootstrap is what caused it, on purpose. The row still SAYS the
+    lint is not running, which is the visibility tan-cli#1192 asks for, but it
+    raises no `issues[]` entry, contributes no `nextSteps` line, lands in
+    `summary.pass`, and cannot move the exit code.
+
+    The one `warn` arm is the host where somebody INSTALLED a `dtc` and does
+    not get the lint anyway, because `FindDtc.cmake` judged it unusable and
+    reset it to `DTC-NOTFOUND` without printing anything. That is a real,
+    actionable divergence between what an operator did and what they got, it
+    is unreachable on a host provisioned per this repo's own onramp, and its
+    fix is concrete. `warn`, never `fail`: `exit_code_for` reserves exit 4 for
+    a host that cannot build, and this one builds fine -- it just builds
+    without a class of diagnostics.
+
+    NOT harvested by `tan support-bundle`: that command reports only the five
+    HOST checks `support_bundle_cmd._HOST_CHECK_ORDER` names, built by
+    `host_environment_checks` (which this is deliberately not added to), so
+    this check reaches neither that command's report nor its verdict. That is
+    the right call for the same reason `_demote_long_paths_fail` exists --
+    support-bundle's acceptance bar is matching the frozen oracle's axes, and
+    the oracle has no devicetree-lint axis at all.
+
+    `scope="host"` on every arm: the subject is this machine's tooling (an SDK
+    install and `PATH`), identical for every project built on it, which is
+    `tan.core.doctor_scope`'s own test.
+    """
+    floor = devicetree_lint.format_version(devicetree_lint.DTC_MIN_VERSION)
+    lint_flags = "`-E unit_address_vs_reg` / `-Wunique_unit_address_if_enabled`"
+    if devicetree_lint.lint_will_run(resolution) and resolution.version is not None:
+        where = (
+            "the Zephyr SDK's own hosttools bundle, which `host-tools.cmake` puts on "
+            "`CMAKE_PREFIX_PATH`"
+            if resolution.origin == devicetree_lint.ORIGIN_HOSTTOOLS
+            else "this host's PATH"
+        )
+        return Check(
+            "devicetreeLint",
+            "pass",
+            f"dtc {devicetree_lint.format_version(resolution.version)} at "
+            f"{resolution.path} ({where}) -- Zephyr's devicetree lint pass "
+            f"({lint_flags}, `dts.cmake`'s `if(DTC)` block) runs for builds here.",
+            scope="host",
+        )
+    if resolution.path is not None:
+        answered = (
+            f"reports {devicetree_lint.format_version(resolution.version)}, below the "
+            f"{floor} floor"
+            if resolution.version is not None
+            else "did not answer `dtc --version` in a form `FindDtc.cmake` can parse"
+        )
+        return Check(
+            "devicetreeLint",
+            "warn",
+            f"`dtc` is installed at {resolution.path} but {answered}, so Zephyr's "
+            f"`find_package(Dtc {floor})` rejects it and `FindDtc.cmake` resets DTC to "
+            f"`DTC-NOTFOUND` -- silently. The devicetree lint pass ({lint_flags}) does "
+            f"not run, exactly as if no dtc were installed, and nothing in the build "
+            f"output says so.",
+            f"Install dtc {floor} or newer (Debian/Ubuntu `device-tree-compiler`, "
+            f"Homebrew `dtc`) ahead of {resolution.path} on PATH, or drop this one so "
+            f"the report stops claiming a lint that is not happening.",
+            scope="host",
+        )
+    return Check(
+        "devicetreeLint",
+        "pass",
+        f"no `dtc` in CMake's reach (neither a Zephyr SDK `hosttools/` copy nor one on "
+        f"PATH), so Zephyr's devicetree lint pass ({lint_flags}) is SKIPPED -- "
+        f"`dts.cmake` guards it with `if(DTC)` and treats dtc as optional. Builds "
+        f"succeed and produce a real `zephyr.elf`; only those diagnostics are absent. "
+        f"This is the expected state after `tan bootstrap`, which acquires the Zephyr "
+        f"SDK with `--no-hosttools` (tan-cli#1178) and so installs no dtc. Install a "
+        f"system dtc {floor} or newer if you want the lint back.",
         scope="host",
     )
 
@@ -1317,7 +1666,24 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
     )
 
 
-def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) -> Check:
+def jlink_available(app_dir: str, sdk_root: str | None) -> bool:
+    """Whether `tan flash` would find a J-Link tool: the SAME test it applies
+    (`flash_cmd._tool_available` -- PATH or the workspace venv)."""
+    try:
+        venv_bin = venv_bin_dir(app_dir, sdk_root)
+        return any(_tool_available(n, venv_bin) for n in ("JLinkExe", "JLink"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def setools_check(
+    setools_dir: str | None,
+    se_uart: str | None,
+    is_linux: bool,
+    flash_methods: frozenset[str] | None = None,
+    jlink_found: bool | None = None,
+    setools_source: str = "$SETOOLS_DIR",
+) -> Check:
     """`setools` -- can this host flash an Alif AEN part's MRAM at all?
 
     Nothing else in either doctor asks. `scripts/west_commands/runners/
@@ -1342,8 +1708,29 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
     license-gated binary will succeed, and the false alarm it produced here
     trains an operator to stop trusting doctor on the one question they ask it
     before a write.
+
+    **Method-aware (tan-cli#1323).** `$SE_UART` belongs to Flow A
+    (`zephyr_west_flash` -> the `alif_flash` runner) ONLY. A planner-emitted
+    AEN manifest dispatches Flow D (`alif_mram_jlink`): SETOOLS signs the ATOC
+    (`app-gen-toc`) and J-Link writes it over SWD, no SE-UART. `flash_methods`
+    is the set `tan flash` would dispatch for the project's built manifest
+    (`tan.core.doctor_setools.project_flash_methods`, which calls
+    `select_flash_method` itself); `None` means no project/manifest is in
+    scope, and the verdict is then phrased per method rather than asserting
+    one. `jlink_found` is whether a J-Link tool is on PATH (Flow D only).
     """
-    if not is_linux and not setools_dir and not se_uart:
+    flow_d = flash_methods is not None and FLOW_D_METHOD in flash_methods
+    flow_a = flash_methods is not None and FLOW_A_METHOD in flash_methods
+    if flash_methods is not None and not (flow_a or flow_d):
+        return Check(
+            "setools",
+            "unknown",
+            "this project's slices flash via "
+            f"{', '.join(f'`{m}`' for m in sorted(flash_methods)) or 'no method'}, "
+            "which does not use SETOOLS -- nothing to check here.",
+            scope="host",
+        )
+    if flow_a and not flow_d and not is_linux and not setools_dir and not se_uart:
         return Check(
             "setools",
             "unknown",
@@ -1361,53 +1748,17 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
             scope="host",
         )
 
-    problems: list[str] = []
-    if not setools_dir:
-        problems.append(
-            "$SETOOLS_DIR is unset (the Alif Security Toolkit is license-gated and "
-            "NOT redistributed by alp-sdk)"
-        )
-    else:
-        root = Path(setools_dir)
-        absent = []
-        for exe in SETOOLS_EXECUTABLES:
-            try:
-                if not (root / exe).is_file():
-                    absent.append(exe)
-            except OSError:
-                absent.append(exe)
-        if absent:
-            problems.append(
-                f"$SETOOLS_DIR=`{setools_dir}` does not look like an "
-                f"app-release-exec-linux directory (no {', '.join(absent)})"
-            )
-    if not se_uart:
-        problems.append(
-            "$SE_UART is unset (the SE-UART device: Linux /dev/ttyUSB*, macOS "
-            "/dev/cu.usbserial-*, a passed-through COM under WSL)"
-        )
-
-    if not problems:
-        return Check(
-            "setools",
-            "pass",
-            f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has "
-            f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`.",
-            scope="host",
-        )
-    return Check(
-        "setools",
-        "warn",
-        "AEN MRAM flashing (`west flash`, the alif_flash runner) will fail: "
-        + "; ".join(problems)
-        + ".",
-        f"Download the Alif Security Toolkit (`{SETOOLS_BUNDLE}`) from the Alif "
-        f"developer portal -- it is license-gated and alp-sdk does not "
-        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux` "
-        f"and `export SE_UART=/dev/ttyUSB0` (your SE-UART device). "
-        f"See docs/aen-bench-bringup.md.",
-        scope="host",
+    status, detail, fix = setools_verdict(
+        setools_dir,
+        setools_source,
+        se_uart,
+        flash_methods,
+        jlink_found,
+        SETOOLS_BUNDLE,
+        SETOOLS_EXECUTABLES,
+        is_linux,
     )
+    return Check("setools", status, detail, fix, scope="host")
 
 
 def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
@@ -1450,6 +1801,7 @@ def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -1720,6 +2072,32 @@ def long_paths_check(registry_enabled: bool | None, git_core_longpaths: bool | N
     return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix, scope="host")
 
 
+def tan_install_check(verdict: StaleVerdict | None, version: str) -> Check:
+    """`tanInstall` -- is the RUNNING `tan` behind the source it was installed
+    from? `warn` when so (never `fail`: a stale tan still works, and `exit_code_for`
+    reserves exit 4 for real breakage); `pass` when current OR when it cannot be
+    told (no provenance record, offline, no git) -- an unanswerable question is
+    not a problem. The verdict logic lives in `tan.core.doctor_stale`."""
+    return Check(
+        "tanInstall",
+        "pass" if verdict is None else "warn",
+        f"tan {version}" if verdict is None else verdict.detail,
+        None if verdict is None else verdict.fix,
+        scope="host",
+    )
+
+
+def _tan_install_check() -> Check:
+    """IO half of `tan_install_check`; `TAN_DOCTOR_OFFLINE=1` skips its one
+    short-timeout `git ls-remote`."""
+    from tan.version import TAN_VERSION
+
+    verdict = running_tan_verdict(
+        TAN_VERSION, _resolve_git_executable(), bool(os.environ.get("TAN_DOCTOR_OFFLINE"))
+    )
+    return tan_install_check(verdict, TAN_VERSION)
+
+
 def home_path_check(home: str | None) -> Check:
     """`homePath` -- does the home directory contain a space? Mirrors
     `tan_core::host_env::home_path_check`.
@@ -1939,7 +2317,8 @@ def sdk_check(
         return Check("sdk", "pass", detail, scope="project")
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
-        pointer = str(_home_alp_dir() / "sdk-default")
+        home = _home_alp_dir()
+        pointer = str(home / "sdk-default")
         return Check(
             "sdk",
             "fail",
@@ -1947,8 +2326,8 @@ def sdk_check(
             f'({pointer}) names "{broken_global_default}", which is not a '
             f"valid alp-sdk checkout, so tan fell through past it and found "
             f"nothing else either.",
-            f"{global_default_pointer_fix_hint(pointer)}, or pass "
-            f"--sdk-root <path> directly.",
+            f"{global_default_pointer_fix_hint(pointer, str(registry_path(home)))}, or "
+            f"pass --sdk-root <path> directly.",
             scope="project",
         )
     return Check(
@@ -2049,23 +2428,70 @@ def libraries_check(report: LibraryReport | None) -> Check | None:
     )
 
 
-def workspace_preflight_check(workspace_dir: str | None) -> Check:
+def workspace_patches_check(result: PatchCheck, workspace_dir: str) -> Check:
+    """`workspacePatches` (tan-cli#1376) -- is alp-sdk's `zephyr/patches.yml`
+    applied in the resolved workspace? A tree without them still BUILDS; the
+    gap shows up on the device (`alp_camera_open` -> `ALP_ERR_NOSUPPORT` for a
+    missing Alif clock `set_rate`). `unknown` (never a failure) when the SDK has
+    no verifier or the check could not run, so an offline doctor stays green."""
+    if result.state == WORKSPACE_PATCHES_APPLIED:
+        return Check(
+            "workspacePatches", "pass",
+            f"zephyr/patches.yml {result.note} in {workspace_dir}", scope="project",
+        )
+    if result.state == WORKSPACE_PATCHES_MISSING:
+        return Check(
+            "workspacePatches",
+            "warn",
+            f"alp-sdk's zephyr/patches.yml is not applied in {workspace_dir}: "
+            f"{describe_unapplied(result.patches, result.modules)}. The build still succeeds, "
+            "but features that need them fail at runtime (for example `alp_camera_open` "
+            f"returns ALP_ERR_NOSUPPORT). Fix: {patch_fix_text(result.modules, workspace_dir)}.",
+            "tan bootstrap",
+            scope="project",
+        )
+    return Check(
+        "workspacePatches", "unknown", f"patches not checked: {result.note}.", scope="project"
+    )
+
+
+def zephyr_base_check(env_value: str | None, workspace_dir: str) -> Check | None:
+    """`zephyrBase` (tan-cli#1376) -- only when `$ZEPHYR_BASE` names a tree other
+    than the resolved workspace's zephyr, which tan ignores. A `pass` carrying
+    the explanation: it is information, not a problem with the host."""
+    note = zephyr_base_note(env_value, str(Path(workspace_dir) / "zephyr"))
+    if note is None:
+        return None
+    return Check("zephyrBase", "pass", note, scope="project")
+
+
+def workspace_preflight_check(
+    workspace_dir: str | None,
+    *,
+    start: str | None = None,
+    sdk_root: str | None = None,
+    zephyr_base: str | None = None,
+) -> Check:
     """`workspace` -- is a Zephyr WORKSPACE (a directory holding `.west/`)
     resolved at all? Mirrors `build_preflight_checks`'s check of the same
     name. Distinct from `hostPrerequisites`/`west` above, which only confirm
     the TOOLS needed to build are on PATH -- neither confirms a Zephyr tree
     exists to build against.
+
+    tan-cli#1432: with `start` and `sdk_root` known, an unresolved workspace
+    is judged by what `tan build` will then do (see `tan.core.
+    west_workspace_refusal.unresolved_workspace_verdict`), not reported as a
+    bare "no Zephyr workspace" when west's own walk still finds one.
     """
     if workspace_dir is not None:
         return Check("workspace", "pass", f"Zephyr workspace at {workspace_dir}", scope="project")
-    return Check(
-        "workspace",
-        "fail",
+    status, detail = "fail", (
         "no Zephyr workspace -- run `tan bootstrap` (reuses a compatible Zephyr, else "
-        "bootstraps one)",
-        "tan bootstrap",
-        scope="project",
+        "bootstraps one)"
     )
+    if start is not None and sdk_root is not None:
+        status, detail = unresolved_workspace_verdict(Path(start), zephyr_base, Path(sdk_root))
+    return Check("workspace", status, detail, "tan bootstrap", scope="project")
 
 
 def zephyr_version_preflight_check(
@@ -2290,16 +2716,6 @@ def exit_code_for(checks: list[Check]) -> ExitCode:
 # ---------------------------------------------------------------------------
 
 
-def _python_candidates() -> list[list[str]]:
-    """Verbatim `tan_core::bootstrap::python_candidates`. Windows leads with the
-    `py` launcher because a machine can have a perfectly good 3.12 with no bare
-    `python` on PATH, and the bare `python.exe` there is very often the Store
-    alias."""
-    if os.name == "nt":
-        return [["py", "-3"], ["python"], ["python3"]]
-    return [["python3"], ["python"]]
-
-
 #: `platform.machine()` -> the Zephyr-SDK-release arch token
 #: (`tan_core::host_env::ZEPHYR_SDK_HOSTS`'s spelling). Values seen in
 #: practice: Windows `AMD64`/`ARM64`, macOS `x86_64`/`arm64`, Linux
@@ -2460,7 +2876,23 @@ def _zephyr_sdk_root_valid(root: Path) -> bool:
 def _zephyr_sdk_scan_roots() -> list[Path]:
     """Every directory `_zephyr_sdk_detected` scans for a `zephyr-sdk-*`
     install, besides `/opt` -- `$HOME`, `%USERPROFILE%` AND `Path.home()`,
-    ALL of them, never `HOME or USERPROFILE`.
+    ALL of them, never `HOME or USERPROFILE` -- PLUS the ADR 0021
+    artifact-keyed store (`~/.alp/toolchains`, or `$ALP_TOOLCHAIN_ROOT`)
+    `tan bootstrap`'s own toolchain phase installs into, two directory
+    levels below `$HOME` and invisible to the first four roots (tan-cli#1186:
+    a real compiler planted at that exact bootstrap-filled path was measured
+    returning `False` here before this root was added).
+    `_toolchain_store_scan_root`/`_is_toolchain_wreckage` are reused from
+    `build.toolchain` rather than re-derived -- the SAME store root
+    `${TOOLCHAIN_ROOT}` substitution (tan-cli#547) already scans, so this
+    check and that one cannot independently drift on where tan's own
+    installs live, and the SAME `.tmp-<pid>` wreckage exclusion applies (an
+    interrupted acquisition's leftover also starts with `zephyr-sdk`). Routed
+    through the same string-level `seen` dedup as the other four roots (an
+    `ALP_TOOLCHAIN_ROOT` pointed at `$HOME` or `/opt` -- both legitimate,
+    e.g. a bench-machine escape hatch -- would otherwise list that directory
+    twice; harmless for this yes/no scan but not for the invariant the other
+    roots already hold).
 
     Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
     (`/c/Users/dev`) while the real Zephyr SDK sits under the native
@@ -2474,7 +2906,7 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     not assumed redundant.
     """
     roots = [Path("/opt")]
-    seen: set[str] = set()
+    seen: set[str] = {str(roots[0])}
     for raw in (os.environ.get("HOME"), os.environ.get("USERPROFILE")):
         if raw and raw not in seen:
             seen.add(raw)
@@ -2485,15 +2917,62 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
         home = None
     if home is not None and str(home) not in seen:
         roots.append(home)
+        seen.add(str(home))
+    store_root = _toolchain_store_scan_root()
+    if str(store_root) not in seen:
+        roots.append(store_root)
     return roots
+
+
+def _zephyr_sdk_detected_roots() -> list[Path]:
+    """EVERY root the scan validates, in precedence order (tan-cli#1483: the
+    adoption check needs to see all of them, not just the first -- a
+    mismatched `ZEPHYR_SDK_INSTALL_DIR` must not hide an installed copy of the
+    pinned version). `ZEPHYR_SDK_INSTALL_DIR` first, then each `zephyr-sdk*`
+    entry under `_zephyr_sdk_scan_roots()`.
+
+    Never raises: an unreadable or missing scan root is "nothing found
+    there", not a doctor crash.
+    """
+    found: list[Path] = []
+    env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
+    if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
+        found.append(Path(env_dir))
+    for root in _zephyr_sdk_scan_roots():
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if (
+                entry.name.startswith("zephyr-sdk")
+                and not _is_toolchain_wreckage(entry.name)
+                and _zephyr_sdk_root_valid(entry)
+            ):
+                found.append(entry)
+    return found
+
+
+def _zephyr_sdk_detected_root() -> Path | None:
+    """The first root `_zephyr_sdk_detected_roots` validates, or `None`."""
+    roots = _zephyr_sdk_detected_roots()
+    return roots[0] if roots else None
 
 
 def _zephyr_sdk_detected() -> bool:
     """`True` when a Zephyr SDK toolchain is installed anywhere this host
-    would resolve one from. Mirrors `crate::toolchain::resolve_toolchain_root`
-    /`zephyr_sdk_detected` (not yet ported for build-plan `${TOOLCHAIN_ROOT}`
-    substitution -- see `build_cmd.py`'s `toolchain_root=None` -- but doctor
-    only needs the yes/no, same split the Rust module docstring draws):
+    would resolve one from. Descends from `crate::toolchain::
+    resolve_toolchain_root`/`zephyr_sdk_detected` in the now-deleted Rust
+    oracle (`crates/` retired in tan-cli#601) -- doctor only ever needed that
+    pair's yes/no half. Build-plan `${TOOLCHAIN_ROOT}` substitution is its own
+    resolver now, not `None` as it was when this docstring was last true:
+    `build.toolchain.resolve_toolchain_root` (tan-cli#547), which
+    `build_cmd.py` calls and passes on as `toolchain_root=toolchain.root`.
+    That resolver is stricter on purpose -- a host with SEVERAL candidate
+    installs and no `ZEPHYR_SDK_INSTALL_DIR` to choose between them must FAIL
+    a substitution (the wrong one silently baked into a slice is worse than
+    refusing), but should not fail doctor's plain yes/no here, which only
+    needs to know that AT LEAST one usable toolchain exists somewhere:
     `ZEPHYR_SDK_INSTALL_DIR`, honored ONLY when the directory it names
     actually CONTAINS the toolchain (`_zephyr_sdk_root_valid` -- the variable
     is exported from a shell profile and routinely outlives the SDK it once
@@ -2502,29 +2981,72 @@ def _zephyr_sdk_detected() -> bool:
     -- trusting presence alone would report a false Pass here and the real
     failure would surface later as a raw CMake toolchain error); else any
     `zephyr-sdk*`-named directory, similarly validated, directly under
-    `_zephyr_sdk_scan_roots()`. Several installs still count as detected --
-    this is only doctor's yes/no, not the ambiguous-root pick the build-plan
-    substitution path will need.
+    `_zephyr_sdk_scan_roots()` -- which now also covers the ADR 0021
+    artifact-keyed store `tan bootstrap` fills (tan-cli#1186). Several
+    installs still count as detected here -- this is only doctor's yes/no,
+    not the ambiguous-root pick `${TOOLCHAIN_ROOT}` substitution needs.
 
     Never raises: an unreadable or missing scan root is "nothing found
-    there", not a doctor crash.
+    there", not a doctor crash. Delegates to `_zephyr_sdk_detected_root` so
+    the two cannot independently drift on what "detected" means.
     """
-    env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
-    if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
-        return True
-    for root in _zephyr_sdk_scan_roots():
-        try:
-            entries = list(root.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.name.startswith("zephyr-sdk") and _zephyr_sdk_root_valid(entry):
-                return True
-    return False
+    return _zephyr_sdk_detected_root() is not None
+
+
+def _resolve_dtc() -> devicetree_lint.DtcResolution:
+    """Resolve `dtc` the way `zephyr/cmake/modules/FindDtc.cmake` would, and
+    ask it its version -- the IO half of `devicetree_lint_check`.
+
+    Order matters and is CMake's, not this file's: `find_program` searches
+    `CMAKE_PREFIX_PATH` BEFORE the ambient `PATH`, and the SDK's own
+    `cmake/zephyr/host-tools.cmake` is the only thing that puts a
+    `dtc`-bearing prefix on that list. A PATH-first probe would attribute the
+    reported version to the wrong binary on a host that has both -- the same
+    "which binary answered" defect tan-cli#123/#488 closed for `west`.
+
+    The SDK root comes from `_zephyr_sdk_detected_root()` -- the SAME
+    `ZEPHYR_SDK_INSTALL_DIR`-then-scan precedence `zephyrSdk` and `toolchain`
+    already trust, reused rather than re-rolled. One narrowing, stated rather
+    than glossed: an SDK reachable ONLY through CMake's user package registry
+    (`~/.cmake/packages/Zephyr-sdk/*`, which `west sdk install` writes and
+    `FindZephyr-sdk.cmake`'s CONFIG-mode lookup consults) and living outside
+    `$HOME` and `/opt` is not consulted here. That can only ever move a hosttools
+    `dtc` from the first arm to the third -- `pass` either way -- and never
+    manufacture the `warn`, which is the arm that would cost a customer
+    attention.
+
+    Never raises: `_zephyr_sdk_detected_root`, `on_path` and `probe` are all
+    non-raising by contract (see the module docstring), and the one direct
+    filesystem touch here catches `OSError` itself.
+    """
+    host_os, host_arch = _host_os_arch_tags()
+    found: str | None = None
+    origin = devicetree_lint.ORIGIN_ABSENT
+    sdk_dir = _zephyr_sdk_detected_root()
+    if sdk_dir is not None:
+        bin_dir = devicetree_lint.hosttools_bin_dir(sdk_dir, host_os, host_arch)
+        if bin_dir is not None:
+            candidate = bin_dir / ("dtc.exe" if os.name == "nt" else "dtc")
+            try:
+                present = candidate.is_file()
+            except OSError:
+                present = False
+            if present:
+                found, origin = str(candidate), devicetree_lint.ORIGIN_HOSTTOOLS
+    if found is None:
+        on_path_dtc = on_path("dtc")
+        if on_path_dtc is not None:
+            found, origin = on_path_dtc, devicetree_lint.ORIGIN_PATH
+    version = (
+        devicetree_lint.parse_dtc_version(probe([found, "--version"]))
+        if found is not None
+        else None
+    )
+    return devicetree_lint.DtcResolution(found, origin, version)
 
 
 def _probe_host_python(
-    floor: tuple[int, int],
+    floor: tuple[int, int], candidates: list | None = None
 ) -> tuple[str, tuple[int, int], str] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
@@ -2546,26 +3068,10 @@ def _probe_host_python(
     tan-cli#797 exists to close. `python_check` only reads the first two
     elements; a caller wanting just those may slice `found[:2]`.
     """
-    first_that_ran: tuple[str, tuple[int, int], str] | None = None
-    for candidate in _python_candidates():
-        resolved = resolve_tool(candidate[0], os.environ).resolved
-        if resolved is None:
-            continue
-        out = probe(
-            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
-            executable=resolved,
-        )
-        if out is None:
-            continue
-        version = _parse_two(out)
-        if version is None:
-            continue
-        entry = (" ".join(candidate), version, resolved)
-        if version >= floor:
-            return entry
-        if first_that_ran is None:
-            first_that_ran = entry
-    return first_that_ran
+    if candidates is None:
+        candidates = probe_all_host_pythons()
+    found = select_host_python(candidates, floor)
+    return None if found is None else (found.display, found.version, found.resolved)
 
 
 @dataclass(frozen=True)
@@ -2585,6 +3091,17 @@ class ManifestLoad:
     source: str
     error: str | None
     is_real: bool
+    #: tan-cli#1066 review: what was unreadable inside a manifest that was
+    #: otherwise read FINE -- today only the `artifactProvenance` block. A
+    #: SECOND field rather than reusing `error`, because the two mean opposite
+    #: things to the caller: `error` says "this manifest was rejected and the
+    #: built-in fallback list is in play", which would be false here (the tool
+    #: list, the floor and the install commands were all read normally, and
+    #: `is_real` stays true). Both raise the same `bootstrapManifest` warn and
+    #: the same `doctor.bootstrap-manifest` issue -- they differ only in what
+    #: the line says, and saying the wrong one would send a customer hunting a
+    #: prerequisite list that is not actually stale.
+    provenance_error: str | None = None
 
 
 def _load_manifest(sdk_root: str | None) -> ManifestLoad:
@@ -2681,7 +3198,32 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
             **prerequisites,
             "_zephyrPythonMinVersion": zephyr["pythonMinVersion"],
         }
-    return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
+    # tan-cli#1066: `artifactProvenance` is TOP-LEVEL in the manifest
+    # (alp-sdk#1574) while everything else this reader returns lives under
+    # `prerequisites` -- injected onto the returned dict the same way
+    # `_pipSpec` and `_zephyrPythonMinVersion` are, so `prerequisites_check`
+    # has one place to read it from and this file keeps its single parse.
+    # ALWAYS injected, even when absent/malformed: `parse_table` answers `{}`
+    # for both, and `{}` is the same "nothing reported" a tool with no entry
+    # gets -- so no caller has to branch on whether the key was there.
+    prerequisites = {
+        **prerequisites,
+        "_artifactProvenance": artifact_provenance.parse_table(
+            facts.get(artifact_provenance.BLOCK_KEY)
+        ),
+    }
+    return ManifestLoad(
+        prerequisites,
+        f"facts from alp-sdk {path}",
+        None,
+        is_real=True,
+        # Reported, never refused: a corrupt provenance block must not cost
+        # this customer their diagnosis (tan-cli#1066), and must not cost the
+        # NEXT one the ability to see that alp-sdk's generator regressed
+        # (#1066 review -- a silent degrade is byte-identical to a pre-v0.16.0
+        # SDK, so the producer bug is undetectable from here).
+        provenance_error=artifact_provenance.problems_in(facts),
+    )
 
 
 def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
@@ -2956,7 +3498,7 @@ def _running_as_root() -> bool:
 
 
 def run_fix(
-    missing: list[dict[str, str | None]],
+    missing: list[dict[str, str | int | None]],
     on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
@@ -3077,6 +3619,7 @@ def run_fix(
                 errors="replace",
                 stdin=subprocess.DEVNULL,
                 timeout=FIX_INSTALL_TIMEOUT_S,
+                env=spawn_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -3186,6 +3729,239 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
         "`tan doctor --fix` from a real, interactive terminal, without "
         "--ci/--non-interactive/--format json, to allow it.",
     )
+
+
+@dataclass(frozen=True)
+class _PrerequisitesEnvironment:
+    """Everything `bootstrapManifest`/`hostPrerequisites` (and `_collect`'s
+    OWN `hostPython`/`pythonFloor`/`west` checks, which read the SAME
+    manifest load and Python probe) need, computed exactly once regardless of
+    which caller asked -- see `_resolve_prerequisites_environment` (tan-cli#441).
+    """
+
+    bootstrap_manifest_check: Check | None
+    prerequisites_check: Check
+    facts: dict
+    manifest_floor: tuple[int, int]
+    effective_floor: tuple[int, int]
+    effective_source: str
+    python_found: tuple[str, tuple[int, int], str] | None
+    manifest_is_real: bool
+    #: Every interpreter the ONE probe saw (tan-cli#1317) -- `hostPython`'s
+    #: build-readiness verdict reads this instead of probing a second time.
+    host_pythons: tuple = ()
+
+
+def _resolve_prerequisites_environment(
+    sdk_root: str | None, workspace_path: Path | None
+) -> _PrerequisitesEnvironment:
+    """The manifest load through `hostPrerequisites` -- moved verbatim out of
+    `_collect` (tan-cli#441) so `host_environment_checks` (support-bundle's
+    seam onto exactly these two checks; see its own docstring) and `_collect`
+    (`tan doctor`'s full checklist, which ALSO needs `hostPython`/
+    `pythonFloor`/`west`'s `facts.get("_pipSpec")` off the SAME manifest load
+    and the SAME Python probe) build `bootstrapManifest`/`hostPrerequisites`
+    from ONE copy of this logic and pay for the manifest read + the
+    `_probe_host_python` subprocess spawn exactly once per caller, instead of
+    a second copy drifting the moment either check changes.
+
+    `workspace_path` is a parameter, not resolved here, so a caller that
+    already has one (`_collect`, from its own earlier `west_workspace_dir`
+    call) never pays for a second walk -- `host_environment_checks` below
+    resolves its own before calling this.
+    """
+    loaded = _load_manifest(sdk_root)
+    facts, source = loaded.facts, loaded.source
+    bootstrap_manifest_check: Check | None = None
+    if loaded.error is not None:
+        bootstrap_manifest_check = Check(
+            "bootstrapManifest",
+            "warn",
+            f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
+            f"tan's built-in prerequisite list, which may not match this SDK.",
+            "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
+            "version understands; `tan bootstrap` will refuse outright until then.",
+            scope="project",
+        )
+    elif loaded.provenance_error is not None:
+        # tan-cli#1066 review. SAME check name and SAME issue code as the
+        # rejected-manifest arm above -- a consumer keying on
+        # `doctor.bootstrap-manifest` sees both -- but its own wording, because
+        # this manifest was NOT rejected: the tool list, the floor and the
+        # install commands were all read normally and `is_real` is true, so
+        # borrowing the "falling back to tan's built-in prerequisite list"
+        # sentence would send the reader hunting a staleness that does not
+        # exist. `warn`, never `fail`: the exit code and every reported entry
+        # are byte-identical to a run with no provenance at all (the four keys
+        # are still there, still `null`) -- what changes is that the failure is
+        # now SAYABLE. `elif`: a manifest that was rejected outright never had
+        # its provenance parsed in the first place, and the bigger fact wins.
+        bootstrap_manifest_check = Check(
+            "bootstrapManifest",
+            "warn",
+            f"metadata/bootstrap.json was read, but its artifactProvenance "
+            f"block is not readable: {loaded.provenance_error}. Any affected "
+            f"missingPrerequisites[] entries report tier/licence/sourceUrl/"
+            f"sizeBytes as null; the prerequisite list itself is unaffected.",
+            "Report this against alp-sdk -- its metadata/bootstrap.json "
+            "generator produced the block, and `tan` needs no change. Nothing "
+            "else in this report is affected.",
+            scope="project",
+        )
+
+    manifest_floor = _manifest_floor_from_facts(facts)
+    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
+    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
+    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
+    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
+    # bootstrap` next-steps block, both tell a customer to export it), and
+    # reading it here regardless of the resolved workspace is how one report
+    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
+    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
+    # mirroring #290's fix for `zephyrWorkspace` itself.
+    zephyr_source_base = (
+        str(workspace_path / "zephyr")
+        if workspace_path is not None
+        else os.environ.get("ZEPHYR_BASE")
+    )
+    # tan-cli#606: when no workspace resolves, prefer alp-sdk's OWN declared
+    # `zephyr.pythonMinVersion` over `ZEPHYR_PYTHON_FLOOR` -- same `facts`
+    # dict `manifest_floor` above already reads, so this is not a second
+    # manifest parse.
+    zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
+    # tan tan-cli#1317: the ONE composition (`tan.core.python_floor`), shared
+    # with `tan build`'s interpreter pick.
+    effective_floor, effective_source = effective_python_floor(
+        manifest_floor, zephyr_source_base, zephyr_manifest_floor
+    )
+
+    host_pythons = probe_all_host_pythons()
+    python_found = _probe_host_python(effective_floor, host_pythons)
+
+    # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
+    # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
+    # else "posix"`, which has no `macos` arm at all -- so a stock Mac (no
+    # `wget`, no standalone `xz`, both of which joined `prerequisites.posix`
+    # at alp-sdk v0.14.0) got handed the POSIX list wholesale and reported
+    # `hostPrerequisites: fail` on a host `tan bootstrap` accepts. Mirrors
+    # `tan.core.bootstrap.BootstrapFacts.prerequisites`'s own host-keyed read
+    # exactly, including its fallback: an EMPTY/absent `prerequisites.macos`
+    # means the manifest declared none (every SDK before v0.14.0), and macOS
+    # then reads `posix` exactly as it always did -- not a guess, the actual
+    # pre-v0.14.0 behaviour.
+    is_macos = sys.platform == "darwin"
+    required = facts.get("windows" if os.name == "nt" else ("macos" if is_macos else "posix"))
+    if is_macos and not (isinstance(required, list) and required):
+        required = facts.get("posix")
+    if not isinstance(required, list):
+        required = []
+    required = [t for t in required if isinstance(t, str)]
+    install = facts.get("install")
+    platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
+    if platform_key == "linux":
+        # `install["linux"]` is package-manager-keyed, not tool-keyed like
+        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
+        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
+        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
+        # so it needs the SAME normalize/select reconciliation that reader
+        # applies, not a flat `.get(platform_key)` (which would silently
+        # return `{}` for every Linux tool, apt included).
+        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
+        per_tool = select_linux_install(
+            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
+            linux_pm,
+        )
+    else:
+        per_tool = install.get(platform_key) if isinstance(install, dict) else None
+        if not isinstance(per_tool, dict):
+            per_tool = {}
+    # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
+    # confirmation (`available=`) to build the customer-facing `missing`
+    # field; this dict stays unguarded because it is also the source of
+    # `fix_missing`, `--fix`'s (`run_fix`'s) own input -- see
+    # `prerequisites_check`'s docstring and tan-cli#760 review MAJOR 1 for
+    # why those two must NOT be the same value.
+    resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
+    missing_tools = [tool for tool in required if on_path(tool) is None]
+    # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
+    # tool list itself is clean AND a Python actually ran -- mirrors
+    # `check_prerequisites`' own order (`crates/tan-cli/src/commands/
+    # bootstrap/steps.rs:296-298`): presence first, `ensurepip` only after.
+    venv_refusal = None
+    if (
+        sys.platform.startswith("linux")
+        and not missing_tools
+        and python_found is not None
+        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
+    ):
+        venv_refusal = posix_venv_unusable()
+    built_prerequisites_check = prerequisites_check(
+        required,
+        missing_tools,
+        resolved_install,
+        source,
+        venv_refusal,
+        # tan-cli#760: confirmed -- not merely present, not GUESSED --
+        # against THIS host's real PATH walk (`on_path`, already used
+        # above for the tool-presence probe itself).
+        available=lambda binary: on_path(binary) is not None,
+        # tan-cli#1066. `facts` is the manifest `_load_manifest` already
+        # parsed and already resolved the SDK root for -- the join happens
+        # in the ONE process that holds both halves, which is the whole
+        # reason this lives in tan and not in the consumer.
+        provenance=facts.get("_artifactProvenance"),
+    )
+
+    return _PrerequisitesEnvironment(
+        bootstrap_manifest_check=bootstrap_manifest_check,
+        prerequisites_check=built_prerequisites_check,
+        facts=facts,
+        manifest_floor=manifest_floor,
+        effective_floor=effective_floor,
+        effective_source=effective_source,
+        python_found=python_found,
+        manifest_is_real=loaded.is_real,
+        host_pythons=tuple(host_pythons),
+    )
+
+
+def host_environment_checks(sdk_root: str | None, workspace_root: str = ".") -> list[Check]:
+    """The public/internal seam `support-bundle` harvests instead of running
+    `_collect`'s whole build/flash-readiness checklist (tan-cli#441).
+
+    Exactly the five HOST-only checks `_HOST_CHECK_ORDER`
+    (`support_bundle_cmd.py`) names -- `zephyrSdkAvailableForHost`,
+    `longPaths` (Windows only), `homePath`, `bootstrapManifest` (only on a
+    rejected manifest), `hostPrerequisites` -- none of which need a resolved
+    board.yaml, a spawned `west`/JLink/SETOOLS probe, or git provenance. Every
+    one of them is built by the SAME functions `_collect` calls
+    (`zephyr_sdk_host_check`/`long_paths_check`/`home_path_check` directly,
+    `bootstrapManifest`/`hostPrerequisites` via the shared
+    `_resolve_prerequisites_environment`) -- this is a second CALLER, not a
+    second COPY, so a change to any of the five reaches both `tan doctor` and
+    `tan support-bundle` from one place.
+
+    Returned unordered by name (construction order here, not
+    `_HOST_CHECK_ORDER`) -- `support_bundle_cmd._host_checks_from_doctor`
+    already re-indexes by `.name` before use, exactly as it did when it
+    harvested from `_collect`'s much longer list.
+    """
+    workspace_path = west_workspace_dir(
+        workspace_root, Path(sdk_root) if sdk_root is not None else None
+    )
+    host_os, host_arch = _host_os_arch_tags()
+    checks = [zephyr_sdk_host_check(host_os, host_arch)]
+    if os.name == "nt":
+        checks.append(
+            long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
+        )
+    checks.append(home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")))
+
+    prereq_env = _resolve_prerequisites_environment(sdk_root, workspace_path)
+    if prereq_env.bootstrap_manifest_check is not None:
+        checks.append(prereq_env.bootstrap_manifest_check)
+    checks.append(prereq_env.prerequisites_check)
+    return checks
 
 
 def _collect(
@@ -3356,7 +4132,12 @@ def _collect(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
     _add(
-        workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
+        workspace_preflight_check(
+            str(workspace_path) if workspace_path is not None else None,
+            start=workspace_root,
+            sdk_root=sdk_root,
+            zephyr_base=os.environ.get("ZEPHYR_BASE"),
+        )
     )
 
     # tan-cli#290: `westResolved`, right after `workspace` -- the same order
@@ -3421,6 +4202,15 @@ def _collect(
         # earns its own check beside `zephyrVersion` rather than being
         # dropped as a duplicate.
         _add(zephyr_workspace_check(str(workspace_path), workspace_version))
+        # tan-cli#1376: read-only; never raises, never fails an offline doctor.
+        _add(
+            workspace_patches_check(
+                check_workspace_patches(workspace_path, sdk_root, timeout=30), str(workspace_path)
+            )
+        )
+        zephyr_base_info = zephyr_base_check(os.environ.get("ZEPHYR_BASE"), str(workspace_path))
+        if zephyr_base_info is not None:
+            _add(zephyr_base_info)
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.
@@ -3430,142 +4220,61 @@ def _collect(
         _add(
             long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
         )
+    _add(home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")))
+    # `tanInstall`: is this running tan behind the source it was installed from?
+    _add(_tan_install_check())
+
+    # tan-cli#441: `bootstrapManifest` + `hostPrerequisites` (and the manifest
+    # load + Python probe `hostPython`/`pythonFloor`/`west` below also need)
+    # are built by the ONE shared `_resolve_prerequisites_environment` --
+    # `host_environment_checks` calls the SAME function for support-bundle's
+    # seam, so the two callers can never build a diverging verdict.
+    #
+    # tan-cli#980 review nit 3, decided rather than restored: because this
+    # call now builds `hostPrerequisites` (PATH walk over `required`, plus
+    # the POSIX `_posix_venv_capable` spawn) EAGERLY as part of the same
+    # shared unit, `bootstrapManifest`/`hostPython`/`pythonFloor` below are
+    # `_add`ed -- and so, in `tan doctor` TEXT mode, printed by `on_check` --
+    # AFTER that PATH walk and spawn finish, where pre-#441 `_collect` built
+    # and `_add`ed each of the three the moment it had the data, before ever
+    # touching PATH or spawning `_posix_venv_capable`. The returned list
+    # order and the JSON envelope are byte-identical either way (verified in
+    # the PR's own equivalence pass) -- only the incremental print TIMING
+    # `on_check` exists for shifts by the wall-clock cost of two spawns this
+    # single caller already pays for regardless of which check the delay is
+    # attributed to. Restoring the old interleaving would mean splitting
+    # `_resolve_prerequisites_environment` back into a pre-PATH-walk half and
+    # a post-PATH-walk half so `_collect` could `_add` between them -- which
+    # reopens the exact two-copies-of-one-decision risk this helper exists to
+    # close, for a few hundred milliseconds of `tan doctor` console timing.
+    # Accepted as-is.
+    prereq_env = _resolve_prerequisites_environment(sdk_root, workspace_path)
+    if prereq_env.bootstrap_manifest_check is not None:
+        _add(prereq_env.bootstrap_manifest_check)
+    facts = prereq_env.facts
+    effective_floor = prereq_env.effective_floor
+    effective_source = prereq_env.effective_source
+    python_found = prereq_env.python_found
+
     _add(
-        home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
-    )
-
-    loaded = _load_manifest(sdk_root)
-    facts, source = loaded.facts, loaded.source
-    if loaded.error is not None:
-        _add(
-            Check(
-                "bootstrapManifest",
-                "warn",
-                f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
-                f"tan's built-in prerequisite list, which may not match this SDK.",
-                "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
-                "version understands; `tan bootstrap` will refuse outright until then.",
-                scope="project",
-            )
-        )
-
-    manifest_floor = _manifest_floor_from_facts(facts)
-    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
-    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
-    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
-    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
-    # bootstrap` next-steps block, both tell a customer to export it), and
-    # reading it here regardless of the resolved workspace is how one report
-    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
-    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
-    # mirroring #290's fix for `zephyrWorkspace` itself.
-    zephyr_source_base = (
-        str(workspace_path / "zephyr")
-        if workspace_path is not None
-        else os.environ.get("ZEPHYR_BASE")
-    )
-    # tan-cli#606: when no workspace resolves, prefer alp-sdk's OWN declared
-    # `zephyr.pythonMinVersion` over `ZEPHYR_PYTHON_FLOOR` -- same `facts`
-    # dict `manifest_floor` above already reads, so this is not a second
-    # manifest parse.
-    zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
-    zephyr_floor, zephyr_source = zephyr_python_floor(
-        zephyr_source_base, manifest_zephyr_floor=zephyr_manifest_floor
-    )
-    # The EFFECTIVE floor: the highest anything in the build chain enforces. The
-    # manifest is not the authority here -- it is one of two claimants.
-    effective_floor = max(manifest_floor, zephyr_floor)
-    effective_source = (
-        zephyr_source
-        if zephyr_floor >= manifest_floor
-        else "alp-sdk metadata/bootstrap.json pythonMinVersion"
-    )
-
-    python_found = _probe_host_python(effective_floor)
-    _add(
-        python_check(
-            python_found[:2] if python_found else None, effective_floor, effective_source
+        host_python_check(
+            python_found[:2] if python_found else None,
+            effective_floor,
+            effective_source,
+            find_workspace_venv(workspace_root, sdk_root) is not None,
+            list(prereq_env.host_pythons),
         )
     )
     skew = python_floor_skew_check(
-        manifest_floor,
+        prereq_env.manifest_floor,
         effective_floor,
         effective_source,
-        manifest_is_real=loaded.is_real,
+        manifest_is_real=prereq_env.manifest_is_real,
     )
     if skew is not None:
         _add(skew)
 
-    # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
-    # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
-    # else "posix"`, which has no `macos` arm at all -- so a stock Mac (no
-    # `wget`, no standalone `xz`, both of which joined `prerequisites.posix`
-    # at alp-sdk v0.14.0) got handed the POSIX list wholesale and reported
-    # `hostPrerequisites: fail` on a host `tan bootstrap` accepts. Mirrors
-    # `tan.core.bootstrap.BootstrapFacts.prerequisites`'s own host-keyed read
-    # exactly, including its fallback: an EMPTY/absent `prerequisites.macos`
-    # means the manifest declared none (every SDK before v0.14.0), and macOS
-    # then reads `posix` exactly as it always did -- not a guess, the actual
-    # pre-v0.14.0 behaviour.
-    is_macos = sys.platform == "darwin"
-    required = facts.get("windows" if os.name == "nt" else ("macos" if is_macos else "posix"))
-    if is_macos and not (isinstance(required, list) and required):
-        required = facts.get("posix")
-    if not isinstance(required, list):
-        required = []
-    required = [t for t in required if isinstance(t, str)]
-    install = facts.get("install")
-    platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
-    if platform_key == "linux":
-        # `install["linux"]` is package-manager-keyed, not tool-keyed like
-        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
-        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
-        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
-        # so it needs the SAME normalize/select reconciliation that reader
-        # applies, not a flat `.get(platform_key)` (which would silently
-        # return `{}` for every Linux tool, apt included).
-        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
-        per_tool = select_linux_install(
-            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
-            linux_pm,
-        )
-    else:
-        per_tool = install.get(platform_key) if isinstance(install, dict) else None
-        if not isinstance(per_tool, dict):
-            per_tool = {}
-    # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
-    # confirmation (`available=`) to build the customer-facing `missing`
-    # field; this dict stays unguarded because it is also the source of
-    # `fix_missing`, `--fix`'s (`run_fix`'s) own input -- see
-    # `prerequisites_check`'s docstring and tan-cli#760 review MAJOR 1 for
-    # why those two must NOT be the same value.
-    resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
-    missing_tools = [tool for tool in required if on_path(tool) is None]
-    # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
-    # tool list itself is clean AND a Python actually ran -- mirrors
-    # `check_prerequisites`' own order (`crates/tan-cli/src/commands/
-    # bootstrap/steps.rs:296-298`): presence first, `ensurepip` only after.
-    venv_refusal = None
-    if (
-        sys.platform.startswith("linux")
-        and not missing_tools
-        and python_found is not None
-        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
-    ):
-        venv_refusal = posix_venv_unusable()
-    _add(
-        prerequisites_check(
-            required,
-            missing_tools,
-            resolved_install,
-            source,
-            venv_refusal,
-            # tan-cli#760: confirmed -- not merely present, not GUESSED --
-            # against THIS host's real PATH walk (`on_path`, already used
-            # above for the tool-presence probe itself).
-            available=lambda binary: on_path(binary) is not None,
-        )
-    )
+    _add(prereq_env.prerequisites_check)
 
     west_exe = on_path("west")
     # tan-cli#488 defect 5: probe `west_exe` -- the PATH-RESOLVED absolute
@@ -3608,6 +4317,18 @@ def _collect(
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
     zephyr_sdk_ok = _zephyr_sdk_detected()
     _add(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
+    # issue #474 (ADR 0021 Lane 1 P1): stamp-vs-pin, narrower than `zephyrSdk`
+    # above -- see `toolchain_check`'s own docstring for the distinction.
+    _add(toolchain_check(sdk_root))
+    # tan-cli#1192: beside the two toolchain checks because it reads the SAME
+    # resolved SDK install (`_zephyr_sdk_detected_root`) they do -- but it
+    # answers a question neither does: whether Zephyr's diagnostics-only `dtc`
+    # pass will run at all now that `tan bootstrap` acquires the SDK with
+    # `--no-hosttools` (tan-cli#1178) and so ships no `dtc`. NOT added to
+    # `host_environment_checks` below: `tan support-bundle` reports only the
+    # five checks `_HOST_CHECK_ORDER` names, and this is not one of them --
+    # see `devicetree_lint_check`'s docstring for why that is deliberate.
+    _add(devicetree_lint_check(_resolve_dtc()))
     # tan-cli#736: unconditional on Windows. This used to ride the
     # `zephyrSdk` Fail (`and not zephyr_sdk_ok`), which silently excused the
     # host that has an SDK and no 7-Zip -- exactly the host whose next
@@ -3617,11 +4338,27 @@ def _collect(
     if os.name == "nt":
         _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
+    # tan-cli#1323: the precedence `tan flash` applies (`resolve_setools_dir`),
+    # minus the per-run `--setools-dir` flag doctor cannot see: $SETOOLS_DIR,
+    # then the built manifest's flash_args.setools_dir.
+    flash_info = project_flash(board_yaml)
+    setools_dir = os.environ.get("SETOOLS_DIR") or (
+        flash_info.setools_dir if flash_info is not None else None
+    )
+    setools_source = (
+        "$SETOOLS_DIR" if os.environ.get("SETOOLS_DIR") else "the manifest's flash_args.setools_dir"
+    )
     _add(
         setools_check(
-            os.environ.get("SETOOLS_DIR"),
+            setools_dir,
             os.environ.get("SE_UART"),
             sys.platform.startswith("linux"),
+            flash_info.methods if flash_info is not None else None,
+            jlink_available(
+                str(Path(board_yaml).parent) if board_yaml is not None else workspace_root,
+                sdk_root,
+            ),
+            setools_source,
         )
     )
 
@@ -3740,9 +4477,13 @@ def doctor(
     build: bool = typer.Option(
         False,
         "--build",
-        help="Accepted for compatibility (tan-cli#290): zephyrWorkspace, the check "
-        "this used to gate, now runs unconditionally, so this flag no longer "
-        "changes the check list.",
+        help=inert_help(
+            "Accepted for compatibility: zephyrWorkspace, the check this used "
+            "to gate, now runs unconditionally, so this flag no longer changes "
+            "the check list.",
+            COMPATIBILITY,
+            "tan-cli#290",
+        ),
     ),
     fix: bool = typer.Option(
         False,

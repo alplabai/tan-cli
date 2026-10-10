@@ -33,7 +33,8 @@ exists to prevent, applied to this file about itself):
 
   1. LITERAL sites -- `Issue("family.code", ...)`, `code="family.code"`
      anywhere, and `Issue(NAME, ...)` where `NAME` is a module-level constant
-     assigned exactly that literal (`cli.command-deferred`'s actual shape).
+     assigned exactly that literal (`completion.shell-unsupported`'s actual
+     shape, via `completion_cmd.SHELL_UNSUPPORTED_CODE`).
   2. FULL-CODE-CARRYING CALL sites -- [`_FULL_CODE_CALLABLES`]: the port's
      DOMINANT emit idiom is not `Issue("family.code", ...)` directly but a
      per-command error TYPE (`BuildError`, `InitError`, `GenerateError`, ...)
@@ -347,8 +348,8 @@ def _rel(path: pathlib.Path) -> str:
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     """Module-level `NAME = "literal.with.a.dot"` assignments -- the
-    `cli.command-deferred` shape (`DEFERRED_ISSUE_CODE` in
-    `deferred_cmd.py`), where the whole code is named once and referenced by
+    `completion.shell-unsupported` shape (`SHELL_UNSUPPORTED_CODE` in
+    `completion_cmd.py`), where the whole code is named once and referenced by
     identifier at the `Issue(...)` call site rather than spelled inline.
     Deliberately shallow: only a direct top-level `Assign` to a `Name`
     counts, so a value reassigned or computed elsewhere is correctly left
@@ -382,6 +383,7 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
 _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/core/build_plan.py", "PlanParseError"): 0,
     ("tan/commands/monitor_cmd.py", "MonitorError"): 0,
+    ("tan/commands/monitor_session.py", "MonitorError"): 0,
     ("tan/commands/explain_cmd.py", "ExplainError"): 0,
     ("tan/commands/generate_cmd.py", "GenerateError"): 0,
     ("tan/commands/build/token_substitution.py", "TokenSubstitutionError"): 0,
@@ -417,21 +419,22 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
 #: Every entry's literal IS captured elsewhere in this same scan: an
 #: `except <X>Error as err:` block re-emitting `err.code` (`<X>Error` is
 #: itself in `_FULL_CODE_CALLABLES`, so its OWN construction sites carry the
-#: literal), or a module constant imported from another file (`deferred_cmd
-#: .py`'s `DEFERRED_ISSUE_CODE`, resolved by `_module_string_constants` only
-#: at ITS OWN definition site -- deliberately shallow, per that function's own
-#: docstring -- so the cross-module import here needs its own declared entry).
+#: literal), or a module constant imported from another file, which
+#: `_module_string_constants` resolves only at ITS OWN definition site --
+#: deliberately shallow, per that function's own docstring -- so a
+#: cross-module import needs its own declared entry here.
 _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tan/commands/build_cmd.py", "err.code"),  # BuildError <- PlanParseError/TokenSubstitutionError
-        ("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE"),  # imported from deferred_cmd.py
-        ("tan/commands/doctor_cmd.py", "SDK_DISCOVERY_DIVERGENT"),  # imported from build_cmd.py
-        # (tan-cli#407). Same shape as the line above and covered the same way:
-        # `_module_string_constants` only reads the file it is given, so a
-        # constant DEFINED in `build_cmd.py` (where its literal
+        # imported from `tan.core.sdk_discovery` (tan-cli#407; the module
+        # moved under tan-cli#408, this entry did not need to). Same shape as
+        # the line above and covered the same way: `_module_string_constants`
+        # only reads the file it is given, so a constant DEFINED in
+        # `tan/core/sdk_discovery.py` (where its literal
         # `"sdk.discovery-divergent"` IS resolved and checked against
         # `contract/issue-codes.json`) cannot resolve from `doctor_cmd.py`'s
         # own tree. Declared, not silently dropped.
+        ("tan/commands/doctor_cmd.py", "SDK_DISCOVERY_DIVERGENT"),
         ("tan/commands/build_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN body,
         # forwarding ITS OWN `code` parameter -- `_refuse` is itself in
         # `_FULL_CODE_CALLABLES`, so its call sites carry the literal.
@@ -759,7 +762,50 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # never answered, so the venv is reused rather than removed), and
         # `bootstrap.venv-recreated` (the one surviving delete, promoted from a
         # `log.line` so it reaches `issues[]`). Checked before bumping.
-        expected_calls=20,
+        #
+        # 31, not 20, since issue #474 (ADR 0021 Lane 1 P1) added
+        # `toolchain_phase`/`_acquire_toolchain`/`_finish_toolchain_install`,
+        # which together carry ELEVEN new `log.warn("toolchain-install", ...)`
+        # call sites -- one code, many sites, all of them the phase's own
+        # non-fatal failure modes (bad manifest, missing 7-Zip, insufficient
+        # disk, a `west sdk install` failure, a post-install version
+        # mismatch, a compiler that will not run, a failed stamp write, an
+        # adopted-root refusal). Registered as `bootstrap.toolchain-install`
+        # in contract/issue-codes.json before bumping.
+        #
+        # 33, not 31, since issue #1143 gave `tan bootstrap` a way to
+        # authenticate its own `west sdk install`: `_sdk_credential` carries
+        # TWO new `log.warn("sdk-credential-unstaged", ...)` call sites --
+        # one for a token variable whose VALUE tan will not write into a
+        # netrc, one for a netrc it could not stage -- both meaning "the
+        # environment named a credential and this download is going out
+        # unauthenticated anyway". One code, two sites, deliberately NOT a
+        # `WORKSPACE_BLOCKING` member (the download usually still succeeds).
+        # Registered as `bootstrap.sdk-credential-unstaged` in
+        # contract/issue-codes.json before bumping.
+        #
+        # 35 (tan-cli#1498 added the adopted-root pre-download refusal); was 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
+        # runtime tripwire under that netrc route: ONE new
+        # `log.warn("sdk-credential-unverified", ...)` call site, taken
+        # instead of the `Authenticating the Zephyr SDK download ...` line
+        # when the resolved `<zephyr_base>/scripts/west_commands/sdk.py` no
+        # longer matches the shape the route was measured against. A NEW code,
+        # not a second site on the old one -- "the credential is staged but
+        # tan cannot vouch for it" is a different fact from
+        # `sdk-credential-unstaged`'s "tan did not use it at all", and
+        # collapsing them would put two verdicts behind one wire string.
+        # Registered as `bootstrap.sdk-credential-unverified` in
+        # contract/issue-codes.json before bumping.
+        # 41, not 34, since tan-cli#1496: the pre/post-install sum checks and the
+        # toolchain download carry seven new `log.warn` sites, all on the registered
+        # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`;
+        # 42 = 34 + 7 (#1496) + 1 (#1503, merged from dev).
+        expected_calls=42,
+        # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
+        # with the `FAILED`/`UNCHECKED` constants (declared below in
+        # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
+        # invisible to the gate, which scans only the template's own file.
+        also_scan={"tan/commands/bootstrap_patches.py": 2},
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
@@ -767,11 +813,12 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_refusal",
         arg_index=1,
-        # 9, not 8, since tan-cli#389 added the `workspace-orphan-refused`
-        # refusal beside `enclosing-west-workspace`: `--workspace` must not
-        # rename the manifest repository out of a live west workspace. Code
-        # registered before bumping.
-        expected_calls=9,
+        # 10, not 9, since tan-cli#964 review added the
+        # `metadata-schema-invalid` refusal: `bootstrap` reads a SoM preset to
+        # build its topology, so a schema-invalid preset must REFUSE rather
+        # than silently degrade the way `tan presets`'s WARN half is allowed
+        # to. Code registered before bumping.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/debug_config_cmd.py", "_failure"): dict(
@@ -813,7 +860,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         #     counted) with a second, SDK-published authority for the same
         #     `core-unknown` code.
         # 9 -> 10.
-        expected_calls=10,
+        #   tan-cli#1488  `_core_required_failure` -- `debug-config.core-required`
+        #     (registered), a multi-core build with no `--core`. 10 -> 11.
+        expected_calls=11,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(
@@ -828,7 +877,27 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `sdk.network-required`, is still a LITERAL `Issue("sdk.network-
         # required", ...)` first-arg site, so it is still covered, just by the
         # plain-literal scan (shape 1) instead of this prefixing scan (shape 3).
-        expected_calls=4,
+        # tan-cli#790: 4 -> 9. `sdk remove` added five new `_fail(...)` call
+        # sites -- `remove-missing-argument`, `remove-outside-root`,
+        # `remove-active`, and `remove-in-use`/`remove-permission` (TWO
+        # literal call sites, not one `f"remove-{outcome.kind}"`: this exact
+        # gate can only resolve a `code=` keyword to a registered wire string
+        # when it is a literal at the call site, so the dynamic form would
+        # have emitted a real string this gate cannot see). Every suffix is
+        # FLAT -- one dash, no dot -- rather than the nested `remove.<reason>`
+        # shape the tan-cli#790 issue's own prose sketches:
+        # `contract/issue-codes.json`'s `sdk.remove-missing-argument` entry
+        # explains why a nested (two-dot) code is not available on this wire
+        # at all (alp-sdk-vscode's `ISSUE_CODE_SHAPE` hard-requires exactly
+        # one dot; `test_issue_code_registry_shape.py` caught the first,
+        # nested-dot draft of this change).
+        # tan-cli#790 review follow-up, same PR: 9 -> 10. `remove-is-cache-root`
+        # added a SIXTH `_fail(...)` call site -- found live during review:
+        # naming the cache root exactly (`target == destination`) was
+        # unguarded, since `remove-outside-root` deliberately answers False for
+        # that equality and `remove-active`'s load-bearing ladder only ever
+        # names a specific version subdirectory, never the root holding them.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/validate_cmd.py", "validate.fail"): dict(
@@ -846,7 +915,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # guard (`crates/tan-cli/src/commands/validate.rs:124-129`):
         # `python-too-old`, the one #376 left out while its own module docstring
         # claimed three guards were implemented.
-        expected_calls=7,
+        expected_calls=8,
         sites=1,
     ),
     ("tan/commands/doctor_cmd.py", "checks_to_issues"): dict(
@@ -919,13 +988,50 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `"sdk"` -- the same literal every other arm of that function uses --
         # and passes no `code=` override, so `doctor.sdk` needs no new
         # registry entry. One more call site, no new code.
+        #
+        # 69 as of issue #474 (ADR 0021 Lane 1 P1): `toolchain_check` is SIX
+        # `Check(...)` sites (no-sdk-root, missing/malformed manifest, pass,
+        # version-skew fail, no-toolchain fail), all literally named
+        # `"toolchain"`, so they contribute ONE new code, `doctor.toolchain`,
+        # newly registered in `contract/issue-codes.json` -- the same shape
+        # as the `libraries_check` bump above.
+        #
+        # 70 as of tan-cli#990 review (the BLOCKER fix): `toolchain_check`
+        # grew a SEVENTH `Check(...)` site -- the host-toolchain-matches-the-
+        # pin adoption path (`_host_toolchain_matching_pin`), a `pass`
+        # alongside the existing stamp-verified `pass`. Still literally named
+        # `"toolchain"`, so still `doctor.toolchain`; no new code registered.
+        #
+        # 71 as of tan-cli#1066 review: `_resolve_prerequisites_environment`
+        # grew a SECOND `bootstrapManifest` arm -- a manifest that was read
+        # fine but whose `artifactProvenance` block is present and unreadable
+        # (a silent degrade there made an alp-sdk generator regression
+        # indistinguishable from a pre-v0.16.0 SDK). Literally named
+        # `"bootstrapManifest"`, same as the rejected-manifest arm beside it,
+        # so it emits the SAME already-registered `doctor.bootstrap-manifest`
+        # and no registry entry is added: one more call site, no new code --
+        # exactly the shape the `63 as of tan-cli#727` bump above describes.
+        #
+        # 75 as of tan-cli#1317: `host_python_check` adds the `hostPython` warn `Check(...)`.
+        # 76 as of tan-cli#1367: `tan_install_check` adds the `tanInstall` warn `Check(...)`.
+        # 80 as of tan-cli#1376: `workspace_patches_check` (3 arms) and `zephyr_base_check` add four.
+        # 74 as of tan-cli#1192: `devicetree_lint_check` is THREE `Check(...)`
+        # sites (lint runs; a `dtc` Zephyr's own `find_package(Dtc 1.4.6)`
+        # rejects; no `dtc` in CMake's reach at all), all literally named
+        # `"devicetreeLint"`, so they contribute ONE new code,
+        # `doctor.devicetree-lint`, newly registered in
+        # `contract/issue-codes.json` -- the same shape as the
+        # `libraries_check` and `toolchain_check` bumps above. Only the middle
+        # site can ever emit it: the other two are `pass`, and
+        # `checks_to_issues` raises an issue for `warn`/`fail` only.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=63,
+        # 84 (tan-cli#1498): three adopted-root toolchain-check arms, no new code.
+        expected_calls=84,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
@@ -1036,10 +1142,20 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # unavailable`/`schema-violation` from `_load_document`/`_parse_fields`;
     # `python-too-old`/`spawn-failed` from `_reject_if_sdk_validator_disagrees`'s
     # own two direct refusals; `schema-violation`/`missing-preset`/
-    # `hardware-revision`/`failed` (the fifth, `clean`, never reaches a raise)
+    # `hardware-revision`/`hardware-revision-unknown`/
+    # `hardware-revision-not-buildable`/`failed` (the seventh, `clean`, never
+    # reaches a raise -- `_reject_if_sdk_validator_disagrees` returns on it)
     # from `_spawn_validator`'s outcome, the same `_STATUS_OUTCOME` +
     # `OUTCOME_FAILED` vocabulary `validate_cmd`'s own `result.outcome` entry
     # below declares (tan-cli#455 review round).
+    # The two `hardware-revision-*` siblings arrived with tan-cli#1262: that
+    # change added validator exits 4 and 5 to `_STATUS_OUTCOME`, and because
+    # `diff` raises `ParseFailure(outcome, ...)` with whatever
+    # `_spawn_validator` returns, the SAME edit widened THIS site's value
+    # space too. Declaring them only on the `validate_cmd` entry would have
+    # left `diff` emitting a code nothing registers -- the exact hole this
+    # gate exists to close -- so both codes are registered under `diff.` as
+    # well as under `validate.`.
     ("tan/commands/diff_cmd.py", "failure.code"): dict(
         suffixes=frozenset(
             {
@@ -1050,6 +1166,8 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
                 "failed",
                 "missing-preset",
                 "hardware-revision",
+                "hardware-revision-unknown",
+                "hardware-revision-not-buildable",
             }
         ),
         sites=1,
@@ -1126,11 +1244,24 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # of `validate()`'s paths (that single funnel is deliberate: a second
     # template for the spawn path would be a second, separately-declared site
     # for the same wire fact). `result.outcome`'s value space is
-    # `validate_cmd._STATUS_OUTCOME`'s four outcomes plus `failed`, ALL FIVE
+    # `validate_cmd._STATUS_OUTCOME`'s SIX outcomes plus `failed`, ALL SEVEN
     # of them. Was `{"schema-violation"}` alone until tan-cli#376 ported the
     # spawn path -- offline can still only reach `schema-violation` (`outcome
     # = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION`), the
-    # other four arrive only from a spawned validator.
+    # other six arrive only from a spawned validator.
+    # `hardware-revision-unknown` and `hardware-revision-not-buildable` are
+    # tan-cli#1262's: validator exits 4 and 5 (`EXIT_SDK_REVISION_UNKNOWN`,
+    # `EXIT_SDK_REVISION_NOT_BUILDABLE`), which alp-sdk has returned all along
+    # -- measured at v0.16.0 and at `dev`/`cfeafd148cb16d24a0e6c2feb7749769
+    # fec8f992` -- and which used to fall through `.get(..., OUTCOME_FAILED)`
+    # onto `failed`, i.e. onto a code published as "produced no usable
+    # verdict". Every row of that map is reachable, `missing-preset`
+    # included: the SCRIPT's `main()` never returns 2, but `_STATUS_OUTCOME`
+    # keys off the spawned PROCESS's exit status, and that is 2 when the
+    # interpreter cannot open the script or when argparse rejects a flag --
+    # both measured, both recorded in `validate_cmd`'s module docstring.
+    # Either way this set is `_STATUS_OUTCOME`'s VALUE SPACE, which is what
+    # the emit site can produce, not a claim about what the SDK returns.
     # `clean` IS reachable, counter-intuitively: `validate_board_yaml.py`
     # renders every diagnostic to stderr and only RETURNS 1 when
     # `collector.has_errors()`, so a board carrying warnings only exits 0 with
@@ -1141,7 +1272,15 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # invention of this port.
     ("tan/commands/validate_cmd.py", "result.outcome"): dict(
         suffixes=frozenset(
-            {"clean", "schema-violation", "missing-preset", "hardware-revision", "failed"}
+            {
+                "clean",
+                "schema-violation",
+                "missing-preset",
+                "hardware-revision",
+                "hardware-revision-unknown",
+                "hardware-revision-not-buildable",
+                "failed",
+            }
         ),
         sites=1,
     ),
@@ -1152,6 +1291,14 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     ("tan/commands/bootstrap_cmd.py", "warn(*skew)"): dict(suffixes=frozenset({"python-floor-skew"}), sites=1),
     ("tan/commands/bootstrap_cmd.py", "warn(*ceiling)"): dict(
         suffixes=frozenset({"python-newer-than-verified"}), sites=1
+    ),
+    # tan-cli#1296: `log.warn(FAILED, ...)` / `log.warn(UNCHECKED, ...)` in
+    # bootstrap_patches.py, whose module constants hold these two suffixes.
+    ("tan/commands/bootstrap_patches.py", "FAILED"): dict(
+        suffixes=frozenset({"west-patches-failed"}), sites=1
+    ),
+    ("tan/commands/bootstrap_patches.py", "UNCHECKED"): dict(
+        suffixes=frozenset({"west-patches-unchecked"}), sites=1
     ),
 }
 
@@ -1457,24 +1604,29 @@ def _classify_and_resolve(
             )
 
     for key, spec in _RESOLVABLE_HELPERS.items():
-        rel = key[0]
-        site_codes, site_unresolved, site_forwarder_hits = _resolve_helper(
-            TAN.parent / rel,
-            kind=spec.get("kind", "prefix"),
-            prefix=spec.get("prefix"),
-            suffix=spec.get("suffix"),
-            attr=spec.get("attr"),
-            name=spec.get("name"),
-            arg_index=spec.get("arg_index"),
-            arg_keyword=spec.get("arg_keyword"),
-            skip_if_keyword=spec.get("skip_if_keyword"),
-            kebab=spec.get("kebab", False),
-            expected_calls=spec["expected_calls"],
-        )
-        codes |= site_codes
-        unresolved.extend(site_unresolved)
-        for fwd_key, lines in site_forwarder_hits.items():
-            seen_forwarder_lines.setdefault(fwd_key, []).extend(lines)
+        # The helper's own file, plus any `also_scan` file that CALLS it
+        # (tan-cli#1296: `bootstrap_patches.py` calls `Log.warn` but the
+        # f-string that turns the code into an issue lives in bootstrap_cmd.py,
+        # so scanning only the template's file left those call sites unseen).
+        scans = {key[0]: spec["expected_calls"], **spec.get("also_scan", {})}
+        for rel, expected_calls in scans.items():
+            site_codes, site_unresolved, site_forwarder_hits = _resolve_helper(
+                TAN.parent / rel,
+                kind=spec.get("kind", "prefix"),
+                prefix=spec.get("prefix"),
+                suffix=spec.get("suffix"),
+                attr=spec.get("attr"),
+                name=spec.get("name"),
+                arg_index=spec.get("arg_index"),
+                arg_keyword=spec.get("arg_keyword"),
+                skip_if_keyword=spec.get("skip_if_keyword"),
+                kebab=spec.get("kebab", False),
+                expected_calls=expected_calls,
+            )
+            codes |= site_codes
+            unresolved.extend(site_unresolved)
+            for fwd_key, lines in site_forwarder_hits.items():
+                seen_forwarder_lines.setdefault(fwd_key, []).extend(lines)
 
     unclassified.extend(_check_site_counts(_RESOLVABLE_HELPERS, seen_helper_lines, "_RESOLVABLE_HELPERS"))
     unclassified.extend(_check_site_counts(_ACKNOWLEDGED_CEILINGS, seen_ceiling_lines, "_ACKNOWLEDGED_CEILINGS"))
@@ -1628,6 +1780,97 @@ def test_gate_rejects_a_deliberately_unregistered_code():
     # not unconditionally red.
     offenders_clean = _missing(real_emitted, registered)
     assert fabricated not in offenders_clean
+
+
+def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
+    """`_KNOWN_CODE_FORWARDS` is a static allowlist that only ever answers
+    "is this unresolved site declared" -- it never asks "is this declared
+    entry unresolved anywhere any more", so a stale row (the call site it
+    used to shield renamed, refactored away, or resolved some other way)
+    costs the gate above nothing. Proven by mutation while reviewing
+    tan-cli#427: this change deletes `deferred_cmd.py` and, with it, every
+    call site `("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE")` used to
+    shield -- had that row been left in `_KNOWN_CODE_FORWARDS` instead of
+    removed in the same commit,
+    `test_every_emitted_issue_code_is_registered` would have stayed exactly
+    as green, because that gate only ever checks the declared side, never
+    whether the declaration still matches anything real. A gate that cannot
+    go red for carrying a dead row is not pruning itself.
+
+    This is the missing other half. With `_KNOWN_CODE_FORWARDS` temporarily
+    emptied, re-run the SAME whole-tree scan `_all_literal_codes` runs for
+    the real gate, and recover every `(rel, expr)` pair that comes back
+    unresolved without it. Every entry in the real table must appear there --
+    i.e. removing it must make some real `Issue(...)`/`code=` call regress
+    from resolved to unresolved. One that does not is dead: nothing in the
+    tree needs it forwarded any more, and it should be deleted in the same
+    change that made it dead, not left for the next reviewer to notice by
+    hand.
+    """
+    live_forwards = _KNOWN_CODE_FORWARDS
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", frozenset())
+    _, unresolved_without_forwards = _all_literal_codes()
+
+    # `_literal_codes_in_file`'s own message format ends every unresolved
+    # entry in `({payload})`, following `{rel}:{lineno} -- ...` -- recover
+    # both halves the same way the message was built, not by re-deriving
+    # them from the AST a second time.
+    observed: set[tuple[str, str]] = set()
+    for line in unresolved_without_forwards:
+        rel = line.split(":", 1)[0]
+        expr = line.rsplit(" (", 1)[-1].rstrip(")")
+        observed.add((rel, expr))
+
+    # A single callable, not two independently-typed subtraction expressions:
+    # the negative half below calls this SAME function on a different input
+    # rather than re-deriving `forwards - observed` a second time, so a
+    # mutation of the computation itself (not just of one call site) is
+    # visible to both halves. Proven by mutation while reviewing this same
+    # PR's round 3: with the negative half re-deriving its own copy of the
+    # subtraction, replacing this real computation with the always-empty
+    # `live_forwards - live_forwards` left the whole test green -- the
+    # positive assertion below is trivially satisfied by an empty `stale`
+    # regardless of how it was computed, and the re-derived negative half
+    # never touched the mutated line at all.
+    def _stale_forwards(forwards: frozenset[tuple[str, str]]) -> list[tuple[str, str]]:
+        return sorted(forwards - observed)
+
+    stale = _stale_forwards(live_forwards)
+    assert not stale, (
+        f"{len(stale)} _KNOWN_CODE_FORWARDS entr(ies) match no unresolved "
+        "code-position site anywhere in the tree once forwarding is disabled "
+        "for the check -- the call site each one used to shield is gone, "
+        "renamed, or resolves some other way now, so the entry is dead "
+        "weight that would silently swallow a real FUTURE escape sharing the "
+        "same (file, expr) spelling. Delete the stale row(s), in the same "
+        "change that made them dead:\n  "
+        + "\n  ".join(f"{rel!r}, {expr!r}" for rel, expr in stale)
+    )
+
+    # And the negative -- proven properly, not by construction. Intersecting
+    # `live_forwards` against a scan run WITH `live_forwards` itself bound to
+    # `_KNOWN_CODE_FORWARDS` is empty for ANY table: `_resolve_code_value`'s
+    # forward branch trivially excludes every member of whatever set is
+    # currently bound there from ever landing in `unresolved`, so that
+    # intersection cannot be non-empty no matter what the table holds -- a
+    # check with no way to fail is not a check (round-3 review of
+    # tan-cli#1062). What `_stale_forwards` needs to be shown capable of is
+    # flagging a row that IS genuinely dead: fabricate one that matches no
+    # real call site anywhere in the tree -- the exact shape a stale row
+    # takes -- and confirm calling `_stale_forwards` again, on
+    # `live_forwards | {fabricated}`, reports exactly it. This calls the
+    # gate's own `_stale_forwards`, not a re-derived copy of its expression,
+    # so a mutation of that expression fails HERE too, not just above.
+    fabricated = ("tan/commands/build_cmd.py", "__no_such_forward_target__")
+    assert fabricated not in observed  # sanity: matches nothing real
+    fabricated_stale = _stale_forwards(live_forwards | {fabricated})
+    assert fabricated_stale == [fabricated], (
+        "a fabricated _KNOWN_CODE_FORWARDS entry matching no real call site "
+        "was not reported stale -- the negative half of this gate cannot "
+        f"fail for any table content:\n  {fabricated_stale!r}"
+    )
+
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", live_forwards)
 
 
 def test_check_site_counts_flags_a_declared_vs_actual_mismatch():

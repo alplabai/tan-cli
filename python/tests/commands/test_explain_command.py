@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -30,9 +31,21 @@ from tan.commands.explain_cmd import (
     PROJECT_TEMPLATES,
     resolve,
 )
-from tan.core.scaffold import _library_names, vendored_library_names_for
+from tan.core.scaffold import (
+    TEMPLATE_SUPPORTED_SKUS,
+    UNSUPPORTED_SOM_FAMILY_PREFIXES,
+    _library_names,
+    vendored_library_names_for,
+)
 
 runner = CliRunner()
+
+
+def _no_real_tty_size(*_args, **_kwargs):
+    """Stand-in for `os.get_terminal_size`: a run under `pytest -s` on a real
+    terminal would otherwise measure the live stderr fd and ignore the
+    `shutil.get_terminal_size` pin the wrap tests install."""
+    raise OSError("not a terminal")
 
 
 def details(template: str | None = None, target: str | None = None) -> list[str]:
@@ -95,6 +108,194 @@ def test_features_default_to_all_false_lowercase():
     lowercase bools; `str(True)` would emit `True`."""
     assert "Default features: wifi=false mqtt=false ble=false tls=false" in details(
         template="minimal-app"
+    )
+
+
+# --------------------------------------------------------------------------
+# `tan init` --som accept/refuse policy -- data.som (tan-cli#866)
+# --------------------------------------------------------------------------
+#
+# PR #985 review renamed the two `data.som` fields (major 1):
+# `supportedSkus`/`unsupportedSkuPrefixes` sounded like a capability
+# statement, but they are exactly and only `tan init`'s REFUSAL policy --
+# `initAcceptsSkus`/`initRefusesSkuPrefixes` say that plainly. Do not rename
+# back to the old keys; see `explain_cmd.py`'s module docstring and
+# `_som_support_data`'s docstring for the measured gap against alp-sdk's own
+# scaffold-catalog `supported.som_skus` that makes the old names wrong.
+
+
+def test_minimal_app_carries_no_som_restriction():
+    """minimal-app is tan's one vendor-neutral, non-family-gated template
+    (`scaffold.plan_template_files` never calls `_vendored_family` for it) --
+    `tan init` accepts every SoM for it, unconditionally."""
+    som = resolve("minimal-app", None).extra_data["som"]
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
+
+
+@pytest.mark.parametrize("template_id", ["iot-starter", "multicore-mailbox"])
+def test_explicitly_gated_templates_report_the_real_sku_allowlist(template_id):
+    """Populated from `TEMPLATE_SUPPORTED_SKUS` -- the SAME table `tan init`
+    refuses `init.invalid-som` against -- not a second, hand-typed copy.
+    Pinned to the real current value (not just "the keys exist"): a
+    regression to an empty/wrong allowlist REDs here."""
+    assert TEMPLATE_SUPPORTED_SKUS[template_id] == ("E1M-AEN801",)
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"initAcceptsSkus": ["E1M-AEN801"], "initRefusesSkuPrefixes": []}
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_report_the_real_unsupported_prefix_list(template_id):
+    """No explicit SKU allowlist for these four -- their restriction is the
+    family-tree exclusion `tan init` refuses `init.som-unsupported` against.
+    Pinned to the real current value: every family tan knows has a vendored
+    tree, so the exclusion list is empty and the field says `[]`, not a
+    missing key. This is `tan init`'s ACCEPT/REFUSE policy, not what
+    alp-sdk's own catalog validates -- see `explain_cmd.py`'s module
+    docstring."""
+    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ()
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_publish_a_non_empty_exclusion_when_one_exists(
+    template_id, monkeypatch
+):
+    """The mechanism is table-driven: a family row with no vendored tree
+    shows up in `data.som` and in text mode with no further change."""
+    import tan.commands.explain_cmd as explain_cmd
+
+    monkeypatch.setattr(explain_cmd, "UNSUPPORTED_SOM_FAMILY_PREFIXES", ("E1M-ZZ9",))
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": ["E1M-ZZ9"]}
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_report_their_exclusion_in_text_mode_too(
+    template_id, monkeypatch
+):
+    """PR #985 review, minor 5: text mode used to say nothing at all about
+    the family exclusion for these four templates, even though JSON already
+    carried `data.som.initRefusesSkuPrefixes` -- a human running `tan explain
+    --template <id>` with no `--format json` only discovered the restriction
+    as `init.som-unsupported`, at `tan init` time. Derived from the SAME
+    table `data.som` reads, not a second hand-typed sentence. Exercised with
+    an injected tree-less family row, since the real table has none."""
+    import tan.commands.explain_cmd as explain_cmd
+
+    monkeypatch.setattr(explain_cmd, "UNSUPPORTED_SOM_FAMILY_PREFIXES", ("E1M-ZZ9",))
+    lines = details(template=template_id)
+    assert "Refuses --som for these SoM families: E1M-ZZ9." in lines
+
+
+def test_no_exclusion_line_when_every_family_has_a_tree():
+    """The real table: nothing to refuse, so no `Refuses --som` sentence."""
+    assert not any(
+        line.startswith("Refuses --som") for line in details(template="sensor-starter")
+    )
+
+
+def test_som_is_absent_not_null_for_module_templates_and_generation_targets():
+    """Neither selector kind carries a SoM concept -- `som` must be ABSENT
+    from `extra_data`, matching the absent-vs-null convention `--code`'s own
+    `data.diagnostic`/`data.suggestions` already use for a mode that did not
+    run (see the module docstring)."""
+    assert "som" not in resolve("sensor-driver", None).extra_data
+    assert "som" not in resolve(None, "hw-info-h").extra_data
+
+
+def test_iot_starter_json_envelope_carries_structured_som_support_data():
+    """The wire shape, through the real CLI dispatch, not just the Python
+    object `resolve()` returns -- what alp-studio/the extension actually
+    parses."""
+    result = runner.invoke(app, ["explain", "--template", "iot-starter", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["data"]["som"] == {
+        "initAcceptsSkus": ["E1M-AEN801"],
+        "initRefusesSkuPrefixes": [],
+    }
+
+
+#: Any SKU-shaped token, not just one adjacent to the word "only" -- PR #985
+#: review, major 2: the previous `\bE1M-[A-Z0-9]+\s+only\b` version of this
+#: gate matched `"(E1M-AEN801 only)"`/`"E1M-AEN801 only:"` and NOTHING else,
+#: so a copy-edit that kept the wrong SKU but changed the surrounding English
+#: (measured: `"Supported on E1M-V2N101 alone: ..."`, also `"AEN801 only"`,
+#: `"only on E1M-AEN801"`, `"E1M-AEN801-only"`, `"E1M-AEN801 ONLY"`,
+#: `"Requires E1M-AEN801"`, `"--som is fixed to E1M-AEN801"`) sailed through
+#: every test in this file. This version does not look for "only" or any
+#: other English word at all -- it extracts every SKU LITERAL a template's
+#: prose contains and requires each one to be reconcilable with
+#: `TEMPLATE_SUPPORTED_SKUS`, which inverts the problem from "enumerate every
+#: phrasing" to "any mention must agree" and so stays true as prose changes.
+_SKU_MENTION_RE = re.compile(r"\bE1M-[A-Z0-9]+\b")
+
+#: SKUs a template's prose deliberately mentions as a CONTRAST, not a claim
+#: of support -- named here, per template, so the gate below can't be
+#: silently widened to swallow an unrelated future drift the way a phrasing
+#: filter did. Every entry needs its own on-the-record reason.
+_CONTRAST_MENTIONS: dict[str, frozenset[str]] = {
+    # iot-starter's explanation names E1M-V2N101 to say its Wi-Fi path does
+    # NOT exist yet -- the opposite of a support claim (see
+    # `explain_cmd._iot_wifi_note`).
+    "iot-starter": frozenset({"E1M-V2N101"}),
+}
+
+
+def test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data():
+    """The drift gate tan-cli#866 asks for, widened past a single phrasing
+    (PR #985 review, major 2): ANY `E1M-<...>` SKU token appearing anywhere
+    in a project template's description/explanation prose must be a SKU
+    `TEMPLATE_SUPPORTED_SKUS` actually allows for that template, or a named
+    `_CONTRAST_MENTIONS` exemption. `iot-starter`'s description parenthetical
+    and Wi-Fi-transport sentence are GENERATED (`_only_note`, `_iot_wifi_note`)
+    and cannot go stale; this is the gate over the one sentence this change
+    deliberately left hand-written -- `multicore-mailbox`'s explanation, which
+    also says "E1M-AEN801 only".
+
+    Probe: hand-edit `TEMPLATE_SUPPORTED_SKUS["multicore-mailbox"]` to a
+    different SKU with the prose untouched, or rewrite the prose's SKU with
+    the table untouched (in ANY phrasing), and this test REDs -- it does not
+    merely check that a key exists."""
+    for pt in PROJECT_TEMPLATES:
+        prose = " ".join([pt.description, *pt.explanation])
+        mentioned = set(_SKU_MENTION_RE.findall(prose))
+        supported = TEMPLATE_SUPPORTED_SKUS.get(pt.id)
+        allowed = (set(supported) if supported is not None else set())
+        allowed |= _CONTRAST_MENTIONS.get(pt.id, frozenset())
+        unexplained = mentioned - allowed
+        assert not unexplained, (
+            f"{pt.id}: prose mentions {sorted(unexplained)!r}, which "
+            f"TEMPLATE_SUPPORTED_SKUS ({sorted(supported) if supported else supported!r}) "
+            f"does not allow and no _CONTRAST_MENTIONS entry exempts"
+        )
+
+
+def test_exact_sku_gated_templates_get_no_redundant_family_exclusion_line():
+    """`iot-starter`/`multicore-mailbox` already report their (narrower)
+    restriction via `_only_note`'s description parenthetical -- a second,
+    family-level sentence here would repeat it, not add information."""
+    assert not any(
+        "Refuses --som for these SoM families" in line for line in details(template="iot-starter")
+    )
+    assert not any(
+        "Refuses --som for these SoM families" in line
+        for line in details(template="multicore-mailbox")
+    )
+
+
+def test_minimal_app_gets_no_family_exclusion_line():
+    """minimal-app is not family-gated at all (`is_family_gated` is `False`
+    only for it) -- no exclusion sentence to add."""
+    assert not any(
+        "Refuses --som for these SoM families" in line for line in details(template="minimal-app")
     )
 
 
@@ -291,6 +492,229 @@ def test_an_unknown_id_is_exit_1_with_the_id_echoed(argv, code, message, echoed)
     assert doc["data"]["selector"] == {"kind": "overview", "value": echoed}
 
 
+# ---------------------------------------------------------------------------
+# `--code`'s SDK resolution -- a broken project pin (tan-cli#950)
+# ---------------------------------------------------------------------------
+
+
+def _broken_pin_project(tmp_path, monkeypatch):
+    """A project whose `.alp/sdk-path` names a checkout that no longer
+    exists, with HOME/USERPROFILE pointed at an empty directory so a real
+    `~/.alp/sdk-default` on the machine running this suite cannot decide
+    what tier the ladder falls through to -- the fixture the issue itself
+    measured against, minus the subprocess plumbing: `.alp/sdk-path` MUST be
+    JSON (`{"sdkPath": ..., "updatedAt": ...}`); a plain-text pointer makes
+    the pin unreadable rather than broken, and `broken_project_pin` stays
+    `None`, which is precisely the shape that would NOT catch this defect.
+    """
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout"), "updatedAt": "2026-01-01T00:00:00Z"})
+    )
+    return proj
+
+
+def test_a_broken_project_pin_is_reported_alongside_the_unresolved_sdk_root(tmp_path, monkeypatch):
+    """tan-cli#950 -- the `explain` instance of the tan-cli#900 class
+    (`presets`/`clean` had this from #468; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` got it in #926/#949). `bind_sdk` raised
+    `explain.sdk-root-unresolved` while discarding
+    `resolution.broken_project_pin` on the way -- a workspace whose
+    `.alp/sdk-path` names a checkout that no longer exists, with nothing else
+    on the ladder resolving either, reported `explain.sdk-root-unresolved`
+    alone, with no `sdk.project-pin-unresolved` alongside it.
+
+    Fails against dev: `[i["code"] for i in doc["issues"]]` there is
+    `["explain.sdk-root-unresolved"]` alone, with no leading
+    `sdk.project-pin-unresolved` and "gone-checkout" nowhere in the
+    envelope."""
+    proj = _broken_pin_project(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app,
+        ["explain", "--code", "ALP_ERR_TIMEOUT", "--project", str(proj), "--format", "json"],
+    )
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is False
+    assert doc["exitCode"] == 1
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "explain.sdk-root-unresolved",
+    ], doc
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    # Still no usable checkout -- still no `sdk` block.
+    assert "sdk" not in doc
+
+
+def test_text_mode_also_discloses_the_broken_project_pin(tmp_path, monkeypatch):
+    """Same fixture as above, `--format text`. tan-cli#677's asymmetry
+    (`bootstrap`'s #949 fix hit the identical recurrence): `_fail`'s text
+    branch used to print only `err.text_line`, never `err.extra_issues`, so a
+    JSON-only fix would disclose the pin under `--format json` while text
+    stayed silent about it.
+
+    Fails against a JSON-only fix: `.alp/sdk-path` / "gone-checkout" never
+    appear in stderr even though the same invocation's `--format json`
+    carries them."""
+    proj = _broken_pin_project(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app, ["explain", "--code", "ALP_ERR_TIMEOUT", "--project", str(proj)]
+    )
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert ".alp/sdk-path" in result.stderr, (
+        f"DEFECT (tan-cli#677 recurrence): JSON carries sdk.project-pin-"
+        f"unresolved but text does not render it:\n{result.stderr}"
+    )
+    assert "gone-checkout" in result.stderr
+    assert "alp-sdk root is unresolved" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#959: text mode never disclosed SDK-resolution advisories on the
+# SUCCESS path or on the two SDK-BOUND refusals (`explain.code-unknown`,
+# `explain.catalog-unreadable`) -- widening #950 above, which fixed only the
+# ONE refusal (`explain.sdk-root-unresolved`) that raises before an `SdkInfo`
+# is ever built. These three fire AFTER `bind_sdk` succeeds, so `--format
+# json` already discloses `sdk.project-pin-unresolved` for free through
+# `Envelope`'s `_with_sdk_resolution_advisories` (it fires for every path that
+# constructs an `Envelope`, which is `_emit`'s json branch alone); text mode
+# printed nothing on any of the three.
+# ---------------------------------------------------------------------------
+
+
+def _broken_pin_with_working_fallback(tmp_path, monkeypatch, fallback_sdk: Path) -> Path:
+    """Same broken `.alp/sdk-path` as `_broken_pin_project`, but with
+    `~/.alp/sdk-default` ALSO pointing at a real checkout (no `writtenFor`,
+    so `foreign_global_default_for` stays `None` and the unrelated
+    #464 warning does not confuse this fixture) -- the exact scenario the
+    issue measured: "`--code` resolves against a checkout whose
+    `.alp/sdk-path` was broken but a lower ladder tier caught it." `bind_sdk`
+    resolves via the `globalDefault` tier and carries `broken_project_pin`
+    through on the `SdkInfo` it returns instead of raising.
+
+    `.alp/sdk-path` MUST be JSON (`{"sdkPath": ..., "updatedAt": ...}`); a
+    plain-text pointer makes the pin unreadable rather than broken, and
+    `broken_project_pin` stays `None` -- precisely the shape that would NOT
+    reproduce this defect (same trap `_broken_pin_project` above documents).
+    """
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    (fake_home / ".alp").mkdir(parents=True)
+    (fake_home / ".alp" / "sdk-default").write_text(
+        json.dumps({"sdkPath": str(fallback_sdk).replace("\\", "/")}), encoding="utf-8"
+    )
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps(
+            {
+                "sdkPath": str(tmp_path / "gone-checkout").replace("\\", "/"),
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        )
+    )
+    return proj
+
+
+def _broken_pin_warning_line(tmp_path: Path) -> str:
+    """The exact `explain: warning: ...` stderr line
+    `_print_sdk_resolution_warnings` must print for `_broken_pin_with_
+    working_fallback`'s fixture -- `sdk_discovery.project_pin_issue`'s message,
+    verbatim, at the `globalDefault` tier."""
+    gone = str(tmp_path / "gone-checkout").replace("\\", "/")
+    return (
+        f'explain: warning: .alp/sdk-path names "{gone}", which does not '
+        f"resolve to an alp-sdk checkout from the current directory -- "
+        f"falling through to the globalDefault tier instead."
+    )
+
+
+def test_the_success_path_discloses_a_broken_project_pin_in_text_mode(tmp_path, monkeypatch):
+    """The success-path half of tan-cli#959 -- first flagged during review of
+    #950 as affecting only this path. `--format json` already carries
+    `sdk.project-pin-unresolved` here (`Envelope`'s advisory machinery);
+    `--format text` printed nothing.
+
+    Fails against dev: the warning line is entirely absent from stderr even
+    though the invocation succeeds and the same run's `--format json` would
+    carry `sdk.project-pin-unresolved`."""
+    from tests.commands.test_explain_code_command import _ALP_B003, _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk", {"ALP-B003": _ALP_B003})
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(app, ["explain", "--code", "ALP-B003", "--project", str(proj)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    # The payload still follows -- the warning is a PREFIX, not a replacement.
+    assert "explain: ALP-B003 (runtime-diagnostic)" in result.stderr
+
+
+def test_the_code_unknown_refusal_discloses_a_broken_project_pin_in_text_mode(
+    tmp_path, monkeypatch
+):
+    """`explain.code-unknown`: `bind_sdk` already resolved (via
+    `globalDefault`) before `resolve_code` finds no matching key. `sdk` is
+    populated on this `ExplainError`, unlike `explain.sdk-root-unresolved`'s
+    `extra_issues` mechanism (#950) -- this is the OTHER path #959 widens
+    #950 to cover.
+
+    Fails against dev: no `explain: warning: ...` line precedes the unknown-
+    code refusal, even though `--format json` on the same invocation carries
+    `sdk.project-pin-unresolved` alongside `explain.code-unknown`."""
+    from tests.commands.test_explain_code_command import _ALP_B003, _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk", {"ALP-B003": _ALP_B003})
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(
+        app, ["explain", "--code", "ZZZ-NOT-A-CODE", "--project", str(proj)]
+    )
+
+    assert result.exit_code == 1, result.output
+    lines = result.stderr.splitlines()
+    assert lines[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    assert lines[-1] == (
+        "explain: unknown code 'ZZZ-NOT-A-CODE' -- pass a code from the SDK's "
+        "metadata/error-catalog.json."
+    )
+
+
+def test_the_catalog_unreadable_refusal_discloses_a_broken_project_pin_in_text_mode(
+    tmp_path, monkeypatch
+):
+    """`explain.catalog-unreadable`: `bind_sdk` resolves the checkout fine
+    (via `globalDefault`); it is `metadata/error-catalog.json` itself that is
+    missing. `sdk` is populated on this `ExplainError` too -- the other of
+    the two SDK-BOUND refusals #959 names.
+
+    Fails against dev: no `explain: warning: ...` line precedes the
+    catalog-unreadable refusal."""
+    from tests.commands.test_explain_code_command import _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk")  # no `metadata/error-catalog.json` at all
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(app, ["explain", "--code", "ALP-B003", "--project", str(proj)])
+
+    assert result.exit_code == 1, result.output
+    lines = result.stderr.splitlines()
+    assert lines[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    assert lines[-1] == (
+        "explain: error catalog not found -- run `python3 scripts/gen_error_catalog.py` "
+        f"in the alp-sdk checkout ({sdk / 'metadata' / 'error-catalog.json'})."
+    )
+
+
 def test_json_mode_writes_one_envelope_and_nothing_else():
     """The hard constraint: stdout is the envelope channel. A stray byte on
     either stream silently breaks the extension -- it renders nothing, with no
@@ -305,12 +729,15 @@ def test_json_mode_writes_one_envelope_and_nothing_else():
     # `--template` resolves no checkout (only `--code` does), so `sdk` is
     # absent -- never null.
     assert "sdk" not in doc
+    # `som` is present here (tan-cli#866): `iot-starter` is a PROJECT
+    # template, the one selector kind that carries `data.som`.
     assert list(doc["data"]) == [
         "schemaVersion",
         "selector",
         "summary",
         "details",
         "available",
+        "som",
     ]
     assert list(doc["data"]["available"]) == [
         "projectTemplates",
@@ -529,6 +956,10 @@ def test_text_mode_wraps_prose_on_a_real_terminal(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
+    monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain", "--template", "iot-starter"])
     assert result.exit_code == 0
@@ -558,6 +989,10 @@ def test_text_mode_wraps_the_generation_targets_catalogue_line_too(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
+    monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain"])
     assert result.exit_code == 0
@@ -591,6 +1026,10 @@ def test_text_mode_wraps_on_a_terminal_even_with_no_color(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
+    monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain", "--template", "iot-starter", "--no-color"])
     assert result.exit_code == 0

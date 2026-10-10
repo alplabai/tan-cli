@@ -114,8 +114,21 @@ FROZEN_LOCATIONS: dict[str, list[str]] = {
     "bootstrap.yocto-host": ["commands/bootstrap_cmd.py"],
     "bootstrap.prerequisites-missing": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     "presets.sdk-root-unresolved": ["commands/presets_cmd.py"],
+    # tan-cli#1092: alp-sdk-vscode#649 bound a consumer to this spelling, so it
+    # left `reserved`. The whole dotted code is the string constant at the
+    # `MonitorError` call site (monitor_cmd.py:247), not an assembled suffix.
+    "monitor.no-port": ["commands/monitor_cmd.py"],
     "bootstrap.python-not-runnable": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     "bootstrap.python-too-old": ["core/bootstrap.py", "commands/doctor_cmd.py"],
+    # tan-cli#885: alp-sdk-vscode#575 bound a consumer to this spelling, so it
+    # left `reserved`. Emitted from the JSON re-invoke in `cli.py`, which
+    # rebuilds the click result and turns a non-zero exit into one Issue.
+    "cli.parse-error": ["cli.py"],
+    # tan-cli#1425: alp-sdk-vscode's `classifyInitRefusal` (`initRefusal.ts`,
+    # `KINDS`) binds this spelling to `no-scaffold-for-som`, so it left
+    # `reserved`. The whole dotted code is the literal at `init_cmd`'s
+    # `UnsupportedSomError` handler.
+    "init.som-unsupported": ["commands/init_cmd.py"],
 }
 
 
@@ -221,7 +234,7 @@ def _unemitted_reason(path: pathlib.Path, code: str) -> str | None:
 
       1. WHOLE code as a string constant -- `Issue("sdk.network-required", ...)`
          however it is wrapped, `code="kconfig.emit-failed"`, or a module
-         constant (`DEFERRED_ISSUE_CODE = "cli.command-deferred"`).
+         constant (`SHELL_UNSUPPORTED_CODE = "completion.shell-unsupported"`).
       2. BARE SUFFIX as a string constant -- the dominant shape: a prefixing
          helper is handed `"venv-unusable"` / `"yocto-host"` / `"boardYaml"`
          and assembles `family.` + suffix itself.

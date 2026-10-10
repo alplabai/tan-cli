@@ -14,8 +14,8 @@ scratch-tmp-dir + `.venv/<bin>/<exe>` shape.
 import os
 from pathlib import Path
 
-from tan.commands.build_cmd import _planner_python
 from tan.core import venv as venv_module
+from tan.core.sdk_discovery import _planner_python
 
 _BARE_NAME = "python" if os.name == "nt" else "python3"
 

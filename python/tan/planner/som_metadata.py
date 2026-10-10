@@ -23,6 +23,10 @@ rules (a SoM `memory_map:` override beating the SoC variant, SoC-level
 defaults, then the per-SKU `unpopulated` restriction forcing 0/False) are
 accumulated behaviour that `tests/parity/test_planner_emit_parity.py` pins byte
 for byte -- not something to re-derive.
+
+`resolve_soc_path` itself is defined in the leaf module `tan.soc_ref` (ADR-0028
+Task 2 follow-up) and re-exported here, so `tan.model.targets` can use it
+without pulling in this package's own import-time metadata reads.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tan.soc_ref import resolve_soc_path  # noqa: F401  (re-export: see below)
 
 # ---------------------------------------------------------------------
 # SKU-family mapping
@@ -44,7 +49,7 @@ from typing import Any
 # (The silicon -> Kconfig mapping, by contrast, lives in the versioned
 # registry below -- see silicon_to_kconfig().)
 
-_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
+_SKU_FAMILY = re.compile(r"^E1M-(AEN|V2N|V2M)")
 
 
 def _sku_family(sku: str) -> str:
@@ -52,7 +57,7 @@ def _sku_family(sku: str) -> str:
     m = _SKU_FAMILY.match(sku)
     if m is None:
         raise ValueError(f"unrecognised SoM SKU pattern: {sku}")
-    return {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1", "NX9": "imx93"}[m.group(1)]
+    return {"AEN": "aen", "V2N": "v2n", "V2M": "v2n-m1"}[m.group(1)]
 
 
 # Silicon ref -> Zephyr SoC-select Kconfig symbol.
@@ -95,27 +100,11 @@ def silicon_to_kconfig(silicon: str | None, metadata_root: Path) -> str | None:
     return prefix + silicon.upper().replace(":", "_")
 
 
-def resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
-    """Resolve a `vendor:family:part` `silicon:` key to the SoC-JSON path
-    it names: `metadata/socs/<vendor>/<family>/<part>.json`.
-
-    Returns None when `silicon` is falsy or not exactly 3 colon-separated
-    parts -- does NOT check the path exists, callers decide what an
-    unresolved/missing SoC spec means for them (e.g. a SoM preset with no
-    `silicon:` at all is a valid, if incomplete, state; a `silicon:` that
-    names a spec that isn't on disk is not).
-
-    alp-sdk keeps its own copies of this resolution behind differing failure
-    shapes (`OrchestratorError`, `ZephyrBoardEmitError`, a diagnostic list);
-    `loader._silicon_to_soc_path` is the planner's raising variant. This is the
-    soft-fail one the three functions below share.
-    """
-    if not silicon:
-        return None
-    parts = silicon.split(":")
-    if len(parts) != 3:
-        return None
-    return metadata_root / "socs" / parts[0] / parts[1] / f"{parts[2]}.json"
+# resolve_soc_path() moved to the leaf module `tan.soc_ref` (imported above)
+# so that `tan.model.targets` can use it without pulling in `tan.planner`'s
+# import-time metadata reads. Re-exported here (rather than inlined) so this
+# module's own four call sites, and every external `from
+# tan.planner.som_metadata import resolve_soc_path`, keep working unchanged.
 
 
 def _resolve_silicon_variant(
@@ -183,13 +172,14 @@ def resolve_memory_map(
          SoC `cores[]` list.
 
     The returned dicts have the keys defined by the memory_region
-    schema: `name`, `size_kib`, `accessible_from`, `cacheable` (plus
+    schema: `name`, `size_kib`, `accessible_from`, `cacheable`,
+    `write_authority` (always set explicitly on derived rows) (plus
     optional `base` only when the SoM preset's override declares one
     -- silicon-default bases stay unset, so downstream emitters know
     to use the silicon's defaults).
 
     Returns an empty list when the silicon_variant cannot be resolved
-    (e.g. NX9101's `silicon_variant: TBD`) -- callers should treat
+    (e.g. a preset with `silicon_variant: TBD`) -- callers should treat
     that as "memory layout pending the HW-config writeup".
     """
     declared = sku_preset.get("memory_map")
@@ -215,7 +205,10 @@ def resolve_memory_map(
     # authoritative base addresses (e.g. RZ/V2N OCRAM at 0x00010000).
     soc_memory_regions = soc_spec.get("memory_regions")
     if soc_memory_regions:
-        return list(soc_memory_regions)
+        # Every SoC-level region is RAM (no SoC declares a flash window
+        # here), so each is runtime-writable by the application.
+        return [{**r, "write_authority": "customer_runtime"}
+                for r in soc_memory_regions]
 
     # MRAM as one region (size in KiB; mram_mb -> *1024).
     mram_mb = variant.get("mram_mb")
@@ -225,6 +218,11 @@ def resolve_memory_map(
             "size_kib": int(mram_mb * 1024),
             "accessible_from": list(soc_cores),
             "cacheable": True,
+            # The whole-device alias spans MCUboot/ATOC/slot0/storage
+            # rows of differing authority, so no single value is true;
+            # `composite` is the schema's explicit word for that
+            # (ADR-0034 clause 4: stated, never defaulted).
+            "write_authority": "composite",
         })
 
     # SRAM banks. Per-core TCM banks get `accessible_from: [<core>]`;
@@ -247,6 +245,8 @@ def resolve_memory_map(
             "size_kib": int(size_kib),
             "accessible_from": accessible,
             "cacheable": not is_tcm,
+            # SRAM/TCM is RAM: runtime-writable by the application.
+            "write_authority": "customer_runtime",
         })
 
     return regions
@@ -286,6 +286,14 @@ def resolve_capabilities(
 
     # SoM side wins on collision (bridge / add-on overrides silicon default).
     merged: dict[str, Any] = {**soc_caps, **som_caps}
+
+    # GPU: a per-die fact (variants[].optional_features.gpu_mali_g31, the one
+    # source) -- the SoC-level capabilities block cannot carry it because
+    # four of the eight RZ/V2N dies are fused without the Mali-G31.
+    variant = _resolve_silicon_variant(sku_preset, metadata_root)
+    mali = ((variant or {}).get("optional_features") or {}).get("gpu_mali_g31")
+    if mali is not None:
+        merged["gpu2d"] = bool(mali)
 
     # SKU-level restriction: capabilities the silicon offers but this SKU
     # leaves unpopulated (per-SKU granularity -- one family, many SKUs).

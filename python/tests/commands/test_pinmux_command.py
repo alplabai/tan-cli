@@ -605,7 +605,7 @@ def test_sku_to_family_prefix_map():
     assert pinmux_family_for_sku("E1M-V2N44") == "v2n"
     # E1M-V2M reuses the base V2N pinout in full; no separate table.
     assert pinmux_family_for_sku("E1M-V2M01") == "v2n"
-    assert pinmux_family_for_sku("E1M-NX93") == "imx93"
+    assert pinmux_family_for_sku("E1M-NX93") is None
     assert pinmux_family_for_sku("E1M-UNKNOWN") is None
 
 
@@ -702,6 +702,7 @@ def test_the_no_flag_message_is_unchanged(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--project", str(proj), "--sku", "E1M-AEN801", "--format", "json"])
     assert result.exit_code == 0
     envelope = json.loads(result.stdout)
-    assert envelope["issues"][0]["message"] == (
-        "alp-sdk root is unresolved; cannot read the pinmux table."
+    # tan-cli#1463: the sentence is unchanged; where the ladder looked follows it.
+    assert envelope["issues"][0]["message"].startswith(
+        "alp-sdk root is unresolved; cannot read the pinmux table. Neither `--sdk-root`"
     )

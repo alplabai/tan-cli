@@ -54,6 +54,7 @@ from typing import Any, Optional
 import yaml
 
 from .models import OrchestratorError
+from .strict_loaders import fast_safe_load
 
 # A revision may bound one side, both, or neither.  `max_sdk_version: ~`
 # (YAML null) is the common case in tree today and means "no upper bound
@@ -261,7 +262,9 @@ def load_family_table(metadata_root: Path, family_dir: str) -> Any:
     except OSError as exc:
         raise _table_unreadable(path, f"cannot be read: {exc}") from exc
     try:
-        table = yaml.safe_load(text)
+        # libyaml-backed yaml.safe_load; this runs once per hw-rev check
+        # and was the third-hottest YAML read in tests/scripts (#2328).
+        table = fast_safe_load(text)
     except yaml.YAMLError as exc:
         detail = str(exc)
         first = detail.splitlines()[0] if detail else type(exc).__name__
@@ -291,7 +294,7 @@ def family_revision(metadata_root: Path,
                     hw_rev: Optional[str]) -> dict[str, Any]:
     """The SoM-family `hw_revisions:` entry for `hw_rev`, or {}.
 
-    `family_dir` is the directory name (`aen`, `v2n`, `v2n-m1`, `imx93`),
+    `family_dir` is the directory name (`aen`, `v2n`, `v2n-m1`),
     not the SoM preset's `family:` string (`alif-ensemble`, ...) -- the two
     differ and only the former names a path.
     """
@@ -364,3 +367,29 @@ def check(
     if not reasons:
         return None
     return "; ".join(reasons)
+
+
+def board_designator(table: Any, hw_rev: Optional[str]) -> Optional[str]:
+    """Compose the full board designator for a revision, e.g. `2626-r2`.
+
+    The physical board is `E1M-AEN-2626-R2`: `2626` is a YYWW datecode carried by
+    the Altium board number and declared once, per family, as `board_datecode:`
+    in `hw-revisions.yaml`.  A module whose identity says only `r2` cannot be tied
+    back to its board number, so the identity written into the EEPROM -- and the
+    build-side value the boot banner compares it against -- both carry the
+    composed form.
+
+    IMPORTANT: this is NOT a replacement for the bare revision key.  `hw_rev`
+    stays `r2` everywhere it is used as a LOOKUP KEY (board.yaml, the loader's
+    `family_revision_known()` check, `pad_route_overrides`).  Composing there
+    would break the lookup.  Only the identity/compare surfaces use this.
+
+    Returns the bare `hw_rev` unchanged when the family declares no datecode, so
+    families that have not adopted one are untouched.
+    """
+    if not hw_rev:
+        return hw_rev
+    if not isinstance(table, dict):
+        return hw_rev
+    datecode = table.get("board_datecode")
+    return f"{datecode}-{hw_rev}" if datecode else hw_rev

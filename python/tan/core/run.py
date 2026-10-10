@@ -17,12 +17,11 @@ hardware target flashes only on an explicit `--flash`.
 `tan run` just performed, in memory -- never from re-reading
 `system-manifest.yaml` off disk afterward.** The Rust oracle's own module doc
 records why (three attempts, the last two of which re-read a stale on-disk
-manifest and let a `--flash` slip through against the WRONG target). This
-port's `tan build` does not write a system manifest yet
-(`tan.commands.build.execute`'s own docstring names the same gap), so
-`tan.commands.run_cmd` currently calls this with `native_sim_target=None` --
-"could not be established", which is the honest reading, never "not
-native_sim" -- until that gap closes.
+manifest and let a `--flash` slip through against the WRONG target). `tan build` writes the post-build `system-manifest.yaml` and
+`execute.last_manifest_write()` supplies the real signal, so
+`tan.commands.run_cmd` passes the genuine `native_sim_target` / `manifest_written`
+pair and the FLASH and EXECUTE_NATIVE arms are reachable. `native_sim_target=None`
+still means "could not be established", never "not native_sim".
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Repo-wide test isolation for the SDK discovery ladder.
 
-`resolve_sdk_root_ladder` / `resolve_sdk_tiered` (`tan/commands/build_cmd.py`,
+`resolve_sdk_root_ladder` / `resolve_sdk_tiered` (`tan/core/sdk_discovery.py`,
 `tan/commands/sdk_cmd.py`) read the REAL process environment
 (`ALP_SDK_ROOT`) and the REAL `~/.alp/sdk-default` pointer (`HOME` on POSIX,
 `USERPROFILE` on Windows) with no isolation of their own -- by design, so a
@@ -27,11 +27,14 @@ once per session and never fatally, when the bound `ALP_SDK_ROOT` is not
 `PINNED_SDK_COMMIT`, or when tan's two alp-sdk pins disagree with each other.
 """
 import functools
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import types
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -109,6 +112,254 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
     return None
 
 
+# ---------------------------------------------------------------------------
+# WHAT THE BOUND TREE CARRIES -- a different question from whether one is
+# bound at all (tan-cli#791).
+#
+# `sdk_root()` above answers "is an alp-sdk bound?", and every SDK-gated module
+# skips on `None`. Nothing answered "does the bound one PUBLISH the metadata
+# this module asserts against?", and the two are not the same question: a tree
+# bound at a pin that PREDATES that metadata does not skip, it runs and FAILS
+# -- and the failure belongs to the pin, not to the branch.
+#
+# That is not hypothetical. `.github/workflows/ci.yml`'s `sdk_parity` checkout
+# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `0914da38`, which
+# predates every artefact ADR-0028 publishes on the alp-sdk side. alp-sdk#1470
+# is still OPEN, so there is no post-merge SHA to move the pin to yet, and
+# until there is, twelve tests under `tests/model/` measure a tree that cannot
+# answer them.
+#
+# These are CAPABILITY predicates, the same discipline as
+# `pytest.importorskip("tflite")`: each names ONE artefact and reads the bound
+# tree for it. Deliberately NOT one blanket "is the bound SDK new enough"
+# switch -- the twelve failures have four distinct causes, a skip has to say
+# WHICH, and a reader has to be able to tell an expected skip from a
+# regression without opening the other repository.
+#
+# Two properties every predicate here must keep, because a skip that hides a
+# real check is worse than the failure it replaced:
+#
+#  * It tests for the PRESENCE of the artefact, never for "would this
+#    assertion fail". So it CANNOT fire once the pin moves onto a tree that
+#    carries it. A tree carrying it only PARTIALLY (say `npu_toolchain.vela`
+#    on some Alif parts but not others) makes these RUN and FAIL, which is
+#    the correct direction: a loud failure names the gap, a silent skip buries
+#    it.
+#  * It fires only when a root IS bound. With nothing bound, the module's own
+#    `ALP_SDK_ROOT is not set` skip is the accurate reason and must be the one
+#    reported -- pytest takes the first true `skipif` in closest-first order,
+#    so a capability mark that also fired on `None` would shadow it.
+# ---------------------------------------------------------------------------
+
+#: Where the pin has to get to. Named in every reason string below rather than
+#: paraphrased, so a reader who sees one of these skips can go straight to the
+#: PR and see whether it has merged (in which case the skip is a bug in the
+#: predicate) or not (in which case it is expected).
+_SDK_PR = "alplabai/alp-sdk#1470"
+
+
+def sdk_publishes_vela_profile(sdk: Path) -> bool:
+    """True when ANY SoC spec under ``<sdk>/metadata/socs/`` carries an
+    ``npu_toolchain.vela`` block -- alp-sdk `fff41087`, which landed it on all
+    six Alif Ensemble parts in one commit.
+
+    ANY, not "the part this test is about", and that is the safe direction on
+    purpose: `fff41087` is atomic, so there is no real tree in which some
+    Ethos-U parts carry the block and others do not. Should one ever exist,
+    "any" makes these tests RUN against it and fail loudly on the part that is
+    missing, rather than skipping the whole set on a partial answer.
+    """
+    for spec in sorted((sdk / "metadata" / "socs").rglob("*.json")):
+        try:
+            soc = json.loads(spec.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue          # a spec this reader cannot parse is not evidence
+        block = soc.get("npu_toolchain")
+        if isinstance(block, dict) and isinstance(block.get("vela"), dict):
+            return True
+    return False
+
+
+def sdk_publishes_npu_op_tables(sdk: Path) -> bool:
+    """True when ``<sdk>/metadata/npu_ops/`` holds at least one op-support
+    table -- the per-backend, per-variant JSON `tan.model.analyze` resolves by
+    SKU (`ethos_u/u85@vela-5.1.0.json`, `drpai/onnx-i8@translator-1.12.json`).
+
+    The whole directory is absent before ADR-0028; there is no partial state
+    to distinguish, so presence of the tree is the whole question.
+    """
+    return any((sdk / "metadata" / "npu_ops").rglob("*.json"))
+
+
+def sdk_predates_the_model_engine_relocation(sdk: Path) -> bool:
+    """True when ``<sdk>/scripts/alp_model/`` still exists -- i.e. this alp-sdk
+    still owns a HOST-SIDE model engine and ADR-0028 Task 6 (`ab6968e2`,
+    *"delete the host-side model engine, relocated to tan"*) has not landed on
+    it.
+
+    A STRUCTURAL fact about the bound tree, deliberately not a comparison
+    against the assertion it gates. `ab6968e2` deleted that package AND
+    regenerated alp-sdk's three committed C fixtures through the relocated
+    generator, so their banner moved from ``python -m alp_model._gen_fixture``
+    to ``python -m tan.model._gen_fixture``. Gating on "does the committed
+    header already say what we produce?" would be the self-defeating shape --
+    a guard that skips exactly when it would have caught something. Gating on
+    the package's presence names the CAUSE and goes away with it.
+    """
+    return (sdk / "scripts" / "alp_model").is_dir()
+
+
+def sdk_publishes_model_perf_points(sdk: Path) -> bool:
+    """True when ``<sdk>/metadata/model_perf/`` holds at least one published
+    bench-measured perf point -- the tier-2 facts `tan.model.perf` reads.
+
+    This one is a step further out than its three siblings above: the others
+    gate on metadata that EXISTS on `alplabai/alp-sdk#1470` and is merely
+    absent from the pin, whereas `metadata/model_perf/` exists in NO alp-sdk
+    at all yet. The contract landed (alp-sdk `9b466018`, "feat(metadata):
+    tier-2 model-perf perf-point contract (Refs #1520) (#1884)": the schema,
+    the validator semantics, the capture recipe and ONE synthetic fixture
+    point under `tests/fixtures/`), but the directory this reads stays empty
+    until the bench campaign that is Task 5 of the tier-2 plan runs on real
+    silicon. So a test carrying this mark skips EVERYWHERE today, including
+    against a bound `origin/dev`, and that is the honest state rather than a
+    defect -- the alternative is a test that asserts against data nobody has
+    measured. Presence of a real point, not "would this assertion pass", so
+    it cannot fire once the campaign publishes one.
+
+    Globs `*.yaml` ONLY, deliberately narrower than its
+    `sdk_ships_the_model_perf_fixture` sibling below (tan-cli#1114 review
+    nit): `model-perf-v1.schema.json`'s own `$id`/title names the *published*
+    path as `<sku>/<hash>.yaml`, and `scripts/validate_metadata.py`'s
+    `_collect_model_perf_files` FAILS any file under this tree that is not
+    exactly that shape -- a `*.json` document could never legitimately reach
+    here, so accepting one would fire this predicate on something alp-sdk's
+    own gate would already have rejected.
+    """
+    return any((sdk / "metadata" / "model_perf").rglob("*.yaml"))
+
+
+def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
+    """True when ``<sdk>/tests/fixtures/model_perf/`` holds at least one
+    synthetic perf point -- a schema-valid, illustrative document alp-sdk
+    ships for exercising its own validator (NOT `_fixture`-marked in any way
+    itself: alp-sdk's `_MODEL_PERF_FIXTURE_MARKER` guards the *published*
+    `metadata/model_perf/` tree against a stray fixture landing there by
+    accident, and this document lives under `tests/fixtures/` instead,
+    where no such marker is ever checked -- tan-cli#1115).
+
+    A SEPARATE artefact from the published tree above and therefore a separate
+    predicate, not a broader one: a test that proves tan can READ a real,
+    schema-shaped point needs a real document to read, and that exists today
+    (alp-sdk `9b466018`, "feat(metadata): tier-2 model-perf perf-point
+    contract (Refs #1520) (#1884)") while a published point does not. Folding
+    the two into one switch would skip that proof for the next several
+    months on the strength of an unrelated absence.
+
+    Globs both `*.yaml` and `*.json`: alp-sdk ships this specific fixture as
+    `e1m_aen801_ethos_u55_hp.yaml` (tan-cli#1105 -- a `*.json`-only glob here
+    was permanently unsatisfiable against that real filename, so this test
+    skipped on every run including every green CI run).
+    """
+    fixture_root = sdk / "tests" / "fixtures" / "model_perf"
+    return any(fixture_root.rglob("*.yaml")) or any(fixture_root.rglob("*.json"))
+
+
+#: Resolved once, here, at conftest import -- i.e. at the same moment a test
+#: module's own `SDK = sdk_root()` resolves, and before
+#: `_scrub_sdk_discovery_env` deletes `ALP_SDK_ROOT` for the first test.
+_BOUND_SDK: Path | None = sdk_root()
+
+#: `metadata/socs/**`'s `npu_toolchain.vela`. Without it
+#: `tan.model.targets.resolve_targets` yields `vela_memory_mode=None` for every
+#: Ethos-U target, so tan invokes vela flagless and vela picks its own
+#: DRAM-backed profile -- which on parts that have no DRAM reports 0 KiB SRAM
+#: and is exactly what `VelaFootprintRefused` exists to refuse. Under an older
+#: pin that refusal is CORRECT behaviour, so these tests have no premise.
+needs_sdk_vela_profile = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_vela_profile(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk publishes no `npu_toolchain.vela` in any "
+        "metadata/socs/**.json: it predates alp-sdk fff41087 "
+        f"({_SDK_PR}, still open), so resolve_targets() resolves "
+        "vela_memory_mode=None for every Ethos-U part and this test asserts "
+        "against metadata the bound tree does not carry. EXPECTED while "
+        "ci.yml's sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at "
+        "0914da38; once that pin moves this test RUNS, and a failure here "
+        "then is a regression, not this skip."
+    ),
+)
+
+#: `metadata/npu_ops/**`, the committed op-support tables.
+needs_sdk_npu_op_tables = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_npu_op_tables(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk ships no metadata/npu_ops/ tables at all: it "
+        f"predates alp-sdk 93f2e8f8/ab6968e2 ({_SDK_PR}, still open), so "
+        "analyze_backend() resolves table=None for every backend and this "
+        "test asserts against real committed op vocabularies the bound tree "
+        "does not carry. EXPECTED while ci.yml's sdk_parity `ref:` and "
+        "parity.yml's PINNED_SDK_TAG sit at 0914da38; once that pin moves "
+        "this test RUNS, and a failure here then is a regression, not this "
+        "skip."
+    ),
+)
+
+#: alp-sdk's own committed C fixtures, as regenerated by the relocated
+#: generator.
+needs_sdk_after_the_model_engine_relocation = pytest.mark.skipif(
+    _BOUND_SDK is not None and sdk_predates_the_model_engine_relocation(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk still ships scripts/alp_model/, so it predates "
+        f"alp-sdk ab6968e2 ({_SDK_PR}, still open) and its committed C "
+        "fixtures were generated by that package -- their banner still reads "
+        "`python -m alp_model._gen_fixture`, which this relocated generator "
+        "no longer emits and must not. The CONTAINER BYTES are unaffected and "
+        "stay asserted unconditionally next door. EXPECTED while ci.yml's "
+        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at 0914da38; "
+        "once that pin moves this test RUNS, and a failure here then is a "
+        "regression, not this skip."
+    ),
+)
+
+#: `metadata/model_perf/**`, the published bench-measured perf points.
+needs_sdk_model_perf_points = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_model_perf_points(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk publishes no metadata/model_perf/ perf points: the "
+        "tier-2 CONTRACT landed (alp-sdk `9b466018`, \"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\" -- schema, "
+        "validator semantics, capture recipe, one synthetic fixture) but the published "
+        "tree stays empty until the bench campaign that is Task 5 of "
+        "docs/superpowers/plans/2026-08-16-model-perf-tier2.md runs on real "
+        "silicon. EXPECTED everywhere today, including against a bound "
+        "origin/dev -- there is no measured data to assert against yet, and "
+        "authoring one to make this run would be exactly the fabricated "
+        "bench number the whole tier forbids. Once a real point is published "
+        "this test RUNS, and a failure here then is a regression, not this "
+        "skip."
+    ),
+)
+
+#: `tests/fixtures/model_perf/**`, alp-sdk's own `_fixture`-bannered synthetic.
+needs_sdk_model_perf_fixture = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_ships_the_model_perf_fixture(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk ships no tests/fixtures/model_perf/ synthetic perf "
+        "point: it predates alp-sdk `9b466018` (\"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\", already on "
+        "origin/dev -- unrelated to the still-open "
+        f"{_SDK_PR} the three marks above this one gate on), so there is no "
+        "real fixture document for this test to read (tan-cli#1115: this "
+        "reader now consumes that fixture by its actual fields rather than "
+        "refusing it). Already present at ci.yml's sdk_parity `ref:` / parity.yml's "
+        "PINNED_SDK_TAG (0914da38); EXPECTED only against a checkout older "
+        "than `9b466018`, and a failure here against one that has it is a "
+        "regression, not this skip."
+    ),
+)
+
+
 #: The REAL process environment, captured at collection time -- i.e. while
 #: this conftest module is first imported, before `_scrub_sdk_discovery_env`
 #: below has run for any test. A test that hands an environment to a
@@ -118,6 +369,396 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
 #: `_scrub_sdk_discovery_env` has by then already repointed `HOME`/
 #: `USERPROFILE` at a pytest tmp dir and deleted `ALP_SDK_ROOT`.
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# COLLECTION-TIME PRE-FLIGHT: does a SPAWNED `tan` subprocess survive the
+# `HOME`/`USERPROFILE` repoint `_scrub_sdk_discovery_env` applies to every
+# test in this tree? (tan-cli#903)
+#
+# That fixture is correct and deliberate -- see the module docstring -- but it
+# has a side effect nothing here used to check for: every test that spawns
+# `[sys.executable, "-m", "tan", ...]` builds that child's environment from
+# `os.environ` AFTER the scrub has already repointed `HOME`, so a dependency
+# (`typer`, at the time this was filed) that is importable only via a
+# user-site install under the developer's REAL `HOME` (`~/.local`) vanishes
+# for every one of those children. The result is not one clear error -- it is
+# several hundred unrelated-looking failures deep in the suite, each a
+# crashed subprocess with empty stdout, because the ACTUAL cause (a missing
+# import in a *different* process) never surfaces as a message at all.
+# Measured on the incident that opened this issue: 678 and 679 failures on
+# two independent runs, and a THIRD collection (both SDK roots bound) at
+# 1127 failed / 4228 passed / 768 skipped / 1 xfailed / 17 errors -- every
+# one of them "typer"-shaped or a downstream symptom of a subprocess that
+# crashed before writing anything.
+#
+# On WINDOWS this specific cause can never fire: CPython's user-site base on
+# that platform comes from `%APPDATA%`, not `%USERPROFILE%`/`HOME` -- so a
+# scrubbed `USERPROFILE` does not hide a Windows user-site install the way a
+# scrubbed `HOME` hides a POSIX one. That means no false positive there, and
+# the 5 green `windows-latest` legs at the time of writing are consistent
+# with that -- but a green Windows leg is NOT evidence this pre-flight (or
+# the bug it guards against) does anything on that platform; it is evidence
+# of the opposite. Recorded here so nobody reads Windows-green as "the check
+# works everywhere".
+#
+# `tan_under_test` below already spawns this same probe -- but as a
+# session-scoped AUTOUSE FIXTURE, which pytest sets up for the first test
+# BEFORE that test's function-scoped `_scrub_sdk_discovery_env` runs (broader
+# scopes set up first; verified empirically, not merely assumed). So it
+# always probes under the REAL, unscrubbed `HOME`, which is precisely the one
+# environment this bug does NOT reproduce in. That makes it USELESS for
+# tan-cli#903 SPECIFICALLY, by construction -- it was never wired to see the
+# environment the bug lives in -- and that is the ONLY thing "useless" means
+# here. It remains a good, NECESSARY check for tan-cli#423/#665 (wrong `tan`
+# under test), and it stays the only spawn-probe still armed on the two paths
+# that skip `pytest_configure` below entirely -- an xdist WORKER process, and
+# a session run with `TAN_TEST_SKIP_HOME_PREFLIGHT` set -- so do not read
+# "useless for #903" as "useless" and delete it: doing so would silently
+# disable the #423/#665 wrong-tree backstop on exactly those two paths, a
+# fresh instance of the "check that cannot fire" class this file exists to
+# close.
+#
+# So this runs earlier still, from `pytest_configure` -- before collection,
+# before ANY fixture, session-scoped or not, has executed -- and builds its
+# OWN scrubbed-HOME environment by hand from `REAL_ENVIRON` rather than
+# waiting for `_scrub_sdk_discovery_env` to produce one. The single most
+# important property here is that HOOK ORDERING: a check that let the real
+# fixture do the scrubbing for it, or that read the live environment after
+# collection had begun, would inherit the bug it exists to catch and pass in
+# exactly the case that matters. Reading from `REAL_ENVIRON` rather than
+# `os.environ` is what makes that independent of a future change nearby --
+# AT pytest_configure time the two are still equal (no fixture has run yet
+# to diverge them), so today the ordering alone is what protects this check;
+# building the scrub from the untouched capture, rather than the live
+# environment, is what keeps that true even if something earlier in
+# collection someday starts mutating `os.environ` directly.
+#
+# What is probed is deliberately NOT a hardcoded package name. `typer` was
+# this incident's proximate cause, but it is not the only runtime dependency
+# `tan.__main__` pulls in (`pyproject.toml`'s `dependencies` also names rich,
+# pyyaml, jsonschema, click, truststore, certifi, and that list can grow).
+# Spawning the exact command every one of the 31 subprocess-based test files
+# spawns -- `sys.executable -m tan --version` -- exercises the real import
+# chain as it stands today, whatever it is, without this file needing to know
+# its contents. Under-probing (missing the next instance) and over-probing
+# (false-failing on an unrelated absence) both come from hand-picking a
+# module name; running the actual entry point avoids both failure modes at
+# once.
+#
+# COST: measured on `--collect-only`, three runs each, dev vs this branch --
+# 0.56/0.78/0.64s vs 1.50/1.20/1.44s -- so this adds roughly +0.72s to every
+# pytest invocation, not only the ones that run anything. Negligible next to
+# an ~850s full suite, but it is paid on every IDE-triggered collection and
+# doubles the wall time of a single-test edit loop.
+# ---------------------------------------------------------------------------
+
+#: Escape hatch, named in the failure message itself so it is discoverable
+#: without reading this file. A hard collection failure is the right default
+#: -- "a run that cannot produce a meaningful result should not produce 678
+#: meaningless ones" (tan-cli#903) -- but it is a big hammer: a developer who
+#: already knows their interpreter is unusual (deliberately probing a broken
+#: install, say) must be able to say so and get the real suite instead of a
+#: refusal.
+TAN_TEST_SKIP_HOME_PREFLIGHT = "TAN_TEST_SKIP_HOME_PREFLIGHT"
+
+
+def _home_scrubbed_environ(home: Path) -> dict[str, str]:
+    """`REAL_ENVIRON` with `HOME`/`USERPROFILE` repointed at `home` and
+    `ALP_SDK_ROOT` removed, reproduced here as a pure function so the
+    pre-flight below can apply it BEFORE `_scrub_sdk_discovery_env`, or any
+    fixture, has run.
+
+    NOT the identical transformation `_scrub_sdk_discovery_env` applies,
+    despite the resemblance -- two deliberate, SAFE divergences, not a
+    drift to reconcile:
+
+    * That fixture also deletes `ZEPHYR_BASE`, `SOURCE_DATE_EPOCH` and
+      `ZEPHYR_SDK_INSTALL_DIR`; this function deletes only `ALP_SDK_ROOT`.
+      The probe below only asks "can `sys.executable -m tan --version` import
+      its dependencies under this HOME", a question those three variables do
+      not affect either way, so leaving them at the developer's real values
+      here is inert rather than wrong.
+    * The caller (`_home_preflight_failure`) additionally prepends this
+      repo's `python/` onto `PYTHONPATH` before spawning -- mirroring
+      `tan_under_test`'s spawn-side prepend below, NOT this scrub. That
+      prepend is load-bearing, not decoration: without it the probe cannot
+      find `tan` at all (a bare `ModuleNotFoundError`, nothing to do with
+      HOME) before `tan_under_test` ever gets a chance to apply its own.
+
+    Both divergences only ADD to what `_scrub_sdk_discovery_env` would leave
+    in place -- the probe environment is a strict superset -- which is why
+    the probe still reproduces the HOME-shaped failure this file exists to
+    catch (tan-cli#903) despite not being byte-for-byte identical to it.
+
+    Deliberately built from `REAL_ENVIRON`, the capture taken at import before
+    anything scrubs it, and not from live `os.environ` -- see the block
+    comment above this function for why that ordering is load-bearing rather
+    than incidental.
+    """
+    env = dict(REAL_ENVIRON)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env.pop("ALP_SDK_ROOT", None)
+    return env
+
+
+def _with_repo_pythonpath(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` with this repo's `python/` prepended onto `PYTHONPATH` --
+    the same prepend `tan_under_test` applies to `os.environ` for its own
+    spawned probe, reproduced here as a pure function so BOTH probes in
+    `_home_preflight_failure` (the scrubbed-HOME one and its real-HOME
+    control) apply the identical transformation and differ ONLY in
+    HOME/USERPROFILE, which is the whole point of running a control at all.
+    """
+    env = dict(environ)
+    repo_python = str(Path(__file__).resolve().parents[1])
+    existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if repo_python not in existing:
+        env["PYTHONPATH"] = os.pathsep.join([repo_python, *existing])
+    return env
+
+
+#: Values that turn the escape hatch ON. Case-insensitive, and deliberately
+#: NOT bare truthiness (`os.environ.get(...)`) -- measured, that reading
+#: means `TAN_TEST_SKIP_HOME_PREFLIGHT=0` DISABLES the pre-flight (any
+#: non-empty string is truthy in Python), the exact opposite of what a
+#: developer setting `=0` means. `=1`/`=true`/`=yes`/`=on` all skip it;
+#: anything else -- including `=0`, `=false`, or an unset/empty var -- leaves
+#: it armed.
+_SKIP_HOME_PREFLIGHT_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _skip_home_preflight_requested() -> bool:
+    """Whether `TAN_TEST_SKIP_HOME_PREFLIGHT` names one of
+    `_SKIP_HOME_PREFLIGHT_TRUE_VALUES`, case-insensitively -- never bare
+    truthiness. See that constant for why `=0` must NOT skip the check."""
+    value = os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT, "")
+    return value.strip().lower() in _SKIP_HOME_PREFLIGHT_TRUE_VALUES
+
+
+def _run_version_probe(environ: Mapping[str, str], context: str) -> subprocess.CompletedProcess[str] | str:
+    """Spawn `sys.executable -m tan --version` under `environ`.
+
+    Returns the `CompletedProcess` on any ordinary exit (the CALLER decides
+    what a nonzero `returncode` means -- this function only reports whether
+    the probe ran at all), or a ready-to-print diagnostic STRING when the
+    subprocess could not even be spawned, or hung past its timeout. Those two
+    failure shapes get their own wording -- a spawn that never happened
+    ("could not even SPAWN") is a materially different claim from a spawn
+    that happened and then hung ("DID spawn, never returned"), and conflating
+    them under one message misdescribes whichever one didn't occur. Both name
+    the escape hatch, so a developer reading either one has the same way out
+    regardless of which branch they hit.
+
+    `context` is a short phrase describing which of the two probes this is
+    ("under a scrubbed HOME", "under this interpreter's own, REAL,
+    unmodified HOME (the control probe)") so the two callers in
+    `_home_preflight_failure` don't have to duplicate this function just to
+    get a different noun into the message.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "tan", "--version"],
+            env=dict(environ),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            f"`{sys.executable} -m tan --version` HUNG for over 60 seconds "
+            f"{context} instead of exiting -- it DID spawn, it just never "
+            f"returned: {exc}. This pre-flight cannot tell whether the suite "
+            "itself would hang the same way; investigate directly (a shell "
+            "that never finishes venv-activating, an interactive prompt "
+            "`--version` should never trigger, ...). To bypass this check "
+            f"and run the suite anyway, set {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            f"could not even SPAWN `{sys.executable} -m tan --version` "
+            f"{context}: {exc}. To bypass this check and run the suite "
+            f"anyway, set {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+
+
+def _home_preflight_failure() -> str | None:
+    """`None` when `sys.executable -m tan --version` still works once `HOME`/
+    `USERPROFILE` are repointed at a throwaway directory; otherwise a
+    ready-to-print diagnostic naming the cause and the fix.
+
+    `-m tan`, not `-c "import tan"`: `tan/__init__.py` is empty (see
+    `tan_under_test` below), so a bare import proves nothing about whether
+    the dependencies `tan.__main__` actually needs are reachable. `--version`
+    is the cheapest subcommand that still forces that full import chain.
+
+    A nonzero exit under the scrubbed HOME is NOT on its own evidence that
+    HOME caused it -- `tan --version` can be broken for reasons that have
+    nothing to do with HOME (a `SyntaxError` in `tan/cli.py`, say), and
+    printing this function's venv-repair recipe in that case sends a
+    developer chasing a cause that isn't there. So a scrubbed-HOME failure
+    triggers a CONTROL: the identical probe run again under `REAL_ENVIRON`,
+    with only `ALP_SDK_ROOT` also popped (matching `_home_scrubbed_environ`,
+    so a variable neither probe's subject reads today cannot later become an
+    unnoticed second difference) -- the two runs differ in HOME/USERPROFILE
+    and nothing else, which is what lets the diagnostic tell "HOME did this"
+    from "tan is just broken here" apart, and print the right one.
+
+    A pure function of `REAL_ENVIRON` and this host's filesystem -- no
+    fixture, no pytest state -- so `pytest_configure` below can call it before
+    collection has even started.
+
+    This is a TWO-SAMPLE comparison, once each, with no retry and no stderr
+    diffing between the two runs -- it cannot, on its own, distinguish "the
+    scrubbed probe failed because of HOME" from "the scrubbed probe hit a
+    one-off flake (a transient fork failure, a momentarily-full disk, a slow
+    CI neighbour) that the control's later, unrelated run simply didn't
+    repeat." A flaky scrubbed-probe failure paired with a healthy control
+    still prints the venv recipe and blames HOME, wrongly, on exactly that
+    scenario. Treat a report from this function as a strong lead, not a
+    proof, if the failure doesn't reproduce on a second run.
+    """
+    with tempfile.TemporaryDirectory(prefix="tan-home-preflight-") as scratch_home:
+        scrubbed_env = _with_repo_pythonpath(_home_scrubbed_environ(Path(scratch_home)))
+        probe = _run_version_probe(scrubbed_env, "under a scrubbed HOME to pre-flight this suite")
+    if isinstance(probe, str):
+        return probe
+    if probe.returncode == 0:
+        return None
+
+    # `ALP_SDK_ROOT` popped here too, matching `_home_scrubbed_environ` --
+    # otherwise the two probes would differ in HOME/USERPROFILE AND in
+    # whether `ALP_SDK_ROOT` is bound, which is exactly the two-variable
+    # confound the "differ ONLY in HOME" claim below (and in
+    # `_with_repo_pythonpath`'s own docstring) exists to rule out. `tan
+    # --version` does not read `ALP_SDK_ROOT` today, so this is inert now --
+    # but a control that could pass or fail on ALP_SDK_ROOT alone would stop
+    # being a control the moment that stops being true.
+    control_env = dict(REAL_ENVIRON)
+    control_env.pop("ALP_SDK_ROOT", None)
+    control_env = _with_repo_pythonpath(control_env)
+    control = _run_version_probe(
+        control_env, "under this interpreter's own, REAL, unmodified HOME (the control probe)"
+    )
+    if isinstance(control, str):
+        # The control itself could not be run -- say so rather than guessing
+        # at HOME's role from a comparison that never completed.
+        return (
+            f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+            "under a scrubbed HOME, AND the control probe meant to confirm HOME "
+            f"is the cause could not be run either: {control}\n\n"
+            f"stderr from the scrubbed-HOME probe:\n{probe.stderr.strip()}"
+        )
+
+    if control.returncode != 0:
+        # BOTH probes fail -- scrubbed HOME and the developer's own, real
+        # HOME alike -- so the failure is not caused by the HOME/USERPROFILE
+        # repoint this suite's own `_scrub_sdk_discovery_env` fixture applies.
+        # `tan` is broken in this tree regardless of HOME; the venv recipe
+        # below would not fix that, so it is deliberately NOT printed here.
+        return (
+            f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+            "under a scrubbed HOME, AND fails the SAME way "
+            f"(exit {control.returncode}) under this interpreter's own, REAL, "
+            "unmodified HOME -- so this is NOT the scrubbed-HOME failure mode "
+            "tan-cli#903 exists to catch. `tan --version` is broken in this "
+            "tree regardless of HOME; fix `tan` itself first (this pre-flight "
+            "has nothing more specific to add, and the usual scrubbed-HOME "
+            "venv recipe would not fix a failure that also reproduces under "
+            "your real HOME).\n\n"
+            f"stderr from the scrubbed-HOME probe:\n{probe.stderr.strip()}\n\n"
+            f"stderr from the control (real-HOME) probe:\n{control.stderr.strip()}\n\n"
+            f"To bypass this check and run the suite anyway, set"
+            f" {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+
+    # The control SUCCEEDED under the developer's real HOME -- confirming the
+    # scrubbed HOME really is what broke the scrubbed-HOME probe.
+    return (
+        f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+        "once HOME/USERPROFILE are repointed at a throwaway directory -- "
+        "exactly what THIS SUITE's own `_scrub_sdk_discovery_env` fixture "
+        "does to every test's subprocess environment (python/tests/"
+        "conftest.py); the SAME probe under this interpreter's own, REAL "
+        "HOME succeeds (control probe, exit 0), which is what pins the cause "
+        "to HOME rather than to `tan` itself. Left uncaught, that produces "
+        "several hundred unrelated-looking test failures (crashed subprocesses "
+        "returning empty stdout) instead of this one message (tan-cli#903).\n\n"
+        f"stderr from the (scrubbed-HOME) probe:\n{probe.stderr.strip()}\n\n"
+        "The usual cause: this interpreter's runtime dependencies (typer, "
+        "pydantic, ...) are importable only via a user-site install under "
+        "your REAL HOME (e.g. `~/.local`), which a scrubbed-HOME subprocess "
+        "cannot see. Fix it the documented way (README.md, \"New "
+        "implementation work belongs under python/\"):\n"
+        "    python3.12 -m venv .venv\n"
+        '    .venv/bin/python -m pip install -e "./python[monitor]"\n'
+        "    .venv/bin/python -m pip install pytest\n"
+        "    (cd python && ../.venv/bin/python -m pytest tests -q)\n\n"
+        f"To bypass this check and run the suite anyway (NOT recommended --"
+        " every test that spawns a subprocess will fail with its own"
+        " unrelated-looking error instead), set"
+        f" {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail collection ONCE, with one clear diagnostic, rather than letting
+    hundreds of individually-spawned subprocesses fail for a reason none of
+    them can name (tan-cli#903).
+
+    `pytest_configure` fires before collection starts and therefore before
+    ANY fixture -- session-scoped or function-scoped -- has touched `HOME`;
+    `_home_preflight_failure` builds its own scrubbed-HOME environment rather
+    than relying on `_scrub_sdk_discovery_env` to have already produced one,
+    which is what lets this check observe the failure mode instead of
+    inheriting the scrub that hides it (see the block comment above).
+
+    Skipped on xdist WORKER processes (`config.workerinput` is only set
+    there): the controller process runs this exact hook first and would have
+    already aborted the whole session via `UsageError` before any worker is
+    spawned, so a worker re-running the same subprocess probe is pure
+    duplicated cost, not additional coverage.
+
+    FAILS rather than warns -- deliberately, per tan-cli#903's own framing:
+    "a run that cannot produce a meaningful result should not produce 678
+    meaningless ones." A warning here is exactly as easy to miss as the 678
+    failures it would otherwise sit above; a `pytest.UsageError` stops the
+    run immediately, before a single test executes, with nothing else to
+    scroll past. `TAN_TEST_SKIP_HOME_PREFLIGHT=1` is the escape hatch for a
+    developer who already knows their interpreter is unusual on purpose --
+    named in the failure message itself, so it is discoverable without
+    reading this file.
+
+    SELECTION-blind, by design: this spawns the probe regardless of which
+    node IDs pytest was actually asked to collect, even a selection that
+    would never itself spawn a `tan` subprocess (measured:
+    `pytest -q tests/core/test_timestamp.py` against a broken interpreter is
+    `14 passed` on a healthy HOME, and this `UsageError` on a scrubbed one).
+    Nothing here can know in advance whether a later `-k`/path selection
+    needs a working `tan` child, so it aborts on the safe assumption that it
+    might; `TAN_TEST_SKIP_HOME_PREFLIGHT=1` runs the selection anyway.
+    """
+    if getattr(config, "workerinput", None) is not None:
+        return
+    if _skip_home_preflight_requested():
+        return
+    problem = _home_preflight_failure()
+    if problem is not None:
+        raw_value = os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT)
+        if raw_value:
+            # The var IS set, just not to a recognised value (fail-safe:
+            # `y`/`t`/`enabled` and similar near-misses don't skip the
+            # check) -- say so explicitly, or a developer who already tried
+            # to bypass this sees only "set X=1" and has no reason to
+            # suspect their existing `X=y` was the reason it didn't work.
+            problem += (
+                f"\n\n(note: {TAN_TEST_SKIP_HOME_PREFLIGHT} is already set to "
+                f"{raw_value!r}, which is not one of the recognised bypass "
+                f"values -- {sorted(_SKIP_HOME_PREFLIGHT_TRUE_VALUES)!r}, "
+                "case-insensitively.)"
+            )
+        raise pytest.UsageError(problem)
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +1198,7 @@ def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
 
     Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
     `monkeypatch` is function-scoped and this is a session-wide property, and
-    the 26 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    the 31 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
     their child environment from `os.environ` -- an in-process patch would
     leave every one of those spawns host-dependent. Session-scoped autouse
     fixtures resolve before function-scoped ones, so
@@ -606,6 +1247,9 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # build` subprocess; it reads that from `REAL_ENVIRON` above, not from
     # `os.environ` inside the test body, for exactly this reason.
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    # `tan doctor`'s stale-install check does one `git ls-remote` for a VCS
+    # install; a test must never touch the network.
+    monkeypatch.setenv("TAN_DOCTOR_OFFLINE", "1")
     # `SOURCE_DATE_EPOCH` wins over the clock in `tan.core.timestamp`, so a
     # developer or CI image that exports it (reproducible-build setups do)
     # changes every `generatedAt`/`updatedAt` this suite observes -- and a
@@ -621,9 +1265,173 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # built -- including the demotion tests, which would resolve instead of
     # demoting and go red for a reason that is nothing to do with the code.
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    # Same reasoning, same class, added when `build.toolchain._candidates`
+    # started scanning the ADR 0021 artifact-keyed store (tan-cli#990
+    # review): `$ALP_TOOLCHAIN_ROOT` is documented for real bench/CI
+    # machines, and left unscrubbed a shell that exports it would make every
+    # toolchain-root test see THAT store instead of the fresh-per-test
+    # `home/.alp/toolchains` this fixture builds below.
+    monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    # `tan.env.terminal_width` honours `$COLUMNS` first, and `doctor` wraps
+    # unconditionally, so a shell exporting a narrow COLUMNS re-wraps the
+    # strings the text-mode tests assert on (tan-cli#1337). Tests that need
+    # a width set it themselves, after this fixture.
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+
+
+# Every `tan.planner`-or-under module is BOTH a `sys.modules[name]` entry AND
+# a plain attribute of its PARENT package module -- Python's import machinery
+# keeps the two in lockstep on every ordinary import, but any test that does
+# `sys.modules` surgery (deleting/rebinding `tan.planner*` entries to force a
+# fresh reimport, e.g. to rebind against a different SDK root) can leave them
+# pointing at two DIFFERENT module objects if it restores one location and
+# not the other -- tan-cli#943's actual defect. This is NOT a one-level
+# check: the defect reproduces just as well one layer down (e.g.
+# `tan.planner.kconfig` restored in `sys.modules` while `tan.planner`'s own
+# `.kconfig` attribute keeps the leaked reimport, or vice versa), so this
+# hook walks every `sys.modules` key equal to or under `tan.planner` and
+# compares EACH ONE against its own parent's attribute, not just the
+# top-level package against `tan`. Two different `tan.planner.models`
+# modules -- at ANY depth -- means two different `OrchestratorError` classes
+# alive in one interpreter, so a raise from one and a `pytest.raises` against
+# the other silently stop matching; the failure surfaces in whatever
+# unrelated test happens to run next -- often in a different shard entirely,
+# since `tests/commands/` and `tests/planner/` are `pytest-shard`-partitioned
+# per test, and #943's own pair landed deterministically split across shards
+# -- so the drift can go unnoticed for a full week until the unsharded canary
+# (`unsharded-python-canary.yml`) catches it.
+#
+# A `pytest_runtest_teardown` HOOKWRAPPER, not an autouse fixture: an earlier
+# draft used a plain `@pytest.fixture(autouse=True)` with its check after
+# `yield`, and that produced a false positive on
+# `tests/core/test_planner_root.py::test_rebinding_a_different_root_after_
+# import_is_refused`, which deliberately does
+# `monkeypatch.setitem(sys.modules, "tan.planner", object())` as its OWN
+# test technique (simulating "already imported" for a narrower check that
+# reads only `sys.modules`, never the parent's attribute, by design). A
+# fixture's post-yield code runs as one more finalizer in the SAME LIFO
+# teardown chain as `monkeypatch`'s own restore, and fixture-instantiation
+# order does not guarantee this fixture's finalizer runs after
+# `monkeypatch`'s -- measured: it ran BEFORE, so this fixture observed
+# `sys.modules["tan.planner"]` still holding that test's sentinel
+# `object()` with the `.planner` attribute already back at its pre-test
+# value, and flagged a "drift" that was really just an in-flight teardown a
+# moment away from resolving itself correctly. A hookwrapper sidesteps the
+# ordering question entirely: `pytest_runtest_teardown` wraps the ENTIRE
+# teardown phase, including every fixture finalizer (`monkeypatch`'s
+# among them), so `yield`ing past it and checking afterward is guaranteed
+# to observe the fully-settled post-teardown state, not an intermediate one.
+#
+# The `isinstance(..., ModuleType)` guards below are a second, independent
+# safety net for the same false-positive shape: they skip a comparison
+# whenever either side is present but is not an actual module object (e.g.
+# that same test's sentinel `object()`) -- a test is free to park an
+# arbitrary non-module placeholder in `sys.modules["tan.planner"]` for its
+# own purposes; the identity this check protects is specifically between
+# TWO REAL module objects at the same name, which is the only shape
+# tan-cli#943 actually manifested as (a genuine reimported module left on
+# one side, the stale genuine module -- or nothing -- on the other).
+#
+# Latched PER NAME (`_PLANNER_DRIFT_ALREADY_REPORTED`, a `set` of already-
+# reported `tan.planner`-or-under names): once a given name has been named,
+# EVERY later test's teardown re-observes the same drifted pair for THAT
+# name and would otherwise raise again -- measured on the real #943 shape
+# with the guard un-latched, bound to `eb96112b`: `1057 passed, 15 skipped,
+# 484 errors` for what is one root cause. The set makes it one clean error
+# naming the polluting test, not 483 more burying it. A single process-wide
+# boolean latch (the original shape) over-collapses: measured with two
+# INDEPENDENT permanent leaks in one process (`tan.planner.kconfig` from one
+# test, `tan.planner.slugs` from a second, unrelated one), a boolean latch
+# reports only the first name and lets the second sail through as `passed`
+# while it is a live polluter -- run alone, it reds. Keying the latch on the
+# drifted NAME instead of a single flag still collapses the fan-out for the
+# SAME name re-observed on every subsequent teardown, but a second, distinct
+# drifted name is not shadowed by the first.
+#
+# Checked after every test in the WHOLE suite. The walk scans every
+# `sys.modules` key (239 keys, unbound, measured) and filters down to
+# whatever `tan.planner`-or-under names are currently live (23, measured --
+# not "typically single digits") + one `getattr` per matching name --
+# effectively free: 42.6 microseconds/teardown measured, ~0.25s total over
+# 5885 tests; a synthetic 3000-teardown microbenchmark measured
+# 10.88/11.12/11.32s with the hook installed vs. 10.22/10.29/10.34s without
+# -- the delta is inside run-to-run noise.
+#
+# Mutation-proven, both the original one-level shape and the child shape a
+# one-level check is blind to (tan-cli#943 review round 3):
+#   * reverting `test_presets_command.py`'s parent-attribute restore to a
+#     no-op turns THIS hook red on the very next test that imports
+#     `tan.planner`, naming both mismatched objects (with their `hex(id())`)
+#     instead of surfacing as a baffling `pytest.raises` mismatch three files
+#     away;
+#   * planting `monkeypatch.delitem(sys.modules, "tan.planner.kconfig")`
+#     followed by a re-import, WITHOUT restoring `tan.planner`'s `.kconfig`
+#     attribute, is silent under the one-level version of this hook (it only
+#     ever compared `tan.planner` itself against `tan`'s `.planner`
+#     attribute) -- `2 passed`, no teardown error -- and reds under the
+#     generalised version above, which walks every `tan.planner`-or-under
+#     name.
+# Restoring the fix in both cases turns the hook green again. Verified NOT
+# to false-positive on `test_rebinding_a_different_root_after_import_is_
+# refused` (the sentinel case above), on `monkeypatch.setitem(sys.modules,
+# "tan.planner", None)` (`test_net.py`, `test_monitor_command.py`,
+# `test_diff_command.py`), on `monkeypatch.delitem(sys.modules, "tan")`, on
+# `test_planner_root.py`'s other `object()` sentinel case, nor on a full
+# unbound/bound run of `python/tests`.
+_PLANNER_DRIFT_ALREADY_REPORTED: set[str] = set()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    result = yield
+    names = sorted(
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    )
+    for name in names:
+        if name in _PLANNER_DRIFT_ALREADY_REPORTED:
+            continue
+        mod = sys.modules.get(name)
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is None:
+            # The parent package itself is absent from sys.modules (e.g. a
+            # permanent `del sys.modules["tan.planner"]` with children left
+            # behind) -- there is no attribute to compare `mod` against, so
+            # treating a missing parent as `attr = None` would report a
+            # bogus "two live copies" drift against `hex(id(None))` for what
+            # is really just one copy and an absent parent. Not reachable
+            # today (every `tan.planner*` mutation in this tree is
+            # monkeypatch-based, so the wrapper always sees it restored),
+            # but a future permanent parent teardown should skip, not
+            # misdiagnose.
+            continue
+        attr = getattr(parent, leaf, None)
+        if not (
+            (mod is None or isinstance(mod, types.ModuleType))
+            and (attr is None or isinstance(attr, types.ModuleType))
+        ):
+            continue
+        if mod is None and attr is None:
+            continue
+        if mod is attr:
+            continue
+        _PLANNER_DRIFT_ALREADY_REPORTED.add(name)
+        raise AssertionError(
+            f"{name} drifted after {item.nodeid}: sys.modules[{name!r}] is "
+            f"{mod!r} ({hex(id(mod))}) but the parent {parent_name!r}'s own "
+            f".{leaf} attribute is {attr!r} ({hex(id(attr))}) -- these must "
+            "be the SAME object. A test rebound one location (sys.modules "
+            "or the parent's attribute) via monkeypatch without restoring "
+            f"the other, exactly the tan-cli#943 shape: two live copies of "
+            f"{name} (and of every class it defines) in one interpreter. "
+            "Find the test named above and make it restore BOTH locations "
+            "for every torn-out module, not just the top-level package."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +1454,7 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 # That is not a theoretical hazard. It made `tests/parity/seam1_field_diff.py`
 # report
 #
-#     FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+#     FAIL <board>: alp-sdk refuses but tan does not
 #
 # for a `status: tbd` hw_rev the tan under test refuses correctly in every
 # emit mode -- a FALSE parity divergence, filed as a real one before the cause
@@ -657,7 +1465,7 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 #   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
 #     session rather than skipping: a quiet skip would hide exactly the gap
 #     this fixture exists to surface.
-#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 26 test files do this,
+#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 31 test files do this,
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
 #     is inherited by every child regardless of cwd or how the argv is built.
@@ -678,6 +1486,15 @@ def tan_under_test() -> None:
 
     Session-scoped and autouse from the tree root, so it nets every consumer
     -- in-process import and spawned child alike -- present and future.
+
+    Before deleting this because it looks "USELESS for tan-cli#903
+    SPECIFICALLY" (it is -- see the long block comment ~870 lines above,
+    right before `TAN_TEST_SKIP_HOME_PREFLIGHT` is defined): read that
+    comment first. It stays the only spawn-probe still armed on the two
+    paths that skip `pytest_configure`'s check entirely (an xdist WORKER
+    process, and a session run with `TAN_TEST_SKIP_HOME_PREFLIGHT` set), and
+    it is the only thing guarding tan-cli#423/#665 (wrong `tan` under test)
+    on those two paths.
     """
     repo_python = Path(__file__).resolve().parents[1]
 
@@ -704,7 +1521,7 @@ def tan_under_test() -> None:
         "here would describe a different tree -- including the parity gates, "
         "which have already reported a divergence that did not exist because "
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
-        "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
+        "`pip uninstall tan-cli`, or set PYTHONPATH to this repo's `python/`."
     )
 
     # Second, independent probe (tan-cli#665): does `sys.executable` -- the
@@ -789,6 +1606,13 @@ PROBE_TOOLS: frozenset[str] = frozenset(
         # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
         # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.
         "arm-zephyr-eabi-addr2line",
+        # Devicetree compiler, probed by `doctor_cmd._resolve_dtc`
+        # (tan-cli#1192). A distro `dtc` is common on a firmware developer's
+        # own machine and absent from every runner, which is exactly the
+        # tan-cli#603 split this list exists to close: without it,
+        # `devicetreeLint` answers `pass`-because-absent on CI and
+        # `pass`-because-found locally, from the same test.
+        "dtc",
     }
 )
 
@@ -848,3 +1672,15 @@ def empty_tool_inventory(scratch: Path) -> str:
             os.symlink(real_which, link)
         assert link.exists(), f"failed to seed `which` into {stub_dir}"
     return str(stub_dir)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_segger_install_roots(monkeypatch):
+    """tan-cli#1336: Flow D resolves the J-Link binary from `--jlink`, `TAN_JLINK`,
+    PATH, then the host's SEGGER install roots. A dev machine with a real
+    `/opt/SEGGER/JLink` would otherwise satisfy the tool gate in every test that
+    scrubs PATH to prove nothing can spawn. Tests that exercise the install-root
+    step patch `_install_roots` themselves."""
+    from tan.core import jlink_binary
+
+    monkeypatch.setattr(jlink_binary, "_install_roots", lambda env, platform: [])

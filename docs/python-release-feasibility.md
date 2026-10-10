@@ -13,7 +13,7 @@
 > | PyInstaller `--onefile`, a raw binary per target | `--onedir`, published as a `.tar.gz`/`.zip` archive (tan-cli#349) |
 > | `sdk_parity: false` on the release gate | `sdk_parity: true` — the divergence it was off for is closed |
 > | blocker 1b OPEN (`pyproject.toml` unparseable) | closed; §0.0 in this same file already records the fix |
-> | `pip install alp-tan` as "a working distribution path" | `alp-tan` has never been published to PyPI, and there is no PyPI job |
+> | `pip install alp-tan` as "a working distribution path" | nothing was ever published under `alp-tan`; the distribution is `tan-cli` and `release.yml` has a `publish_pypi` job as of tan-cli#1054, opt-in and off until `TAN_PYPI_PUBLISH` is armed |
 >
 > **The live contract is [`docs/release-contract.md`](release-contract.md)**,
 > and the executable truth is `.github/workflows/release.yml`. Read those.

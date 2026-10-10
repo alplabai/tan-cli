@@ -21,10 +21,14 @@ same as before, but it is a bonus re-check, not the fidelity guard itself.
 
 `test_decode_matches_the_sdk_original_byte_for_byte` additionally gates on
 `_ORACLE_VINTAGE_HASH` (tan-cli#560 review, the one major): a resolved oracle
-is only byte-diffed if it is AT the alp-sdk commit
-(`tests.gates.test_planner_relocation_freshness.HAND_PORT_PINNED_SDK_COMMIT`)
-this sweep was last audited against, else it skips LOUDLY naming the required
-vintage. Without that gate, any sibling `alp-sdk` checkout older than alp-sdk
+is only byte-diffed if it is AT the alp-sdk vintage this sweep was last
+audited against, else it skips LOUDLY naming the required vintage.
+`_ORACLE_VINTAGE_HASH` used to be read out of
+`tests.gates.test_planner_relocation_freshness.HAND_PORT_HASHES`; tan-cli#996
+froze it locally once alp-sdk `210e9fed` (#1367/#1368) retired
+`scripts/alp_cli/faultdecode.py` outright and that table stopped tracking it
+-- see `_ORACLE_VINTAGE_HASH`'s own comment. Without the vintage gate, any
+sibling `alp-sdk` checkout older than alp-sdk
 dad5b35a (#1389, the commit that adopted tan-cli#616's LSPERR/MLSPERR fix)
 still carries the old `_root_cause` ladder this sweep no longer carves out
 for, and turns a correct port red on a contributor's own machine while CI
@@ -45,24 +49,33 @@ from pathlib import Path
 
 import pytest
 
-from tan.core import faultdecode as port
-from tests.conftest import REAL_ENVIRON
-from tests.gates.test_planner_relocation_freshness import (
-    HAND_PORT_HASHES,
-    HAND_PORT_PINNED_SDK_COMMIT,
-)
+from _pytest.outcomes import Skipped
 
+from tan.core import faultdecode as port
+from tan.core.shapes import SDK_MARKER
+from tests.conftest import REAL_ENVIRON
 _GOLDEN_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "faultdecode_golden.json"
 _GOLDEN = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
 
-#: sha256 of `scripts/alp_cli/faultdecode.py` at
-#: `HAND_PORT_PINNED_SDK_COMMIT` -- the SAME pin and hash
-#: `test_planner_relocation_freshness.py`'s own hand-port freshness gate
-#: tracks for this file, reused here rather than re-pinned separately so the
-#: two audits cannot drift apart (the tan-cli#296 lesson that split
-#: `PINNED_SDK_COMMIT` from `HAND_PORT_PINNED_SDK_COMMIT` in the first place
-#: argues against inventing a THIRD, independent pin for the same file).
-_ORACLE_VINTAGE_HASH = HAND_PORT_HASHES["scripts/alp_cli/faultdecode.py"]
+#: sha256 `scripts/alp_cli/faultdecode.py` had at the LAST alp-sdk commit it
+#: was ever live at, before alp-sdk `210e9fed` (#1367/#1368, "finish the
+#: alp_cli retirement") deleted it outright -- tan-cli#996.
+#:
+#: Used to be `HAND_PORT_HASHES["scripts/alp_cli/faultdecode.py"]`, reused
+#: rather than re-pinned so the two audits could not drift apart (the
+#: tan-cli#296 lesson). That key is now GONE from `HAND_PORT_HASHES` --
+#: retired in the same change that retired this file upstream, since there
+#: is no longer an alp-sdk source for that gate to audit at all (see
+#: `HAND_PORT_PINNED_SDK_COMMIT`'s own comment in
+#: `test_planner_relocation_freshness.py`). This constant is FROZEN here
+#: instead, at the value that table carried immediately before the
+#: retirement (i.e. still the sha256 of `scripts/alp_cli/faultdecode.py` at
+#: the alp-sdk commit `test_decode_matches_the_frozen_golden`'s golden
+#: fixture was itself frozen from) -- it no longer moves with any pin,
+#: because there is nothing left upstream for it to track. The vintage
+#: check below still matters: a contributor's own sibling `alp-sdk` checkout
+#: may predate the retirement and still carry the pre-#1389 fault ladder.
+_ORACLE_VINTAGE_HASH = "3a9e82b7b6892523923e6f571602be1e3bb11e24090dde0b90f6a5ae207aaa0b"
 
 
 def _resolve_oracle_path() -> Path | None:
@@ -112,14 +125,43 @@ def _resolve_oracle_path() -> Path | None:
     """
     override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
-        candidate = Path(override) / "scripts" / "alp_cli" / "faultdecode.py"
-        if not candidate.is_file():
-            raise RuntimeError(
-                f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py. "
-                "Refusing to skip: a named-but-missing oracle would make this "
-                "check pass vacuously. Fix the path, or unset it."
+        root = Path(override)
+        candidate = root / "scripts" / "alp_cli" / "faultdecode.py"
+        if candidate.is_file():
+            return candidate
+        if root.joinpath(*SDK_MARKER).is_file():
+            # A REAL alp-sdk that no longer ships the oracle. alp-sdk#1367/
+            # #1368 (`210e9fed`, "finish the alp_cli retirement") deleted
+            # `scripts/alp_cli/faultdecode.py` outright -- 670 lines, along
+            # with twelve sibling modules -- once `tan faultdecode` shipped
+            # the native port. There is no live oracle left to diff against
+            # at that ref or any later one, and there never will be again,
+            # so refusing to skip here would turn a permanent upstream fact
+            # into a permanent red.
+            #
+            # This does NOT silently drop the coverage, which is the thing
+            # the refusal below exists to prevent.
+            # `tests/fixtures/faultdecode_golden.json` was frozen FROM that
+            # module while it still shipped (see its PROVENANCE.txt), and
+            # `test_bit_tables_match_the_frozen_golden` /
+            # `test_decode_matches_the_frozen_golden` assert tan's port
+            # against it on EVERY run -- bound or not, oracle present or
+            # not. What is lost is only the live re-verification, and that
+            # was lost upstream, not here.
+            pytest.skip(
+                "the bound alp-sdk retired scripts/alp_cli/faultdecode.py "
+                "(alp-sdk#1367/#1368, landed in 210e9fed), so there is no "
+                "live oracle to diff against at this ref. The frozen golden "
+                "tests/fixtures/faultdecode_golden.json is the authority "
+                "now, and its two checks run unconditionally."
             )
-        return candidate
+        raise RuntimeError(
+            f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py "
+            f"and no {'/'.join(SDK_MARKER)} either, so it does not name an "
+            "alp-sdk checkout at all. Refusing to skip: a named-but-missing "
+            "oracle would make this check pass vacuously. Fix the path, or "
+            "unset it."
+        )
     for parent in Path(__file__).resolve().parents:
         candidate = parent.parent / "alp-sdk" / "scripts" / "alp_cli" / "faultdecode.py"
         if candidate.is_file():
@@ -159,7 +201,7 @@ def _load_original():
 
 def _require_pinned_oracle_vintage(path: Path) -> None:
     """Refuse to byte-diff against an oracle that is not AT the alp-sdk
-    commit `test_decode_matches_the_sdk_original_byte_for_byte` was last
+    vintage `test_decode_matches_the_sdk_original_byte_for_byte` was last
     audited against -- skip LOUDLY naming the required vintage instead of
     silently full-diffing whatever sibling checkout `_resolve_oracle_path`
     happened to find (tan-cli#560 review, the one major).
@@ -169,29 +211,32 @@ def _require_pinned_oracle_vintage(path: Path) -> None:
     this sweep's now-unconditional byte-equality assertion would report as
     18 mismatches with no indication the port is fine and the SDK checkout
     is simply stale -- exactly what the old carve-out existed to prevent
-    resurfacing as a false red. `HAND_PORT_PINNED_SDK_COMMIT` and its sha256
-    for this file are the SAME pin `test_planner_relocation_freshness.py`'s
-    own hand-port freshness gate already tracks -- reused, not duplicated,
-    so the two audits cannot silently disagree about which alp-sdk state
-    `scripts/alp_cli/faultdecode.py` was last checked against."""
+    resurfacing as a false red. `_ORACLE_VINTAGE_HASH` used to be read
+    straight out of `test_planner_relocation_freshness.py`'s own
+    `HAND_PORT_HASHES`/`HAND_PORT_PINNED_SDK_COMMIT` pins so the two audits
+    could not silently disagree (tan-cli#296); tan-cli#996 froze it locally
+    instead, once alp-sdk retired `scripts/alp_cli/faultdecode.py` outright
+    and that table stopped tracking it -- see `_ORACLE_VINTAGE_HASH`'s own
+    comment above. A stale sibling checkout is still exactly as likely as
+    it always was, so the vintage guard stays; only its data source moved."""
     current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     if current_hash != _ORACLE_VINTAGE_HASH:
         pytest.skip(
             "the resolved alp-sdk oracle "
-            f"({path}, sha256 {current_hash}) is not at the alp-sdk commit "
-            f"this byte-for-byte sweep is pinned to "
-            f"({HAND_PORT_PINNED_SDK_COMMIT}, sha256 {_ORACLE_VINTAGE_HASH}) "
-            "-- most likely your sibling alp-sdk checkout predates alp-sdk "
-            "dad5b35a (#1389), before it adopted tan-cli#616's LSPERR/MLSPERR "
-            "fix, and would show a root_cause divergence this port "
-            "deliberately no longer carves out for. Point ALP_SDK_ROOT (or "
-            f"your sibling alp-sdk checkout) at {HAND_PORT_PINNED_SDK_COMMIT} "
-            "to run this sweep for real. If instead the SDK's "
-            "faultdecode.py has genuinely changed again, diff it, port the "
-            "delta, and re-pin HAND_PORT_HASHES + HAND_PORT_PINNED_SDK_COMMIT "
-            "in tests/gates/test_planner_relocation_freshness.py -- "
-            "_ORACLE_VINTAGE_HASH here reads that same table, so it moves "
-            "with it."
+            f"({path}, sha256 {current_hash}) is not at the alp-sdk vintage "
+            f"this byte-for-byte sweep is pinned to (sha256 "
+            f"{_ORACLE_VINTAGE_HASH}) -- most likely your sibling alp-sdk "
+            "checkout predates alp-sdk dad5b35a (#1389), before it adopted "
+            "tan-cli#616's LSPERR/MLSPERR fix, and would show a root_cause "
+            "divergence this port deliberately no longer carves out for. "
+            "Every alp-sdk commit at or after 210e9fed (#1367/#1368) has "
+            "retired this file outright, so no checkout newer than that can "
+            "ever match either -- see this test module's own docstring for "
+            "why the frozen golden fixture is the real authority now. If "
+            "instead the SDK's faultdecode.py genuinely changed again before "
+            "its retirement and this constant is simply wrong, diff it "
+            "against the historical commit and update _ORACLE_VINTAGE_HASH "
+            "above."
         )
 
 
@@ -554,3 +599,96 @@ def test_an_address_valid_bit_is_never_announced_as_the_root_cause():
     is what gets named."""
     report = port.decode(cfsr=1 << 15, dfsr=0x2, bfar=0x20000000)
     assert report.root_cause == "BKPT set (DFSR): Breakpoint -- a BKPT instruction or hardware breakpoint."
+
+
+# --------------------------------------------------------------------------
+# The oracle retirement is SCOPED (tan-cli#940). Three directions, because a
+# one-directional test would pass for a version of this resolver that had
+# simply stopped checking anything.
+# --------------------------------------------------------------------------
+
+
+def _resolve_with_root(monkeypatch, root: Path):
+    """Run `_resolve_oracle_path()` with `ALP_SDK_ROOT` bound to *root*.
+
+    Patches `REAL_ENVIRON` rather than `os.environ`: the resolver reads the
+    collection-time snapshot precisely because `_scrub_sdk_discovery_env`
+    has already emptied the live environment by the time a test body runs
+    (tan-cli#254/#256).
+    """
+    monkeypatch.setitem(REAL_ENVIRON, "ALP_SDK_ROOT", str(root))
+    return _resolve_oracle_path()
+
+
+def test_a_retired_oracle_on_a_real_alp_sdk_skips_rather_than_failing(tmp_path, monkeypatch):
+    """A real alp-sdk that no longer ships the oracle SKIPS.
+
+    alp-sdk#1367/#1368 (`210e9fed`) deleted `scripts/alp_cli/faultdecode.py`
+    permanently. Failing on that would turn a settled upstream fact into a
+    permanent red on every bound run.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    # `Skipped` derives from BaseException, not Exception -- a
+    # `pytest.raises(Exception)` here does NOT catch it, the skip escapes and
+    # skips THIS test, and the assertions below never run. Caught while
+    # writing this: the first version reported `1 skipped` and verified
+    # nothing.
+    with pytest.raises(Skipped) as exc:
+        _resolve_with_root(monkeypatch, sdk)
+    assert "210e9fed" in str(exc.value)
+    assert "faultdecode_golden.json" in str(exc.value), (
+        "the skip must name the fixture that takes over, or it reads as "
+        "coverage simply going away")
+
+
+def test_a_root_that_is_not_an_alp_sdk_still_refuses_to_skip(tmp_path, monkeypatch):
+    """The anti-vacuous guard survives the retirement.
+
+    This is the half that makes the skip above safe: a typo'd or stale
+    `ALP_SDK_ROOT` must NOT be read as "upstream retired the oracle" and
+    quietly pass. Without the `SDK_MARKER` discriminator both cases look
+    identical from here -- the file is simply absent -- which is exactly
+    how a retirement branch turns into blanket coverage loss.
+    """
+    not_sdk = tmp_path / "somewhere-else"
+    not_sdk.mkdir()
+    # NOT `pytest.raises(RuntimeError)`. If the retirement branch ever loses
+    # its `SDK_MARKER` discriminator, the resolver SKIPS here instead of
+    # raising -- and a `Skipped` escaping a `pytest.raises(RuntimeError)`
+    # block aborts THIS test as skipped, not failed. Measured: with the
+    # discriminator mutated away, the `raises` version reported `1 skipped`
+    # and CI would have read that as green. Catching `Skipped` explicitly and
+    # converting it to a failure is what makes this regression loud, and it
+    # is the same "a gate skips itself into silence" class tan-cli#937 and
+    # tan-cli#943 are both about.
+    try:
+        resolved = _resolve_with_root(monkeypatch, not_sdk)
+    except Skipped as exc:
+        pytest.fail(
+            "the resolver SKIPPED on a root that is not an alp-sdk at all "
+            f"({exc}). That is the oracle-retirement branch firing where the "
+            "anti-vacuous refusal belongs: a typo'd or stale ALP_SDK_ROOT "
+            "would then read as 'upstream retired the oracle' and pass "
+            "vacuously, which is the whole thing the refusal exists to stop."
+        )
+    except RuntimeError as exc:
+        assert "does not name an alp-sdk checkout" in str(exc)
+    else:
+        pytest.fail(f"expected a RuntimeError refusal, got {resolved!r}")
+
+
+def test_an_alp_sdk_that_still_ships_the_oracle_resolves_it(tmp_path, monkeypatch):
+    """And a checkout that still HAS the oracle keeps using it.
+
+    Measured against the real pins while writing this: bound to eb96112b
+    (pre-retirement) these modules are 77 passed / 0 skipped; bound to
+    791ba769 (post-retirement) they are 64 passed / 13 skipped.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts" / "alp_cli").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    oracle = sdk / "scripts" / "alp_cli" / "faultdecode.py"
+    oracle.write_text("", encoding="utf-8")
+    assert _resolve_with_root(monkeypatch, sdk) == oracle

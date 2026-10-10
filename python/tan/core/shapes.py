@@ -105,6 +105,30 @@ def is_dir(path: Path | str) -> bool:
         return False
 
 
+def matches_glob_suffix(name: str, *suffixes: str) -> bool:
+    """True if @name ends in any of @suffixes -- case-SENSITIVELY on POSIX,
+    case-INSENSITIVELY on Windows, matching `Path.glob`'s own
+    `case_sensitive=None` default (platform casing rules) exactly.
+
+    THE one spelling of the casing rule every `Path.glob("*.<ext>")` ->
+    `os.listdir`/`os.scandir` swap in this tree needs (tan-cli#1127 review
+    round 2, then tan-cli#1132). Swapping a glob for a listing plus a plain
+    `name.endswith(suffix)` silently NARROWS the match on Windows: a
+    `Foo.YAML` board file, or a `prj.CONF` Kconfig fragment, that `glob`
+    used to enumerate there becomes invisible, and nothing at the call site
+    announces the change. Three call sites share this one rule rather than
+    re-deriving it per swap -- `new_som_cmd._is_yaml_board_file`,
+    `commands/build/configure_inputs`'s fragment/overlay walk, and
+    `model/analyze._resolve_table`'s support-table listing.
+
+    @suffixes are case-folded here, so a caller may spell them either way;
+    what varies by platform is only whether @name is folded to match.
+    """
+    if os.name == "nt":
+        return name.lower().endswith(tuple(s.lower() for s in suffixes))
+    return name.endswith(suffixes)
+
+
 def rejected_sdk_root_message(sdk_root: str, consequence: str) -> str:
     """The `<command>.sdk-root-unresolved` message for a `--sdk-root` the
     loader-marker check REJECTED, naming the value the caller typed.

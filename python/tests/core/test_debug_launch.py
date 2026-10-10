@@ -26,6 +26,7 @@ from tan.core.debug_launch import (
     LaunchResolution,
     apply_launch_resolution,
     create_launch_draft,
+    programs_device,
 )
 
 #: Every (target, server) pair paired with the v0.3.1 default that target
@@ -165,3 +166,83 @@ def test_gdbserver_address_has_no_effect_on_a_draft_without_the_key():
     draft = create_launch_draft(ZEPHYR_MCU, JLINK, None)
     apply_launch_resolution(draft, LaunchResolution(gdbserver_address="192.168.10.42:3333"))
     assert "miDebuggerServerAddress" not in draft
+
+
+# tan-cli#945: a consumer must be able to tell, from the written profile
+# alone, whether starting it programs the attached target -- see this
+# module's own `PROGRAMS_DEVICE`/`programs_device` doc comments for why.
+@pytest.mark.parametrize(
+    "target,server,executable",
+    [
+        (ZEPHYR_MCU, JLINK, "${workspaceFolder}/build/app/zephyr/zephyr.elf"),
+        (ZEPHYR_MCU, OPENOCD, "${workspaceFolder}/build/app/zephyr/zephyr.elf"),
+        (ZEPHYR_MCU, PYOCD, "${workspaceFolder}/build/app/zephyr/zephyr.elf"),
+        (BAREMETAL_MCU, JLINK, "${workspaceFolder}/build/baremetal/app.elf"),
+        (BAREMETAL_MCU, OPENOCD, "${workspaceFolder}/build/baremetal/app.elf"),
+        (BAREMETAL_MCU, PYOCD, "${workspaceFolder}/build/baremetal/app.elf"),
+    ],
+)
+def test_cortex_debug_drafts_carry_an_explicit_load_files_key(target, server, executable):
+    """Every cortex-debug draft states `loadFiles` explicitly, naming the same
+    artefact as `executable`, instead of relying on the adapter's own
+    undocumented-on-the-wire schema default (`marus25.cortex-debug`'s
+    `loadFiles`: "if this property does not exist, then the executable is
+    used to program the device")."""
+    draft = create_launch_draft(target, server, None)
+    assert draft["loadFiles"] == [executable]
+    assert draft["executable"] == executable
+
+
+@pytest.mark.parametrize("target,server", [(YOCTO_USERSPACE, GDBSERVER), (NATIVE_HOST, SERVER_NONE)])
+def test_non_cortex_debug_drafts_carry_no_load_files_key(target, server):
+    """`loadFiles` is a cortex-debug-only concept (cppdbg/lldb have none);
+    a non-cortex-debug draft must not grow the key."""
+    draft = create_launch_draft(target, server, None)
+    assert "loadFiles" not in draft
+
+
+def test_apply_launch_resolution_updates_load_files_with_the_resolved_executable():
+    """A real build's own resolved per-core ELF must replace `loadFiles`
+    alongside `executable` -- otherwise the file cortex-debug reports and the
+    file it actually programs could silently diverge."""
+    draft = create_launch_draft(ZEPHYR_MCU, JLINK, None)
+    apply_launch_resolution(
+        draft, LaunchResolution(executable="${workspaceFolder}/build/m55_hp/zephyr/zephyr.elf")
+    )
+    assert draft["loadFiles"] == ["${workspaceFolder}/build/m55_hp/zephyr/zephyr.elf"]
+    assert draft["executable"] == draft["loadFiles"][0]
+
+
+def test_load_files_has_no_effect_on_a_draft_without_the_key():
+    """Same "only replace a key the draft already carries" rule as
+    `miDebuggerServerAddress` above -- a yocto-userspace draft has no
+    `loadFiles` key to fill even when `resolution.executable` resolves (it
+    fills `program` instead)."""
+    draft = create_launch_draft(YOCTO_USERSPACE, GDBSERVER, None)
+    apply_launch_resolution(draft, LaunchResolution(executable="/deploy/app"))
+    assert "loadFiles" not in draft
+    assert draft["program"] == "/deploy/app"
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        (ZEPHYR_MCU, True),
+        (BAREMETAL_MCU, True),
+        (YOCTO_USERSPACE, False),
+        (NATIVE_HOST, False),
+    ],
+)
+def test_programs_device_matches_the_target_class(target, expected):
+    """The two cortex-debug target classes program real hardware on every
+    launch this module can produce; yocto-userspace attaches to an
+    already-deployed gdbserver and native-host runs on the host -- neither
+    writes to a device via this session."""
+    assert programs_device(target) is expected
+
+
+def test_programs_device_defaults_to_false_for_an_unrecognised_target():
+    """Understating "programs a device" is merely confusing; overstating it
+    is the class of bug tan-cli#945 exists to close -- an unknown target must
+    never read as `True`."""
+    assert programs_device("not-a-real-target-kind") is False

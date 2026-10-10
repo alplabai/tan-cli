@@ -18,7 +18,7 @@ debugger.
 * **Portable, chip-free.** Only `<alp/*>` headers -- no chip driver,
   no vendor header -- so the *same* `src/main.c` builds and runs on
   every E1M family (a Ring 1 example per
-  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/portability.md)).
+  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/portability.md)).
 * **SKIP is not FAIL.** A check whose backend has no probe returns
   `ALP_ERR_NOSUPPORT`, which the self-test reports as **SKIP** -- "this
   backend can't answer", not "the hardware is broken". Conflating a
@@ -40,13 +40,15 @@ on-module EEPROM identity manifest lives on. Rebind it in
 
 ```bash
 # Standalone, native_sim (emul I2C; identity/power checks SKIP):
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
 west build -b native_sim/native/64 . \
-    -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
+    -- -DEXTRA_CONF_FILE=generated/alp.conf -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
 west build -t run
 
 # On real silicon, point -b at the SoM's Zephyr board target.
 # Example for E1M-AEN801:
-west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
+west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
 ```
 
@@ -90,8 +92,9 @@ still latches, so the twister console harness passes regardless.
 
 * **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM
   reads back blank -- the module was never run through
-  `scripts/program_eeprom.py` at production test. On a factory-fresh
-  board this is expected; on a shipped SoM it is a real fault.
+  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/scripts/program_eeprom.py) at
+  production test. On a factory-fresh board this is expected; on a
+  shipped SoM it is a real fault.
 * **SoM identity `ALP_ERR_IO`.** Magic present but the CRC/schema
   check failed -- a corrupt manifest. Re-program the EEPROM.
 * **i2c scan `open failed`.** The `alp-i2c0` DT alias isn't set --
@@ -103,7 +106,7 @@ still latches, so the twister console harness passes regardless.
 
 ## Reference
 
-- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/hw_info.h) -- SoM/SoC identity surface.
-- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/power.h) -- operating-point profile surface.
-- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/peripheral.h) -- I2C surface.
-- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.
+- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/include/alp/hw_info.h) -- SoM/SoC identity surface.
+- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/include/alp/power.h) -- operating-point profile surface.
+- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/include/alp/peripheral.h) -- I2C surface.
+- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.

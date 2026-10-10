@@ -60,21 +60,27 @@
 #
 # WHAT IT PRODUCES
 # ----------------
-# A PR against `dev` on the fixed branch `auto/planner-resync`, force-pushed so
-# it always reflects the CURRENT delta rather than accumulating. It NEVER
-# merges: a re-sync can carry behavioural change under a clean merge -- the
-# #608 re-sync changed `-B "."` and silently satisfied tan-cli#561 without the
-# subject line mentioning it -- so a human reads the diff, and rewrites the
-# machine-written placeholder the script leaves above each moved pin.
+# A PR against `dev` on `auto/planner-resync`, force-pushed so it always
+# reflects the CURRENT delta rather than accumulating -- UNLESS that branch
+# carries a commit this automation did not write, in which case it is left
+# completely untouched and the PR is opened against a diverted branch instead
+# (`auto/planner-resync-<sdk-short-sha>`; tan-cli#1002, see
+# `planner_resync_branch_guard.py`'s own docstring for the full incident this
+# closes -- PR #996's "NEEDS A HUMAN" hand-port work was force-pushed away by
+# the next scheduled run because nothing checked what was already there). It
+# NEVER merges: a re-sync can carry behavioural change under a clean merge --
+# the #608 re-sync changed `-B "."` and silently satisfied tan-cli#561 without
+# the subject line mentioning it -- so a human reads the diff, and rewrites
+# the machine-written placeholder the script leaves above each moved pin.
 #
 # WHEN IT CANNOT DO THE JOB
 # -------------------------
 # It says so and fails, rather than opening a green PR that quietly dropped a
-# file. `planner_resync.py` exits 1 when part of the re-sync needs a human (a
-# 3-way conflict, a changed hand-port source, a new/removed upstream module)
-# and 2 when the inputs are not fit to reason over (a pin disagreeing with its
-# own hash table). Either way the PR is still opened WITH the blockers named,
-# the pins covering them stay put, and this job goes red.
+# file. `planner_resync.py` exits 1 when part of the re-sync needs a human
+# (a 3-way conflict, a changed hand-port source, a new/removed upstream
+# module; the pins covering it stay put) and 2 when the inputs are not fit
+# to reason over (a pin disagreeing with its own hash table). Either way
+# this job goes red (tan-cli#911: see "Surface the owed work..." below).
 #
 # TOKEN + THE RECURSION GUARD, stated plainly
 # -------------------------------------------
@@ -120,32 +126,59 @@ concurrency:
   group: planner-resync
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: write
+# tan-cli#911: `permissions:` usually lives right here -- it now sits at the
+# end of the `propose` job instead (tan-cli#920: job-scoped, not workflow-
+# scoped). See the comment down there for why.
 
 jobs:
   propose:
     name: "propose · tan/planner re-sync"
     runs-on: ubuntu-latest
+    # tan-cli#855: this job had NO bound at all and inherited GitHub's
+    # 360-minute default. Sized against parity.yml's `seam1-plan-shape` (30,
+    # "hang catcher, not a budget" -- measured 1 minute on a real run), the
+    # closest sibling shape: a checkout of alp-sdk + a pip install + a bounded
+    # pytest run against pinned commits. This job does MORE git plumbing on
+    # top of that shape (TWO `fetch-depth: 0` checkouts instead of one, three
+    # `git worktree add`s, a `git commit` + force-push, a `gh pr create/edit`)
+    # but nothing here is a heavy build -- no Zephyr toolchain, no PyInstaller
+    # freeze -- so seam1-plan-shape's own bound is the right order of
+    # magnitude rather than something narrower.
+    timeout-minutes: 30
     steps:
       # THE ONE CHECKOUT IN THIS REPOSITORY THAT KEEPS ITS CREDENTIAL, and it
-      # must: the `propose` step below runs `git push -q -f origin` against the
-      # `auto/planner-resync` branch through the remote THIS checkout leaves
+      # must: the `propose` step below runs `git push -q --force-with-lease` against the
+      # `auto/planner-resync` branch (or a diverted stand-in when that branch
+      # is occupied -- tan-cli#1002) through the remote THIS checkout leaves
       # configured -- no later step sets up a token remote of its own. Adding
       # `persist-credentials: false` here does not fail the job at checkout
       # time; it fails several minutes later at the push, after the re-sync has
       # already been computed and committed, and the PR is then never opened.
       # Every other checkout in this repository sets it false (tan-cli#435).
+      #
+      # The `artipacked` ignore travels with this step (tan-cli#899): it used
+      # to be a `<file>:<line>` pin in `.github/zizmor.yml`, which rotted once
+      # (`140:9` -> `151:9`), pre-merge, on the tan-cli#854/#855 branch when an
+      # 11-line `timeout-minutes` block landed above it with no re-pin --
+      # `release.yml`'s pin is the one that rotted twice in two days, a
+      # different file. Inline, neither can rot -- see `.github/zizmor.yml`'s
+      # header for the full inventory and both derivations.
       - name: Check out tan-cli dev (the branch the re-sync targets)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # tan-cli#929: a stable identity for `.github/zizmor.yml`'s INVENTORY
+        # to key on, deliberately separate from this step's `name:` above --
+        # renaming the DISPLAY name must not silently untrack the row that
+        # excuses this step's `artipacked` suppression. Never rename this
+        # without updating the matching `anchor: job=propose
+        # id=artipacked-inventory-1` line in `.github/zizmor.yml`.
+        id: artipacked-inventory-1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: dev
           fetch-depth: 0
 
-      # fetch-depth 0: the script reads blobs at THREE different pinned
-      # commits, the oldest of which (STRICT_LOADERS_PINNED_SDK_COMMIT,
-      # 26b0040e) is far older than the other two. A shallow clone makes
+      # fetch-depth 0: the script reads blobs at THREE pinned commits, which
+      # need not be the same (each moves only when its own audit does). A
+      # shallow clone makes
       # `git show <pin>:<path>` fail, which the script reports as "the bound
       # checkout cannot be the one this gate was pinned against" -- a correct
       # refusal, but for the wrong reason.
@@ -212,6 +245,31 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      # tan-cli#1109 fault 2, half one: the "Check out tan-cli dev" step way
+      # above ran at JOB START -- if this run sat behind `concurrency:
+      # group: planner-resync` for a while (a prior run of this same job, or
+      # a maintainer merging a hand-port PR onto `auto/planner-resync` while
+      # this run was queued), the checkout below "Propose the re-sync" reads
+      # is however old THAT was, not `origin/dev`'s tip right now. That is
+      # exactly how the three PRs this issue is about got generated: from the
+      # tree as it stood before PR #1103 merged, because nothing re-read
+      # `origin/dev` between checkout and regeneration. `-B`, not a bare
+      # `checkout dev`: the initial checkout may have left `dev` detached
+      # rather than as a local branch, and `git checkout -B dev origin/dev`
+      # creates-or-resets the local `dev` branch to point exactly at
+      # `origin/dev`'s tip either way -- not a `merge`/`rebase`: nothing has
+      # run yet that could have left a local commit worth preserving here.
+      - name: Pin the tan-cli dev tip this run regenerates against
+        id: devtip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin dev
+          git checkout -q -B dev origin/dev
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Regenerating against tan-cli dev ${sha} (origin/dev's tip as of just now, not whatever this job's checkout started from)."
 
       - name: Propose the re-sync
         id: resync
@@ -314,20 +372,172 @@ jobs:
           SDK_SHA: ${{ steps.ref.outputs.sha }}
           RC: ${{ steps.resync.outputs.rc }}
           GATE_VERDICT: ${{ steps.gate.outputs.verdict }}
+          RESYNC_VERDICT: ${{ steps.resync.outputs.verdict }}
+          DEV_SHA: ${{ steps.devtip.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
+          # tan-cli#1109 fault 2, half two: "Pin the tan-cli dev tip..."
+          # above closed the window BEFORE regeneration; this closes the one
+          # AFTER it. "Propose the re-sync" and "Run the freshness gate"
+          # (this job's slowest step -- a real `pip install` + pytest run)
+          # both take real wall-clock time, during which `origin/dev` can
+          # move again -- a maintainer merging the very re-sync PR this run
+          # is about to open a stale duplicate of, say (PR #1103's own
+          # timeline: two of tonight's three junk PRs were created while it
+          # sat open). Narrowly scoped to the paths `planner_resync.py`
+          # actually reads as `ours`/writes (the mirror dir + the one gate
+          # file it re-pins) -- an unrelated commit landing on `dev` in the
+          # same window (any other PR, any day) is not this bug and must not
+          # turn every ordinary run red. ABORT rather than push: recomputing
+          # inline would mean re-running the freshness-gate pytest step too
+          # with no bound on how many times `dev` could move again while
+          # THAT reruns, whereas a future scheduled/dispatched run
+          # regenerates against the fresh tip at no extra cost -- simpler and
+          # just as fast in practice.
+          git fetch --quiet origin dev
+          if ! git diff --quiet "${DEV_SHA}" origin/dev -- python/tan/planner python/tests/gates/test_planner_relocation_freshness.py; then
+            latest_dev="$(git rev-parse origin/dev)"
+            echo "::error::tan-cli dev's tan/planner/ (or the freshness gate's pins) moved from ${DEV_SHA} to ${latest_dev} while this run was regenerating (tan-cli#1109 fault 2) -- this run's proposal was computed against a base that is no longer current, and pushing it risks exactly the silent revert of landed work tan-cli#1109 was filed over. Aborting without pushing or opening anything; the next scheduled or dispatched run regenerates against the fresh tip."
+            echo "opened=false" >> "$GITHUB_OUTPUT"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           if [ -z "$(git status --porcelain -- python/)" ]; then
-            echo "Nothing to propose -- tan/planner is level with alp-sdk ${SDK_SHA}."
+            # tan-cli#1109 review (minor): `planner_resync.py` returns 2
+            # (REFUSED) BEFORE it ever writes `verdict=` to $GITHUB_OUTPUT --
+            # its `except Refused` branch is above that write. `RESYNC_VERDICT`
+            # is therefore EMPTY on this path, and asserting "no file ...
+            # changed enough" would claim a measurement the script never made:
+            # a refusal means it never got far enough to classify anything at
+            # all. `RC` (unlike `RESYNC_VERDICT`) IS set on every path, so
+            # branch on that instead of asserting a cause from an empty string.
+            if [ "${RC}" = "2" ]; then
+              echo "Nothing to propose -- planner_resync.py REFUSED to propose anything for alp-sdk ${SDK_SHA} (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- it never got far enough to classify a single file. See the job summary for the refusal reason."
+            else
+              echo "Nothing to propose -- planner_resync.py verdict is '${RESYNC_VERDICT}' for alp-sdk ${SDK_SHA}: no file under scripts/alp_orchestrate/ (nor a tracked hand-port source) changed enough to write anything under python/. See the job summary for the full report."
+            fi
             echo "opened=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          branch=auto/planner-resync
-          git config user.name  "alp-sdk planner re-sync"
-          git config user.email "noreply@alplab.ai"
+          # tan-cli#1109 fault 4: the body built below already carries the
+          # UPSTREAM delta (`planner_resync.py`'s own report); this is the
+          # delta AGAINST `dev`, which is what actually determines whether
+          # merging reverts something -- surfaced explicitly rather than
+          # left for a reviewer to `git diff` themselves.
+          changed_files="$(git status --porcelain -- python/ | wc -l | tr -d ' ')"
+          # tan-cli#1109 review (nit): `awk '{print $2}'` splits on
+          # WHITESPACE, so a path containing a space -- or a staged rename's
+          # `old -> new` porcelain form, which is itself space-separated --
+          # prints truncated. `cut -c4-` instead: `git status --porcelain`
+          # lines are exactly two status characters, one space, then the
+          # (possibly `old -> new`) path -- column 4 onward is the whole
+          # rest of the line, untouched by any space it contains.
+          changed_list="$(git status --porcelain -- python/ | cut -c4-)"
+          short="${SDK_SHA:0:8}"
+
+          # tan-cli#1006 review (nit) / tan-cli#1119 review (minor): the
+          # automation's commit identity used to be spelled out as a LOCAL
+          # literal right here, which both the guard invocation below
+          # (`--automation-name`/`--automation-email`, explicit rather than
+          # relying on the script's argparse defaults matching by
+          # coincidence) and the `git config` calls further down read.
+          # tan-cli#1119 measured what a SECOND, independent copy of that
+          # literal costs elsewhere in this file: the "Close superseded
+          # planner-resync proposals" step below used to carry its own, and
+          # a drift there made every branch this automation actually pushed
+          # read as "occupied" (fail-safe, since that only ever
+          # over-protects) but SILENTLY. Fixed by hoisting BOTH values to
+          # the job-level `AUTOMATION_NAME`/`AUTOMATION_EMAIL` env (bottom
+          # of this job, same pattern `RESYNC_ISSUE_TITLE`/
+          # `RESYNC_ISSUE_MARKER` already use for the other two steps that
+          # need to agree) -- `${AUTOMATION_NAME}`/`${AUTOMATION_EMAIL}`
+          # below read straight from that job env; tan-cli#1119 review round
+          # 3 (nit): there is deliberately NO local reassignment here any
+          # more (`AUTOMATION_NAME="${AUTOMATION_NAME}"` was a no-op
+          # self-assignment left over from the literal it replaced, not
+          # load-bearing for anything -- a step's job-level `env:` is
+          # already in scope for every `run:` block in the job, so nothing
+          # needs re-exporting).
+
+          # tan-cli#1002: never force-push over a commit this automation did
+          # not write. `planner_resync_branch_guard.py` inspects the CURRENT
+          # `origin/auto/planner-resync` (before this step commits anything
+          # on top of it) and picks the branch that is actually safe to
+          # force-push -- `auto/planner-resync` itself when it carries only
+          # automation-authored history (or does not exist yet), or a
+          # diverted `auto/planner-resync-<short>[-N]` name when it carries
+          # someone else's commit -- see that script's own docstring for the
+          # full incident this closes (PR #996's hand-port work, force-pushed
+          # away by the very next scheduled run). `set +e`/`rc=$?`/`set -e`:
+          # exit 1 ("diverted, use the branch it named") is a ROUTINE outcome
+          # this step must keep running past, the same reason the "Propose
+          # the re-sync" step above clears errexit around planner_resync.py's
+          # own routine nonzero exits (tan-cli#793) -- only exit 2 ("could not
+          # determine whether some candidate is safe") is meant to kill this
+          # step outright.
+          set +e
+          python python/scripts/planner_resync_branch_guard.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --base-ref dev \
+            --branch auto/planner-resync \
+            --divert-suffix "${short}" \
+            --automation-name "${AUTOMATION_NAME}" \
+            --automation-email "${AUTOMATION_EMAIL}"
+          rc=$?
+          set -e
+          if [ "${rc}" -eq 2 ]; then
+            echo "::error::planner_resync_branch_guard.py could not determine whether auto/planner-resync is safe to force-push -- refusing to guess (see the step log above for the git failure this raised). This is tan-cli#1002's guard: an ambiguous answer is never treated as 'safe'."
+            exit 1
+          fi
+          # Read back out of $GITHUB_OUTPUT (the guard script writes there
+          # itself, same convention planner_resync.py already uses) rather
+          # than via a `steps.<id>.outputs` expression -- this call is inline
+          # in this step's own `run:` body, not a separate step with an `id:`
+          # of its own. `tail -1`: nothing else in this job writes a `branch=`
+          # key, but a rerun-safe read should not assume that stays true.
+          branch="$(grep '^branch=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          diverted="$(grep '^diverted=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review round 2 (blocker): this used to be the ONE key
+          # `planner_resync_branch_guard.py` wrote CONDITIONALLY (only `if
+          # decision.protected is not None`), while every read down here is
+          # unconditional and this step runs under `set -euo pipefail`. On a
+          # clean, non-diverted run -- the everyday case -- the key was
+          # simply absent, `grep` exited 1, `pipefail` propagated that into
+          # this assignment, and the step died right here: `git config`,
+          # `checkout -B`, `commit`, and `git push` never ran, and the
+          # proposal PR was never opened or refreshed. The guard script now
+          # writes `protected_commit=` (and the three `protected_commit_*`
+          # keys below it) on EVERY path, empty when there is nothing
+          # protected -- the same shape `branch=`/`diverted=`/
+          # `observed_tip=`/`occupied_count=` already use, which is what
+          # keeps THEM safe against this exact class of bug. Audited every
+          # other `grep '^…=' "$GITHUB_OUTPUT"` read in this job against the
+          # guard script's writes when this was fixed: `branch=`,
+          # `diverted=`, `observed_tip=`, and `occupied_count=` were already
+          # unconditional; `occupied_${i}_branch=`/`_commit=`/`_author=`
+          # (further down) are written once per `decision.occupied` entry and
+          # only ever read for `i` in `1..occupied_count`, so those two counts
+          # can't drift apart. `protected_commit=` was the one conditional
+          # key in the set.
+          protected_commit="$(grep '^protected_commit=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review (minor): the sha the guard actually inspected
+          # on `origin/${branch}` -- empty when it didn't exist there yet.
+          # Passed to `--force-with-lease` below so the guard's approval is
+          # atomic with the push instead of merely advisory.
+          observed_tip="$(grep '^observed_tip=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review (minor, cascaded diversion): EVERY candidate
+          # the guard found occupied on its way to `${branch}`, not just
+          # `protected_commit` (which only ever names the first) -- a run
+          # that diverts past a name a PRIOR run already diverted to must
+          # name both, or a reader is told about only one of two branches
+          # holding someone else's work.
+          occupied_count="$(grep '^occupied_count=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+
+          git config user.name  "${AUTOMATION_NAME}"
+          git config user.email "${AUTOMATION_EMAIL}"
           git checkout -q -B "${branch}"
           git add -A python/
-          short="${SDK_SHA:0:8}"
           # Commit subject carries NO issue-closing keyword. GitHub builds a
           # squash message out of the COMMITS and parses `fixes #n` inside
           # backticks and code fences alike, so a re-sync that merely MENTIONS
@@ -338,12 +548,90 @@ jobs:
           Machine-proposed by python/scripts/planner_resync.py. See the PR body
           for what merged, what was flagged for manual porting, and which pins
           moved. Refs alplabai/alp-sdk#855."
-          git push -q -f origin "${branch}"
+          # tan-cli#1006 review (minor): a bare `git push -q -f` is TOCTOU-stale
+          # by the time it lands -- `planner_resync_branch_guard.py` above
+          # read `origin/${branch}` before this step's own `git config` x2,
+          # `checkout -B`, `add -A`, `commit` ran, and any of those give a
+          # commit pushed into that window room to land on `${branch}`
+          # unnoticed. `--force-with-lease="${branch}":"${observed_tip}"`
+          # (empty `observed_tip` spells "the ref must not already exist",
+          # git's own documented form) makes the push itself re-verify the
+          # guard's premise instead of trusting it went stale-free.
+          git push -q --force-with-lease="${branch}":"${observed_tip}" origin "${branch}"
 
           {
-            cat "${RUNNER_TEMP}/resync.md"
+            # Same fallback as the "Propose the re-sync" step above (tan-cli#911)
+            # and the "Surface the owed work..." step below (tan-cli#920): an
+            # unhandled traceback in planner_resync.py is rc=1 with no markdown
+            # written, and this step's `set -euo pipefail` would otherwise die
+            # here -- after the branch is already force-pushed, so the PR would
+            # never get opened for a diff that DID get committed.
+            cat "${RUNNER_TEMP}/resync.md" || \
+              echo "_planner_resync.py wrote no markdown -- see the step log_"
             echo
             echo "---"
+            echo
+            if [ "${diverted}" = "true" ]; then
+              echo "### This proposal was diverted (tan-cli#1002)"
+              echo
+              if [ "${occupied_count:-0}" -eq 1 ]; then
+                echo "\`auto/planner-resync\` carries commit \`${protected_commit}\`,"
+                echo "which this automation did not write, and was left completely"
+                echo "untouched -- this PR proposes against \`${branch}\` instead. If"
+                echo "that commit is hand-port work you (or another re-sync PR) left"
+                echo "on \`auto/planner-resync\`, it is still there:"
+                echo "<https://github.com/${{ github.repository }}/tree/auto/planner-resync>."
+              else
+                # tan-cli#1006 review: a cascaded diversion (this run's own
+                # primary AND an earlier run's diversion target both already
+                # occupied) -- name every branch this run found occupied, not
+                # just the primary, so a reader isn't pointed at only one of
+                # several branches holding someone else's work.
+                echo "This run found **${occupied_count}** branches already"
+                echo "occupied by a commit this automation did not write, and"
+                echo "left every one of them completely untouched -- this PR"
+                echo "proposes against \`${branch}\` instead:"
+                echo
+                for i in $(seq 1 "${occupied_count}"); do
+                  ob="$(grep "^occupied_${i}_branch=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  oc="$(grep "^occupied_${i}_commit=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  oa="$(grep "^occupied_${i}_author=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  # tan-cli#1006 review (minor): `oa` alone reads as the
+                  # automation itself on the `--amend`/`fixup!` shape this
+                  # round exists to catch -- author identity survives the
+                  # amend/autosquash, only the committer changes, so a reader
+                  # here would see this protected commit credited to
+                  # `alp-sdk planner re-sync <noreply@alplab.ai>`. The guard
+                  # already emits `occupied_${i}_committer` and `main()`
+                  # already does exactly this for `protected_commit` at
+                  # planner_resync_branch_guard.py:476-484 -- this is wiring
+                  # an existing key in, not new logic.
+                  ocommitter="$(grep "^occupied_${i}_committer=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  credit="${oa}"
+                  if [ "${ocommitter}" != "${oa}" ]; then
+                    credit="${oa}, committed by ${ocommitter}"
+                  fi
+                  echo "* \`${ob}\` carries \`${oc}\` (by ${credit}):"
+                  echo "  <https://github.com/${{ github.repository }}/tree/${ob}>"
+                done
+              fi
+              echo
+              echo "If any of those commits are hand-port work you (or another"
+              echo "re-sync PR) left there, reconcile it with this proposal by"
+              echo "hand -- do not assume they cover the same delta."
+              echo
+            fi
+            echo "### Diff against \`dev\`"
+            echo
+            echo "**This PR changes ${changed_files} file(s) relative to \`dev\`** --"
+            echo "tan-cli#1109: a clean re-sync can still REVERT work already on"
+            echo "\`dev\` (a hand-authored fix to one of these same files, landed"
+            echo "after the commit this proposal's base merge read as \"ours\") --"
+            echo "read this list before the upstream diffs below, not instead of them."
+            echo
+            echo '```'
+            echo "${changed_list}"
+            echo '```'
             echo
             echo "### This proposal's own checks"
             echo
@@ -351,6 +639,8 @@ jobs:
             echo "| --- | --- |"
             echo "| \`planner_resync.py\` exit | \`${RC}\` (0 clean · 1 needs a human · 2 refused) |"
             echo "| freshness gate + resync tests, run in the proposing job | ${GATE_VERDICT:-not run} |"
+            echo "| branch-clobber guard (tan-cli#1002) | $([ "${diverted}" = "true" ] && echo "diverted -- ${occupied_count:-1} branch(es) occupied, see above" || echo "auto/planner-resync was safe to force-push") |"
+            echo "| files changed relative to \`dev\` (tan-cli#1109) | \`${changed_files}\` -- see \"Diff against \`dev\`\" above |"
             echo
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
@@ -359,6 +649,16 @@ jobs:
             echo "block above each moved pin is a machine-written placeholder that"
             echo "records only WHAT moved. Replace it with the audited narrative"
             echo "before merging."
+            echo
+            echo "**\`${branch}\` is force-pushed by this workflow on every run that"
+            echo "has something to propose.** If part of this re-sync needs a human"
+            echo "(see \"What a human must do\" above, when present), do that work on"
+            echo "a branch of your OWN -- \`git checkout -b fix/<topic> ${branch}\` --"
+            echo "and open your own PR against \`dev\`, rather than committing"
+            echo "directly to \`${branch}\`. A future run that finds \`${branch}\`"
+            echo "occupied by a foreign commit diverts to a new branch instead of"
+            echo "overwriting it (tan-cli#1002), but that is a safety net, not a"
+            echo "place to leave work you intend to keep."
             echo
             echo "Because the PR was opened by \`GITHUB_TOKEN\`, GitHub's recursion"
             echo "guard means its own \`ci.yml\`/\`parity.yml\` runs did not start"
@@ -381,17 +681,508 @@ jobs:
           fi
           echo "opened=true" >> "$GITHUB_OUTPUT"
 
-      # Last, so the PR exists before this job goes red. A re-sync that needs a
-      # human is a REAL finding and must not be reported as success -- but the
-      # proposal is more useful than the red X, so it lands first.
-      - name: Verdict
+      # tan-cli#1109 fault 3: the branch-clobber guard above (tan-cli#1002)
+      # protects a human's foreign commit on `auto/planner-resync` by
+      # DIVERTING to a fresh `auto/planner-resync-<sdk-short-sha>` name --
+      # correct, but every diverted run gets its OWN branch, and
+      # `gh pr list --head <that one branch>` above never finds a prior run's
+      # proposal sitting under a DIFFERENT diverted name. That is exactly how
+      # tonight's #1106/#1107/#1108 ended up open at once: three separate
+      # dispatches, each protecting the SAME human commit on
+      # `auto/planner-resync`, each diverting to its own target-sha-named
+      # branch, each therefore opening its own PR. This step is the other
+      # half of "supersede rather than accumulate": once the step above has
+      # opened or refreshed ONE proposal (on `${{ steps.pr.outputs.branch }}`,
+      # whichever name the guard picked), close every OTHER open PR whose
+      # head branch starts with `auto/planner-resync` -- there is only ever
+      # supposed to be one live proposal from this workflow, diverted or not.
+      - name: Close superseded planner-resync proposals (cap at one open PR)
+        if: ${{ steps.pr.outputs.opened == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_BRANCH: ${{ steps.pr.outputs.branch }}
+          KEEP_URL: ${{ steps.pr.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
+          # tan-cli#1109 review round 3 (nit): this step's own LOCAL `jq`
+          # calls below (unlike the `gh pr list` lookup, which already checks
+          # `list_rc` explicitly) had no presence/failure guard of their own.
+          # Measured: with `jq` missing, each call exits 127 inside a `$(...)`
+          # assignment, `set -e` kills the step there -- which IS fail-closed
+          # (the step dies before ever reaching a `gh pr close`, so nothing
+          # gets destroyed) but SILENTLY: no `::error::` naming what happened,
+          # just a bare nonzero exit -- exactly the "red X with no
+          # explanation" shape tan-cli#793/#911/#920 all exist to close in
+          # this same file, in a step whose entire job is deciding what to
+          # destroy. One check up front, before either `jq` call, rather than
+          # wrapping each individually -- both calls need the same binary, so
+          # one loud refusal covers both.
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is not on PATH -- this step needs it to filter the open-PR list, and cannot safely guess which PRs to close without it. Refusing to guess (see tan-cli#1109 review round 3) rather than silently closing nothing and leaving a stale proposal open with no signal."
+            exit 1
+          fi
+          # tan-cli#1119 review: the per-branch loop below shells out to
+          # `python python/scripts/planner_resync_branch_guard.py
+          # --check-branch` -- the exact same "missing binary => silent
+          # wrong answer" risk `jq`'s own presence check exists for, just one
+          # command later. Checked up front, same reasoning, same shape.
+          if ! command -v python >/dev/null 2>&1; then
+            echo "::error::python is not on PATH -- this step needs it to ask planner_resync_branch_guard.py --check-branch whether each candidate branch is currently safe to close, and cannot safely guess without it. Refusing to guess rather than silently closing a protected branch."
+            exit 1
+          fi
+          # Same fail-closed shape as every other `gh ... | jq` lookup in this
+          # job (tan-cli#920): a transient `gh` error must not be read as "no
+          # other proposal exists" and fall through to leaving a stale one
+          # open.
+          #
+          # tan-cli#1109 review (major): the head-branch prefix alone is not
+          # enough -- `auto/planner-resync` is the exact branch the #1002/#996
+          # incident put a HUMAN'S hand-port commit on (the branch-clobber
+          # guard above protects the COMMIT by diverting, but a human could
+          # just as well open their own PR from a branch already named
+          # `auto/planner-resync-<whatever>`), and this step's own body at
+          # `:552` promises that work "is still there" -- it would not be, if
+          # this closed the PR carrying it. `select(.author.login ==
+          # "app/github-actions")` restricts to PRs THIS WORKFLOW'S TOKEN
+          # opened -- measured against every real `auto/planner-resync*` PR
+          # this repo has ever opened (`gh pr view <n> --json author`):
+          # `{"is_bot":true,"login":"app/github-actions"}`, exactly. The
+          # `isCrossRepository == false` check is defence in depth: a fork PR
+          # cannot forge that author identity, but there is no reason to rely
+          # on that alone when the field is free to check.
+          #
+          # tan-cli#1109 review round 2 (major) / tan-cli#1119: the author
+          # filter alone STILL closes the case this repo actually had -- a
+          # BOT-authored PR whose branch a human took over (exactly #1103:
+          # opened by `app/github-actions`, then a human pushed a hand-port
+          # commit onto `auto/planner-resync` on top of it). tan-cli#1109
+          # first closed this by excluding every branch THIS RUN's own
+          # branch-clobber guard invocation reported occupied -- but that
+          # `occupied_branches` value is a SNAPSHOT of THIS run's own
+          # candidate walk (`primary`, `primary-<this run's suffix>`, `-2`,
+          # ...), computed at the guard step above and consulted here,
+          # later. tan-cli#1119: that leaves two gaps a snapshot can never
+          # close -- a PREVIOUS run's diverted branch name (never one of
+          # this run's own candidates, so never in the snapshot) that a
+          # human has since adopted, and a TOCTOU window (a branch adopted
+          # in the interval between the guard step computing the snapshot
+          # and this step acting on it). Both close the same way: ask the
+          # guard's own authorship test PER CANDIDATE BRANCH, right now,
+          # instead of consulting a list built earlier in the run
+          # (`planner_resync_branch_guard.py --check-branch`, which reruns
+          # exactly the `_foreign_commits` check `decide_branch` applies to
+          # its own candidates, just against a caller-supplied name -- see
+          # that function's docstring). There is no snapshot left to go
+          # stale, and a prior run's diverted name is exactly as reachable
+          # as this run's own `auto/planner-resync` -- neither is special-
+          # cased. A prior run's own diverted SIBLING that nothing has
+          # adopted (say `auto/planner-resync-eaa79695`, not occupied by
+          # anything foreign) still answers "not occupied" and still gets
+          # closed, so the cap still works. Do NOT skip this whole step on
+          # `diverted == true` instead -- diversion is exactly the run where
+          # accumulation happens, so that would disable the cap precisely
+          # when it is needed.
+          #
+          # tan-cli#1109 review (nit): `--limit 100`, same reasoning as the
+          # "Surface the owed work..." / "Close the tracking issue..." steps'
+          # own `gh issue list --limit 100` further down -- `gh pr list` with
+          # no `--limit` defaults to a 30-item, newest-first page, so past 30
+          # open PRs a proposal this cap is supposed to supersede can age off
+          # page 1 and this step silently under-delivers instead of finding
+          # it. 100 is this repo's own established ceiling for that lookup;
+          # not measured as a live problem today (5 open PRs total), same as
+          # the un-`--limit`ed `gh pr list --head` a few lines above -- but
+          # cheap to fix here alongside the rest of this round. The page is
+          # the 100 newest OPEN PRs OF ANY KIND, though, not 100
+          # planner-resync ones -- fail-open, not destructive, but a full
+          # page is worth a loud note rather than a silent under-delivery
+          # past 100 total open PRs.
+          set +e
+          raw="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open \
+                   --limit 100 \
+                   --json number,headRefName,author,isCrossRepository)"
+          list_rc=$?
+          set -e
+          if [ "${list_rc}" -ne 0 ]; then
+            echo "::error::gh pr list failed while looking for other open planner-resync proposals to supersede -- refusing to guess whether any exist. See the step log for gh's error."
+            exit 1
+          fi
+          raw_count="$(printf '%s' "${raw}" | jq 'length')"
+          if [ "${raw_count}" = "100" ]; then
+            echo "::warning::gh pr list returned exactly 100 open PRs (the --limit ceiling) while looking for other planner-resync proposals to supersede -- there may be MORE open PRs this page did not include, and any auto/planner-resync* PR sitting past page 1 would be silently missed by this step's cap. Investigate if this repo's open-PR count keeps climbing."
+          fi
+          # Prefix/self/author/cross-repo only -- the occupied check moved to
+          # a live per-branch question below, so it is no longer part of
+          # this filter. `@tsv` (not bare `.number`): the per-branch check
+          # needs each candidate's `headRefName` too, and jq's own field
+          # access keeps that value out of any shell/jq FILTER TEXT --
+          # unlike `${KEEP_BRANCH}` above (a value this workflow itself
+          # produced two steps ago, not attacker-reachable), a GitHub PR's
+          # `headRefName` is exactly the kind of externally-influenced string
+          # this repo's own `_LOG_SEP`-splitting/`--argjson` conventions
+          # exist to keep out of an interpolated filter or shell command;
+          # `read -r` below and `--check-branch "${branch}"` (a real argv
+          # value, never eval'd or spliced into a jq program) keep it that
+          # way through this loop too.
+          others="$(printf '%s' "${raw}" | jq -r \
+                      ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | [.number, .headRefName] | @tsv")"
+          while IFS=$'\t' read -r n branch; do
+            if [ -z "${n}" ]; then
+              continue
+            fi
+            # Asked FRESH, immediately before acting -- not read back out of
+            # a snapshot computed at the guard step above. See the tan-cli#1119
+            # comment above for why that distinction is the whole fix.
+            # `AUTOMATION_NAME`/`AUTOMATION_EMAIL`: job-level env (bottom of
+            # this job), the same source the "Open or refresh the proposal
+            # PR" step's own commits are actually made under -- see that
+            # step's comment for why a second, independent pair of literals
+            # here silently breaks the cap on drift.
+            set +e
+            python python/scripts/planner_resync_branch_guard.py \
+              --check-branch "${branch}" \
+              --repo-root "${GITHUB_WORKSPACE}" \
+              --base-ref dev \
+              --automation-name "${AUTOMATION_NAME}" \
+              --automation-email "${AUTOMATION_EMAIL}" < /dev/null
+            check_rc=$?
+            set -e
+            # tan-cli#1119 review (blocker): this used to be an ALLOW-LIST of
+            # the two known outcomes (`-eq 2` refuse, `-eq 1` skip), so any
+            # OTHER exit code -- 127 (`python` resolved but the script itself
+            # could not be found or run), 137 (OOM-killed / SIGKILL), or
+            # anything else a subprocess can produce -- fell straight through
+            # to the `gh pr comment`/`gh pr close` below with no signal at
+            # all. Measured: a `python` stub exiting 127 or 137 closed the
+            # exact branch this exclusion exists to protect, step rc 0, no
+            # `::error::` -- a silent fail-OPEN in the one step whose entire
+            # thesis is fail-closed. Inverted to a DENY-list of the single
+            # known-safe answer instead: anything that is not exactly `0`
+            # aborts the whole step before any `gh pr close`, the same
+            # fail-closed posture `command -v jq`/`command -v python` and the
+            # `gh pr list` failure check above already take. `0` (not
+            # occupied, or does not exist) is the only exit code this check
+            # trusts.
+            if [ "${check_rc}" -ne 0 ]; then
+              if [ "${check_rc}" -eq 1 ]; then
+                # Occupied -- exactly the PR this exclusion exists to protect
+                # (#1103's shape, or a prior run's diverted branch a human
+                # has since adopted); leave it alone, and keep processing
+                # the rest of the candidates.
+                continue
+              fi
+              # Anything else (2 = the guard could not determine an answer,
+              # via a real git failure OR a bad invocation of the guard
+              # itself -- `argparse`'s own `ap.error` also exits 2; 127 =
+              # `python`/the script could not be run; 137 = OOM-killed; or
+              # any other subprocess failure) is refused outright, not
+              # skipped -- an unenumerated answer must abort the whole step
+              # rather than let the loop guess "probably fine" and continue
+              # closing other candidates.
+              echo "::error::could not determine whether ${branch} (PR #${n}) currently carries a commit this automation did not write (planner_resync_branch_guard.py --check-branch exited ${check_rc}, not the expected 0 or 1) -- refusing to guess whether it is safe to close. See the step log above for what this guard reported."
+              exit 1
+            fi
+            gh pr comment "${n}" --repo "${GITHUB_REPOSITORY}" \
+              --body "Superseded by ${KEEP_URL} (tan-cli#1109: at most one open \`auto/planner-resync-*\` proposal at a time). Closing." < /dev/null
+            gh pr close "${n}" --repo "${GITHUB_REPOSITORY}" < /dev/null
+          done <<< "${others}"
+
+      # tan-cli#911: the step above's own gate ("is there a mirror diff to
+      # commit") is not the same question as "does a human need to act", and
+      # rc=1 means the second is true regardless of the first. When the PR
+      # step found nothing to commit it prints "Nothing to propose" and sets
+      # `opened=false` WITHOUT opening anything -- so on rc=1 the finding
+      # would otherwise live only in this red run's job summary, which is
+      # what happened for an unbroken streak (measured `gh run list
+      # --workflow planner-resync.yml --limit 100`) starting at run
+      # `31621375705` (last success before it: `31601765469`) and STILL
+      # GROWING as of `32936003033` -- a bare count pinned here would already
+      # be stale against a workflow that keeps failing until this fix lands;
+      # re-run the same `gh run list` for the current number.
+      #
+      # `steps.pr.outputs.opened == 'false'` is deliberately narrower than
+      # "the PR step didn't open a PR": that output is UNSET (not 'false')
+      # both when the PR step was skipped (`open_pr: false` on a
+      # `workflow_dispatch` dry run -- this step honours the same flag below
+      # so a dry run stays a dry run) and when the PR step FAILED before
+      # reaching its own `opened=true` line. The latter happened for real on
+      # run `32660981604` (2026-08-23T19:21:33Z): that run DID have a mirror
+      # diff, and `gh pr create` was refused with "GitHub Actions is not
+      # permitted to create or approve pull requests" -- an org-level policy,
+      # since flipped (repo-level `can_approve_pull_request_reviews` read
+      # `false` then, reads `true` as of 2026-08-25; no run since has had a
+      # diff to prove the PR path clean again). That is a DIFFERENT failure
+      # from the one tan-cli#911 is about -- a real diff blocked by policy,
+      # not an empty diff nobody surfaced -- so this step does not attempt to
+      # cover it; a recurrence is its own issue, not this one. Either way
+      # neither case is "an empty diff", so this step only fires for the one
+      # case tan-cli#911 names.
+      #
+      # A tracking ISSUE rather than a second, code-less PR: an empty-diff PR
+      # is an odd artifact (nothing to review, and it can confuse merge-queue
+      # automation that expects a PR to carry a change), and a fixed,
+      # marker-based match lets repeated cron hits refresh ONE issue instead
+      # of opening one per day -- the still-growing streak measured above is
+      # what daily duplicate-opens would have compounded into, had this been
+      # the shape from the start. (It also happens to sidestep the policy failure
+      # above for this path specifically, since issue creation isn't gated by
+      # "create or approve pull requests" -- a footnote, not the reason: that
+      # policy looks resolved already, and the primary argument holds
+      # regardless of it.)
+      #
+      # tan-cli#920 (second-round review of tan-cli#911): the search below
+      # used to match on `in:title` and `|| true` past a lookup failure into
+      # "no match" -- so a transient `gh issue list` error opened a DUPLICATE
+      # issue rather than refusing (the exact "must not create 40 issues"
+      # guarantee tan-cli#911 exists for, failing silently). Fixed two ways,
+      # matching this file's own established shape for the first and
+      # `parity.yml`'s `notify-planner-drift` job's prior art for the second:
+      #   * the lookup's own exit code is captured with `set +e; ...; set -e`
+      #     (same reason the freshness-gate step above does this for its pin
+      #     reads: a `var=$(cmd)` assignment does not reliably trip `set -e`
+      #     the way a bare command does) and checked BEFORE `-n "${existing}"`
+      #     decides "no match" -- a nonzero lookup now fails the step instead
+      #     of falling through to `gh issue create`.
+      #   * de-dup now matches a fixed, invisible BODY MARKER
+      #     (`RESYNC_ISSUE_MARKER`, job-level `env:` below) rather than the
+      #     title: matching `parity.yml`'s own comment on this exact choice,
+      #     title wording can be edited by a maintainer without breaking
+      #     de-dup, a marker cannot be. `gh issue list --search "in:body ..."`
+      #     is not used for the same reason `parity.yml` doesn't use it --
+      #     GitHub's search tokenizes on hyphens and ANDs the tokens rather
+      #     than matching a phrase, so a hyphenated marker like this one can
+      #     match the wrong issue. Filter server-side on the `ci` label this
+      #     job creates the issue with, then client-side on the literal
+      #     marker string in the body.
+      - name: Surface the owed work when there is nothing to propose
+        id: issue
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.open_pr) && steps.resync.outputs.rc == '1' && steps.pr.outputs.opened == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_SHA: ${{ steps.ref.outputs.sha }}
+          GATE_VERDICT: ${{ steps.gate.outputs.verdict }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "${RESYNC_ISSUE_MARKER}"
+            echo
+            # Same fallback as the "Propose the re-sync" step above
+            # (tan-cli#911) -- an unhandled traceback in planner_resync.py is
+            # rc=1 with NO markdown written, and this step's `set -euo
+            # pipefail` used to die right here: zero `gh` calls, no issue
+            # opened, and (before tan-cli#920 also added `if: always()` to
+            # Verdict below) the informative `::error::` annotation skipped
+            # too -- the exact "red X with no explanation" tan-cli#911 was
+            # filed over, reintroduced on this specific reachable path.
+            cat "${RUNNER_TEMP}/resync.md" || \
+              echo "_planner_resync.py wrote no markdown -- see the step log_"
+            echo
+            echo "---"
+            echo
+            echo "### Why this is an issue and not a PR"
+            echo
+            echo "\`planner_resync.py\` computed an EMPTY diff against \`python/\`"
+            echo "for alp-sdk \`${SDK_SHA}\` -- there is nothing to merge -- but its"
+            echo "verdict was still \`partial\` (exit 1): part of the re-sync needs a"
+            echo "human (a hand-port source changed upstream, a blocked mirror file,"
+            echo "or similar -- see \"What a human must do\" above). A PR with no code"
+            echo "change would be an odd artifact, so this finding is surfaced here"
+            echo "instead."
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            echo "| \`planner_resync.py\` exit | \`1\` (needs a human) |"
+            echo "| freshness gate + resync tests, run in the proposing job | ${GATE_VERDICT:-not run} |"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "This issue is REFRESHED (not recreated) by \`planner-resync.yml\` on"
+            echo "every run that lands in this state -- the body above is replaced with"
+            echo "the latest report and a new status comment is posted below noting the"
+            echo "run that refreshed it -- and is closed automatically the next time a"
+            echo "run reports nothing owed (\`rc=0\`) or a PR ends up covering this delta"
+            echo "after all."
+            echo
+            echo "Refs alplabai/alp-sdk#855 (ADR-0020's cross-repo remediation)."
+          } > "${RUNNER_TEMP}/issue-body.md"
+          # GitHub's issue-body limit is 65536 characters; a real rc=1/empty-
+          # diff run has measured at 27062 (41%) with default --diff-lines --
+          # not close today, but `gh issue create`/`edit` fail HARD on an
+          # overrun rather than truncating, which would turn a real finding
+          # into a red step with no issue at all. Truncate defensively.
+          # `head -c 60000` is a byte cut, not a character cut -- measured, byte
+          # 59999 of a real oversized body lands mid-character (`0xe2`, the
+          # lead byte of a U+2014 em dash), so a bare `head -c` can hand `gh`
+          # a body ending in a partial UTF-8 sequence. `gh` doesn't reject
+          # that (Go's json encoder just emits one mojibake replacement
+          # character), so this is cosmetic, not a failure mode -- but
+          # dropping the possibly-partial last line via `sed '$d'` lands on a
+          # line boundary at effectively no cost and avoids it anyway.
+          if [ "$(wc -c < "${RUNNER_TEMP}/issue-body.md")" -gt 60000 ]; then
+            { head -c 60000 "${RUNNER_TEMP}/issue-body.md" | sed '$d'
+              printf '\n\n_(truncated: the full report exceeded a safe margin under GitHub'"'"'s issue-body limit -- see this run'"'"'s job summary for the complete markdown)_\n'
+            } > "${RUNNER_TEMP}/issue-body.trunc.md"
+            mv "${RUNNER_TEMP}/issue-body.trunc.md" "${RUNNER_TEMP}/issue-body.md"
+          fi
+
+          # `--limit 100`: `gh issue list` with no `--limit` caps at 30,
+          # newest-created-first (measured live on this repo: `gh issue list
+          # --state open --json number --jq length` -> 30, `--limit 500` ->
+          # 49, with 12 open `ci` issues on top of that on an ordinary day).
+          # Past 30 open issues the tracking issue this lookup exists to find
+          # ages off page 1, `existing` comes back empty with rc=0 --
+          # indistinguishable from "no match" -- and the branch below opens a
+          # silent duplicate, which then becomes the new de-dup target and
+          # orphans the original open forever. The same fail-open the
+          # `lookup_rc` check right below closes for a `gh` error, arriving
+          # instead through pagination.
+          set +e
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+                        --limit 100 --label ci --json number,body \
+                        --jq "[.[] | select(.body | contains(\"${RESYNC_ISSUE_MARKER}\"))][0].number")"
+          lookup_rc=$?
+          set -e
+          if [ "${lookup_rc}" -ne 0 ]; then
+            echo "::error::gh issue list failed while searching for an existing planner-resync tracking issue -- refusing to guess whether one already exists, since guessing wrong here means opening a duplicate. See the step log for gh's error."
+            exit 1
+          fi
+          if [ -n "${existing}" ]; then
+            # Title deliberately not reset here: `gh issue edit --title` on
+            # every refresh would clobber a maintainer-reworded title, the
+            # exact case de-dup moved off the title (see the block comment
+            # above this step) to stop being sensitive to. The title is set
+            # once, on create, below.
+            gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${RUNNER_TEMP}/issue-body.md"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" \
+              --body "Refreshed by run ${{ github.run_id }} (alp-sdk \`${SDK_SHA}\`), still nothing to propose."
+            echo "url=$(gh issue view "${existing}" --repo "${GITHUB_REPOSITORY}" --json url -q .url)" >> "$GITHUB_OUTPUT"
+          else
+            url="$(gh issue create --repo "${GITHUB_REPOSITORY}" \
+                     --title "${RESYNC_ISSUE_TITLE}" --label ci \
+                     --body-file "${RUNNER_TEMP}/issue-body.md")"
+            echo "url=${url}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Companion to the step above: once a run reports nothing owed, OR a
+      # real diff shows up and the PR step above opens/refreshes a PR for it,
+      # any tracking issue a PRIOR rc=1/empty-diff run opened is stale by
+      # definition -- close it rather than let it sit open asserting "nothing
+      # to merge" while a proposal PR now exists (tan-cli#920: this second
+      # case was a gap in the original tan-cli#911 fix -- `rc=1` with a
+      # NON-empty diff opened a PR but neither refreshed nor closed the
+      # issue, since the original condition here was `rc == '0'` alone). Same
+      # marker match as the step above, so it only ever touches the one issue
+      # this workflow owns.
+      - name: Close the tracking issue once nothing is owed or a PR now covers it
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.open_pr) && (steps.resync.outputs.rc == '0' || steps.pr.outputs.opened == 'true') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --limit 100: same fail-open as the "Surface..." step's own lookup
+          # above (`gh issue list` defaults to a 30-item, newest-first page;
+          # see that step's comment for the measured numbers) -- without it,
+          # an old tracking issue can age off page 1 and this step silently
+          # does nothing instead of closing it.
+          set +e
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+                        --limit 100 --label ci --json number,body \
+                        --jq "[.[] | select(.body | contains(\"${RESYNC_ISSUE_MARKER}\"))][0].number")"
+          lookup_rc=$?
+          set -e
+          if [ "${lookup_rc}" -ne 0 ]; then
+            echo "::error::gh issue list failed while checking for a stale planner-resync tracking issue to close. See the step log for gh's error."
+            exit 1
+          fi
+          if [ -n "${existing}" ]; then
+            if [ '${{ steps.resync.outputs.rc }}' = '0' ]; then
+              msg="Nothing owed as of run ${{ github.run_id }} -- \`planner_resync.py\` reported \`rc=0\`. Closing."
+            else
+              msg="A proposal PR now exists for this delta (${{ steps.pr.outputs.url }}), so this tracking issue's \"nothing to merge\" is stale. Closing -- see the PR for the remaining human follow-up."
+            fi
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${msg}"
+            gh issue close "${existing}" --repo "${GITHUB_REPOSITORY}"
+          fi
+
+      # Last, so the PR (or tracking issue) exists before this job goes red.
+      # A re-sync that needs a human is a REAL finding and must not be
+      # reported as success -- but the proposal is more useful than the red
+      # X, so it lands first.
+      #
+      # `if: !cancelled()` (tan-cli#920): every other step's `if` gets an
+      # implicit `&& success()`, so if ANY upstream step in this job fails --
+      # most reachably "Surface the owed work..." above, on its own `gh` call
+      # -- this step used to be skipped along with it, and the job still went
+      # red but WITHOUT the `::error::` annotation that names which of rc 1/2
+      # it was and where to look. `!cancelled()` means Verdict still runs (and
+      # still reports correctly: `steps.resync.outputs.rc` etc. are set by
+      # steps that ran before the point of failure) even when a later,
+      # informational step breaks -- but, unlike `always()`, still skips on a
+      # cancelled run. `always()` would also fire when an earlier step (the
+      # checkout, the SDK clone) fails before `planner_resync.py` ever ran:
+      # driven with every step output unset, this step's own `rc=''` falls
+      # into the `*)` branch and prints `::error::planner_resync.py did not
+      # report an exit code` -- right direction (still red), wrong cause
+      # named, since `planner_resync.py` never got the chance to run at all.
+      # `${{ }}` expands to a literal empty string before bash sees it, so
+      # `set -u` does not additionally trip on the unset outputs here.
+      - name: Verdict
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tan-cli#1006 review (minor): a diversion means a human's work was
+          # nearly force-pushed away and the guard caught it -- that is a
+          # real finding, not routine, and must not be indistinguishable from
+          # an ordinary clean run. `steps.pr.outputs.diverted` is one of the
+          # keys `planner_resync_branch_guard.py` writes to $GITHUB_OUTPUT
+          # from inside the "Open or refresh the proposal PR" step (`id:
+          # pr`), which is how it surfaces as that step's own output here.
+          # Checked BEFORE the `case` below (which can itself `exit 1` on
+          # `rc` 1/2, already loud on its own) so a diversion is never lost
+          # regardless of which `rc` branch runs -- the incident this closes
+          # is specifically `rc == 0` with a diversion, which the `0)` arm
+          # below now calls out on its own line too (tan-cli#1006 review,
+          # `:850-861`); the `::warning::` here is kept anyway as the one
+          # line guaranteed to fire ahead of any `case` arm, including a
+          # future one that regresses back to the old unconditional "Re-sync
+          # clean (or nothing owed)." wording.
+          if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
+            echo "::warning::planner-resync diverted away from auto/planner-resync (tan-cli#1002) -- ${{ steps.pr.outputs.occupied_count || 1 }} branch(es) carry a commit this automation did not write and were left completely untouched. A green job here does NOT mean nothing needs attention: see ${{ steps.pr.outputs.url || 'the job summary' }} for what was protected and which branch this proposal actually landed on."
+          fi
+          # tan-cli#1109 review (minor): `stale=true` used to be written by
+          # the "Open or refresh the proposal PR" step's staleness abort and
+          # never READ anywhere -- that step's own `exit 1` already fails the
+          # JOB (this step still runs, `if: !cancelled()`), but with `rc`
+          # left at whatever `steps.resync.outputs.rc` was (commonly `0`),
+          # the `case` below's `0)` arm printed "Re-sync clean (or nothing
+          # owed)." directly under a run that aborted mid-flight and pushed
+          # nothing -- a green-sounding line on a red job, checked BEFORE the
+          # `case` for the same reason the diversion warning above is: never
+          # lost regardless of which `rc` branch would otherwise run.
+          if [ '${{ steps.pr.outputs.stale }}' = 'true' ]; then
+            echo "::error::this run's proposal was computed against a base that went stale before it could be pushed (tan-cli#1109) -- origin/dev's tan/planner/ (or the freshness gate's pins) moved while this run was regenerating, so nothing was pushed or opened. This is NOT the same as 'Re-sync clean': a future scheduled or dispatched run regenerates against the fresh tip."
+            exit 1
+          fi
           rc='${{ steps.resync.outputs.rc }}'
           case "${rc}" in
-            0) echo "Re-sync clean (or nothing owed)." ;;
-            1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move, so the freshness gate stays red until someone ports it."; exit 1 ;;
+            0)
+              # tan-cli#1006 review (nit): with `diverted=true` this arm used
+              # to print "Re-sync clean (or nothing owed)." unconditionally,
+              # directly under the `::warning::` above -- driven, the warning
+              # pre-empts the contradiction it could otherwise read as, but
+              # this line is free to say so itself rather than lean on that.
+              if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
+                echo "Re-sync clean, but this proposal was DIVERTED -- see the warning above."
+              else
+                echo "Re-sync clean (or nothing owed)."
+              fi
+              ;;
+            1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move -- not because test_planner_relocation_freshness.py itself goes red (it doesn't: it re-hashes a worktree pinned at that same unmoved commit, so it trivially passes), but because THIS workflow keeps re-running and exiting 1 (tan-cli#1109) on every scheduled/dispatched run until someone ports the work, which merging the proposal above does not silence."; exit 1 ;;
             2) echo "::error::planner_resync.py REFUSED to propose anything (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- see the job summary."; exit 1 ;;
             *) echo "::error::planner_resync.py did not report an exit code"; exit 1 ;;
           esac
@@ -399,3 +1190,77 @@ jobs:
             echo "::error::the re-sync applied cleanly but the freshness gate did not pass against it (${{ steps.gate.outputs.verdict }}) -- do not merge the proposal on the strength of a clean apply."
             exit 1
           fi
+
+    # Deliberately placed here rather than near the top of the job (where a
+    # `permissions:` block conventionally sits): `.github/zizmor.yml` pins the
+    # "Check out tan-cli dev" step's credential-persistence ignore to an exact
+    # `planner-resync.yml:151:9` (tan-cli#435), and that file is under
+    # parallel edit for tan-cli#899 -- coordinate by reporting a conflict
+    # there rather than editing it (this PR's own instructions). Any line
+    # added ABOVE that step shifts the ignore stale and reddens `zizmor
+    # --min-severity medium`, so this block lives down here instead, after
+    # every step, where it cannot move that line. A mapping key's position in
+    # a YAML block has no effect on what it grants, at job level exactly as
+    # at workflow level.
+    #
+    # JOB-SCOPED, not workflow-scoped (tan-cli#920, second-round review of
+    # tan-cli#911): this was `permissions:` at the workflow's top level,
+    # granting `contents`/`pull-requests`/`issues` write to every job this
+    # file will ever gain, not just the one that uses them today.
+    # `parity.yml`'s `notify-planner-drift` job is this repo's own prior art
+    # for scoping a write grant to the job that actually needs it (its
+    # comment: "it holds `issues: write`, which is the one token in this file
+    # worth bounding on its own account") -- moved here to match, with
+    # `contents`/`pull-requests` brought along since this is still the only
+    # job in the file and splitting them across levels would buy nothing.
+    # Measured: this placement (appended after `steps:`, a job-level mapping
+    # key like any other) leaves `planner-resync.yml:151:9` unchanged and
+    # `zizmor --min-severity medium .github/workflows/` at rc 0.
+    #
+    # NOT PERMANENT: the placement (not the job-scoping) exists only because
+    # of the line-pinned ignore above. tan-cli#899 (PR #919) moves that same
+    # ignore to an inline `# zizmor: ignore[artipacked]` comment on the
+    # checkout step itself, which removes the line-number dependency
+    # entirely -- once that lands, this block is free to move back up near
+    # `steps:` (or stay here) on its own merits, not because a stray line
+    # above line 151 would redden the gate. Don't take this comment as an
+    # argument for keeping the PLACEMENT; the job-scoping itself is not
+    # contingent on #899 either way.
+    permissions:
+      contents: write
+      pull-requests: write
+      # tan-cli#911: the tracking-issue fallback below the PR step needs
+      # this; neither `contents` nor `pull-requests` covers `gh issue
+      # create`/`edit`/`close`.
+      issues: write
+
+    # Shared by "Surface the owed work..." and "Close the tracking issue..."
+    # above (tan-cli#920, second-round review of tan-cli#911): both used to
+    # declare their own copy of `RESYNC_ISSUE_TITLE` with a comment claiming
+    # there was "no job-level `env:` here to share it from without adding a
+    # line ahead of the `Check out tan-cli dev` step's zizmor line-scoped
+    # ignore" -- that claim was false the same way the `permissions:` block
+    # above already proves it false: a job-level mapping key appended AFTER
+    # `steps:` doesn't move any line above it. Sharing it here means the two
+    # steps cannot drift out of sync the way two hand-kept copies eventually
+    # do. `RESYNC_ISSUE_MARKER` is new in the same round: the de-dup key
+    # itself moved from the (editable) title to a fixed body marker,
+    # matching `parity.yml`'s `notify-planner-drift` job -- see the "Surface
+    # the owed work..." step's own comment for why.
+    env:
+      RESYNC_ISSUE_TITLE: "planner-resync: a re-sync is owed and needs a human (no diff to propose)"
+      RESYNC_ISSUE_MARKER: "<!-- tan-cli-planner-resync-tracker -->"
+      # tan-cli#1119 review (minor): the automation's own commit identity,
+      # hoisted here from the "Open or refresh the proposal PR" step's local
+      # `AUTOMATION_NAME`/`AUTOMATION_EMAIL` (still set there too, from
+      # these same job-level values -- see that step's own comment on why
+      # they must never drift independently) so the "Close superseded
+      # planner-resync proposals" step's live `--check-branch` calls read
+      # the SAME identity the branch was actually pushed under, instead of
+      # a second pair of literals that could silently drift from it.
+      # Measured with a drifted literal in the close step: every candidate
+      # answers "occupied" against its own author (a stranger-looking
+      # identity), `closed=[]`, step rc 0, no warning -- the cap dies
+      # silently. A single source closes that.
+      AUTOMATION_NAME: "alp-sdk planner re-sync"
+      AUTOMATION_EMAIL: "noreply@alplab.ai"

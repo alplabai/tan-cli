@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-from tan.core.timestamp import generated_at_iso
+from tan.core.timestamp import generated_at_iso, wall_clock_iso
 
 #: Inside `datetime`'s year [1; 9999], so the epoch itself is rendered -- and
 #: the exact stamp is pinned, because "some stamp came back" is what let the
@@ -92,3 +92,52 @@ def test_an_epoch_past_the_range_is_the_clock_not_a_five_digit_year(epoch, milli
 
     assert stamp.endswith("Z")
     time.strptime(stamp[:-5] if millis else stamp[:-1], "%Y-%m-%dT%H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# `wall_clock_iso` -- direct coverage (review, #904 final round, nit: prior
+# rounds exercised this function only indirectly, through the recency
+# tie-break test in `tests/commands/test_sdk_command.py`, which is itself
+# under-provisioned -- see that file's mutation-proof test).
+
+
+@pytest.mark.parametrize("epoch", ["0", "1700000000000", "not-a-number", "253402300799"])
+def test_wall_clock_iso_ignores_source_date_epoch(epoch, monkeypatch):
+    """`SOURCE_DATE_EPOCH` is `generated_at_iso`'s knob, deliberately not
+    this function's -- reproducibility is the WRONG promise for a field that
+    orders two REAL writes on one host. `"0"` is the one value that would
+    make the divergence invisible by accident if this function secretly DID
+    read the var and render the epoch, since `generated_at_iso("0")` also
+    starts with `1970`; frozen `time.time()` rules that out directly instead
+    of relying on the epoch choice to expose it."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)  # 2023-11-14T22:13:20Z
+    monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    unpinned = wall_clock_iso()
+    assert unpinned == "2023-11-14T22:13:20Z"
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", epoch)
+    pinned = wall_clock_iso()
+
+    assert pinned == unpinned  # the frozen wall clock, not a function of the env var
+
+
+def test_wall_clock_iso_millis_shape():
+    stamp = wall_clock_iso(millis=True)
+
+    assert stamp.endswith("Z")
+    time.strptime(stamp[:-5], "%Y-%m-%dT%H:%M:%S")
+    assert re.match(r"^\d{3}$", stamp[-4:-1])
+
+
+def test_wall_clock_iso_never_raises_on_an_out_of_range_system_clock(monkeypatch):
+    """Unlike `generated_at_iso`, there is no env var to validate here -- the
+    INPUT that can go out of `datetime`'s year [1; 9999] is `time.time()`
+    itself, which a faulty RTC/NTP step or a deliberately-set system clock
+    can hand back as any float, including one this module's own out-of-range
+    arithmetic cannot render (review, #904 final round, major: an earlier
+    revision claimed `time.time()` "cannot land outside" that range and did
+    not defend it)."""
+    monkeypatch.setattr(time, "time", lambda: 9.9e12)  # year ~316000
+
+    assert wall_clock_iso() == "1970-01-01T00:00:00Z"
+    assert wall_clock_iso(millis=True) == "1970-01-01T00:00:00.000Z"

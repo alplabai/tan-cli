@@ -19,6 +19,7 @@ from tan.commands.debug_config_cmd import (
     _sdk_core_refusal_authority,
     _select_slice,
 )
+from tan.core import launch_provenance
 from tan.core.debug_launch import (
     GDBSERVER,
     JLINK,
@@ -33,6 +34,7 @@ from tan.core.debug_launch import (
     infer_target_kind,
     strip_jsonc,
 )
+from tan.core.debug_launch import BAREMETAL_MCU, OPENOCD, PYOCD, SERVER_NONE
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,6 +77,13 @@ def envelope(proc):
 
 def launch_json(root):
     return Path(root, ".vscode", "launch.json")
+
+
+def provenance_sidecar(root):
+    """`tan-cli#518`'s own `.alp/` sidecar, mirroring `launch_json` above --
+    both are keyed off the workspace root the real CLI resolves `--project`
+    against."""
+    return Path(root, ".alp", "debug-launch-provenance.json")
 
 
 def test_a_write_into_the_stock_template_keeps_every_byte_outside_the_entry(tmp_path):
@@ -501,20 +510,22 @@ def test_a_rewrite_preserves_the_existing_files_own_mode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "argv,want_target,want_server",
+    "argv,want_target,want_server,want_programs",
     [
-        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none"),
-        (("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"), ZEPHYR_MCU, "none"),
+        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none", True),
+        (("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"), ZEPHYR_MCU, "none", True),
         # A legal server for the wrong target class: gdbserver is yocto-only.
         # #508 review, Major 4 follow-up (tan-cli#477): both locals ARE bound
         # by this point, so this reports the pairing it actually refused
         # (zephyr-mcu/gdbserver), not the placeholder the first two rows
         # still get -- neither of THOSE ever finished parsing.
-        (("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER), ZEPHYR_MCU, GDBSERVER),
+        (("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER), ZEPHYR_MCU, GDBSERVER, True),
     ],
     ids=["target-kind", "server", "pairing"],
 )
-def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_target, want_server):
+def test_a_refused_selector_is_a_coded_envelope_at_exit_2(
+    tmp_path, argv, want_target, want_server, want_programs
+):
     """tan-cli#477: exit 2, not 5. A flag VALUE outside the accepted set is
     the caller's own input, and every one of these already answered with a
     complete, actionable message -- only the verdict said "tan crashed".
@@ -534,6 +545,14 @@ def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_t
     assert env["data"]["configuration"] is None
     assert env["project"] == {"root": None, "boardYaml": None}
     assert not launch_json(tmp_path).exists()
+    # tan-cli#945: `programsDevice` is present -- and follows `targetKind` --
+    # even on a refusal that never built a `configuration`. tan-cli#1020
+    # review nit: pinned against the LITERAL `want_programs`, not
+    # `programs_device(want_target)` -- comparing the CLI's output to the
+    # very function under test is vacuous for the VALUE (a `programs_device`
+    # mutated to always return `False` cancels out on both sides of `is` and
+    # every case here still passes; verified while fixing this).
+    assert env["data"]["programsDevice"] is want_programs
 
 
 def test_an_svd_path_that_cannot_be_read_fails_instead_of_writing(tmp_path):
@@ -580,6 +599,88 @@ def test_svd_on_a_target_kind_without_the_field_says_so(tmp_path):
     assert any("--svd was given" in n for n in env["data"]["notes"]), (
         "accepting --svd here in silence is the no-op this note exists to prevent"
     )
+
+
+# tan-cli#945: a consumer must be able to tell, from the envelope alone,
+# whether starting the written profile programs the attached target -- see
+# alp-sdk-vscode#586, which had no way to see that fact and shipped a flash
+# consent dialog that could never trigger.
+@pytest.mark.parametrize(
+    "target,server,expect_programs",
+    [
+        (ZEPHYR_MCU, JLINK, True),
+        (BAREMETAL_MCU, OPENOCD, True),
+        (YOCTO_USERSPACE, GDBSERVER, False),
+        (NATIVE_HOST, SERVER_NONE, False),
+    ],
+)
+def test_the_preview_envelope_states_whether_the_profile_programs_the_device(
+    tmp_path, target, server, expect_programs
+):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", target, "--server", server, "--preview", "--format", "json")
+    )
+
+    assert env["data"]["programsDevice"] is expect_programs
+
+
+def test_a_cortex_debug_preview_carries_an_explicit_load_files_key(tmp_path):
+    """The second half of tan-cli#945's ask: the written `configuration`
+    itself names the artefact it programs, rather than relying on
+    `marus25.cortex-debug`'s own undocumented-on-the-wire schema default."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--preview", "--format", "json")
+    )
+
+    config = env["data"]["configuration"]
+    assert config["loadFiles"] == [config["executable"]]
+
+
+def test_a_non_cortex_debug_preview_carries_no_load_files_key(tmp_path):
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+            "--preview", "--format", "json",
+        )
+    )
+
+    assert "loadFiles" not in env["data"]["configuration"]
+
+
+def test_a_real_build_resolution_updates_load_files_alongside_executable(tmp_path):
+    """`loadFiles` must never drift from `executable` once a real build
+    resolves it -- both name the same artefact, or a consumer reading
+    `programsDevice: true` alongside a stale `loadFiles` would be told the
+    wrong file gets flashed."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--preview", "--format", "json")
+    )
+
+    config = env["data"]["configuration"]
+    assert config["executable"] == "${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+    assert config["loadFiles"] == [config["executable"]]
+
+
+def test_a_write_persists_load_files_alongside_the_executable_on_disk(tmp_path):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert env["exitCode"] == 0, env
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    written = on_disk["configurations"][0]
+    assert written["loadFiles"] == [written["executable"]]
+    assert env["data"]["configuration"]["loadFiles"] == written["loadFiles"]
 
 
 def test_text_mode_writes_nothing_to_stdout(tmp_path):
@@ -697,7 +798,7 @@ def test_the_placeholder_note_survives_an_unresolved_host_port():
     apply_launch_resolution(draft, LaunchResolution(gdb_path="/opt/gdb/bin/aarch64-poky-linux-gdb"))
 
     assert draft["miDebuggerServerAddress"] == "<host>:<port>"
-    notes = _preview_notes_for(draft, [], GDBSERVER)
+    notes = _preview_notes_for(draft, [], GDBSERVER, YOCTO_USERSPACE)
     assert any(n.startswith("Placeholder fields") for n in notes)
 
 
@@ -829,7 +930,7 @@ def test_runners_yaml_fills_the_device_and_gdb_a_build_can_answer(tmp_path):
     draft = create_launch_draft(ZEPHYR_MCU, "pyocd", None)
     apply_launch_resolution(draft, pyocd_resolution)
     assert draft["targetId"] == "<resolved-target-id>"
-    notes = _preview_notes_for(draft, pyocd_runners, "pyocd")
+    notes = _preview_notes_for(draft, pyocd_runners, "pyocd", ZEPHYR_MCU)
     assert any('runners.yaml: ["jlink", "openocd"]' in n for n in notes)
 
 
@@ -908,7 +1009,7 @@ def write_sdk_fixture(root):
     som_dir = sdk / "metadata" / "e1m_modules"
     som_dir.mkdir(parents=True)
     (som_dir / "E1M-AEN801.yaml").write_text(
-        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
         "silicon_variant: AE822FA0E5597LS0\n",
         encoding="utf-8",
     )
@@ -934,6 +1035,106 @@ def write_sdk_fixture(root):
         }""",
         encoding="utf-8",
     )
+
+
+#: Deliberately narrower than the real `som-preset-v2.schema.json` -- the same
+#: narrowing rationale `test_presets_command.py`'s own `_SOM_SCHEMA` states:
+#: enough to exercise the gate (`silicon:` typed), not a byte-for-byte mirror
+#: of a schema this file's coverage must not depend on never changing shape.
+_DEBUG_CONFIG_SOM_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 2},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def write_sdk_fixture_with_schema_invalid_som_preset(root):
+    """Same shape as `write_sdk_fixture`, plus `metadata/schemas/som-preset-v2
+    .schema.json` and a `silicon:` field the schema forbids (a number, not a
+    string) -- tan-cli#964 review (major 5): `debug-config` reads this exact
+    SoM preset through TWO walks (`_sdk_published_cores`,
+    `_fill_debug_probe_identity_from_sdk`), both via the shared
+    `read_sdk_som_and_soc`, and before the fix neither passed `warnings` at
+    all."""
+    sdk = Path(root, "sdk")
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    schema_dir = sdk / "metadata" / "schemas"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "som-preset-v2.schema.json").write_text(
+        _DEBUG_CONFIG_SOM_SCHEMA, encoding="utf-8"
+    )
+    som_dir = sdk / "metadata" / "e1m_modules"
+    som_dir.mkdir(parents=True)
+    (som_dir / "E1M-AEN801.yaml").write_text(
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: 7\n"
+        "silicon_variant: AE822FA0E5597LS0\n",
+        encoding="utf-8",
+    )
+    soc_dir = sdk / "metadata" / "socs" / "alif" / "ensemble"
+    soc_dir.mkdir(parents=True)
+    (soc_dir / "e8.json").write_text(
+        """{
+            "soc_spec_version": 1,
+            "ref": "alif:ensemble:e8",
+            "vendor": "Alif Semiconductor",
+            "family": "Ensemble",
+            "part": "E8",
+            "cores": [{"id": "a32_cluster"}, {"id": "m55_hp"}, {"id": "m55_he"}],
+            "variants": [
+                {
+                    "order_code": "AE822FA0E5597LS0",
+                    "debug": {
+                        "pyocd_target": "AE822FA0E5597LS0",
+                        "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                    }
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+
+
+def test_a_schema_invalid_som_preset_warns_on_debug_config(tmp_path):
+    """tan-cli#964 review (major 5): `debug-config` is one of the ten
+    read-path commands the decided rule names, but its own two walks
+    (`_sdk_published_cores`/`_fill_debug_probe_identity_from_sdk`) passed no
+    `warnings` to `read_sdk_som_and_soc` at all -- despite the PR body's own
+    claim that it inherited the WARN half "transitively". This is the
+    `--preview` regression test for the fix: the command still resolves
+    exactly as before (silicon degrades, no refusal, exit 0), but now ALSO
+    reports one `debug-config.metadata-schema-invalid` issue naming the
+    file, the JSON pointer, and what was found.
+
+    Mutation-proven: reverting the `warnings=schema_warnings` threading added
+    to `_sdk_published_cores`/`_fill_debug_probe_identity_from_sdk`'s call
+    sites (byte copy restored after, never `git checkout`) turns this test's
+    `codes`/`message` assertions red; restoring turns them green.
+    """
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture_with_schema_invalid_som_preset(tmp_path)
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+            "--sdk-root", "./sdk", "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0
+    codes = [i["code"] for i in env["issues"]]
+    assert codes.count("debug-config.metadata-schema-invalid") == 1, env["issues"]
+    issue = next(
+        i for i in env["issues"] if i["code"] == "debug-config.metadata-schema-invalid"
+    )
+    assert issue["severity"] == "warning"
+    assert "silicon: 7 is not of type 'string'" in issue["message"]
 
 
 def test_jlink_device_stays_the_placeholder_with_no_core_and_no_build(tmp_path):
@@ -1024,7 +1225,7 @@ def write_sdk_fixture_with_no_jlink_device(root):
     som_dir = sdk / "metadata" / "e1m_modules"
     som_dir.mkdir(parents=True)
     (som_dir / "E1M-AEN801.yaml").write_text(
-        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
         "silicon_variant: AE822FA0E5597LS0\n",
         encoding="utf-8",
     )
@@ -1143,7 +1344,16 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
     advice would hand-add a THIRD copy. The position-anchored merge fixes
     the underlying behaviour the message describes; this proves the message
     and the on-disk result agree again for the one-element SDK-filled case
-    `sdk_identity_overwrites` is scoped to."""
+    `sdk_identity_overwrites` is scoped to.
+
+    tan-cli#518: `board/OLD.cfg` must now be PROVEN tan's own prior output
+    before the merge (and this disclosure) will touch it, so this test
+    primes `.alp/debug-launch-provenance.json` with exactly the record a
+    real EARLIER `tan debug-config` run would have left behind for it --
+    the realistic story this scenario always told (a stale resolved value
+    from a run against an older SDK fixture), not a customer's own typed
+    value. `test_an_sdk_filled_config_files_value_with_no_provenance_is_
+    disclosed_as_appended_not_replaced` below covers the un-primed case."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     launch_json(tmp_path).parent.mkdir()
@@ -1165,6 +1375,15 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
         encoding="utf-8",
     )
     write_sdk_fixture_with_no_jlink_device(tmp_path)
+    provenance_sidecar(tmp_path).parent.mkdir()
+    provenance_sidecar(tmp_path).write_text(
+        launch_provenance.render(
+            launch_provenance.empty().updated(
+                "Alp: Zephyr Debug (OpenOCD)", {"configFiles": ["board/OLD.cfg"]}
+            )
+        ),
+        encoding="utf-8",
+    )
 
     env = envelope(
         run_cli(
@@ -1186,6 +1405,91 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
     assert overwrite_issue is not None, env["issues"]
     assert "board/OLD.cfg" in overwrite_issue["message"]
     assert "board/alif_e8.cfg" in overwrite_issue["message"]
+
+    # tan-cli#982 review finding #2's sibling code must NOT fire here -- this
+    # run genuinely replaced the value, nothing was appended beside it.
+    appended_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-appended"), None
+    )
+    assert appended_issue is None, env["issues"]
+
+
+def test_an_sdk_filled_config_files_value_with_no_provenance_is_disclosed_as_appended_not_replaced(
+    tmp_path,
+):
+    """tan-cli#518's own core scenario, reached through the SDK-identity
+    path specifically: the exact fixture of the test above, but with no
+    `.alp/` sidecar at all -- `board/OLD.cfg` could be a customer's own
+    hand-typed value. Nothing here can tell it apart from tan's own stale
+    output, so the merge must not gamble: `board/alif_e8.cfg` is APPENDED,
+    `board/OLD.cfg` survives untouched, and -- because nothing was actually
+    replaced -- `sdk_identity_overwrites` must not raise a "replaced" alarm
+    over a value that is still sitting right there in the file. A disclosure
+    here would be worse than silence: it would send the customer hunting for
+    a value to restore that was never touched.
+
+    tan-cli#982 review finding #2: staying silent about the OVERWRITE is
+    right, but this run still made a decision worth telling the customer
+    about -- it left `board/OLD.cfg` in the file and appended a second
+    `configFiles` entry beside it, rather than reconciling to one. Two board
+    `.cfg`s sourced on the same TAP is the same failure class
+    `test_a_resolved_replacement_overwrites_the_previous_one_instead_of_
+    accumulating` names, and `issues: []` here told the customer nothing.
+    `debug-config.sdk-identity-appended` is the disclosure for exactly this
+    shape."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (OpenOCD)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "servertype": "openocd",
+                        "configFiles": ["board/OLD.cfg"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_sdk_fixture_with_no_jlink_device(tmp_path)
+    assert not provenance_sidecar(tmp_path).exists()
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", "openocd",
+            "--sdk-root", "./sdk", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0, env
+
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["configFiles"] == [
+        "board/OLD.cfg",
+        "board/alif_e8.cfg",
+    ], on_disk
+
+    overwrite_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-overwrite"), None
+    )
+    assert overwrite_issue is None, env["issues"]
+
+    # tan-cli#982 review finding #2: the append that DID happen is disclosed
+    # instead -- naming both the stranded existing value and what landed
+    # beside it, so the customer can tell there are now two.
+    appended_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-appended"), None
+    )
+    assert appended_issue is not None, env["issues"]
+    assert appended_issue["severity"] == "info"
+    assert "board/OLD.cfg" in appended_issue["message"]
+    assert "board/alif_e8.cfg" in appended_issue["message"]
 
 
 def test_an_all_placeholder_config_files_list_keeps_a_hand_added_second_entry():
@@ -1291,7 +1595,16 @@ def test_a_resolved_replacement_overwrites_the_previous_one_instead_of_accumulat
     and OpenOCD sources every `-f`, so three board configs on one TAP fail
     the session outright. Position is restored as the fallback signal for
     exactly this one-to-one case. FAILS against the review round's own
-    identity-only merge, which accumulated all three."""
+    identity-only merge, which accumulated all three.
+
+    tan-cli#518 threads each call's own `.provenance` into the next, exactly
+    as `tan debug-config` itself does by reading back the `.alp/` sidecar it
+    just wrote -- the real CLI's idempotency (proven end-to-end by
+    `test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate`
+    below) depends on that persistence, not on calling this pure function
+    with no memory of what a prior call wrote. Passing no `provenance` at all
+    is covered on its own by
+    `test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge`."""
     draft_a = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_a["configFiles"] = ["board/alp_rev_a.cfg"]
     existing = json.dumps(
@@ -1302,14 +1615,14 @@ def test_a_resolved_replacement_overwrites_the_previous_one_instead_of_accumulat
 
     draft_b = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_b["configFiles"] = ["board/alp_rev_b.cfg"]
-    plan_b = create_launch_json_write_plan(plan_a.content, draft_b)
+    plan_b = create_launch_json_write_plan(plan_a.content, draft_b, provenance=plan_a.provenance)
     assert plan_b.written_configuration["configFiles"] == ["board/alp_rev_b.cfg"], (
         plan_b.written_configuration["configFiles"]
     )
 
     draft_c = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_c["configFiles"] = ["board/alp_rev_c.cfg"]
-    plan_c = create_launch_json_write_plan(plan_b.content, draft_c)
+    plan_c = create_launch_json_write_plan(plan_b.content, draft_c, provenance=plan_b.provenance)
     assert plan_c.written_configuration["configFiles"] == ["board/alp_rev_c.cfg"], (
         plan_c.written_configuration["configFiles"]
     )
@@ -1320,7 +1633,57 @@ def test_a_resolved_replacement_still_keeps_a_hand_added_entry_in_place():
     above -- a customer's own hand-added SECOND entry (never matched by
     anything the draft resolves) must survive a positional replacement of
     the FIRST entry, in its OWN place, not reordered to the front. This is
-    the exact case #489's own defect 3 is about."""
+    the exact case #489's own defect 3 is about.
+
+    tan-cli#518: `board/old.cfg` is what makes the positional replacement
+    legal at all now -- it must be PROVEN tan's own prior output (a recorded
+    content hash), not just occupy the one free slot. The `provenance` built
+    here is exactly what `create_launch_json_write_plan` itself would have
+    produced from an earlier run that wrote `board/old.cfg` as this same
+    field's only entry -- i.e. this test now covers "tan's own prior value
+    gets replaced", and its sibling below,
+    `test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge`,
+    covers the NEW case this issue is actually about: the identical file with
+    NO provenance for `board/old.cfg` must NOT be overwritten."""
+    draft = create_launch_draft(ZEPHYR_MCU, "openocd", None)
+    draft["configFiles"] = ["board/new.cfg"]
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (OpenOCD)",
+                    "configFiles": ["board/old.cfg", "interface/jlink.cfg"],
+                }
+            ],
+        }
+    )
+    provenance = launch_provenance.empty().updated(
+        "Alp: Zephyr Debug (OpenOCD)", {"configFiles": ["board/old.cfg"]}
+    )
+
+    plan = create_launch_json_write_plan(existing, draft, provenance=provenance)
+
+    assert plan.written_configuration["configFiles"] == [
+        "board/new.cfg",
+        "interface/jlink.cfg",
+    ], plan.written_configuration["configFiles"]
+
+
+def test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge():
+    """tan-cli#518, the gap tan-cli#489 itself named as a "Known, accepted
+    limitation": the EXACT scenario above, but with no provenance at all --
+    `board/old.cfg` might be the customer's own hand-typed value, or tan's
+    own output from a run that predates this sidecar, or simply a sidecar
+    that got deleted. Either way, nothing here can PROVE it is tan's, so the
+    merge must not gamble: `board/new.cfg` is appended instead of replacing
+    it, and `board/old.cfg` survives untouched, in its own place, exactly
+    like the customer's `interface/jlink.cfg` beside it always has.
+
+    FAILS against the pre-#518 position-heuristic merge, which overwrote
+    `board/old.cfg` unconditionally the moment nothing else claimed that
+    slot -- the same test this file's own history shows previously asserted
+    the overwrite."""
     draft = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft["configFiles"] = ["board/new.cfg"]
     existing = json.dumps(
@@ -1338,9 +1701,372 @@ def test_a_resolved_replacement_still_keeps_a_hand_added_entry_in_place():
     plan = create_launch_json_write_plan(existing, draft)
 
     assert plan.written_configuration["configFiles"] == [
-        "board/new.cfg",
+        "board/old.cfg",
         "interface/jlink.cfg",
+        "board/new.cfg",
     ], plan.written_configuration["configFiles"]
+
+
+def test_a_hand_authored_load_files_survives_a_rerun():
+    """tan-cli#1020 review BLOCKER: `loadFiles` is a list field, so before
+    this fix it silently routed through `configFiles`/`setupCommands`'s
+    OWN identity-plus-positional-append merge -- which APPENDS an unmatched
+    incoming value beside an existing one it cannot prove is tan's own,
+    rather than protecting the existing value the way every OTHER hand-
+    filled field in this module does. That is the right call for
+    `configFiles` (independently-owned entries a customer and tan can both
+    legitimately contribute one of); it is wrong for `loadFiles`, which
+    names ONE deliberate artefact list -- appending means cortex-debug
+    programs the customer's file AND tan's resolved one. Measured, at this
+    review's head, against a customer's own `["${workspaceFolder}/custom/
+    app.hex"]`: the pre-fix merge produced `["${workspaceFolder}/custom/
+    app.hex", "${workspaceFolder}/build/app/zephyr/zephyr.elf"]`. FAILS
+    against that merge; this fix leaves the customer's single entry alone."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "loadFiles": ["${workspaceFolder}/custom/app.hex"],
+                }
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/custom/app.hex"
+    ], plan.written_configuration["loadFiles"]
+
+
+def test_an_explicit_empty_load_files_survives_a_rerun_as_attach_only():
+    """tan-cli#1020 review BLOCKER, the SAFETY-critical row: an explicit
+    `"loadFiles": []` is `marus25.cortex-debug`'s own documented spelling for
+    "program nothing, attach only" -- exactly the fact this issue exists to
+    let a customer express. `configFiles`'s own merge rule treats an EMPTY
+    existing list as "nothing to protect" (there is no concept of a
+    deliberate empty `configFiles`), and reusing that rule for `loadFiles`
+    silently turned a customer's attach-only session back into one that
+    programs silicon: measured, at this review's head, `[]` -> `["${
+    workspaceFolder}/build/app/zephyr/zephyr.elf"]`, at exit 0 with
+    `issues: []`. FAILS against that merge; this fix leaves `[]` exactly as
+    the customer wrote it."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "loadFiles": []}
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == [], (
+        plan.written_configuration["loadFiles"]
+    )
+
+
+def test_a_tan_owned_load_files_is_synced_to_a_new_build_resolution():
+    """The pairing case for the two tests above: a `loadFiles` this run CAN
+    prove -- via `.alp/` provenance -- is tan's OWN prior output must still
+    track a fresh resolution, the same "an updated build makes a stale
+    value updateable again" rule `configFiles` already gets. Protecting
+    every existing value unconditionally would be just as wrong as the
+    blocker this test's siblings cover: a rebuild that resolves a new
+    per-core ELF must still reach `loadFiles`, or `programsDevice: true`
+    would sit beside a stale artefact path."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    draft["loadFiles"] = ["${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"]
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"],
+                }
+            ],
+        }
+    )
+    provenance = launch_provenance.empty().updated(
+        "Alp: Zephyr Debug (J-Link)",
+        {"loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"]},
+    )
+
+    plan = create_launch_json_write_plan(existing, draft, provenance=provenance)
+
+    assert plan.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"
+    ], plan.written_configuration["loadFiles"]
+
+
+def test_a_load_files_key_absent_from_an_existing_entry_is_recorded_as_tan_owned():
+    """tan-cli#1020 re-review MAJOR: a `loadFiles` key genuinely ABSENT from an
+    existing entry (a pre-#945 `tan` wrote the configuration before this field
+    existed, or the `.alp/` sidecar was never shared) is not a customer's value
+    to protect -- there is nothing there to have hand-authored. Before this fix
+    `_merge_configuration` only populated `owned_entries` on its `(list, list)`
+    branch, so this write's own fresh `loadFiles` landed on disk but the
+    returned `provenance` recorded NOTHING for it. FAILS pre-fix:
+    `hashes_for` returns the empty set even though `loadFiles` is right there
+    in `written_configuration`, freshly written by this very run."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "servertype": "jlink"}
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == draft["loadFiles"]
+    recorded = plan.provenance.hashes_for("Alp: Zephyr Debug (J-Link)", "loadFiles")
+    assert recorded == frozenset(
+        launch_provenance.content_hash(v) for v in draft["loadFiles"]
+    ), recorded
+
+
+def test_an_explicit_json_null_load_files_is_not_conflated_with_a_missing_key():
+    """tan-cli#1020 review round 4 nit: `existing.get(key)` returns `None`
+    for BOTH "the key is absent" and "the key is present holding JSON
+    `null`" -- an `is None` check cannot tell them apart. `loadFiles: null`
+    is a concrete value some tool or hand-edit put in the file, not the
+    same fact as the key never having existed; conflating them let a
+    pre-fix build silently overwrite it AND record it as tan-owned, as if
+    it were the brand-new-entry case. This write must still land the fresh
+    value (there is nothing sensible to merge `null` against), but must NOT
+    claim ownership of it -- a later run that resolves something different
+    again must still be free to protect whatever a customer put there in
+    the meantime, the same as any other unprovable existing value."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "servertype": "jlink",
+                    "loadFiles": None,
+                }
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == draft["loadFiles"]
+    recorded = plan.provenance.hashes_for("Alp: Zephyr Debug (J-Link)", "loadFiles")
+    assert recorded == frozenset(), recorded
+
+
+def test_the_default_upgrade_path_heals_load_files_within_one_run():
+    """The pairing test for the one above, proving the fix actually closes the
+    loop rather than merely recording something that goes nowhere: feed run
+    1's own returned `provenance` into run 2, the same way the real CLI
+    persists it to `.alp/debug-launch-provenance.json` between invocations. A
+    rebuild that resolves a NEW per-core ELF between the two runs must still
+    reach `loadFiles` on run 2. FAILS pre-fix -- run 2's `loadFiles` stays
+    pinned to run 1's own value forever, the review's measured "never heals"
+    repro, because run 1 never recorded what it wrote."""
+    pre_945_existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "servertype": "jlink"}
+            ],
+        }
+    )
+    draft_1 = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    run_1 = create_launch_json_write_plan(pre_945_existing, draft_1)
+    assert run_1.written_configuration["loadFiles"] == draft_1["loadFiles"]
+
+    draft_2 = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    draft_2["loadFiles"] = ["${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"]
+    run_2 = create_launch_json_write_plan(run_1.content, draft_2, provenance=run_1.provenance)
+
+    assert run_2.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"
+    ], run_2.written_configuration["loadFiles"]
+
+
+def test_a_hand_authored_load_files_survives_a_real_cli_rerun_and_is_disclosed(tmp_path):
+    """The end-to-end counterpart of the two pure-merge blocker tests above,
+    through the real CLI and a real `.vscode/launch.json` -- and the
+    tan-cli#1020 review's disclosure ask: a write that protects a
+    hand-authored `loadFiles` must say so, the same way `configFiles`'s own
+    protected-append case gets `debug-config.sdk-identity-appended`."""
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                        "loadFiles": [],
+                        "servertype": "jlink",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert env["exitCode"] == 0, env
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["loadFiles"] == [], on_disk["configurations"][0]
+    assert env["data"]["configuration"]["loadFiles"] == []
+    preserved_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.load-files-preserved"), None
+    )
+    assert preserved_issue is not None, env["issues"]
+    assert preserved_issue["severity"] == "info"
+    assert "loadFiles" in preserved_issue["message"]
+
+
+def test_the_default_upgrade_path_heals_load_files_within_one_run_through_the_real_cli(tmp_path):
+    """tan-cli#1020 re-review MAJOR, through the real CLI and a real `.alp/`
+    sidecar (not the pure-merge tests above, which the re-review noted "hand-
+    feed `launch_provenance.empty().updated(...)`, so nothing exercises
+    whether a real write ever *records* `loadFiles`"). Mirrors the
+    re-review's own measured repro: a pre-#945-shaped entry (`executable`, no
+    `loadFiles` key, no sidecar) -- run 1 writes a fresh `loadFiles` -- then a
+    rebuild resolves a NEW per-core ELF -- run 2 must track it, not stay
+    pinned to run 1's own value. FAILS pre-fix: run 2's `loadFiles` on disk is
+    still run 1's stale ELF path, `executable` and `loadFiles` name different
+    files, and `.alp/debug-launch-provenance.json` still records nothing for
+    `loadFiles` after two writes."""
+    pytest.importorskip("yaml")
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                        "servertype": "jlink",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert not provenance_sidecar(tmp_path).exists()
+
+    run_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+    assert run_1["exitCode"] == 0, run_1
+    after_run_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    load_files_after_run_1 = after_run_1["configurations"][0]["loadFiles"]
+    assert load_files_after_run_1 == [after_run_1["configurations"][0]["executable"]]
+    sidecar_after_run_1 = json.loads(provenance_sidecar(tmp_path).read_text(encoding="utf-8"))
+    assert sidecar_after_run_1["configurations"]["Alp: Zephyr Debug (J-Link)"]["loadFiles"], (
+        "run 1's own fresh loadFiles must be recorded, or run 2 can never prove it its own"
+    )
+
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr_rev_b.elf\n",
+    )
+
+    run_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert run_2["exitCode"] == 0, run_2
+    after_run_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    entry = after_run_2["configurations"][0]
+    assert entry["executable"].endswith("zephyr_rev_b.elf"), entry
+    assert entry["loadFiles"] == [entry["executable"]], entry
+    assert not any(i["code"] == "debug-config.load-files-preserved" for i in run_2["issues"]), (
+        "a provably tan-owned loadFiles must sync, not be reported as preserved"
+    )
+
+
+def test_the_load_files_preserved_disclosure_reaches_text_mode(tmp_path):
+    """tan-cli#1020 review round 4: `debug-config.load-files-preserved` was
+    only ever rendered under `--format json` -- `launch_provenance.py`'s own
+    "disclosed, every run" claim held for a JSON consumer and NOT for a
+    customer at a terminal, the DEFAULT output mode. Measured pre-fix: the
+    residual case (a `loadFiles` this run cannot prove is tan's own, e.g. a
+    sidecar lost while the key was already present) printed three routine
+    `note:` lines and exited 0 with no hint that `executable` and the
+    actually-programmed `loadFiles` had just diverged -- exactly the silent
+    divergence this `flash-path`/`safety`-labelled issue exists to prevent.
+    FAILS pre-fix: no `note:` line mentions `loadFiles` at all. Shown even
+    under `--quiet`, the same as `debug-config.comments-dropped`."""
+    pytest.importorskip("yaml")
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf",
+                        "servertype": "jlink",
+                        "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr_rev_b.elf\n",
+    )
+
+    # tan-cli#182: stdout is the envelope channel in BOTH modes; the human
+    # text preview is stderr (see `test_text_mode_writes_nothing_to_stdout`).
+    proc = run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == ""
+    load_files_notes = [
+        line for line in proc.stderr.splitlines() if line.startswith("note:") and "loadFiles" in line
+    ]
+    assert load_files_notes, proc.stderr
+    assert "zephyr_rev_a.elf" in load_files_notes[0]
+    assert "zephyr_rev_b.elf" in load_files_notes[0]
+
+    proc_quiet = run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--quiet")
+    assert proc_quiet.returncode == 0, proc_quiet.stdout + proc_quiet.stderr
+    assert any("loadFiles" in line for line in proc_quiet.stderr.splitlines()), proc_quiet.stderr
 
 
 def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_path):
@@ -1378,6 +2104,260 @@ def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_pa
         )
     on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
     assert on_disk["configurations"][0]["configFiles"] == ["board/alp_rev_c.cfg"], on_disk
+
+
+def test_provenance_survives_the_targeted_splice_write_path(tmp_path):
+    """tan-cli#518's own explicit callout: `jsonc_splice` preserves byte
+    spans -- everything OUTSIDE the one entry being rewritten is copied
+    through unconditionally (tan-cli#182) -- so this proves the sidecar's own
+    identity is unaffected by which write path (`jsonc_splice.apply_edit` vs
+    the whole-document fallback `jsonc_splice.pretty_json`) actually produced
+    a given `launch.json` on disk. The comment above `configurations` forces
+    `_write_content` down the TARGETED SPLICE path (the same one
+    `test_a_write_into_the_stock_template_keeps_every_byte_outside_the_entry`
+    pins) on every write here, never the fallback -- if content-hash
+    provenance were somehow keyed to raw file bytes instead of the PARSED
+    value, splicing (which never re-serialises the untouched comment, but
+    DOES re-serialise the one entry it rewrites) would be exactly the kind of
+    thing that could desync it."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(STOCK_TEMPLATE, encoding="utf-8")
+
+    for rev in "a", "b", "c":
+        runners_yaml.write_text(
+            "runners:\n- openocd\n"
+            f"args:\n  openocd:\n  - --config=board/splice_rev_{rev}.cfg\n",
+            encoding="utf-8",
+        )
+        env = envelope(
+            run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+        )
+        assert env["exitCode"] == 0, env
+        # The comment survives every single write -- proof the targeted
+        # splice path ran, not the whole-document fallback (which would have
+        # destroyed it on the very first write).
+        assert "// Use IntelliSense" in launch_json(tmp_path).read_text(encoding="utf-8")
+
+    on_disk = json.loads(strip_jsonc(launch_json(tmp_path).read_text(encoding="utf-8")))
+    # Not accumulated: if provenance had desynced from the real (spliced)
+    # file, rev "b" and "c" would each have found no recorded hash for rev
+    # "a"'s entry and appended instead, same failure shape as tan-cli#489.
+    assert on_disk["configurations"][0]["configFiles"] == ["board/splice_rev_c.cfg"], on_disk
+
+
+def test_a_customer_edit_of_a_tans_own_entry_orphans_it_instead_of_overwriting_it(tmp_path):
+    """tan-cli#518's central scenario, end to end through the real CLI and a
+    real (rewritten between runs) `runners.yaml`: tan writes a resolved
+    `configFiles` value on run 1 (recorded in `.alp/` as tan's own), the
+    CUSTOMER then hand-edits that exact entry in `launch.json` -- the desync
+    the whole sidecar exists to survive -- and a SECOND real build resolves
+    a yet-DIFFERENT value on run 2. The edited entry's current content no
+    longer hashes to what run 1 recorded, so it reads as "not tan's any
+    more": run 2 must APPEND its own new value beside the customer's edit,
+    never silently overwrite what they just typed. FAILS against the
+    pre-#518 position-heuristic merge, which would have overwritten the
+    customer's edit unconditionally (nothing but position identified that
+    slot)."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    # The customer opens launch.json and edits the value tan just wrote --
+    # the sidecar still names the OLD content, `board/rev_1.cfg`, as tan's;
+    # what's on disk now is something else entirely.
+    on_disk_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    on_disk_1["configurations"][0]["configFiles"] = ["my/own/handpicked.cfg"]
+    launch_json(tmp_path).write_text(json.dumps(on_disk_1), encoding="utf-8")
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_2.cfg\n",
+        encoding="utf-8",
+    )
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_2.cfg",
+    ], on_disk_2
+
+
+def test_a_customer_edit_stays_orphaned_through_a_third_run_never_reclaimed(tmp_path):
+    """tan-cli#982 review finding #1 (1): `_merge_list_by_identity`'s own
+    docstring promises pass-3 (appended) entries are NEVER recorded as
+    tan-owned -- only pass 1's identity matches and pass 2's positional
+    placements are. The test above
+    (`test_a_customer_edit_of_a_tans_own_entry_orphans_it_instead_of_
+    overwriting_it`) only runs TWO builds, which cannot catch a violation of
+    that promise: nothing would wrongly treat the customer's still-orphaned
+    edit as tan's own until something LOOKS UP what run 2 recorded, and
+    nothing does that until a THIRD run. Reproduces the reviewer's own probe
+    end to end: run 1 resolves and records `board/rev_1.cfg`; the customer
+    hand-edits that exact entry to `my/own/handpicked.cfg`; run 2 cannot
+    match it any more (the content hash disagrees) so it APPENDS
+    `board/rev_2.cfg` beside it -- and, per the docstring's promise, must
+    NOT record the still-unmatched `my/own/handpicked.cfg` as tan's own even
+    though it now sits in the merged result; run 3 must therefore still find
+    nothing it can prove is tan's at slot 0 and append again, never
+    overwrite the customer's edit. FAILS against `owned_entries =
+    list(result)` (claiming every merged entry as owned, including the ones
+    pass 1/2 never matched or placed) -- there, run 2 wrongly records
+    `my/own/handpicked.cfg` as tan's own, and run 3 overwrites it outright,
+    deleting it: `['board/rev_3.cfg', 'board/rev_2.cfg']` instead of this
+    test's own assertion below."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    on_disk_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    on_disk_1["configurations"][0]["configFiles"] = ["my/own/handpicked.cfg"]
+    launch_json(tmp_path).write_text(json.dumps(on_disk_1), encoding="utf-8")
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_2.cfg\n",
+        encoding="utf-8",
+    )
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_2.cfg",
+    ], on_disk_2
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_3.cfg\n",
+        encoding="utf-8",
+    )
+    env_3 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_3["exitCode"] == 0, env_3
+    on_disk_3 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_3["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_3.cfg",
+    ], on_disk_3
+
+
+def test_a_run_that_resolves_nothing_for_a_field_leaves_its_provenance_record_untouched(
+    tmp_path,
+):
+    """tan-cli#982 review finding #1 (2): `_merge_list_field`'s all-placeholder
+    guard returns `owned_entries=[]` for a run that resolved NOTHING for a
+    list field, and `_merge_configuration`'s own docstring promises that
+    means the field's `.alp/` provenance record is left EXACTLY as it
+    already was, never wiped -- gated by `if owned_entries_out is not None
+    and owned:`. Reproduces the reviewer's own probe end to end: run 1
+    resolves and records `board/rev_1.cfg` as tan's own; run 2's
+    `runners.yaml` is REMOVED entirely (a build that has not been re-run
+    against this server, or registers no openocd runner at all), so
+    `configFiles` resolves to nothing but tan's own placeholder and the
+    all-placeholder guard fires -- this run touches NOTHING for the field;
+    run 3's `runners.yaml` comes back with a fresh value. If run 2 had wiped
+    the field's provenance record instead of leaving it alone, run 3 has
+    nothing left to match `board/rev_1.cfg` against and must APPEND rather
+    than replace it -- tan-cli#489's own accumulation blocker regressing,
+    silently. FAILS against dropping the `and owned` half of that guard's
+    condition (`debug_launch.py`'s `_merge_configuration`): there, run 3
+    yields `['board/rev_1.cfg', 'board/rev_3.cfg']` instead of this test's
+    own assertion below."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    # A run with no `runners.yaml` at all: `configFiles` resolves to nothing
+    # but tan's own placeholder, so the all-placeholder guard in
+    # `_merge_list_field` fires and this run touches NOTHING for the field.
+    runners_yaml.unlink()
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == ["board/rev_1.cfg"], on_disk_2
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_3.cfg\n",
+        encoding="utf-8",
+    )
+    env_3 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_3["exitCode"] == 0, env_3
+    on_disk_3 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_3["configurations"][0]["configFiles"] == ["board/rev_3.cfg"], on_disk_3
 
 
 def test_a_multi_element_draft_with_a_customer_prepended_entry_still_replaces(tmp_path):
@@ -1826,7 +2806,7 @@ def test_an_omitted_target_kind_infers_zephyr_mcu_from_the_built_manifest(tmp_pa
     root = str(tmp_path).replace("\\", "/")
     write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
 
-    env = envelope(run_cli(tmp_path, "--format", "json"))
+    env = envelope(run_cli(tmp_path, "--core", "m55_hp", "--format", "json"))
 
     assert env["exitCode"] == 0, env
     assert env["data"]["targetKind"] == ZEPHYR_MCU
@@ -2560,3 +3540,51 @@ def test_inferred_target_kind_stays_native_host_for_a_pure_native_sim_manifest()
     target, code, ambiguous = infer_target_kind(manifest, None, None)
 
     assert target == NATIVE_HOST and code is None and ambiguous is None
+
+
+def test_a_multi_core_build_without_core_is_refused_listing_the_cores(tmp_path):
+    """tan-cli#1488: two Zephyr cores and no --core used to exit 0 and write the
+    first slice's ELF with programsDevice:true. Now refused like tan probe/flash."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    for argv in (
+        ("--format", "json"),
+        ("--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json"),
+    ):
+        env = envelope(run_cli(tmp_path, *argv))
+        assert env["exitCode"] == 2, env
+        issue = next(i for i in env["issues"] if i["code"] == "debug-config.core-required")
+        assert "m55_hp, m55_he" in issue["message"], issue
+    assert not launch_json(tmp_path).exists()
+
+
+def test_the_jlink_launch_config_pins_the_probe_serial_from_the_manifest(tmp_path):
+    """tan-cli#1488: flash_args.jlink_serial becomes cortex-debug serialNumber."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    text = MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root).replace(
+        "  status: ok\n  build_dir: " + root + "/build/m55_he-zephyr/build\n",
+        "  status: ok\n  flash_args:\n    jlink_serial: '123456789'\n  build_dir: "
+        + root + "/build/m55_he-zephyr/build\n",
+    )
+    assert "123456789" in text
+    write_manifest(tmp_path, text)
+
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_he",
+            "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["configuration"]["serialNumber"] == "123456789"
+
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_hp",
+            "--preview", "--format", "json",
+        )
+    )
+    assert "serialNumber" not in env["data"]["configuration"]

@@ -90,11 +90,11 @@ def test_no_sdk_root_reports_kconfig_no_sdk_root(tmp_path: Path) -> None:
     # tan-cli#305: `tan sdk switch`/`tan bootstrap` both used to be named
     # here and neither is a working remedy for an unresolved SDK in this
     # build -- see NO_SDK_NEXT_STEPS's own docstring in `sdk_cmd.py`.
-    assert (
-        envelope["issues"][0]["message"]
-        == "no alp-sdk checkout found — pass `--sdk-root <PATH>`, or get an alp-sdk "
+    # tan-cli#1463: the unchanged remedy is followed by where the ladder looked.
+    assert envelope["issues"][0]["message"].startswith(
+        "no alp-sdk checkout found — pass `--sdk-root <PATH>`, or get an alp-sdk "
         "checkout (`git clone https://github.com/alplabai/alp-sdk`), then point tan "
-        "at it with `--sdk-root <path>`."
+        "at it with `--sdk-root <path>`. Neither `--sdk-root`"
     )
 
 

@@ -2,7 +2,7 @@
 # `contract/` — the JSON envelope drift gate
 
 The vscode extension drives `tan <cmd> --format json` and hard-depends on
-five things that nothing else in this repo pins:
+six things that nothing else in this repo pins:
 
 - the top-level envelope shape, `{ command, ok, exitCode, project, data,
   issues }` (`python/tan/envelope.py`);
@@ -10,7 +10,11 @@ five things that nothing else in this repo pins:
   doctor, 5 internal (`python/tan/exit_codes.py`);
 - `tan --version`'s first stdout line, `tan MAJOR.MINOR.PATCH`;
 - the **frozen issue codes** it matches with `===` (`issue-codes.json`, below);
-- the **`data` field names** it reads with `?? []` fallbacks (below).
+- the **`data` field names** it reads with `?? []` fallbacks (below);
+- the **`(inert:KIND)` marker** in `--help`, which it records into its own
+  `test/golden/tan-surface/surface.json` (below). Not an envelope field — the
+  extension reads `--help` text for its option surface — but a wire fact all
+  the same, and the one thing on this list a consumer used to have to INFER.
 
 `python/tests/conformance/test_contract_envelopes.py` runs every committed
 fixture against `python -m tan`, the implementation that release assets ship,
@@ -111,6 +115,10 @@ with a full `consumerEffect` per entry — this table does not duplicate them.
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
 | `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
 | `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
+| `cli.parse-error` (severity `error`) | frozen | Reports "this build of the tan CLI doesn't accept the command the extension sent", raises the outcome to error severity (exit 2 alone reads as a board.yaml validation warning), routes the usage dump to the output channel and offers Update CLI. Renamed, the customer sees the raw click usage dump in a warning toast again. |
+| `init.som-unsupported` (severity `error`) | frozen | `alp-sdk-vscode`'s `classifyInitRefusal` (`packages/alp-core/src/project/initRefusal.ts`, `KINDS`) maps it to `no-scaffold-for-som` and tells the customer to pick another template or an example. Renamed, the refusal falls through to tan's raw message with no route forward. |
+| `cli.command-deferred` (severity `error`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#427 (its emission module, `tan/commands/deferred_cmd.py`, is gone) so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `flash.swd-probe-write-unconfirmed` (severity `warning`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#732, which removed the `swd_probe` flash backend entirely, so the spelling is RESERVED and must never be re-used for a different verdict. |
 
 `bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
 `bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
@@ -129,23 +137,33 @@ create a second list that immediately drifts.
 
 | Field the extension reads | Command family | Gated by |
 |---|---|---|
-| `data.soms[]`, `.sku`, `.displayName`, `.family`, `.cores[].{id,os}` | `presets` | golden `presets-heterogeneous-som` (a55/yocto + m33/zephyr) |
+| `data.soms[]`, `.sku`, `.displayName`, `.family`, `.cores[].{id,os}` | `presets` | golden `presets-heterogeneous-som` (a55/yocto + m33/zephyr). The same `.cores[]` entries also carry `type`/`allowedOs` on the wire (tan-cli#870, additive at `schemaVersion` `"1"`) -- `type` is the raw `metadata/socs/**/*.json` `cores[].type` string, `allowedOs` is that type's excluded cross-class OS subtracted from the checkout's own `board.schema.json` enum via `tan.core.os_class`, the same cortex-a/cortex-m convention `tan.planner.validate` gates a build on for the cross-class exclusion itself -- narrower for an UNRESOLVED core type, where `allowedOs` degrades to `[]` but the build-time gate still accepts `baremetal`/`off` (deliberate: presets offers nothing rather than guess) -- but as of this writing no consumer reads either field yet (`git grep allowedOs` over `alp-sdk-vscode@dev` is empty; `src/ideHub/messages.ts`'s `cores?: { id: string; os: string }[]` declares neither): present on the wire type, not among the fields this consumer actually reads (see the `build --plan` row's `schemaVersion` for the same distinction). `allowedOs` degrades to `[]` on a schema miss alone; `type` degrades to `""` on any of four SoC-lookup misses (measured): an unresolvable `silicon:` (not a `vendor:family:part` triple), a resolvable `silicon:` with no matching `metadata/socs/**` file, a resolved SoC JSON whose `cores[]` either has no entry for this core's id or has one whose `type` key is itself empty or absent, or (tan-cli#957) an entry whose `type` key is present but not a JSON string at all -- a schema-invalid tree `soc-spec-v1.schema.json` itself forbids but does not stop `tan` from reading, since nothing validates the checkout before `presets` does -- neither field fails the command over it, and `type` never carries the raw non-string value onto the wire either. The `presets-heterogeneous-som` fixture's own shape pins both degraded values at once, not populated ones (its `silicon:` is not a `vendor:family:part` triple, which degrades `type`, and its `sdk/` tree carries no `board.schema.json`, which independently degrades `allowedOs`), but exercises only the NO-SCHEMA path for `allowedOs`: both conditions co-occur in that one fixture, and the missing-schema check short-circuits `allowed_os_lookup` before the unresolved `type` is ever consulted, so this golden does not exercise (and would not catch a regression in) the separate unresolved-core-type guard -- deleting that guard still leaves this golden green (measured); the RESOLVED (non-empty) shape, and the unresolved-core-type guard specifically, are covered at the unit level in `python/tests/commands/test_presets_command.py`, not by a golden. |
 | `data.sdkRoot`, `.skus`, `.libraries`, `.boardLibraries`, … | `presets` | goldens `presets-no-sdk` + `presets-heterogeneous-som` |
 | `data.available.projectTemplates` (+ `moduleTemplates`, `generationTargets`), `data.summary`, `data.details` | `explain` | golden `explain-overview` |
+| `data.som.{initAcceptsSkus,initRefusesSkuPrefixes}` | `explain --template <project-template-id>` | golden `explain-template-iot-starter` (tan-cli#866). Present only on a PROJECT-template hit (the one selector kind with a SoM concept) — absent, not `null`, for a module-template or generation-target hit, the same absent-vs-null convention `--code`'s `data.diagnostic`/`data.suggestions` already use. **These name a REFUSAL prediction — "will `tan init` accept/refuse this `--som`" — not a capability statement (PR #985 review, major 1); do not read them as "the SDK supports this pair".** `initAcceptsSkus` is the exact-SKU allowlist `init.invalid-som` refuses against (`null` when the template carries none); `initRefusesSkuPrefixes` is the family-tree exclusion `init.som-unsupported` refuses against (always `[]` when `initAcceptsSkus` is set, since an exact allowlist already implies it). Both are read from `tan.core.scaffold`'s `TEMPLATE_SUPPORTED_SKUS`/`UNSUPPORTED_SOM_FAMILY_PREFIXES` — the SAME tables `tan init` gates on — not a second, hand-typed copy. For every template except `iot-starter`/`multicore-mailbox`, `initRefusesSkuPrefixes` (`[]`: no family is unvendored today) refuses strictly less than alp-sdk's own scaffold-catalog `supported.som_skus` (`["E1M-AEN801", "E1M-V2N101"]`, `tan/templates/vendored/MANIFEST.md`) — `tan init` accepts a `--som` alp-sdk's catalog never validated this template against, by design (`_family_bucket`'s unrecognised-prefix fallback), and this field says so correctly rather than inventing a narrower vocabulary tan cannot verify without a checkout. `tests/commands/test_explain_command.py::test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data` gates every SKU literal in project-template prose (not just an "only"-adjacent one) against drifting from `TEMPLATE_SUPPORTED_SKUS`, with a named exemption (`_CONTRAST_MENTIONS`) for `iot-starter`'s deliberate `E1M-V2N101` contrast mention. |
 | `data.examples[].{id,sourceDir,title,description}` | `examples` | golden `examples-catalog` |
+| `data.examples[].{category,som,board,cores[].{id,os,app},coreCount,osSet,declares}` (tan-cli#484, additive at `schemaVersion` `"1"`) | `examples` | golden `examples-catalog-facets`. Present PER-ROW only when the bound checkout's generated `metadata/catalog.json` has an entry for that row's `sourceDir` (`tan.core.example_facets.load_example_facets`) -- an older SDK, a stale catalogue missing a newer example, or a catalogue that fails to parse all degrade to the pre-#484 four-key row, never a failure. `category` is the only one of these ALWAYS present once any facet is: the catalogue's own grouping key. Every other field is independently optional and OMITTED (never emitted `null`) exactly as alp-sdk's own generator omits it -- `cores`/`coreCount`/`osSet` come from that catalogue's topology resolver (`gen_catalog.py::_resolved_core_facets`, the same `alp_project.py --emit os-topology` path `tan build` itself plans against) and are absent together when a board's topology does not resolve; `som`/`board` are absent for a portable example that declares neither. `category` is ALREADY read (measured against `alp-sdk-vscode@origin/dev`): `packages/alp-core/src/examples/category.ts`'s `exampleCategory()` prefers an explicit `ex.category` over its own `sourceDir`-leading-segment fallback the moment one is on the wire, so this row promotes that field from "derived client-side" to "sent by the producer" with no extension change needed. `som`/`board`/`cores`/`coreCount`/`osSet`/`declares` are pre-consumer as of the same measurement (`git grep -n 'coreCount\|osSet\|declares' -- src/ packages/` over `alp-sdk-vscode@origin/dev` matches nothing on this envelope) -- present on the wire ahead of the consumer landing, same distinction the `presets` `type`/`allowedOs` row above notes. |
 | `data.targets` / `.written` / `.failed` | `generate` | golden `generate-board-yaml-missing` |
-| `data.generatedAt`, `.summary.{pass,warn,fail}`, `.checks[].{name,status,scope,detail,fix?}`, `.missingPrerequisites[].{tool,command}`, `.nextSteps` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) **As of tan-cli#664, this key set is also PUBLISHED** — `envelope-contract.json`'s `envelopes.doctor` (built from `contract/doctor-data-keys.json`, the single source) — kept in lockstep with the shipping command by `python/tests/conformance/test_doctor_contract_key_set.py`, which runs a real `tan doctor --format json` and fails on either an undeclared emitted key or a declared key the command stopped emitting. See "The `doctor` family is a key set, not a golden" below. |
+| `data.generatedAt`, `.summary.{pass,warn,fail}`, `.checks[].{name,status,scope,detail,fix?}`, `.missingPrerequisites[].{tool,command,tier,licence,sourceUrl,sizeBytes}`, `.nextSteps` | `doctor` (both invocations) | `python/tests/commands/test_doctor_command.py` — KEY-SET assertions, not a golden, because doctor's values are host facts. `test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback` reads `name`/`status` off the spawned envelope and pins `data`'s key set; `test_unknown_is_counted_in_no_summary_bucket` pins the three summary buckets; `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host` pins the literal `workspace`. (The Rust `doctor_build_data_keys_the_extension_reads` cited here until #601 went with `crates/`.) **As of tan-cli#664, this key set is also PUBLISHED** — `envelope-contract.json`'s `envelopes.doctor` (built from `contract/doctor-data-keys.json`, the single source) — kept in lockstep with the shipping command by `python/tests/conformance/test_doctor_contract_key_set.py`, which runs a real `tan doctor --format json` and fails on either an undeclared emitted key or a declared key the command stopped emitting. See "The `doctor` family is a key set, not a golden" below. |
 | `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
-| `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
-| `data.sku`, `.boardYaml`, `.slices[].{coreId,backend,buildDir,env,command,configArtefacts[].{path,contents}}`, `.sharedArtefacts[].{path,contents}`, `.warnings[].{code,coreId,message}` | `build --plan` | **NOT COVERED, and unreachable.** The flag refuses today: `tan build --plan --format json` answers `ok:false`, `exitCode:1`, `cli.command-deferred` (tan-cli#427), so there is no plan `data` to freeze -- the refusal envelope's `data` carries only the deferral `message`. (`--plan-from` echoes a plan handed to it at exit 0, but that is a passthrough of the caller's own file, not this emitter, so it freezes nothing here -- tan-cli#853.) When #427 lands it inherits `data.written`'s blocker too (a resolvable alp-sdk checkout + a Python spawn). Read by `src/ideHub/buildPlanPanel.ts` (tan-cli#200). |
-| `data.slices[].{core_id,os,status,flash_method,build_dir,board,machine,image,app,reason,output_artefact,log_path}`, `.ipc[].{name,kind,endpoints[],status,reason}`, `.helper_mcus[].{name,chip,flash_method,firmware_path}` | `build --manifest`, `build --manifest-from <path>` | **NOT COVERED, and unreachable.** Same refusal: `cli.command-deferred`, exit 1 (tan-cli#427). Note for whoever freezes it: the extension matches the literal `"TBD"` on `slices[].flash_method`, `helper_mcus.flash_method` and `helper_mcus.firmware_path` to gate its Flash button, and matches `slices[].os === "off"` to decide whether a core participates -- both are load-bearing wire VALUES, not placeholders tan may change freely. |
+| `data.releases[].{tag,publishedAt,tarballUrl,releaseNotesSummary,releaseNotes,draft,prerelease}`, `data.subcommand` | `sdk list` | **PUBLISHED key set** (`contract/sdk-list-data-keys.json` → `envelope-contract.json`'s `envelopes.sdk-list`), tan-cli#887. Not a byte golden and not a fixture dir, for the same reason `doctor` is not: the values are whatever alp-sdk has published on GitHub at the moment of the call. Kept in lockstep by `python/tests/conformance/test_sdk_list_contract_key_set.py`, which runs the real command with **only the socket replaced** and fails on an emitted key nobody declared or a declared key the command stopped emitting. It does NOT prove GitHub still sends what tan reads — nothing offline can — only that the payload→wire mapping is the declared one. `draft`/`prerelease` are always real booleans, defaulting to `false` when the payload omits them (tan-cli#122), and `releases` is `[]`, never absent, on the no-`--online` and fetch-failure paths. |
+| `data.{subcommand,removed,path,version,wasActive,freedBytes,resolvesToAfter}` | `sdk remove` | golden `sdk-remove-absent` (tan-cli#790), the one fully offline/hermetic case: an idempotent no-op on a target that was never there, `removed: false`. `data.path` is the resolved absolute target — new to `PATH_KEYS`, so it normalises to `__WORKDIR__` the same way `boardYamlPath`/`launchJsonPath` already do. `data.resolvesToAfter` (tan-cli#1028) is `{sdkPath, readiness, sourceTier}` — mirroring `sdk current`'s own `data` SHAPE rather than inventing a fourth one — reporting what `resolve_sdk_tiered` (the SAME narrow ladder `remove`'s own load-bearing-removal check calls, never the wide `resolve_sdk_root_ladder` tail `sdk current` falls through to and never threading `--sdk-root`) now returns for the calling workspace; present on EVERY `sdk remove` response, not only a load-bearing one, so a caller does not need a separate `sdk current` call to learn whether a force-removed global default fell through to a lower tier or left nothing to resolve at all (`sourceTier: "none"`, the golden's own case) — this can therefore read one tier below what a same-instant `sdk current` call would report, by design (see `_resolves_to_after`'s own docstring). A force-removed workspace PROJECT PIN is a narrower case still: `.alp/sdk-path` is left dangling rather than cleared, and `resolvesToAfter` reports the same `sourceTier: "none"` a never-pinned workspace would — the payload alone still cannot tell the two apart, so `sdk remove` additionally carries the `sdk.project-pin-unresolved` WARNING on `issues[]` for exactly that workspace (tan-cli#1051), from the same `project_pin_issue` helper `sdk current` uses. Not necessarily the byte-identical issue `sdk current` emits, though: `remove`'s warning names `resolvesToAfter`'s own NARROW tier while `sdk current` falls through to the wide ladder (tan-cli#497), so in a workspace with a child `<ws>/alp-sdk` the two say `none` and `discovery` at the same instant. The invariant is internal consistency — the tier the warning names is the tier `data.resolvesToAfter` names, in the same envelope — not cross-command equality. It rides on EVERY branch — refusal, idempotent no-op, removal failure, success — because a dangling pin is a fact about the workspace, not about whether the call deleted anything; on a refusal it FOLLOWS the refusal, so `issues[0]` still names what blocked the removal. The removal never clears `.alp/sdk-path` itself: `--force` on `remove <version>` is consent to delete that install, not to rewrite a workspace config file the caller never named, and it could only ever reach the one workspace it ran in anyway. `PATH_KEYS` includes `sdkPath` and the harness's `normalise()` recurses into nested `data` dicts, so a future non-`null` `resolvesToAfter.sdkPath` golden would be `\`→`/`-folded on BOTH the actual and expected sides — this fixture's `sdkPath: null` means the contract suite cannot currently catch a Windows separator regression on this specific field; the behavioural coverage for that lives in `test_sdk_command.py`'s host-native-path assertions instead, not here. The load-bearing refusal behind `sdk.remove-active` compares paths through `sdk_removal.removal_would_take_out` (tan-cli#1053), not a raw `==`: two spellings of ONE directory — a differently-cased path on a case-insensitive volume (NTFS, or macOS's default APFS), or a path through a symlinked cache — used to compare unequal, so the refusal never fired and the install another project still pointed at was removed without `--force`. That predicate is ASYMMETRIC about symlinks and must stay so: removing a link unlinks it without following it, so `remove <cache>/current` is allowed even when a workspace is pinned at what `current` points at, and `data.wasActive` stays `false` for it. The six refusal/failure codes (`sdk.remove-missing-argument`, `sdk.remove-outside-root`, `sdk.remove-is-cache-root`, `sdk.remove-active`, `sdk.remove-in-use`, `sdk.remove-permission` — flat, one dash, no dot; `contract/issue-codes.json`'s own entries explain why a nested `sdk.remove.<reason>` shape is not on this wire at all) and a real successful removal all need a filesystem the harness cannot pre-seed hermetically (a real install to delete, a real lock/permission to trip) — covered instead by `python/tests/commands/test_sdk_command.py`'s own removal-behaviour tests, including mutation-proved read-only-directory, `wasActive`-on-refusal, outside-root-refusal, cache-root-itself-refusal, and `resolvesToAfter`-falls-through-to-a-lower-tier cases. |
+| `data.sku`, `.boardYaml`, `.slices[].{coreId,backend,buildDir,env,command,configArtefacts[].{path,contents}}`, `.sharedArtefacts[].{path,contents}`, `.warnings[].{code,coreId,message}` | `build --plan` | **NOT COVERED, and now permanently unreachable.** tan-cli#427 RETIRED the flag rather than implementing it -- "Two overlapping plan surfaces is worse than one, so the oracle spellings go" (the maintainer's own decision). `tan build --plan --format json` answers `ok:false`, `exitCode:2`, `build.flag-retired`, naming `--plan-from` (plus `--materialise`/`--execute` to act on it) as the replacement in the refusal message itself -- the refusal envelope's `data` carries only that message, never plan data, and never will through this flag. Two different producers sat behind this row before the retirement, and only one of them survives (tan-cli#853): `--plan-from` (reachable today, unchanged by #427; `_acquire_plan`, `build_cmd.py:874`, called at `:1534`) reads the caller's own plan FILE and echoes it verbatim at exit 0 once it parses -- an unreadable file still refuses -- returning BEFORE `apply_plan_token_substitution` runs (`_MODE_PLAN`'s early return); a passthrough of the caller's file, not this emitter, so a golden recorded from it pins whatever fixture it was handed, tokens or not. `--plan` itself would instead have echoed whatever `emit_build_plan` (`python/tan/planner/buildplan.py:375`) renders in-process -- MEASURED, before the retirement, against a real board (`emit('build-plan', ..., board_yaml=examples/multicore/rpmsg-v2n/board.yaml)`): the plan was tagged `"planPathMode": "tokened"` and every slice's `env.ALP_SDK_ROOT` / `envAppendPath.{EXTRA_ZEPHYR_MODULES,PYTHONPATH}` carried a literal, UNSUBSTITUTED `${SDK_ROOT}` token (`buildplan.py:610,620-623,636`) -- emitter facts, not fields this consumer currently binds (`alp-sdk-vscode@dev`'s `BuildPlanData`/`BuildPlanSlice`, `src/ideHub/messages.ts:456-481`, declare neither); the same held for `schemaVersion`, which the TS interface DOES declare but which `packages/alp-core/src/tanPayloadShape.ts`'s `BUILD_PLAN_SHAPE` names explicitly "NOT read on this path". That whole paragraph is kept here as the HISTORICAL record of what this row's `data` shape would have been, not a live description: with `--plan` retired, the in-process planner's own raw JSON is dispatched (not shown) by an ordinary `tan build`, and no other flag echoes it unsubstituted, so nothing above is reachable through any `tan build` invocation any more. `src/ideHub/buildPlanPanel.ts` (tan-cli#200) has nothing left to read from `build --plan`; if a future flag resurrects in-process plan display, re-measure rather than trust this paragraph. |
+| `data.slices[].{core_id,os,status,flash_method,build_dir,board,machine,image,app,reason,output_artefact,log_path}`, `.ipc[].{name,kind,endpoints[],status,reason}`, `.helper_mcus[].{name,chip,flash_method,firmware_path}` | `build --manifest`, `build --manifest-from <path>` | **NOT COVERED, and now permanently unreachable.** tan-cli#427 RETIRED both flags rather than implementing them: a native `tan build` already writes `build/system-manifest.yaml` (plain YAML, readable directly), so neither flag was implemented on top of it. `tan build --manifest --format json` / `--manifest-from <path>` each answer `ok:false`, `exitCode:2`, `build.flag-retired`, naming that file as the replacement in the refusal message itself -- never `cli.command-deferred`/exit 1 any more. Note for whoever freezes `system-manifest.yaml`'s own shape instead (the artefact these flags would have echoed): the extension matches the literal `"TBD"` on `slices[].flash_method`, `helper_mcus.flash_method` and `helper_mcus.firmware_path` to gate its Flash button, and matches `slices[].os === "off"` to decide whether a core participates -- both are load-bearing wire VALUES, not placeholders tan may change freely. |
 | `data.slices[]` keyed by `.core_id`; `.status`, `.flash`, `.ram` (each `{used,total,pct}`, any member `null`), `.budget_note` | `size` | **NOT COVERED.** The command is reachable but needs a built ELF and a manifest -- a bare run answers `ok:false`, `exitCode:1`, `size.manifest-unavailable`. `slices[].status` is matched BY VALUE (`not-built`, `n/a`, `over`, `warn`, `no-budget`; anything else renders as "in budget"), so those strings are wire content. |
+| `data.availablePorts[].{device,description}` | `monitor` | golden `monitor-no-port` (tan-cli#1165). Read by alp-sdk-vscode `src/monitor.ts::listSerialPorts` (alp-sdk-vscode#649, OPEN, not merged as of this writing -- verified against that PR's own head commit via `gh api`, not assumed); a rename of either key makes that extension silently report "No serial ports were found" while `tan monitor` itself printed a full list. Pins one entry with a real `description` and one exercising what tan actually sends for a description-less port -- the literal `"n/a"` pyserial's own `ListPortInfo.__init__` defaults `description` to, which `_ports_data` copies through verbatim; confirmed against alp-sdk-vscode#649's own `packages/alp-core/src/monitor/ports.ts`, which says of that same field "tan sends the literal string `"n/a"` when it has nothing, and that is tan's word, not ours to invent" -- it is tan's word, not a consumer-side fallback rendering, and `monitor_cmd.py`'s own `p.description or ""` guard never fires against it (that guard's `""` is unreachable through `comports()` at all). `env.json`-armed (see "Pinning host state a case reads" below): `_available_ports()`'s real source enumerates whatever serial hardware is attached to the recording machine, which is a fact about that machine, not the contract. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
+| `data.programsDevice` (additive at `schemaVersion` `"1"`), `data.configuration.loadFiles` (cortex-debug targets only) | `debug-config` | same five goldens, second re-record under tan-cli#945 (see "Why the five `debug-config-preview-*` goldens were re-recorded" below). tan-cli#945: a consumer had no way to tell, from the written profile alone, whether starting it programs the attached target — cortex-debug's own `loadFiles` schema default silently falls back to `executable` ("if this property does not exist, then the executable is used to program the device", `marus25.cortex-debug` 1.12.1), which alp-sdk-vscode#586 had to reimplement client-side because neither of its flash gates could see the write happen inside cortex-debug's own spawned probe server. `programsDevice` is `true` for `zephyr-mcu`/`baremetal-mcu`, `false` for `yocto-userspace` (a `cppdbg` attach to an already-deployed gdbserver) and `native-host` (no target hardware exists) — `tan.core.debug_launch.programs_device`, keyed on `targetKind` alone, so it is present on every outcome this command can report, including a validation failure with `configuration: null`. It is not necessarily *correct* on every one of those: the internal-failure backstop paths (`_internal_failure` and its siblings) report a fixed `zephyr-mcu`/`none` placeholder target that never learned what was actually asked for, so `programsDevice` on those is present and CONSERVATIVE (`true`, fail-safe) rather than an answer for the target the caller actually named (tan-cli#1020 review) — understating the write is the bug class this field exists to close; overstating it is merely unhelpful. The same conservative mismatch can also happen on an ordinary, successful write: `programsDevice` is keyed on `targetKind` alone, never on the `loadFiles` this particular write actually lands, so a merge that PROTECTS a customer's own explicit attach-only `[]` (see below) still reports `programsDevice: true` beside `data.configuration.loadFiles: []` in the same exit-0 payload (tan-cli#1020 re-review) — a consumer that needs per-write precision reads `data.configuration.loadFiles` itself rather than trusting `programsDevice` alone for that one case. `loadFiles` is emitted explicitly on every cortex-debug draft, naming the SAME artefact `executable` does, and both are kept in sync by `apply_launch_resolution` once a real build resolves one. A hand-authored `loadFiles` already in the file — an explicit `[]` for attach-only included — is protected on a rerun rather than merged or overwritten unless `.alp/debug-launch-provenance.json` proves tan wrote it itself; see `debug-config.load-files-preserved` below for the disclosure and `tan.core.debug_launch._merge_load_files` for the merge rule (tan-cli#1020 review). |
 
-The five NOT COVERED rows -- `build --materialise`, `sdk list`, `build --plan`,
+The four NOT COVERED rows -- `build --materialise`, `build --plan`,
 `build --manifest*` and `size` -- are stated rather than quietly omitted: an
 uncovered field that reads as covered is worse than one everybody knows about.
+(`sdk list` was the fifth until tan-cli#887 published its key set. Worth
+recording why it moved: its FIELDS were never wrong -- `draft` and `prerelease`
+have been on the wire since `tan sdk` was first added, measured on the pinned
+v0.6.0-rc1 -- but "emitted today" and "promised" are different things, and this
+row said in as many words that it was the former.)
 The last three were in neither list until tan-cli#200 found them, which is the
 failure mode this paragraph exists to prevent, so it is worth saying plainly
 that the rule needs applying when a command family is ADDED, not only when
@@ -240,7 +258,16 @@ MACHINE TOKEN — `"string"`, `"int"`, `"string|null"` — never a prose sentenc
 so a consumer can validate structurally without parsing English: `checks`
 is `{requiredKeys, optionalKeys}` (today `optionalKeys` is just `fix`, which
 `Check.as_dict()` omits — never nulls — when a check carries no remediation),
-and `missingPrerequisites` is `{nullable: true, items: {tool, command}}`.
+and `missingPrerequisites` is `{nullable: true, items: {tool, command, tier,
+licence, sourceUrl, sizeBytes}}` — the last four added additively by
+tan-cli#1066, carrying alp-sdk v0.16.0's `artifactProvenance`
+(alplabai/alp-sdk#1574) joined on `tool`. All four are REQUIRED keys whose
+value is `null` when unreported (an SDK predating the block, or a tool with no
+entry in it) — not optional keys like `checks[].fix`, which is omitted
+instead; see `doctor-data-keys.json`'s own `_comment` for why absence is a
+value here and for why alp-sdk's `source` is spelled `sourceUrl` on the wire.
+`tan bootstrap`'s `missingPrerequisites[]` carries the same six keys — both
+commands render it through `tan.core.bootstrap.MissingPrerequisite.as_dict`.
 `contract/doctor-data-keys.json` is the single source (its own `_comment`
 records how it was enumerated and why `status` stays a free string rather
 than a pinned pass/warn/fail/unknown enum — a value added later must survive
@@ -295,10 +322,25 @@ Every tagged release carries **`envelope-contract.json`** beside the binaries:
   "envelopes": {
     "presets-heterogeneous-som": { "args": [...], "exitCode": 0, "envelope": { ... } },
     // …one entry per golden case
-    "doctor": { "args": [...], "dataKeys": { /* contract/doctor-data-keys.json's dataKeys, verbatim */ } }
+    // A case that pins host state carries its `env.json` too (tan-cli#253), so
+    // the entry is replayable: WITHOUT it, replaying `model-doctor-no-sdk`'s
+    // `args` on a box that has `vela` reports `ethos_u.available: true` and
+    // diffs against the `envelope` published right beside it.
+    "model-doctor-no-sdk": { "args": [...], "exitCode": 0, "envelope": { ... },
+                             "env": { "PATH": "__WORKDIR__", "ALP_VELA_CONFIG": null } },
+    "doctor": { "args": [...], "dataKeys": { /* contract/doctor-data-keys.json's dataKeys, verbatim */ } },
+    "sdk-list": { "args": [...], "dataKeys": { /* contract/sdk-list-data-keys.json's dataKeys, verbatim */ } }
   }
 }
 ```
+
+**`env` is present only on a case that carries one** (one case today), and its
+semantics are the fixture's own: a **`null` UNSETS** the variable, a string
+**SETS** it, and **`__WORKDIR__` expands to the directory the command is run
+from** — so a consumer replaying an entry applies the block on top of its own
+environment before spawning `tan`, and reproduces the `envelope` beside it.
+An entry with no `env` key needs no environment beyond the isolation any
+replay already wants (a scratch cwd, an isolated `HOME`).
 
 Built by the `Bundle the envelope contract` step in
 `.github/workflows/release.yml` — pure re-packaging of committed files gated by
@@ -323,6 +365,97 @@ frozen oracle (`xfail`'d, tan-cli#498), so that one entry advertises an exit-0
 `PROVENANCE.txt` beside it is a re-recording against the shipping CLI; a golden
 named in `DELIBERATE_DIVERGENCE` is not.
 
+## Inert options and their kind (`--help`, tan-cli#886)
+
+`tan` accepts a number of options it does not read. **Every one of them ends
+its `--help` text with a marker naming WHICH KIND of inert it is**, rendered by
+`python/tan/core/inert.py` and nothing else:
+
+```
+--build              Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
+--project            Project root. Not read: ... (inert:not-applicable)
+```
+
+`--build` (`doctor_cmd.py`) is, measured, the ONLY live `compatibility` tenant
+today — the identical single-flag population `deferred`'s worked example had
+right before it emptied out twice (below). It is named directly rather than
+documented from the enforcing code the way `deferred` now is, and
+deliberately so: `COMPATIBILITY` is a `PERMANENT_KINDS` member
+(`python/tan/core/inert.py`) precisely because its flags are kept forever, not
+retired the way a `deferred` flag eventually ships or gets retired outright —
+so `--build` going away here would mean `doctor`'s own compat flag was
+deleted, a change big enough to update this worked example deliberately, not
+the structural churn (`build` retiring flags under tan-cli#427) that emptied
+`deferred`'s twice. If a second `compatibility` tenant ever appears, prefer it
+over `--build` alone so the block stops being read as "the one and only".
+
+`deferred` has no live specimen to put in that block: `--no-auto-bootstrap`
+was the last option carrying it, and tan-cli#427 retired that flag outright
+rather than implementing it, so `tan build --help` now carries no
+inert-marked option at all (measured population as of that change: `parity`
+117, `compatibility` 1, `not-applicable` 2, `deferred` 0). This is the
+SECOND time this doc's worked example for `deferred` has emptied out from
+under it — `--plan` was the original specimen, retired by an earlier pass of
+the same issue, and `--no-auto-bootstrap` was repointed to after that. Rather
+than repoint to a third named flag that the next retirement can empty out
+again, the shape is documented straight from the enforcing code instead:
+`inert_help("...", DEFERRED, "tan-cli#NNN")` renders
+`(inert:deferred:tan-cli#NNN)`, where `NNN` is the tracking issue --
+`inert_help` refuses to build one with no ref (`python/tan/core/inert.py`).
+
+The kind itself stays in the closed vocabulary (`INERT_KINDS`) with zero
+current members: it names "a real flag from the v0.4.1 oracle this port has
+not built yet, with an issue tracking its arrival", which is a property of
+individual flags, not of the vocabulary, and can recur for any future oracle
+gap. Retiring the KIND for lack of a current tenant would be a breaking wire
+change in its own right (see "The vocabulary is closed" below) for a problem
+a doc fix can solve instead.
+
+A retired flag, unlike a deferred one, carries no `(inert:...)` marker at
+all — its value selects a real, distinct refusal (`build.flag-retired`); see
+the `build --plan` row above.
+
+Read it back with, after collapsing runs of whitespace:
+
+```
+\(inert:(?<kind>[a-z-]+)(?::(?<ref>[^)\s]+))?\)
+```
+
+| Kind | Means | Will it ever act? |
+|---|---|---|
+| `deferred` | An upstream issue tracks its arrival. **Always carries a ref** — `inert_help` refuses to render one without it. | Yes, eventually |
+| `compatibility` | Kept so an existing caller's command line keeps parsing, after the behaviour it used to select stopped being conditional. | **No** |
+| `parity` | Accepted only because a sibling surface accepts it — the v0.4.1 oracle's clap `GlobalArgs` are `global = true`, so every verb parses all ten (tan-cli#261, `tan.core.global_flags`). Hidden on every command today. | **No** |
+| `not-applicable` | Structurally meaningless for this command, whatever tan implements later. | **No** |
+
+**`deferred` is the only non-permanent kind, and the KIND is what says so —
+never the presence of a ref.** `compatibility` and `parity` both name the issue
+that explains their history; a consumer that keys "will this arrive?" off
+`ref != null` gets `doctor --build` wrong, which is the exact customer-visible
+defect tan-cli#886 was filed about ("not implemented yet, see tan-cli#427" told
+about a flag that is never going to act).
+
+**The vocabulary is closed.** An unrecognised kind is a tan bug, not a value to
+fall back on; renaming or dropping one is the same breaking wire change the
+frozen-issue-code rule describes — bump the CLI MAJOR/MINOR, record it in
+`CHANGELOG.md`, and open the matching alp-sdk-vscode issue.
+
+**Why parentheses and not `[inert:…]`.** Typer runs this app with
+`rich_markup_mode="rich"`, so help text is rich MARKUP: a square-bracketed
+marker parses as a style tag and renders as *nothing at all* — measured, the
+token vanishes from `tan build --help` entirely. The token also carries no
+whitespace, so rich's wrapping can never split it across two lines.
+
+**What keeps it true:** `python/tests/gates/test_inert_option_markers.py`,
+which walks the built Click tree (not the source) and fails on an unknown
+kind, a `deferred` with no ref, a hidden inert option of a non-`parity` kind,
+an option that reads as inert in prose but carries no marker, and — the pin
+that matters to this repo's consumer — any change at all to the census of
+**visible** inert options. That census is 3 rows today: `doctor --build` and
+`faultdecode`'s `--project`/`--sdk-root`. `build` used to contribute rows of
+its own (twelve, then one after tan-cli#427's first pass) but now contributes
+none — see "Inert options and their kind" above for why.
+
 ## Fixture shape (`envelopes/<case>/`)
 
 One directory per case, mirroring the retired `cli-rs/contract` harness:
@@ -333,6 +466,7 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 | `expected.json` | The full golden envelope, normalized (see below). |
 | `expected.exit` | The golden process exit code, as a bare integer. |
 | *(when re-recorded)* `PROVENANCE.txt` | Why this golden was re-recorded, when, against which `tan` version, what moved, and why the previous recording was wrong. **Required on any golden re-recorded against the shipping CLI** — a re-recorded golden with no provenance is indistinguishable from a laundered one. Harness metadata, like the three rows above: skipped when fixture inputs are copied (`CASE_METADATA`). |
+| *(optional)* `env.json` | Environment overrides for cases whose command reads the **host** rather than its own inputs: a JSON object of `NAME` → value, where `null` UNSETS and a string SETS, and `__WORKDIR__` inside a value expands to the case's scratch directory. Applied on top of the harness's own isolation vars, which a case may NOT re-pin (`HARNESS_OWNED_ENV`). `model-doctor-no-sdk`, `debug-config-preview-baremetal-mcu` and `monitor-no-port` carry one today — see "Pinning host state a case reads" under Determinism. Harness metadata: skipped when fixture inputs are copied (`CASE_METADATA`). |
 | *(optional)* `board.yaml` / other fixture inputs | Copied into the isolated working directory the case runs in before `tan` is spawned. **Directories are copied recursively**, which is what lets a case ship a synthetic `sdk/` checkout (`scripts/alp_project.py` + `metadata/…` + `examples/…`) and pass `--sdk-root ./sdk`. That relative argv keeps the "no absolute paths in argv" rule intact — `data.sdkRoot` comes back as the literal `./sdk` on every platform. |
 
 `contract/fixtures/` (sibling directory) is not an envelope-golden directory.
@@ -385,28 +519,35 @@ just the one that captured it:
   `python/tan/core/timestamp.py::generated_at_iso`; set
   unconditionally even though none of the current cases emit a timestamp, so
   a future timestamped case is covered without touching the harness.
-- **No absolute paths in argv** — every case invokes `tan` without
-  `--project`/`--sdk-root`/`--destination`, so path fields the CLI reflects
-  back (`project.root`, `boardYamlPath`, …) come out as `.`/`./board.yaml`
-  rather than an absolute, machine-specific path. Nothing needed a
+- **No absolute paths in argv** — every case invokes `tan` without an
+  absolute `--project`/`--sdk-root`/`--destination`, so path fields the CLI
+  reflects back (`project.root`, `boardYamlPath`, …) come out as
+  `.`/`./board.yaml` rather than a machine-specific one. Nothing needed a
   `__SDKROOT__`-style substitution token (the convention `tests/parity/`
-  uses) as a result.
+  uses) as a result. `sdk-remove-absent` (tan-cli#790) is the first case to
+  pass `--destination` at all — a RELATIVE one (`./sdk-cache`), so the rule
+  still holds — and the first whose `data` reflects an absolute path anyway
+  (`data.path`, the resolved removal target): that field is what made `path`
+  join `PATH_KEYS`, so it normalises through the `__WORKDIR__` substitution
+  below instead of a third token kind.
 - **Scoped path-separator normalization** — the one thing case selection
   can't avoid by construction: Windows path rendering produces
   `./board.yaml` as `.\board.yaml` on Windows. The harness normalizes
   `\` → `/` on the freshly captured side before diffing, but only on the
   known path-shaped fields (`root`, `boardYaml`, `boardYamlPath`,
-  `destination`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
+  `destination`, `path`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
   `unchanged`, `launchJsonPath` — see `PATH_KEYS` in the Python conformance
   harness), not every
   string leaf. A blanket rewrite would also launder a real drift inside
   `issues[].message` or any other value that happens to contain a backslash —
   exactly the kind of change this gate exists to catch. Committed goldens are
   authored with forward slashes in those fields, matching the normalized form.
-- **`__WORKDIR__` for a reflected absolute path** — the one case the
+- **`__WORKDIR__` for a reflected absolute path** — the case family the
   "no absolute paths in argv" rule above cannot cover: `debug-config` reports
   the working directory it resolved (`project.root`) and the `launch.json`
-  path it would write, absolute, whatever the argv. Those two fields are
+  path it would write, absolute, whatever the argv; `sdk remove` (tan-cli#790)
+  resolves its `<version|path>` argument against `--destination` and reports
+  that resolved, absolute `data.path` back the same way. Those fields are
   substituted down to the `__WORKDIR__` token on the captured side. The
   substitution anchors on the case's unique scratch-dir marker
   (`tan-contract-<case>-<pid>/root`) rather than on the harness's own
@@ -414,6 +555,70 @@ just the one that captured it:
   `std::env::current_dir()` resolves through (`/var/…` → `/private/var/…`) and
   a whole-prefix comparison would silently stop matching there. Like the
   separator rewrite, it applies to `PATH_KEYS` fields only.
+- **Pinning host state a case reads (`env.json`, tan-cli#253)** — every rule
+  above isolates a case from the FILESYSTEM. `model doctor` is the first
+  command whose entire payload is a fact about the HOST: each
+  `data.backends[]` row answers "is this vendor NPU compiler installed",
+  resolved through `shutil.which("vela")` / `shutil.which("dxcom")` and the
+  `ALP_DRPAI_TVM_HOME` / `ALP_DEEPX_SDK_HOME` / `ALP_VELA_CONFIG` environment
+  variables. A golden recorded on a toolchain-less box would therefore go RED
+  on a box that has them — and the repo's own unavailable-reason string tells
+  the reader to install one (`"vela not on PATH; pip install
+  tan-cli[model-compile]"`). Measured on a host carrying a `vela`, a `dxcom`
+  and `ALP_VELA_CONFIG`/`ALP_DEEPX_SDK_HOME`, three of the five reported rows
+  flip. `model-doctor-no-sdk` therefore ships an `env.json` pinning `PATH` to
+  its own (empty) scratch directory and unsetting the three variables, so the
+  case measures the CONTRACT rather than the recording box. **Pinning, not
+  normalising**: `available`/`reason` are the only fields that case exists to
+  gate, and `normalise()` is deliberately scoped to `PATH_KEYS` for the reason
+  its own docstring gives. `PATH` is pinned to `__WORKDIR__` rather than `""`
+  because an empty `PATH` also strips a Windows runner's launcher search path,
+  and a harness that cannot spawn the child reports a contract failure it never
+  measured.
+
+  **`debug-config-preview-baremetal-mcu` is the second, tan-cli#1179.** Since
+  tan-cli#1176/#1178 `tan bootstrap` installs the Zephyr SDK with
+  `--no-hosttools`, so the SDK ships no `openocd`; `tan debug-config --server
+  openocd` on a host with no system one either used to emit a profile with no
+  `serverpath`, no `searchDir` and no warning. It now emits a `data.notes`
+  entry -- and, since tan-cli#1194's review round, the spelling of that entry
+  that fits the state this case is actually in: an empty scratch directory
+  with no build, asking for `baremetal-mcu`, which is a plain-CMake backend
+  no Zephyr-SDK paragraph applies to (the first wording asserted "this
+  project's runners.yaml has no 'config.openocd' key" about a file that has
+  never existed here). The note fires only when no `openocd` resolves on
+  `PATH` -- so this case reads the host in exactly the way the paragraph
+  above describes, and a re-record on a box carrying `/usr/bin/openocd` would
+  bless a note-less golden that then fails on every box without one. Its
+  `env.json` pins `PATH` alone (`{"PATH": "__WORKDIR__"}`) and unsets nothing.
+  Left unpinned, the golden's answer would instead ride on
+  `python/tests/conftest.py`'s session-scoped PROBE_TOOLS scrub -- a fixture
+  in a different tree, which the "Regenerating a golden" procedure above (it
+  calls `case_env`; it runs no session fixture) never applies.
+
+  **`monitor-no-port` is the third, tan-cli#1165.** `data.availablePorts` is
+  `_available_ports()`'s payload verbatim, and that function's real source,
+  pyserial's own `serial.tools.list_ports.comports()`, enumerates whatever
+  serial hardware is physically plugged into the host running it -- a
+  recording taken straight off it would pin one machine's Bluetooth pairings
+  and USB adapters, not the contract, and would answer `[]` on a CI runner
+  with nothing attached, which pins nothing the field exists to freeze. There
+  was no existing seam to make this deterministic, so this case's fix adds one:
+  `_TEST_PORTS_ENV` (`TAN_MONITOR_TEST_PORTS_JSON`, `monitor_cmd.py`), read
+  once inside `_available_ports()`, which -- set -- REPLACES the pyserial
+  enumeration outright with a JSON-encoded `[[device, description], ...]`
+  array, instead of normalising the result away; `_run_monitor`'s own
+  "pyserial is importable" precheck honours the same variable, so the case is
+  deterministic whether or not pyserial happens to be installed in whatever
+  environment replays it (`ci.yml`'s gates job installs no extras, on
+  purpose). Its `env.json` sets only `TAN_MONITOR_TEST_PORTS_JSON`; nothing on
+  this command's path calls `shutil.which`, so `PATH` needs no pin. See its own
+  `PROVENANCE.txt` for why a host-read port list cannot be a golden, which is
+  what this case's fixture stands in for.
+
+  The other twenty-four cases answer from their own copied inputs and carry
+  no `env.json`; pinning host state they never read would only hide a real
+  regression in how they read it.
 
 ## Cases pinned today
 
@@ -426,20 +631,31 @@ just the one that captured it:
 | `validate-offline-empty-document` | `validate --offline --format json` (empty fixture `board.yaml`) | 2 | An empty/comment-only document used to report exit 0 "clean" — pins that the shipping Python CLI refuses it, message and exit code alike, as the frozen Rust oracle did when it was recorded. |
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
+| `sdk-remove-absent` | `sdk remove v0.0.0-nonexistent --destination ./sdk-cache --format json` | 0 | tan-cli#790: idempotent removal of a target that was never there — `removed: false`, `freedBytes: 0`, exit 0 (a no-op is a SUCCESS, matching `sdk current`'s "nothing configured" convention). `--destination ./sdk-cache` is a relative argv token, matching the "no absolute paths in argv" rule below; `data.path` still comes back absolute (the resolved target), which is what makes it the first case to need the `__WORKDIR__` substitution for a field OTHER than `project.root`/`launch.json`. Re-recorded for tan-cli#1028 (`PROVENANCE.txt`): `data.resolvesToAfter` is `{sdkPath: null, readiness: null, sourceTier: "none"}` here — the isolated `HOME` this case runs under means nothing resolves for the workspace either before or after the (idempotent) no-op. |
+| `model-doctor-no-sdk` | `model doctor --format json` (no SDK, `env.json`) | 0 | tan-cli#253, and the first `model` case of any kind — the three shipped `model` subcommands had ZERO envelope coverage while every other command surface had some. Pins that an absent vendor toolchain is a REPORTED row and never a failure (`ok: true`, exit 0 — `_run_doctor` returns `SUCCESS` unconditionally), the four `data.backends[]` rows in REGISTRY order (`cpu`, `ethos_u`, `drpai`, `deepx_dxm1`), the five-key row shape (`backend`/`tool`/`available`/`version`/`reason`), the separate `data.optional[]` array carrying the `ALP_VELA_CONFIG` row — kept out of `backends[]` so a licensed-only enhancement cannot read as a broken backend — and the `model.doctor-sdk-unresolved` WARNING, which is `doctor`'s deliberate softening of the `model.sdk-root-unresolved` ERROR the other two subcommands raise for the identical non-resolution. The one case in this set that reads the host, hence the `env.json`; see "Pinning host state a case reads" below. |
+| `model-unknown-subcommand` | `model bogus --format json` | 1 | tan-cli#253; the direct analogue of `sdk-unknown-subcommand`. Also pins the shipped subcommand inventory, since the message's "Available: build, doctor, check, list, zoo, add, prep, run, ab." is rendered from `SUBCOMMANDS` itself. Re-recorded for tan-cli#674 when `list` landed as a fourth subcommand, and again for tan-cli#1286 when `zoo` and `add` landed (`PROVENANCE.txt`); only the trailing inventory moved each time. |
+| `model-build-no-sdk` | `model build --format json` (no SDK resolvable) | 2 | tan-cli#253. `model build`'s refusal when no alp-sdk checkout resolves, captured the way `presets-no-sdk` / `generate-board-yaml-missing` capture theirs. Pins that `data` still carries `build`'s OWN empty payload (`schemaVersion`/`sku`/`built`) on a refusal, not a generic stand-in. The refusal fires before the board.yaml is read, which is also why it is the deterministic one — the `model.board-yaml-missing` alternative embeds an absolute path in `issues[].message`, which `normalise()` deliberately does not rewrite. |
+| `model-check-no-sdk` | `model check --format json` (no SDK resolvable) | 2 | tan-cli#253. The same refusal as the row above with `check`'s OWN empty payload (`sku`/`exact`/`models`, not `sku`/`built`). The pair is the point: both subcommands share a refusal path and `_empty_data` shapes it per subcommand, so a regression that collapsed them onto one shape would be invisible with only one of the two committed. |
+| `model-build-no-models` | `model build --sdk-root ./sdk --format json` (fixture SDK, board with no `models:`) | 0 | tan-cli#253. The clean EMPTY success: nothing declared is not an error. Pins `data.sku` read off the board, `data.built: []`, `issues: []`, and the `sdk` block (`root: "./sdk"`, `sourceTier: "sdkRootFlag"`) — the resolution `model` reported nowhere at all before tan-cli#497. Deterministic on a box with no NPU compiler because no adapter is ever reached. |
+| `model-check-no-models` | `model check --sdk-root ./sdk --format json` (fixture SDK, board with no `models:`) | 0 | tan-cli#253. `check`'s own empty success shape, and the pin on `exact: false` as the default of the `--exact` flag this case does not pass. |
 | `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is the first guard clause in `python/tan/commands/generate_cmd.py`, needing no board/SDK/network to reach. |
 | `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
 | `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
 | `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
 | `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
-| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five were re-recorded against the shipping Python CLI under tan-cli#502 and carry a `PROVENANCE.txt`; none is `xfail`'d any more — see "Why the five `debug-config-preview-*` goldens were re-recorded" right below this table.** `--preview` reads no `board.yaml`, spawns no Python and probes no PATH; the only host-dependent output is the absolute working directory, tokenized as `__WORKDIR__` above. |
+| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five were re-recorded against the shipping Python CLI under tan-cli#502 and carry a `PROVENANCE.txt`; none is `xfail`'d any more — see "Why the five `debug-config-preview-*` goldens were re-recorded" right below this table.** `--preview` reads no `board.yaml` and spawns no Python. It used to probe no PATH either; since tan-cli#1179 the OpenOCD profile does — `baremetal-mcu` is the one case here that passes `--server openocd`, its `data.notes` now carries the no-`serverpath` note (tan-cli#1194 review: the `baremetal-mcu` spelling of it, which drops the Zephyr-SDK `--no-hosttools` paragraph — that target kind is built by the plain-CMake backend, so no Zephyr SDK and no `find_program(OPENOCD openocd)` is in its story), and it therefore ships an `env.json` pinning `PATH` (see "Pinning host state a case reads" and its own `PROVENANCE.txt`). For the other four the only host-dependent output is still the absolute working directory, tokenized as `__WORKDIR__` above. |
+| `monitor-no-port` | `monitor --format json` (no `--port`, `env.json`) | 1 | tan-cli#1165. Pins `data.availablePorts[].{device,description}` — read by alp-sdk-vscode `src/monitor.ts::listSerialPorts` (alp-sdk-vscode#649, OPEN, not yet merged) and otherwise unguarded by any golden — with two entries: one carrying a real `description`, one carrying `"n/a"`, the literal pyserial defaults `description` to for a port with none (tan's own word, copied through by `_ports_data` verbatim). Also pins the `monitor.no-port` issue and its "no --port given -- available serial ports: ..." message. The one case in this set whose command reads live serial hardware, hence the `env.json`; see "Pinning host state a case reads" below. |
 | `presets-no-sdk` | `presets --format json` (no SDK resolvable) | 0 | Pins the `presets.sdk-root-unresolved` warning ON THE WIRE — the one frozen issue code reachable hermetically — plus the full `PresetsData` key set with `soms: []`. |
 | `presets-heterogeneous-som` | `presets --sdk-root ./sdk --format json` (fixture SDK) | 0 | Issue #106's worked example made executable. The fixture SoM has an `a55` (`machine:` → yocto) and an `m33` (`board:` → zephyr), so `data.soms[].cores[].{id,os}` carries two different values — rename `soms` or `cores` and this fails instead of quietly scaffolding a multi-core part single-core with no IPC. Also pins `boardLibraries` discovery. |
 | `explain-overview` | `explain --format json` | 0 | `data.available.projectTemplates`, the New Project wizard's starter list. Fully hermetic — the catalogues are static, no SDK involved. |
-| `examples-catalog` | `examples --sdk-root ./sdk --format json` (fixture SDK) | 0 | `data.examples[].sourceDir`, which is what `tan init --from-example <sourceDir>` is handed back; a rename breaks scaffolding from an SDK example. Also pins README-derived `title`/`description`. |
+| `explain-template-iot-starter` | `explain --template iot-starter --format json` | 0 | `data.som.{initAcceptsSkus,initRefusesSkuPrefixes}` (tan-cli#866) — a project template's `tan init` `--som` refusal policy as structured data, not just the `details[]` prose it used to be. `iot-starter` carries the ONE per-template `TEMPLATE_SUPPORTED_SKUS` restriction whose description string used to hand-repeat it ("(E1M-AEN801 only)"), so this is also the golden proving that parenthetical, and the explanation's Wi-Fi-transport sentence, are now GENERATED from `data.som.initAcceptsSkus`, not typed twice. Fully hermetic — no SDK involved on this path (`--template` never resolves a checkout). |
+| `examples-catalog` | `examples --sdk-root ./sdk --format json` (fixture SDK) | 0 | `data.examples[].sourceDir`, which is what `tan init --from-example <sourceDir>` is handed back; a rename breaks scaffolding from an SDK example. Also pins README-derived `title`/`description`. The fixture SDK ships no `metadata/catalog.json`, so this also pins the pre-#484 FOUR-key row shape for a checkout that predates the facets. |
+| `examples-catalog-facets` | `examples --sdk-root ./sdk --format json` (fixture SDK) | 0 | tan-cli#484. Same example as `examples-catalog`, but this fixture SDK's `metadata/catalog.json` carries a real `gen_catalog.py`-shaped entry for it (`category`/`som`/`board`/`cores[]`/`coreCount`/`osSet`/`declares`) — pins that every one of those keys reaches the wire, in the order alp-sdk's own issue illustrated, appended after the original four. |
 | version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` asserts the format rather than a literal version that changes every release. (A Rust mirror of it existed until tan-cli#269 deleted `crates/`.) |
 | issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites. They prove spelling/registration, while command tests prove reachability. The Rust half, which checked the registry entries the frozen oracle owned, went with `crates/` in tan-cli#269 — see the `emittedBy` note under "Frozen issue codes". |
 | doctor `--build` key set (no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`, in `python/tests/commands/test_doctor_command.py` — the envelope `data` key set and `summary`'s `{pass,warn,fail}` shape, plus the build preflight's leading check names (`sdk`, `boardYaml`, `workspace`) in `test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host`. The single named Rust assertion that used to own this row, `doctor_build_data_keys_the_extension_reads`, went with `crates/` in tan-cli#269; the Python coverage is spread across that module rather than concentrated in one test. |
 | `doctor` published key set (`contract/doctor-data-keys.json`, no `envelopes/` fixture dir) | `doctor --format json` | — | tan-cli#664: the SAME key-set fact as the row above, but PUBLISHED into `envelope-contract.json`'s `envelopes.doctor.dataKeys` rather than pinned only inside this repo. See "The `doctor` family is a key set, not a golden" above. Kept honest by `python/tests/conformance/test_doctor_contract_key_set.py`, which spawns a real `tan doctor --format json` and fails on either an emitted key this file doesn't declare or a declared key the command stopped emitting. |
+| `sdk list` published key set (`contract/sdk-list-data-keys.json`, no `envelopes/` fixture dir) | `sdk list --online --format json` | — | tan-cli#887: the second `dataKeys` family, for the same reason as `doctor` — the values are upstream release facts, the key names are not. Published into `envelope-contract.json`'s `envelopes.sdk-list.dataKeys`. Kept honest by `python/tests/conformance/test_sdk_list_contract_key_set.py`, which replaces only `urllib.request.OpenerDirector.open` and runs the real `_fetch_releases` → `parse_remote_sdk_releases` → `_list_data` → `emit()` path. Both directions fail loudly, and a second run feeds an entry carrying nothing but `tag_name` so a key tan defaults rather than emits cannot hide behind a fully-populated fixture. |
 
 ### Why the five `debug-config-preview-*` goldens were re-recorded (tan-cli#502)
 
@@ -529,6 +745,24 @@ five matching the retired oracle any more — and re-recording is what stops
 (`zephyr-mcu-sdk-identity`, `baremetal-mcu`, `yocto-userspace`) that never had
 a parity fixture.
 
+### Second re-record: `data.programsDevice` + `loadFiles` (tan-cli#945)
+
+All five `debug-config-preview-*` goldens were re-recorded a SECOND time, on
+2026-08-30 against `tan 0.6.1-rc1.dev0`, purely additively — `data.
+schemaVersion` stays `"1"` on every one. Two new facts, both explained in
+full in the `data.programsDevice`/`data.configuration.loadFiles` row of the
+frozen-`data`-field-names table above:
+
+- `data.programsDevice: bool` on every case (`true` for the two cortex-debug
+  targets, `false` for `yocto-userspace`/`native-host`).
+- `data.configuration.loadFiles` on the three cortex-debug cases
+  (`zephyr-mcu`, `zephyr-mcu-sdk-identity`, `baremetal-mcu`) only — it is not
+  a field `cppdbg`/`lldb` have any concept of, so `yocto-userspace` and
+  `native-host`'s `configuration` is untouched by this re-record.
+
+Each case's `PROVENANCE.txt` carries its own "second re-record" section with
+the exact diff. `issues[]` is unchanged on all five.
+
 Deliberately **outside the envelope**: nothing, as of tan-cli#399's close-out.
 `faultdecode` was the one verb here — its `--format json` used to print the
 SDK's unwrapped fault report
@@ -572,9 +806,16 @@ purpose:
 1. Run the case's `args.txt` through the **shipping Python CLI** by hand from an
    empty directory, with `SOURCE_DATE_EPOCH=0` and `HOME`/`USERPROFILE` pointed
    at another empty directory, `--format json`. (Reuse the conformance
-   harness's own `fresh_dir` / `copy_fixture_inputs` / `normalise` if you can —
-   that is how the tan-cli#502 re-record was captured, and it removes any chance
-   of the recording and the comparison disagreeing about isolation.)
+   harness's own `fresh_dir` / `copy_fixture_inputs` / **`case_env`** /
+   `normalise` if you can — that is how the tan-cli#502 re-record and the
+   tan-cli#253 `model` recordings were captured, and it removes any chance of
+   the recording and the comparison disagreeing about isolation.)
+   **`case_env` is not optional for a case that ships an `env.json`.** It is
+   what applies that pin, and skipping it re-records the RECORDING BOX: on a
+   host with `vela` installed, `model-doctor-no-sdk` would be blessed with
+   `ethos_u.available: true` and would then fail on every box without it —
+   the exact hole tan-cli#253 closed. Assembling the environment by hand
+   instead of calling `case_env` has the same effect.
 2. Copy the printed envelope into `expected.json`, converting any `\` path
    separator to `/` (Windows only — Unix output is already normalized).
 3. Update `expected.exit` if the exit code changed.
@@ -589,3 +830,12 @@ purpose:
 6. Explain the *intentional* shape change in the commit message — a golden
    update with no explanation of why the wire format changed is exactly the
    drift this gate exists to catch.
+
+`contract/fixtures/build-workspace-issues/` holds one golden `issues[]` entry
+per workspace-shaped `tan build` code (`build.workspace-unresolved`,
+`build.workspace-patches-missing`, `build.workspace-patches-uncached`;
+tan-cli#1466), diffed by
+`python/tests/conformance/test_build_workspace_issue_goldens.py`. They are not
+envelope cases (each needs host state a hermetic subprocess cannot pin); the
+scratch directory is spelled `__WORKDIR__`. Re-record with
+`TAN_RECORD_GOLDENS=1`.

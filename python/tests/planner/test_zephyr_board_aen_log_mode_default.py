@@ -30,10 +30,9 @@ from __future__ import annotations
 
 import pytest
 
-from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
-
-SDK = sdk_root()
+# `_bound_sdk` is a pytest fixture, imported for its side effect -- the
+# same idiom `_baremetal_support`'s consumers use for `bound_sdk_root`.
+from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
@@ -43,12 +42,6 @@ pytestmark = pytest.mark.skipif(
            "below read only their own arguments, never the bound "
            "checkout's content. A SKIP about the missing root, not a pass.",
 )
-
-
-@pytest.fixture(autouse=True)
-def _bound_sdk():
-    bind_sdk_root(SDK)
-    yield
 
 
 def _mod():

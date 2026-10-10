@@ -1,0 +1,6 @@
+model
+build
+--sdk-root
+./sdk
+--format
+json

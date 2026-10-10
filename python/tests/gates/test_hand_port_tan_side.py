@@ -79,11 +79,32 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: not have.
 HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
     "scripts/gen_zephyr_board.py": ("tan/planner/zephyr_board.py",),
+    # tan-cli#1265: one upstream file answered by one tan file, the clean shape
+    # this table is for. Upstream keeps the predicate in a FLAT, package-free
+    # module so `gen_zephyr_board.py` -- which lives OUTSIDE the
+    # `alp_orchestrate` package -- can import it without dragging in the
+    # orchestrator (jsonschema, alp_project, alp_cli) or adding a
+    # package-to-generator import loop against `loader.py`/`secure.py`'s
+    # existing deferred import going the other way. Neither hazard exists here:
+    # both callers are inside `tan.planner`, so it relocates as an ordinary
+    # sibling that `aperture.py` imports twice and `zephyr_board.py` once
+    # (alp-sdk#2073). Deliberately NOT inlined the way `sentinels.is_tbd` became
+    # `zephyr_board.py::_is_tbd` -- that inline has ONE calling module, this
+    # predicate has two, and not drifting is the whole point of #2073.
+    "scripts/whole_device_alias.py": ("tan/planner/whole_device_alias.py",),
     "scripts/alp_project_loader.py": (
         "tan/planner/project_loader.py",
         "tan/planner/som_metadata.py",
     ),
-    "scripts/alp_template.py": ("tan/planner/template.py",),
+    # tan-cli#1142 split template.py (2206 lines against MODULE_CAP=800) into
+    # three sibling modules under the ONE HAND_PORT_SOURCES entry -- see that
+    # table's own comment for why a split is allowed here (MIRRORED_PREFIX
+    # bars a PINNED_HASHES module's shape from diverging, not a hand-port's).
+    "scripts/alp_template.py": (
+        "tan/planner/template.py",
+        "tan/planner/template_pins.py",
+        "tan/planner/template_rewrite.py",
+    ),
     # BOTH halves, because the mapped file disclaims the second one:
     # `project_emit/__init__.py:15` says `_CHIP_SUBSYSTEMS` is "already in
     # `slugs.py`", and `slugs.py:188` claims the relocation in the same words
@@ -93,6 +114,24 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
         "tan/planner/project_emit/__init__.py",
         "tan/planner/slugs.py",
     ),
+    # The in-process `--emit` front door: `tan/planner_emit.py` says it mirrors
+    # `_run_v2_per_core_emit` and `main()` line for line. One upstream file,
+    # one tan file that exists to implement it -- the clean shape. Pinned
+    # because the `dts-overlay` M33-ownership append (alp-sdk#2673) landed
+    # upstream here and was missed while nothing tracked this file.
+    "scripts/alp_project.py": ("tan/planner_emit.py",),
+    # tan-cli#270: `tan validate`'s in-process engine. `validator.py` is split
+    # across three tan modules for the 800-line budget -- ONE port, not three;
+    # `loader.py` also carries its two schema helpers (see the
+    # NO_TAN_FILE_PAIRING history of this key).
+    "scripts/alp_cli/validator.py": (
+        "tan/core/board_validator.py",
+        "tan/core/board_validator_schema.py",
+        "tan/core/board_validator_compat.py",
+    ),
+    "scripts/alp_cli/diagnostic.py": ("tan/core/board_diagnostic.py",),
+    "scripts/alp_cli/yaml_pos.py": ("tan/core/board_yaml_pos.py",),
+    "scripts/validate_board_yaml.py": ("tan/core/board_validator_run.py",),
     "scripts/alp_project_emit/bom_netlist.py": ("tan/planner/project_emit/bom_netlist.py",),
     "scripts/alp_project_emit/dts.py": ("tan/planner/project_emit/dts.py",),
     "scripts/alp_project_emit/hw_info.py": ("tan/planner/project_emit/hw_info.py",),
@@ -104,23 +143,17 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
         "tan/planner/project_emit/west_libs.py",
         "tan/planner/libraries.py",
     ),
-    # The `scripts/alp_cli/*` half -- the nine #778 is about. Each of these was
-    # unmapped before this file existed.
-    "scripts/alp_cli/faultdecode.py": (
-        "tan/core/faultdecode.py",
-        "tan/commands/faultdecode_cmd.py",
-    ),
-    "scripts/alp_cli/new_som.py": ("tan/commands/new_som_cmd.py",),
-    "scripts/alp_cli/monitor.py": ("tan/commands/monitor_cmd.py",),
-    # `tan/core/error_catalog.py` ONLY. `explain_cmd.py` also touches this
-    # upstream module, but ~80% of it is template registries ported from the
-    # retired Rust oracle with no upstream-Python origin at all; pairing it
-    # here would attribute that prose to `explain.py`.
-    "scripts/alp_cli/explain.py": ("tan/core/error_catalog.py",),
-    # Lopsided, and worth knowing before reading a red here as a port failure:
-    # 66 of `doctor.py`'s 832 lines crossed (`_check_libraries`). The upstream
-    # hash therefore also moves for the ~24 checks that never came over.
-    "scripts/alp_cli/doctor.py": ("tan/core/doctor_libraries.py",),
+    # `scripts/alp_cli/{faultdecode,new_som,monitor,explain,doctor}.py` were
+    # here (the `scripts/alp_cli/*` half #778 is about) until tan-cli#996:
+    # RETIRED, alongside their `HAND_PORT_HASHES` pins, when alp-sdk `210e9fed`
+    # (#1367/#1368) deleted all seven `alp_cli/*` sources outright -- see that
+    # pin's own comment in `test_planner_relocation_freshness.py`. Their tan
+    # counterparts (`tan/core/faultdecode.py` + `tan/commands/
+    # faultdecode_cmd.py`, `tan/commands/new_som_cmd.py`, `tan/commands/
+    # monitor_cmd.py`, `tan/core/error_catalog.py`, `tan/core/
+    # doctor_libraries.py`) are unaffected and keep governing their own tan
+    # commands; only the alp-sdk half of the audit is gone, per this file's
+    # own "drop them in the same change that dropped the pin" rule.
 }
 
 #: Upstream sources whose tan counterpart is real but is NOT a file. A
@@ -134,28 +167,27 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
 #: below bounds the set the same way the drift ledger is bounded.
 HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
     "scripts/alp_cli/diagnostic_format.py": (
-        "the port is a ~150-line region inside tan/commands/validate_cmd.py "
-        "(1613 lines), a file under active change for stderr parsing, "
-        "exit-code classification and spawn behaviour"
-    ),
-    "scripts/alp_cli/validate.py": (
-        "no real counterpart: tan/commands/validate_cmd.py is a port of the retired Rust "
-        "oracle's validate.rs. What crossed is the --format human/json/sarif "
-        "concept, which tan deliberately diverges on, plus two indent=2 calls"
+        "the port is split across two files: a ~150-line region inside "
+        "tan/commands/validate_cmd.py (1702 lines, under active change for "
+        "stderr parsing, exit-code classification and spawn behaviour) for "
+        "the SARIF emission, and tan/core/uri_reference.py for the "
+        "`_is_windows_spelled`/`_path_to_uri_reference` URI half. Naming "
+        "only the first would have been the incomplete-mapping defect #778 "
+        "is about"
     ),
     "scripts/sentinels.py": (
         "INLINED, not ported as a file: `sentinels.is_tbd` is spelled "
         "`_is_tbd` inside tan/planner/zephyr_board.py, which this table "
         "already pairs with scripts/gen_zephyr_board.py. Pairing it again "
         "here would pin one file to two upstream sources -- the same shape "
-        "as validator.py below"
+        "as `loader.py`'s schema helpers did"
     ),
-    "scripts/alp_cli/validator.py": (
-        "load_board_schema/iter_schema_errors crossed into tan/planner/"
-        "loader.py, 24 lines of 1313 -- and that file is already pinned in "
-        "PINNED_HASHES against scripts/alp_orchestrate/loader.py, so a second "
-        "file pairing would double-pin one file to two upstream sources"
-    ),
+    # "scripts/alp_cli/validate.py" and "scripts/alp_cli/model.py" were here
+    # until tan-cli#996: RETIRED, alongside their HAND_PORT_HASHES pins, when
+    # alp-sdk 210e9fed (#1367/#1368) deleted the whole alp_cli click-group --
+    # see that pin's own comment in test_planner_relocation_freshness.py.
+    # tan/commands/validate_cmd.py and tan/commands/model_cmd.py are
+    # unaffected; only the alp-sdk half of the audit is gone.
 }
 
 #: Upstream sources whose tan counterpart is KNOWN to be wrong right now.
@@ -167,16 +199,22 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
 #: failure reproduced one file later. So the permitted contents are pinned as
 #: a literal in `_LEDGER_MAY_ONLY_CONTAIN` below: growing this table requires
 #: editing that set too, in a diff a reviewer sees.
-HAND_PORT_KNOWN_DRIFT: dict[str, str] = {
-    "scripts/alp_cli/model.py": (
-        "tan/commands/model_cmd.py's _resolve_compile is still pre-alp-sdk#1271: "
-        "it resolves EVERY string compile option to a path, so DRP-AI's "
-        "input_shape/input_name/product are corrupted into filesystem paths. "
-        "Upstream restricts this to _PATH_OPT_KEYS = {config, calibration, "
-        "images, spec}. Tracked by tan-cli#777; delete this entry and add the "
-        "pairing to HAND_PORT_TAN_SIDE when that lands."
-    ),
-}
+# `scripts/alp_cli/model.py` was here (tan-cli#777: tan/commands/model_cmd.py's
+# _resolve_compile was pre-alp-sdk#1271, corrupting DRP-AI's
+# input_shape/input_name/product into filesystem paths). #791 briefly retired
+# the whole entry (both here and from HAND_PORT_HASHES) on the premise that
+# ADR-0028 had already deleted the alp-sdk original -- re-checked against the
+# actual pinned commits (PINNED_SDK_COMMIT `eb96112b`/v0.16.0 and
+# HAND_PORT_PINNED_SDK_COMMIT `88318e75`/v0.15.0+88) and that premise does not
+# hold: the deletion (alp-sdk `ab6968e22`) lives only on alp-sdk PR #1470,
+# OPEN and unmerged, so `scripts/alp_cli/model.py` is still live upstream,
+# byte-identical to what `origin/dev` still pins there. Restored to
+# HAND_PORT_HASHES; the underlying #777 drift IS fixed though (verified:
+# `tan/commands/model_cmd.py` already carries `_PATH_OPT_KEYS = {"config",
+# "calibration", "images", "spec"}`), so the entry moves to
+# HAND_PORT_NO_TAN_FILE_PAIRING (a real, clean, function-level
+# correspondence in a much larger file) rather than staying KNOWN_DRIFT.
+HAND_PORT_KNOWN_DRIFT: dict[str, str] = {}
 
 
 #: The ONLY hand-ports allowed to decline a file-level pairing. Pinned for the
@@ -185,8 +223,6 @@ HAND_PORT_KNOWN_DRIFT: dict[str, str] = {
 _PAIRING_MAY_ONLY_CONTAIN: frozenset[str] = frozenset(
     {
         "scripts/alp_cli/diagnostic_format.py",
-        "scripts/alp_cli/validate.py",
-        "scripts/alp_cli/validator.py",
         "scripts/sentinels.py",
     }
 )
@@ -316,7 +352,7 @@ def test_every_declared_tan_counterpart_exists_on_disk():
 #: The ONLY hand-ports allowed to sit in `HAND_PORT_KNOWN_DRIFT`. Pinned as a
 #: literal so the ledger cannot grow quietly: adding an entry means editing
 #: this set in the same diff, with the reason visible to a reviewer.
-_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset({"scripts/alp_cli/model.py"})
+_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset()
 
 #: A tracking reference is `<repo>#<number>`. A bare `tan-cli#` passed the
 #: substring test this replaced, so the reason string could name no issue at
@@ -515,7 +551,26 @@ def test_explain_hand_port_still_agrees_with_its_upstream_symbols():
 
     Skips visibly without a bound checkout, same contract as the sibling
     gate: a run that never bound the root is not set up to do this audit.
+
+    tan-cli#996: `scripts/alp_cli/explain.py` was RETIRED upstream at
+    alp-sdk `210e9fed` (#1367/#1368, "finish the alp_cli retirement") and is
+    no longer a `HAND_PORT_HASHES` key -- see that pin's own comment. This
+    symbol-level probe has nothing left to compare against upstream, so it
+    SKIPS (loudly, naming why) rather than either hard-failing on a
+    `FileNotFoundError` that looks like drift, or silently vanishing --
+    `tan/core/error_catalog.py`'s own three symbols are unaffected and still
+    govern `tan explain`'s real behaviour; only the alp-sdk half of this
+    audit is gone. If a future upstream re-adds an equivalent module, port
+    this probe to the new path rather than reviving `explain.py`'s.
     """
+    upstream_path = _hand_port_sdk_root() / "scripts" / "alp_cli" / "explain.py"
+    if not upstream_path.is_file():
+        pytest.skip(
+            "scripts/alp_cli/explain.py no longer exists upstream (alp-sdk "
+            "210e9fed retired the whole alp_cli click-group, tan-cli#996) -- "
+            "nothing to compare tan/core/error_catalog.py's symbols against. "
+            "Not a failure: tan's own explain command is unaffected."
+        )
     upstream = _upstream_ast("scripts/alp_cli/explain.py")
 
     from tan.core import error_catalog
@@ -596,3 +651,13 @@ def test_the_symbol_probe_can_actually_fail():
         _function_body_source(tan_tree, "_definitely_not_a_function_here")
 
     assert HAND_PORT_SDK_ROOT_ENV, "the sibling gate's env-var name is empty"
+
+
+def test_the_validators_ported_from_commit_is_the_audited_hand_port_pin():
+    """tan-cli#270: `validate_cmd.PORTED_FROM_SDK_COMMIT` is what the
+    version-skew message tells the user the in-process validator was cut from.
+    It must move with `HAND_PORT_PINNED_SDK_COMMIT`, or the message lies."""
+    from tan.commands.validate_cmd import PORTED_FROM_SDK_COMMIT
+    from tests.gates.test_planner_relocation_freshness import HAND_PORT_PINNED_SDK_COMMIT
+
+    assert PORTED_FROM_SDK_COMMIT == HAND_PORT_PINNED_SDK_COMMIT

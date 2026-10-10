@@ -35,6 +35,13 @@ try:
 except ImportError:
     sys.exit("alp_orchestrate: jsonschema is required.  Install via `pip install jsonschema`.")
 
+from tan.core.metadata_schema import (
+    missing_schema_note,
+    soc_spec_schema_path,
+    som_preset_schema_path,
+    validate_document,
+)
+
 from . import sdk_compat
 from .models import (
     BoardProject,
@@ -46,7 +53,8 @@ from .models import (
     Slice,
     StorageEntry,
 )
-from .partition import _known_flash_devices
+from .ownership import load_ownership_doc, resolve_ownership
+from .partition import _is_ospi_key_unassembled, _known_flash_devices
 from .paths import BOARD_SCHEMA, METADATA_ROOT, REPO
 from .som_metadata import _sku_family, resolve_memory_map
 from .strict_loaders import DuplicateKeyError, strict_json_loads, strict_yaml_load
@@ -98,7 +106,24 @@ def _silicon_to_soc_path(silicon: str, metadata_root: Path) -> Path:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    if not path.is_file():
+    try:
+        path_is_file = path.is_file()
+    except (OSError, RuntimeError) as e:
+        # Same defect class as validate.py's `profile:` guard (#1961):
+        # a bad `--input` board.yaml path must not crash the loader
+        # with an unhandled exception.  `Path.is_file()`'s own
+        # `_ignore_error` list swallows ENOENT/ENOTDIR/EBADF/ELOOP on
+        # POSIX -- a symlink loop returns `False` there, no raise --
+        # but re-raises `PermissionError` on EACCES (an `OSError`
+        # subclass) rather than swallowing it, same as the `profile:`
+        # gap.  On Windows, a real WSL-made symlink loop driven through
+        # the real CLI with CPython 3.11.3 shows `.is_file()` raise a
+        # plain `OSError` (`WinError 1920`, "The file cannot be
+        # accessed by the system") instead -- confirmed, not a mock.
+        # `RuntimeError` is caught too for parity with `.resolve()`'s
+        # own ELOOP shape elsewhere in this module.
+        raise OrchestratorError(f"could not access {path}: {e}") from e
+    if not path_is_file:
         raise OrchestratorError(f"file not found: {path}")
     try:
         data = strict_yaml_load(path.read_text(encoding="utf-8"), source=path)
@@ -607,6 +632,7 @@ def _load_and_validate_yaml(path: Path,
 def _resolve_board(
     project: dict[str, Any],
     metadata_root: Path,
+    *, skip_advisories: list[str] | None = None,
 ) -> tuple[str, Optional[str], dict[str, Any], str, dict[str, Any],
            dict[str, Any], Optional[str], Optional[str]]:
     """Stage 2 of the #673 Phase-1 `load_board_yaml` split: SoM SKU
@@ -614,8 +640,11 @@ def _resolve_board(
 
     Returns (sku, hw_rev, som_preset, silicon, soc_spec, board_preset,
     board_name, board_hw_rev).
+
+    *skip_advisories*: threaded straight to `_resolve_board_impl`'s own
+    `_refuse_on_schema_errors` calls (tan-cli#964 review, major 6).
     """
-    return _resolve_board_impl(project, metadata_root)
+    return _resolve_board_impl(project, metadata_root, skip_advisories=skip_advisories)
 
 
 def _sku_family_dir(sku: str) -> Optional[str]:
@@ -763,9 +792,56 @@ def _check_sdk_supports_hw_rev(
             f"hw_rev this SDK supports.")
 
 
+def _refuse_on_schema_errors(
+    doc: dict[str, Any], schema_path: Path, source: Path, schema_name: str, subject: str,
+    *, skip_advisories: list[str] | None = None,
+) -> None:
+    """tan-cli#964: refuse a `board.yaml`-bound `tan build`/`tan generate` run
+    when the SoM preset or SoC spec it just read does not validate against
+    its own schema.
+
+    This is the REFUSE half of #964's decided rule: `load_board_yaml` is what
+    `tan build` and `tan generate` (via `planner_root.emit` /
+    `planner_emit.render`) call to turn a `board.yaml` into a plan or an
+    emitted file, and every `OrchestratorError` raised anywhere in that walk
+    already becomes a coded refusal at the command layer (`build.plan-
+    unavailable` / `generate.emit-failed`) rather than a traceback -- so
+    raising here, at the point the document is READ, closes the read-path gap
+    #964 is about with the SAME refusal machinery every other loader check in
+    this file already uses (`_check_hw_rev_exists` and friends), not a new
+    one. `tan.core.metadata_schema.validate_document` never raises itself --
+    a CORRUPT schema file degrades to one synthetic message (which DOES
+    refuse, below, exactly like a real violation); an ABSENT schema file
+    degrades to `[]`, no message at all, which must never refuse (see
+    `validate_document`'s own docstring) -- the refusal, and its exit
+    code/issue code, are entirely this function's unconditional-if-non-empty
+    read of the returned list.
+
+    *skip_advisories* (tan-cli#964 review, major 6): when given, collects
+    `tan.core.metadata_schema.missing_schema_note`'s disclosure for the
+    ABSENT-schema case -- "skip-but-disclose", not a silent skip. Checked
+    unconditionally, before the refuse-worthy violations: a missing schema
+    means `validate_document` returns `[]` and this function would otherwise
+    return having said nothing at all, which is the exact vacuous-gate shape
+    the review measured (`tan generate --target os-topology` writing an
+    unvalidated SoC spec to disk at `ok: true`, `issues: []`).
+    """
+    if skip_advisories is not None:
+        note = missing_schema_note(schema_path, source=source)
+        if note is not None:
+            skip_advisories.append(note)
+    errors = validate_document(doc, schema_path, source)
+    if not errors:
+        return
+    raise OrchestratorError(
+        f"{subject} does not validate against {schema_name}:\n" +
+        "\n".join(f"  - {e}" for e in errors))
+
+
 def _resolve_board_impl(
     project: dict[str, Any],
     metadata_root: Path,
+    *, skip_advisories: list[str] | None = None,
 ) -> tuple[str, Optional[str], dict[str, Any], str, dict[str, Any],
            dict[str, Any], Optional[str], Optional[str]]:
     sku = project["som"]["sku"]
@@ -778,6 +854,9 @@ def _resolve_board_impl(
             f"no preset for SoM SKU {sku} at "
             f"{sku_preset_path.relative_to(REPO) if sku_preset_path.is_relative_to(REPO) else sku_preset_path}")
     som_preset = _load_yaml(sku_preset_path)
+    _refuse_on_schema_errors(
+        som_preset, som_preset_schema_path(metadata_root), sku_preset_path,
+        "som-preset-v2", f"SoM preset {sku}", skip_advisories=skip_advisories)
 
     # Resolve SoC spec via the preset's `silicon:` ref.
     silicon = som_preset.get("silicon")
@@ -789,6 +868,9 @@ def _resolve_board_impl(
         raise OrchestratorError(
             f"no SoC spec at {soc_path.relative_to(REPO) if soc_path.is_relative_to(REPO) else soc_path} for ref '{silicon}'")
     soc_spec = _load_json(soc_path)
+    _refuse_on_schema_errors(
+        soc_spec, soc_spec_schema_path(metadata_root), soc_path,
+        "soc-spec-v1", f"SoC spec for {silicon}", skip_advisories=skip_advisories)
 
     # Board definition.  Two mutually-exclusive sources (the
     # schema's `oneOf` rule enforces this):
@@ -845,7 +927,7 @@ def _validate_topology_cores(
     # `som.sku:` swap where `cores.<key>` doesn't match this SoM preset's
     # `topology:`.  Example: customer has `cores.m55_hp:` and swaps
     # som.sku from E1M-AEN801 (topology: m55_hp + m55_he + a32_cluster)
-    # to E1M-NX9101 (topology: m33 + a55_cluster).  Pre-fix the slice-
+    # to E1M-V2N101 (topology: m33_sm + a55_cluster).  Pre-fix the slice-
     # build loop iterated topology keys, NOT project_cores keys, so
     # `cores.m55_hp:` was silently dropped and the customer got an
     # empty slice with no diagnostic.
@@ -1078,6 +1160,23 @@ def _resolve_storage(
         for entry in storage_entries:
             if entry.flash_device is None:
                 continue   # resolver will block it with a clear reason
+            if _is_ospi_key_unassembled(som_preset, entry.flash_device):
+                # Same #2311 guard as the PSA ITS/PS backing-store check
+                # below: an `ospi_memories` key with `assembled: false`
+                # (e.g. E1M-AEN801's `ospi0`/`ospi1`) is a designed-in
+                # footprint, not a part this SKU actually carries -- refuse
+                # it as a `storage[].flash_device` with the specific reason
+                # rather than the generic "does not resolve" message.
+                where = f"SoM {sku}" if sku else "this SoM"
+                yaml_ref = (f"metadata/e1m_modules/{sku}.yaml" if sku
+                            else "its SoM preset YAML")
+                raise OrchestratorError(
+                    f"board.yaml `storage[{entry.name}].flash_device: "
+                    f"{entry.flash_device}` names on-module OSPI part "
+                    f"'{entry.flash_device}', which is not assembled on "
+                    f"{where} (assembled: false in {yaml_ref}); pick a "
+                    f"flash device backed by a part this SKU actually "
+                    f"carries")
             if entry.flash_device not in known_devices:
                 raise OrchestratorError(
                     f"board.yaml `storage[{entry.name}].flash_device: "
@@ -1139,7 +1238,27 @@ def _validate_cross_fields(
             ref = psa.get(field)
             if ref is None:
                 return
-            if str(ref) in valid_refs:
+            ref_str = str(ref)
+            if ref_str in ospi_keys and _is_ospi_key_unassembled(
+                    som_preset, ref_str):
+                # Same #2311 guard as `_known_flash_devices()` /
+                # `_resolve_flash_device()` in partition.py: an
+                # `ospi_memories` key with `assembled: false` (e.g.
+                # E1M-AEN801's `ospi0`/`ospi1`) is a designed-in footprint,
+                # not a part this SKU actually carries -- refuse it as a
+                # PSA ITS/PS backing store with the specific reason rather
+                # than the generic "does not resolve" message below.
+                sku = som_preset.get("sku")
+                where = f"SoM {sku}" if sku else "this SoM"
+                yaml_ref = (f"metadata/e1m_modules/{sku}.yaml" if sku
+                            else "its SoM preset YAML")
+                raise OrchestratorError(
+                    f"board.yaml `security.psa.{field}: {ref}` names "
+                    f"on-module OSPI part '{ref_str}', which is not "
+                    f"assembled on {where} (assembled: false in "
+                    f"{yaml_ref}); pick a storage partition or memory "
+                    f"region backed by a part this SKU actually carries")
+            if ref_str in valid_refs:
                 return
             raise OrchestratorError(
                 f"board.yaml `security.psa.{field}: {ref}` does not "
@@ -1157,6 +1276,25 @@ def _validate_cross_fields(
 
         att_root = psa.get("attestation_root")
         if att_root == "optiga_trust_m":
+            if _is_i2c_chip_unassembled(som_preset, "optiga_trust_m"):
+                # alp-sdk#2316 (tan-cli#1295), same class as alp-sdk#2311's
+                # OSPI guard: E1M-AEN801/803 carry
+                # `capabilities.optiga_trust_m: true` and name the part
+                # under `on_module:`, but the part itself is DNP
+                # (`assembled: false` on its i2c_devices entry).  The
+                # population fact wins -- an attestation root on a part
+                # this SKU does not carry would build and then fail on
+                # silicon.
+                where = f"SoM {sku}" if sku else "this SoM"
+                yaml_ref = (f"metadata/e1m_modules/{sku}.yaml" if sku
+                            else "its SoM preset YAML")
+                raise OrchestratorError(
+                    f"board.yaml `security.psa.attestation_root: "
+                    f"optiga_trust_m` names on-module part "
+                    f"'optiga_trust_m', which is not assembled on "
+                    f"{where} (assembled: false in {yaml_ref}); pick "
+                    f"`tfm_internal` or `none`, or switch to a SKU that "
+                    f"carries OPTIGA Trust M")
             on_module = som_preset.get("on_module") or {}
             chip_set: set[str] = set()
             for key, val in on_module.items():
@@ -1182,13 +1320,29 @@ def _validate_cross_fields(
     return security_block
 
 
+def _is_i2c_chip_unassembled(som_preset: dict, chip: str) -> bool:
+    """True when the preset declares @p chip under `on_module.i2c_devices`
+    and every such entry is `assembled: false` (alp-sdk#2316).
+
+    A chip the preset never lists there is not "unassembled" -- the other
+    presence checks (on_module:/capabilities:) decide that case -- so this
+    only refuses what the preset explicitly marks DNP.
+    """
+    buses = ((som_preset.get("on_module") or {}).get("i2c_devices")) or {}
+    entries = [dev for bus in buses.values() if isinstance(bus, dict)
+               for dev in (bus.get("devices") or [])
+               if isinstance(dev, dict) and dev.get("chip") == chip]
+    return bool(entries) and all(dev.get("assembled") is False
+                                 for dev in entries)
+
+
 def _library_alias_table(metadata_root: Path) -> dict[str, str]:
     """Legacy per-core `libraries:` token -> canonical manifest name
     (metadata/library-aliases-v1.json).  Empty dict if the table is absent."""
     path = metadata_root / "library-aliases-v1.json"
     if not path.is_file():
         return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = strict_json_loads(path.read_text(encoding="utf-8"), source=path)
     aliases = doc.get("aliases")
     return dict(aliases) if isinstance(aliases, dict) else {}
 
@@ -1248,7 +1402,9 @@ def _normalize_libraries(project: dict[str, Any],
 
 
 def load_board_yaml(path: Path, *,
-                    metadata_root: Path = METADATA_ROOT) -> BoardProject:
+                    metadata_root: Path = METADATA_ROOT,
+                    sku: Optional[str] = None,
+                    skip_advisories: list[str] | None = None) -> BoardProject:
     """Load + validate a board.yaml.
 
     Raises OrchestratorError on any schema / preset / topology error.
@@ -1261,8 +1417,26 @@ def load_board_yaml(path: Path, *,
     `_validate_cross_fields`), invoked in the exact same order as the
     original monolithic function so error precedence and messages are
     unchanged.
+
+    *skip_advisories* (tan-cli#964 review, major 6): optional, caller-owned,
+    threaded to `_resolve_board`'s `_refuse_on_schema_errors` calls. `None`
+    (the default) costs nothing extra -- every existing call site is
+    unaffected. A caller that wants "skip-but-disclose" (rather than the bare
+    silent skip an absent schema file used to be) passes its own list and
+    folds the collected notes into its own issues after this returns; see
+    `planner_emit._render_route_table`/`generate_cmd._emit_one_in_process`
+    for the two commands that do.
     """
     project = _load_and_validate_yaml(path, metadata_root)
+    if sku:
+        # Per-target SKU (alp-sdk#2597): the SoM facts follow the board
+        # being built, not the single static `som.sku` an example declares.
+        # Safe after schema validation: the override only changes the SKU
+        # string, and every SKU-derived value (_resolve_board's preset + SoC
+        # variant lookup, hw_rev checks, topology, storage) is computed
+        # below from it.  Callers pass a SKU taken from
+        # metadata/e1m_modules/.
+        project["som"]["sku"] = sku
 
     # Fold the unified top-level `libraries:` list into the per-core /
     # project-wide channels the downstream resolution expects, so topology +
@@ -1270,7 +1444,8 @@ def load_board_yaml(path: Path, *,
     _normalize_libraries(project, metadata_root)
 
     (sku, hw_rev, som_preset, silicon, soc_spec, board_preset,
-     board_name, board_hw_rev) = _resolve_board(project, metadata_root)
+     board_name, board_hw_rev) = _resolve_board(
+        project, metadata_root, skip_advisories=skip_advisories)
 
     _check_hw_rev_exists(
         metadata_root,
@@ -1305,6 +1480,14 @@ def load_board_yaml(path: Path, *,
     security_block = _validate_cross_fields(
         project, som_preset, sku, storage_entries, metadata_root)
 
+    ownership = resolve_ownership(
+        load_ownership_doc(metadata_root, _sku_family_dir(sku)),
+        project.get("ownership"),
+        declared_core_types=(
+            {str(c.get("type") or "") for c in (soc_spec.get("cores") or [])
+             if c.get("id") in project["cores"]}
+            if project.get("cores") else None))
+
     out = BoardProject(
         sku=sku,
         hw_rev=hw_rev or som_preset.get("default_hw_rev"),
@@ -1323,13 +1506,20 @@ def load_board_yaml(path: Path, *,
         ota=dict(project.get("ota") or {}),
         storage=storage_entries,
         security=security_block,
+        ownership=ownership,
         raw=project,
         metadata_root=metadata_root,   # tan-cli#573: the tree THIS load read
+        source_dir=Path(path).resolve().parent,
     )
 
     # Cross-field consistency pass (v0.6 P2.3).  Runs last so it can
     # inspect the fully-assembled project + every per-core
     # extra_libraries: entry the schema couldn't validate cleanly.
     _validate_consistency(out)
+
+    # `diagnostics.link: itcm` is an AEN M55-HE-only knob (tan-cli#1350):
+    # refuse it here so every planner consumer sees the coded error.
+    from .link_target import apply_link_target  # noqa: PLC0415
+    apply_link_target(out)
 
     return out

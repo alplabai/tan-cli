@@ -106,13 +106,36 @@ IN_PROCESS_MODES = frozenset({
 #: `--emit zephyr-board` emits a whole Zephyr board tree named per SKU+core.
 TREE_MODES = frozenset({"zephyr-board"})
 
-#: The three per-core config slices, each mapped to the `tan.planner` renderer
-#: `alp_project.py` calls for it. Rendered by name via `getattr` so this table
-#: cannot drift from the package's own public surface.
+#: The three per-core config slices this mode set names -- the membership test
+#: `render()` uses to route into `_render_per_core` at all
+#: (`if mode in _SLICE_RENDERER`). All three render through a `buildplan`
+#: artefact helper instead (tan-cli#1216, `_CONFIG_ARTEFACT_HELPER`) -- see
+#: `_render_per_core` -- so the values below only document the leaf renderer
+#: that helper still calls; nothing resolves them by name.
 _SLICE_RENDERER = {
     "zephyr-conf": "_slice_alp_conf",
     "yocto-conf": "_slice_local_conf",
     "cmake-args": "_slice_cmake_args",
+}
+
+#: The modes whose bytes ARE a build-plan `configArtefacts[]` entry, and the
+#: file name that entry carries (`metadata/schemas/build-plan-v1.schema.json`:
+#: "byte-identical to what a consumer's own materialise step writes to
+#: buildDir"). These render through the `buildplan` helper `emit_build_plan` also
+#: calls for the same artefact (tan-cli#1216, ADR-0026 §D).
+_CONFIG_ARTEFACT_FILE = {
+    "zephyr-conf": "alp.conf",
+    "yocto-conf": "local.conf",
+    "cmake-args": "cmake-args.txt",
+}
+
+#: The `buildplan` helper that returns each of those modes' `(file, contents)`.
+#: `cmake-args.txt` is an ADDITIVE plan artefact (tan-cli#1216), so it has its
+#: own helper; the other two are a slice's primary config artefact.
+_CONFIG_ARTEFACT_HELPER = {
+    "zephyr-conf": "_slice_config_artefact",
+    "yocto-conf": "_slice_config_artefact",
+    "cmake-args": "_slice_cmake_args_artefact",
 }
 
 #: `carrier-netlist` / `composed-route-table` share one resolution shape (see
@@ -197,6 +220,7 @@ def render(
     sdk_root: Path,
     board_yaml: Path,
     core: str | None = None,
+    skip_advisories: list[str] | None = None,
 ) -> str:
     """One relocated emit mode as text. Raises on any refusal.
 
@@ -206,6 +230,12 @@ def render(
 
     `TREE_MODES` are refused here rather than silently mis-served: they write a
     directory, so a caller that asked for text would get a path it never wrote.
+
+    *skip_advisories* (tan-cli#964 review, major 6): optional, caller-owned;
+    threaded to `load_board_yaml`/`_render_route_table`'s own schema checks so
+    a caller that writes the rendered text to disk (`generate_cmd.py`) can
+    disclose "validated against nothing -- the schema itself is absent" rather
+    than silently writing an unvalidated artefact at `ok: true`.
     """
     if mode in TREE_MODES:
         raise PlannerEmitError(
@@ -221,9 +251,9 @@ def render(
         # board.yaml dict alone. Routing them through the v2 loader would
         # resolve a topology the emitter never looks at -- and could refuse a
         # board the SDK's own front door serves.
-        return _render_route_table(mode, board_yaml)
+        return _render_route_table(mode, board_yaml, skip_advisories=skip_advisories)
 
-    project = planner.load_board_yaml(Path(board_yaml))
+    project = planner.load_board_yaml(Path(board_yaml), skip_advisories=skip_advisories)
     if mode in _SLICE_RENDERER:
         return _render_per_core(planner, project, mode, core=core, sdk_root=sdk_root)
     if mode == "os-topology":
@@ -281,9 +311,16 @@ def render_tree(
     return {relpath.split("/", 1)[1]: content for relpath, content in files.items()}
 
 
-def _render_route_table(mode: str, board_yaml: Path) -> str:
+def _render_route_table(
+    mode: str, board_yaml: Path, *, skip_advisories: list[str] | None = None
+) -> str:
     """`--emit carrier-netlist` / `--emit composed-route-table`, mirroring
     `alp_project.main()`'s own branch (the two share one dispatch there too)."""
+    from tan.core.metadata_schema import (  # noqa: PLC0415
+        missing_schema_note,
+        som_preset_schema_path,
+        validate_document,
+    )
     from tan.planner.loader import _load_yaml  # noqa: PLC0415
     from tan.planner.paths import METADATA_ROOT  # noqa: PLC0415
     from tan.planner.project_loader import (  # noqa: PLC0415
@@ -302,6 +339,29 @@ def _render_route_table(mode: str, board_yaml: Path) -> str:
             f"{board_yaml}: `som.sku` is missing or is not a string; "
             f"--emit {mode} renders the SoM's pad routes against it.")
     sku_preset = _resolve_sku(sku, METADATA_ROOT)
+    # tan-cli#964 review (major 4): both route-table modes write a real file
+    # to disk (`generate_cmd.py`'s `build/generated/{carrier,composed-route
+    # -table}-netlist.json`) WITHOUT going through `load_board_yaml` -- the one
+    # place #964's REFUSE gate otherwise lives -- so the gate is repeated here,
+    # against the raw preset `_resolve_sku` just returned, before it reaches
+    # either emitter. Same wording `tan.planner.loader._refuse_on_schema_errors`
+    # uses for `build`/`generate`'s other modes.
+    som_preset_path = METADATA_ROOT / "e1m_modules" / f"{sku}.yaml"
+    # major 6: "skip-but-disclose", checked BEFORE the refuse-worthy
+    # violations, same ordering `_refuse_on_schema_errors` uses -- an absent
+    # schema means `validate_document` below returns `[]` and this function
+    # would otherwise write the file having said nothing at all.
+    if skip_advisories is not None:
+        note = missing_schema_note(som_preset_schema_path(METADATA_ROOT), source=som_preset_path)
+        if note is not None:
+            skip_advisories.append(note)
+    som_schema_errors = validate_document(
+        sku_preset, som_preset_schema_path(METADATA_ROOT), som_preset_path,
+    )
+    if som_schema_errors:
+        raise PlannerEmitError(
+            f"SoM preset {sku} does not validate against som-preset-v2:\n"
+            + "\n".join(f"  - {e}" for e in som_schema_errors))
     board_preset = _resolve_inline_or_preset_board(project, METADATA_ROOT)
     from tan.planner.project_emit import bom_netlist  # noqa: PLC0415
 
@@ -320,23 +380,58 @@ _V1_SHAPED_MODES = frozenset({
 
 
 def _v1_shaped_project(project) -> dict[str, Any]:
-    """The legacy `board:`-wrapper dict the four relocated emitters consume.
+    """The legacy `board:`-wrapper dict the four relocated emitters consume --
+    the one `buildplan._v1_shaped_project` (alp-sdk's `alp_project.py` shares
+    it with the plan emit, #2771)."""
+    from tan.planner.buildplan import _v1_shaped_project as shaped  # noqa: PLC0415
 
-    Verbatim from `alp_project._run_v2_per_core_emit`. The public board.yaml
-    schema no longer uses this wrapper, but it is the shape those emitters read,
-    and reshaping them instead would be a rewrite.
-    """
-    return {
-        "som": {
-            "sku":    project.sku,
-            "hw_rev": project.hw_rev,
-        },
-        "pins": list(project.raw.get("pins") or []),
-        "board": ({
-            "name":   project.board_name,
-            "hw_rev": project.board_hw_rev,
-        } if project.board_name else None),
-    }
+    return shaped(project)
+
+
+def _render_dts_overlay(project, shaped, core: str | None) -> str:
+    """`--emit dts-overlay`, mirroring `alp_project._run_v2_per_core_emit`:
+    the board overlay, then the nodes board.yaml `ownership:` hands the M33."""
+    from tan.planner.models import OrchestratorError  # noqa: PLC0415
+    from tan.planner.ownership import project_m33_overlay  # noqa: PLC0415
+    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
+
+    # The DTS overlay is shaped by the board header (bus aliases +
+    # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
+    # v2 contributes only the peripherals list: union across
+    # Zephyr/baremetal cores (or one core when --core is set).
+    if core is not None:
+        # The slice's own overlay IS the build plan's `alp.overlay`
+        # configArtefact (tan-cli#1216, ADR-0026 §D): one function, so
+        # `tan generate --core` and `tan build`'s plan cannot disagree. It
+        # also appends the M33-ownership nodes, so this path returns early.
+        from tan.planner.buildplan import _slice_dts_overlay  # noqa: PLC0415
+
+        try:
+            return _slice_dts_overlay(project, project.cores[core])
+        except OrchestratorError as err:
+            raise PlannerEmitError(str(err)) from err
+    else:
+        union: set[str] = set()
+        zephyr_core_ids: list[str] = []
+        for core_id, slice_ in project.cores.items():
+            if slice_.os in ("zephyr", "baremetal"):
+                union.update(slice_.peripherals)
+                zephyr_core_ids.append(core_id)
+        out = _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(union),
+            v2_core_ids=zephyr_core_ids,
+        )
+    # Per-product core ownership: enable the assignable nodes this project
+    # assigned to the M33 (the board tree carries them disabled).
+    try:
+        own_dts, _ = project_m33_overlay(project, core)
+    except OrchestratorError as err:
+        raise PlannerEmitError(str(err)) from err
+    if own_dts:
+        out += ("\n/* Assignable peripherals owned by the M33 "
+                "(board.yaml `ownership:`). */\n" + "\n".join(own_dts) + "\n")
+    return out
 
 
 def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
@@ -351,7 +446,10 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
             f"--core {core} not present in board.yaml "
             f"(known: {sorted(project.cores.keys())})")
 
-    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
+    from tan.planner.buildplan import (  # noqa: PLC0415
+        _slice_hw_info_h,
+        _slice_west_libraries,
+    )
     from tan.planner.project_emit.hw_info import _emit_hw_info_h  # noqa: PLC0415
     from tan.planner.project_emit.native_sim import (  # noqa: PLC0415
         _emit_native_sim_overlay,
@@ -363,30 +461,7 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     shaped = _v1_shaped_project(project)
 
     if mode == "dts-overlay":
-        # The DTS overlay is shaped by the board header (bus aliases +
-        # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
-        # v2 contributes only the peripherals list: union across
-        # Zephyr/baremetal cores (or one core when --core is set).
-        if core is not None:
-            slice_ = project.cores[core]
-            return _emit_dts_overlay(
-                shaped, project.som_preset, project.board_preset,
-                v2_peripherals=sorted(set(slice_.peripherals)),
-                v2_core_id=core,
-                v2_core_os=slice_.os,
-                v2_core_ids=[core],
-            )
-        union: set[str] = set()
-        zephyr_core_ids: list[str] = []
-        for core_id, slice_ in project.cores.items():
-            if slice_.os in ("zephyr", "baremetal"):
-                union.update(slice_.peripherals)
-                zephyr_core_ids.append(core_id)
-        return _emit_dts_overlay(
-            shaped, project.som_preset, project.board_preset,
-            v2_peripherals=sorted(union),
-            v2_core_ids=zephyr_core_ids,
-        )
+        return _render_dts_overlay(project, shaped, core)
 
     if mode == "native-sim-overlay":
         # native_sim GPIO emulation -- board-agnostic (the E1M pad map is a
@@ -397,15 +472,22 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
         # hw-info-h is a project-level emit even under v2 -- consumers
         # `#include` it from any slice. --core picks which slice's OS lands in
         # ALP_HW_BUILD_OS; absent --core, primary-core rules apply.
+        if core is not None:
+            # Single source shared with the build plan's
+            # `alp_hw_info_build.h` configArtefact (ADR-0026 §D).
+            return _slice_hw_info_h(project, project.cores[core])
         return _emit_hw_info_h(
             shaped, project.som_preset, project.board_preset,
             v2_cores={cid: s.os for cid, s in project.cores.items()},
-            v2_selected_core=core,
+            v2_selected_core=None,
+            metadata_root=project.effective_metadata_root(),
         )
 
     # west-libraries
     if core is not None:
-        v2_libraries = sorted(set(project.cores[core].libraries))
+        # Single source shared with the build plan's `alp-west-libs.yml`
+        # configArtefact (ADR-0026 §D).
+        return _slice_west_libraries(project, project.cores[core])
     else:
         union_l: set[str] = set()
         for slice_ in project.cores.values():
@@ -423,7 +505,20 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
 def _render_per_core(planner, project, mode: str, *, core: str | None,
                      sdk_root: Path) -> str:
     """`zephyr-conf` / `cmake-args` / `yocto-conf`, mirroring
-    `alp_project._run_v2_per_core_emit`'s per-core section exactly."""
+    `alp_project._run_v2_per_core_emit`'s per-core section exactly.
+
+    `zephyr-conf` and `yocto-conf` render through `buildplan._slice_config_artefact` -- the
+    SAME helper `emit_build_plan` calls to fill a slice's
+    `configArtefacts[].contents` (tan-cli#1216, ADR-0026 §D) -- rather than a
+    second, independent dispatch straight to the leaf renderer. The bytes are
+    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`, its yocto
+    branch `_slice_local_conf`);
+    what changes is that `tan generate --target zephyr-conf` and `tan build`'s
+    plan are now structurally pinned to the one call site the schema's own
+    words describe ("byte-identical to what a consumer's own materialise step
+    writes to buildDir") instead of merely agreeing today by coincidence of
+    two dispatch tables that happen to name the same function.
+    """
     if core is not None and core not in project.cores:
         raise PlannerEmitError(
             f"--core {core} not present in board.yaml "
@@ -438,7 +533,38 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         resolve_selection(project, project.effective_metadata_root())
 
     allowed_os = _os_classes(sdk_root).get(mode)
-    slice_renderer = getattr(planner, _SLICE_RENDERER[mode])
+    # Already imported (`tan.planner.__init__` imports `.buildplan` at
+    # module scope) by the time `render()` reaches here -- this is a
+    # `sys.modules` cache hit, not a fresh load, and it must stay lazy
+    # like every other `tan.planner*` import in this file: importing it
+    # before `bind_sdk_root` has run would raise.
+    from tan.planner import buildplan  # noqa: PLC0415
+
+    wanted = _CONFIG_ARTEFACT_FILE[mode]
+    artefact_of = getattr(buildplan, _CONFIG_ARTEFACT_HELPER[mode])
+
+    from tan.planner.models import OrchestratorError  # noqa: PLC0415
+
+    def slice_renderer(proj, sl):
+        try:
+            artefact = artefact_of(proj, sl)
+        except OrchestratorError as err:
+            if mode != "cmake-args":
+                raise
+            # alp-sdk ed57bd025 (#2791): `alp_project._run_v2_per_core_emit`
+            # turns a cmake-args OrchestratorError -- e.g. a `cameras:` entry
+            # unbuildable for this core -- into one clean refusal line.
+            raise PlannerEmitError(str(err)) from err
+        if artefact is None or artefact[0] != wanted:
+            # Unreachable in practice: `allowed_os` above already confines
+            # each mode to the one OS whose artefact IS `wanted`. A coded
+            # refusal beats a bare `NoneType` subscript -- or silently
+            # emitting a different file's bytes -- if that invariant breaks.
+            raise PlannerEmitError(
+                f"no {wanted} config artefact for core `{sl.core_id}` "
+                f"(os: {sl.os})")
+        return artefact[1]
+
     core_ids = [core] if core is not None else sorted(project.cores.keys())
 
     parts: list[str] = []

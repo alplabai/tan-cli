@@ -1,0 +1,5 @@
+{
+  "code": "build.workspace-patches-missing",
+  "severity": "warning",
+  "message": "alp-sdk's zephyr/patches.yml is not applied in __WORKDIR__/ws: hal_alif/0001-clock-set-rate.patch (ABSENT), mcuboot/0001-flash-map.patch (DRIFTED) in module(s) alif, mcuboot. The build can succeed yet fail at runtime (for example `alp_camera_open` returns ALP_ERR_NOSUPPORT). Fix: run `tan bootstrap` (or, from __WORKDIR__/ws: west patch --dst-module alif apply; west patch --dst-module mcuboot apply)."
+}

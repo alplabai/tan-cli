@@ -1,0 +1,325 @@
+{
+  "soc_spec_version": 1,
+  "ref": "renesas:rzv2n:n44",
+  "vendor": "Renesas Electronics",
+  "family": "RZ/V2N",
+  "part": "R9A09G056N44GBG",
+  "status": "released",
+  "datasheet": {
+    "version": "1.20",
+    "extracted_at": "2026-05-09",
+    "source": "r01ds0466ej0120-rzv2n.pdf",
+    "doc_id": "R01DS0466EJ0120"
+  },
+  "cores": [
+    {
+      "id": "a55_cluster",
+      "type": "cortex-a55",
+      "count": 4,
+      "freq_mhz": 1800,
+      "isa": "Armv8-A",
+      "trustzone": true,
+      "vector_extension": "Neon",
+      "fpu": "double-precision",
+      "l1_kb": 32,
+      "l2_kb": 0,
+      "shared_l2": false,
+      "mmu": true
+    },
+    {
+      "id": "m33_sm",
+      "type": "cortex-m33",
+      "subtype": "system-manager",
+      "count": 1,
+      "freq_mhz": 200,
+      "isa": "Armv8-M",
+      "trustzone": true,
+      "fpu": "single-precision",
+      "zephyr_cpucluster": "cm33",
+      "watchdog": {
+        "base": "0x41c00400",
+        "size": "0x10",
+        "counting_clock_hz": 24000000
+      }
+    }
+  ],
+  "npus": [
+    {
+      "type": "drp-ai",
+      "subtype": "ai-mac+drp",
+      "freq_mhz": 1000,
+      "tops": 4,
+      "supports": ["CNN", "RNN", "Transformer"]
+    }
+  ],
+  "soc_ram_kb": 1536,
+  "inference_arena_sram_kib": 0,
+  "always_on_sram_kb": 0,
+  "peripherals": {
+    "i2c": 9,
+    "i3c": 1,
+    "spi": 3,
+    "uart": 10,
+    "scif": 1,
+    "i2s": 10,
+    "spdif": 3,
+    "pdm": 6,
+    "ethernet_1g": 2,
+    "usb_2": 1,
+    "usb_3_2_gen2": 1,
+    "sdio_emmc": 1,
+    "sdio": 2,
+    "can_fd": 6,
+    "mipi_csi2": 2,
+    "mipi_dsi": 1,
+    "pcie_gen3": 1,
+    "adc_12bit": 24,
+    "temp_sensor": 2,
+    "otp": 1,
+    "timer_32bit_gpt": 16,
+    "timer_32bit_cmtw": 8,
+    "timer_32bit_gtm": 8,
+    "watchdog": 4,
+    "rtc": 1,
+    "gpio": 86,
+    "irq_external": 16,
+    "dmac_channels": 80
+  },
+  "peripheral_instances": {
+    "i2c": [
+      {"index": 0, "label": "i2c0", "base": "0x44400400", "size": "0x400", "interrupts": [{"irq": 174, "priority": 1, "name": "tei"}, {"irq": 175, "priority": 1, "name": "naki"}, {"irq": 176, "priority": 1, "name": "spi"}, {"irq": 177, "priority": 1, "name": "sti"}, {"irq": 178, "priority": 1, "name": "ali"}, {"irq": 179, "priority": 1, "name": "tmoi"}, {"irq": 385, "priority": 1, "name": "txi"}, {"irq": 386, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 1, "label": "i2c1", "base": "0x44400800", "size": "0x400", "interrupts": [{"irq": 180, "priority": 1, "name": "tei"}, {"irq": 181, "priority": 1, "name": "naki"}, {"irq": 182, "priority": 1, "name": "spi"}, {"irq": 183, "priority": 1, "name": "sti"}, {"irq": 184, "priority": 1, "name": "ali"}, {"irq": 185, "priority": 1, "name": "tmoi"}, {"irq": 387, "priority": 1, "name": "txi"}, {"irq": 388, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 2, "label": "i2c2", "base": "0x44400c00", "size": "0x400", "interrupts": [{"irq": 186, "priority": 1, "name": "tei"}, {"irq": 187, "priority": 1, "name": "naki"}, {"irq": 188, "priority": 1, "name": "spi"}, {"irq": 189, "priority": 1, "name": "sti"}, {"irq": 190, "priority": 1, "name": "ali"}, {"irq": 191, "priority": 1, "name": "tmoi"}, {"irq": 389, "priority": 1, "name": "txi"}, {"irq": 390, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 3, "label": "i2c3", "base": "0x44401000", "size": "0x400", "interrupts": [{"irq": 192, "priority": 1, "name": "tei"}, {"irq": 193, "priority": 1, "name": "naki"}, {"irq": 194, "priority": 1, "name": "spi"}, {"irq": 195, "priority": 1, "name": "sti"}, {"irq": 196, "priority": 1, "name": "ali"}, {"irq": 197, "priority": 1, "name": "tmoi"}, {"irq": 391, "priority": 1, "name": "txi"}, {"irq": 392, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 4, "label": "i2c4", "base": "0x44401400", "size": "0x400", "interrupts": [{"irq": 198, "priority": 1, "name": "tei"}, {"irq": 199, "priority": 1, "name": "naki"}, {"irq": 200, "priority": 1, "name": "spi"}, {"irq": 201, "priority": 1, "name": "sti"}, {"irq": 202, "priority": 1, "name": "ali"}, {"irq": 203, "priority": 1, "name": "tmoi"}, {"irq": 393, "priority": 1, "name": "txi"}, {"irq": 394, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 5, "label": "i2c5", "base": "0x44401800", "size": "0x400", "interrupts": [{"irq": 204, "priority": 1, "name": "tei"}, {"irq": 205, "priority": 1, "name": "naki"}, {"irq": 206, "priority": 1, "name": "spi"}, {"irq": 207, "priority": 1, "name": "sti"}, {"irq": 208, "priority": 1, "name": "ali"}, {"irq": 209, "priority": 1, "name": "tmoi"}, {"irq": 395, "priority": 1, "name": "txi"}, {"irq": 396, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 6, "label": "i2c6", "base": "0x44401c00", "size": "0x400", "interrupts": [{"irq": 210, "priority": 1, "name": "tei"}, {"irq": 211, "priority": 1, "name": "naki"}, {"irq": 212, "priority": 1, "name": "spi"}, {"irq": 213, "priority": 1, "name": "sti"}, {"irq": 214, "priority": 1, "name": "ali"}, {"irq": 215, "priority": 1, "name": "tmoi"}, {"irq": 397, "priority": 1, "name": "txi"}, {"irq": 398, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 7, "label": "i2c7", "base": "0x44402000", "size": "0x400", "interrupts": [{"irq": 216, "priority": 1, "name": "tei"}, {"irq": 217, "priority": 1, "name": "naki"}, {"irq": 218, "priority": 1, "name": "spi"}, {"irq": 219, "priority": 1, "name": "sti"}, {"irq": 220, "priority": 1, "name": "ali"}, {"irq": 221, "priority": 1, "name": "tmoi"}, {"irq": 399, "priority": 1, "name": "txi"}, {"irq": 400, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"},
+      {"index": 8, "label": "i2c8", "base": "0x41c01000", "size": "0x400", "interrupts": [{"irq": 222, "priority": 1, "name": "tei"}, {"irq": 223, "priority": 1, "name": "naki"}, {"irq": 224, "priority": 1, "name": "spi"}, {"irq": 225, "priority": 1, "name": "sti"}, {"irq": 226, "priority": 1, "name": "ali"}, {"irq": 227, "priority": 1, "name": "tmoi"}, {"irq": 401, "priority": 1, "name": "txi"}, {"irq": 402, "priority": 1, "name": "rxi"}], "compatible": "renesas,rz-riic"}
+    ],
+    "uart": [
+      {"index": 0, "label": "sci0", "base": "0x42800c00", "size": "0x400", "interrupts": [{"irq": 114, "priority": 1, "name": "eri"}, {"irq": 115, "priority": 1, "name": "rxi"}, {"irq": 116, "priority": 1, "name": "txi"}, {"irq": 117, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 1, "label": "sci1", "base": "0x42801000", "size": "0x400", "interrupts": [{"irq": 120, "priority": 1, "name": "eri"}, {"irq": 121, "priority": 1, "name": "rxi"}, {"irq": 122, "priority": 1, "name": "txi"}, {"irq": 123, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 2, "label": "sci2", "base": "0x42801400", "size": "0x400", "interrupts": [{"irq": 126, "priority": 1, "name": "eri"}, {"irq": 127, "priority": 1, "name": "rxi"}, {"irq": 128, "priority": 1, "name": "txi"}, {"irq": 129, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 3, "label": "sci3", "base": "0x42801800", "size": "0x400", "interrupts": [{"irq": 132, "priority": 1, "name": "eri"}, {"irq": 133, "priority": 1, "name": "rxi"}, {"irq": 134, "priority": 1, "name": "txi"}, {"irq": 135, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 4, "label": "sci4", "base": "0x42801c00", "size": "0x400", "interrupts": [{"irq": 138, "priority": 1, "name": "eri"}, {"irq": 139, "priority": 1, "name": "rxi"}, {"irq": 140, "priority": 1, "name": "txi"}, {"irq": 141, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 5, "label": "sci5", "base": "0x42802000", "size": "0x400", "interrupts": [{"irq": 144, "priority": 1, "name": "eri"}, {"irq": 145, "priority": 1, "name": "rxi"}, {"irq": 146, "priority": 1, "name": "txi"}, {"irq": 147, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 6, "label": "sci6", "base": "0x42802400", "size": "0x400", "interrupts": [{"irq": 150, "priority": 1, "name": "eri"}, {"irq": 151, "priority": 1, "name": "rxi"}, {"irq": 152, "priority": 1, "name": "txi"}, {"irq": 153, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 7, "label": "sci7", "base": "0x42802800", "size": "0x400", "interrupts": [{"irq": 156, "priority": 1, "name": "eri"}, {"irq": 157, "priority": 1, "name": "rxi"}, {"irq": 158, "priority": 1, "name": "txi"}, {"irq": 159, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 8, "label": "sci8", "base": "0x42802c00", "size": "0x400", "interrupts": [{"irq": 162, "priority": 1, "name": "eri"}, {"irq": 163, "priority": 1, "name": "rxi"}, {"irq": 164, "priority": 1, "name": "txi"}, {"irq": 165, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"},
+      {"index": 9, "label": "sci9", "base": "0x42803000", "size": "0x400", "interrupts": [{"irq": 168, "priority": 1, "name": "eri"}, {"irq": 169, "priority": 1, "name": "rxi"}, {"irq": 170, "priority": 1, "name": "txi"}, {"irq": 171, "priority": 1, "name": "tei"}], "compatible": "renesas,rz-sci-b"}
+    ],
+    "timer_32bit_gpt": [
+      {"index": 0, "label": "gpt0", "base": "0x43010000", "size": "0x100", "interrupts": [{"irq": 406, "priority": 1, "name": "ccmpa"}, {"irq": 407, "priority": 1, "name": "ccmpb"}, {"irq": 408, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 1, "label": "gpt1", "base": "0x43010100", "size": "0x100", "interrupts": [{"irq": 409, "priority": 1, "name": "ccmpa"}, {"irq": 410, "priority": 1, "name": "ccmpb"}, {"irq": 411, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 2, "label": "gpt2", "base": "0x43010200", "size": "0x100", "interrupts": [{"irq": 412, "priority": 1, "name": "ccmpa"}, {"irq": 413, "priority": 1, "name": "ccmpb"}, {"irq": 414, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 3, "label": "gpt3", "base": "0x43010300", "size": "0x100", "interrupts": [{"irq": 415, "priority": 1, "name": "ccmpa"}, {"irq": 416, "priority": 1, "name": "ccmpb"}, {"irq": 417, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 4, "label": "gpt4", "base": "0x43010400", "size": "0x100", "interrupts": [{"irq": 418, "priority": 1, "name": "ccmpa"}, {"irq": 419, "priority": 1, "name": "ccmpb"}, {"irq": 420, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 5, "label": "gpt5", "base": "0x43010500", "size": "0x100", "interrupts": [{"irq": 421, "priority": 1, "name": "ccmpa"}, {"irq": 422, "priority": 1, "name": "ccmpb"}, {"irq": 423, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 6, "label": "gpt6", "base": "0x43010600", "size": "0x100", "interrupts": [{"irq": 424, "priority": 1, "name": "ccmpa"}, {"irq": 425, "priority": 1, "name": "ccmpb"}, {"irq": 426, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 7, "label": "gpt7", "base": "0x43010700", "size": "0x100", "interrupts": [{"irq": 427, "priority": 1, "name": "ccmpa"}, {"irq": 428, "priority": 1, "name": "ccmpb"}, {"irq": 429, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 8, "label": "gpt8", "base": "0x43020000", "size": "0x100", "interrupts": [{"irq": 430, "priority": 1, "name": "ccmpa"}, {"irq": 431, "priority": 1, "name": "ccmpb"}, {"irq": 432, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 9, "label": "gpt9", "base": "0x43020100", "size": "0x100", "interrupts": [{"irq": 433, "priority": 1, "name": "ccmpa"}, {"irq": 434, "priority": 1, "name": "ccmpb"}, {"irq": 435, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 10, "label": "gpt10", "base": "0x43020200", "size": "0x100", "interrupts": [{"irq": 436, "priority": 1, "name": "ccmpa"}, {"irq": 437, "priority": 1, "name": "ccmpb"}, {"irq": 438, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 11, "label": "gpt11", "base": "0x43020300", "size": "0x100", "interrupts": [{"irq": 439, "priority": 1, "name": "ccmpa"}, {"irq": 440, "priority": 1, "name": "ccmpb"}, {"irq": 441, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 12, "label": "gpt12", "base": "0x43020400", "size": "0x100", "interrupts": [{"irq": 442, "priority": 1, "name": "ccmpa"}, {"irq": 443, "priority": 1, "name": "ccmpb"}, {"irq": 444, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 13, "label": "gpt13", "base": "0x43020500", "size": "0x100", "interrupts": [{"irq": 445, "priority": 1, "name": "ccmpa"}, {"irq": 446, "priority": 1, "name": "ccmpb"}, {"irq": 447, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 14, "label": "gpt14", "base": "0x43020600", "size": "0x100", "interrupts": [{"irq": 448, "priority": 1, "name": "ccmpa"}, {"irq": 449, "priority": 1, "name": "ccmpb"}, {"irq": 450, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"},
+      {"index": 15, "label": "gpt15", "base": "0x43020700", "size": "0x100", "interrupts": [{"irq": 451, "priority": 1, "name": "ccmpa"}, {"irq": 452, "priority": 1, "name": "ccmpb"}, {"irq": 453, "priority": 1, "name": "ovf"}], "compatible": "renesas,rz-gpt"}
+    ],
+    "timer_32bit_gtm": [
+      {"index": 0, "label": "gtm0", "base": "0x41800000", "size": "0x1000", "interrupts": [{"irq": 17, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 1, "label": "gtm1", "base": "0x41801000", "size": "0x1000", "interrupts": [{"irq": 18, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 2, "label": "gtm2", "base": "0x44000000", "size": "0x1000", "interrupts": [{"irq": 19, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 3, "label": "gtm3", "base": "0x44001000", "size": "0x1000", "interrupts": [{"irq": 20, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 4, "label": "gtm4", "base": "0x42c00000", "size": "0x1000", "interrupts": [{"irq": 21, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 5, "label": "gtm5", "base": "0x42c01000", "size": "0x1000", "interrupts": [{"irq": 22, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 6, "label": "gtm6", "base": "0x42c02000", "size": "0x1000", "interrupts": [{"irq": 23, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"},
+      {"index": 7, "label": "gtm7", "base": "0x42c03000", "size": "0x1000", "interrupts": [{"irq": 24, "priority": 1, "name": "overflow"}], "compatible": "renesas,rz-gtm"}
+    ]
+  },
+  "capabilities": {
+    "drp_ai":   true,
+    "neon":     true,
+    "emmc_dma": true
+  },
+  "external_memory_interfaces": [
+    {
+      "kind": "LPDDR4/4X",
+      "count": 1,
+      "spec": "LPDDR4-3200 / LPDDR4X-3200",
+      "max_mbps_ddr": 12800,
+      "supports": ["ECC", "32-bit"]
+    },
+    {
+      "kind": "xSPI",
+      "count": 1,
+      "supports": ["4-bit DTR", "8-bit DTR"]
+    },
+    {
+      "kind": "SD/eMMC",
+      "count": 1,
+      "spec": "1/4/8-bit bus width",
+      "dma": true
+    }
+  ],
+  "power": {
+    "vio_18_v": [1.71, 1.89],
+    "vio_33_v": [3.0, 3.6]
+  },
+  "pad_tolerance": {
+    "source": "RZ/V2N Group User's Manual: Hardware R01UH1071EJ0120 Rev.1.20, 4.2.3.1.1 List of IO blocks, Table 4.2-34 Note 1 (p.404): \"All Pxx pins (with the exceptions of P2x, P90, P91, P92, and PBx) have a 3.3-V tolerance.\" Verified against a text extraction of the manual, not against the PDF page image.",
+    "max_signal_v": 1.89,
+    "non_33v_tolerant_pads": ["P9[0-2]", "P2[0-9]", "PB[0-9]"]
+  },
+  "operating_temp_c": {
+    "junction": [-40, 125]
+  },
+  "packages": ["840-pin FCBGA, 15 mm × 15 mm, 0.50 mm pitch"],
+  "variants": [
+    {
+      "order_code": "R9A09G056N41GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": false, "isp_mali_c55": false, "security_crypto": false },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N42GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": true,  "isp_mali_c55": false, "security_crypto": false },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N43GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": false, "isp_mali_c55": true,  "security_crypto": false },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N44GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": true,  "isp_mali_c55": true,  "security_crypto": false },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"],
+      "alp_module_skus": ["E1M-V2N101", "E1M-V2N102", "E1M-V2N103", "E1M-V2M101", "E1M-V2M102", "E1M-V2M103"],
+      "zephyr_soc_variant": "r9a09g056n48gbg",
+      "notes": "Zephyr upstream only models the n48gbg die (no n44gbg SOC_* Kconfig symbol); the n44/n48 delta is GPU/ISP/crypto fusing only, devicetree-identical for the M33 + SPI/I2C peripherals this SDK targets.  zephyr_soc_variant names the Kconfig/devicetree symbol Zephyr board artefacts reference in place of order_code."
+    },
+    {
+      "order_code": "R9A09G056N45GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": false, "isp_mali_c55": false, "security_crypto": true },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N46GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": true,  "isp_mali_c55": false, "security_crypto": true },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N47GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": false, "isp_mali_c55": true,  "security_crypto": true },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    },
+    {
+      "order_code": "R9A09G056N48GBG",
+      "package": "FCBGA840",
+      "temperature_grade": "industrial",
+      "optional_features": { "gpu_mali_g31": true,  "isp_mali_c55": true,  "security_crypto": true },
+      "shipment_suffixes": ["#AC0", "#AC1", "#BC0", "#BC1"]
+    }
+  ],
+  "cm33_boot": {"sram_base": 134217728, "image_pad": 12288, "image_max": 196608, "xspi_offset": 1703936,
+    "note": "BL2 copies the stored CM33 image raw from mtd1 + xspi_offset (0x1A0000) to SRAM sram_base (0x08000000) and silently truncates past image_max (0x30000); the CM33 starts at sram_base + image_pad (0x08003000), so the stored image is image_pad zero bytes + zephyr.bin."},
+  "openamp_carveout": {"a55_base": 1332740096, "cm33_ns_base": 2674917376, "size": 9437184,
+    "regions": {
+      "rsctbl":     {"offset": 0,       "size": 4096},
+      "mhu-shm":    {"offset": 4096,    "size": 4096},
+      "vring-ctl0": {"offset": 1048576, "size": 327680},
+      "vring-ctl1": {"offset": 1376256, "size": 327680},
+      "vring-shm0": {"offset": 2097152, "size": 3145728},
+      "vring-shm1": {"offset": 5242880, "size": 3145728}
+    },
+    "ram_console": {"offset": 65536, "size": 16384},
+    "note": "OpenAMP/MHU-B reservation: A55 view 0x4F700000..0x4FFFFFFF = CM33-NS 0x9F700000 (A55 = CM33-NS - 0x50000000). regions[] are offsets+sizes inside it: rsctbl 0x0/0x1000 (the AMP liveness beacon is the top 16 bytes of this rsctbl page, A55 0x4F700FF0), mhu-shm 0x1000/0x1000, vring-ctl0 0x100000/0x50000, vring-ctl1 0x150000/0x50000, vring-shm0 0x200000/0x300000, vring-shm1 0x500000/0x300000. ram_console (0x10000/0x4000, A55 0x4F710000 = CM33-NS 0x9F710000) is the CM33 RAM-console buffer the A55 reads post-mortem; it lies inside the window, clear of every region above, and has no UIO node. The generated CM33 board .dts, the RPC backend's generated alp_amp_window.h and the Linux reserved-memory/UIO nodes (checked by scripts/check_amp_window.py) all quote this block."},
+  "memory_regions": [
+    {
+      "name":            "ddr_main",
+      "base":            1207959552,
+      "size_mib":        4096,
+      "accessible_from": ["a55_cluster", "m33_sm"],
+      "cacheable":       true,
+      "access_windows": {
+        "m33_sm": {
+          "base":     1073741824,
+          "size_mib": 256,
+          "note":     "CM33 DDR window per Renesas FSP drivers/rz/fsp/src/rzv/bsp/mcu/rzv2n/bsp_slave_address.h: CM33-secure 0x80000000 / CM33-non-secure 0x90000000 -> A55 0x40000000, 256 MiB.  In A55-physical terms 0x40000000..0x50000000, so the CM33 reaches only the first 128 MiB of ddr_main (base 0x48000000); the remaining 3968 MiB is unaddressable from the CM33 and must never receive an IPC carve-out that lists m33_sm as an endpoint."
+        }
+      }
+    },
+    {
+      "name":            "ocram_low",
+      "base":            65536,
+      "size_kib":        512,
+      "accessible_from": ["a55_cluster", "m33_sm"],
+      "cacheable":       false
+    },
+    {
+      "name":            "m33_tcm",
+      "base":            2147483648,
+      "size_kib":        128,
+      "accessible_from": ["m33_sm"],
+      "cacheable":       false
+    }
+  ],
+
+  "linux_dt": {
+    "RIIC2": {"label": "i2c2", "pinmux": {"RIIC2_SDA2": 1, "RIIC2_SCL2": 1}},
+    "CSI0":  {"label": "csi20", "capture": "cru0"},
+    "UART0": {"label": "sci0", "pinmux": {"UART0_TXD0": 1, "UART0_RXD0": 1}, "cpg_clocks": ["rsci_0_pclk", "rsci_0_tclk", "rsci_0_ps_ps3_n", "rsci_0_ps_ps2_n", "rsci_0_ps_ps1_n"]},
+    "UART1": {"label": "sci1", "cpg_clocks": ["rsci_1_pclk", "rsci_1_tclk", "rsci_1_ps_ps3_n", "rsci_1_ps_ps2_n", "rsci_1_ps_ps1_n"]},
+    "SCI7":  {"label": "sci7", "cpg_clocks": ["rsci_7_pclk", "rsci_7_tclk", "rsci_7_ps_ps3_n", "rsci_7_ps_ps2_n", "rsci_7_ps_ps1_n"]},
+    "RSPI0": {"label": "rspi0", "cpg_clocks": ["rspi_0_pclk", "rspi_0_pclk_sfr", "rspi_0_tclk"]},
+    "CANFD2": {"label": "canfd", "channel": 2, "cpg_clocks": ["canfd_0_pclk", "canfd_0_clk_ram", "canfd_0_clkc"]},
+    "CANFD3": {"label": "canfd", "channel": 3, "cpg_clocks": ["canfd_0_pclk", "canfd_0_clk_ram", "canfd_0_clkc"]}
+  },
+
+  "boot_strap": {
+    "source": "RZ/V2N Hardware Manual R01UH1071EJ0120 Rev.1.20, 4.3.3.2.75-77 (SYS_LSI_MODE/DEVID/PRR), 1.9.3 (debug mode). SYS_LSI_MODE fields: [2:0] STAT_MD_BOOT (device = MD_BOOT[1:0]), [9] STAT_DEBUGEN (MD_BOOT3), [10] STAT_BOOTSELECTER (BOOTSELCPU), [12:11] STAT_BOOTPLLCA55, [13] STAT_MD_CLKS, [16] SEC_EN; [9], [2:0] and [10] are judged; [10]: 1 = CA55 boot (manual labels it CM55 cold boot) is the intended strap",
+    "registers": {
+      "soc_sys_lsi_mode": "0x10430300",
+      "soc_lsi_devid": "0x10430304",
+      "soc_prr": "0x10430308"
+    },
+    "strap_word": {
+      "debug_enable_bit": 9,
+      "boot_pins_shift": 0,
+      "boot_pins_width": 3,
+      "boot_device_pins_width": 2,
+      "boot_device_names": ["esd", "emmc", "xspi", "scif-download"],
+      "boot_cpu_bit": 10,
+      "boot_cpu_names": ["cm33", "ca55"]
+    }
+  },
+  "notes": [
+    "Datasheet: 137 pages, R01DS0466EJ0120 v1.20, Sep 2025.",
+    "Single die with 8 orderable SKUs that toggle Mali-G31 GPU, Mali-C55 ISP (RZ/V2NP suffix), and security-crypto extensions on/off.  N41/N42/N45/N46 are RZ/V2N (no ISP); N43/N44/N47/N48 are RZ/V2NP (with ISP).",
+    "DRP-AI: 4 dense TOPS, up to 15 sparse TOPS @ 1.0 GHz.  Vendor toolchain: DRP-AI translator + DRP-AI TVM.",
+    "Quad Cortex-A55 @ 1.8 GHz @ 0.9 V (1.1 GHz @ 0.8 V low-power).  L3 cache max frequency is 1.26 GHz, not 1.8 GHz.",
+    "VCD: H.264 1080p60 / H.265 4K30 encode + decode in hardware.",
+    "Shipment suffix '#ACx' = individual tray, '#BCx' = full carton.  Variants with '#AC0' or '#BC0' do not support MIPI-DSI Display Command Set control.",
+    "AC0 default per Alp Lab vendors/renesas-rzv2n/README.md — R9A09G056N44GBG#AC0 backs the E1M-V2N* and E1M-V2M* SoM SKUs.",
+    "MIPI CSI-2 has 2 instances; MIPI DSI has 1.  PCIe Gen3 supports 1 or 2 lanes (no 4-lane on RZ/V2N — that's RZ/V2H).",
+    "GPU and ISP are optional silicon and require software to detect them at runtime via the Renesas FSP.",
+    "On the V2N-M1 SoM, the DEEPX DX-M1 sits behind PCIe internally — see metadata/socs/deepx/dx/m1.json.",
+    "peripheral_instances (#1154): per-instance reg/interrupts for i2c (RIIC0-8), uart (SCI0-9), timer_32bit_gpt (GPT0-15) and timer_32bit_gtm (GTM0-7), mechanically projected by scripts/gen_soc_peripheral_instances.py from the vendored Zephyr SoC devicetree the M33 board .dts already #includes (dts/arm/renesas/rz/rzv/r9a09g056.dtsi, upstream Zephyr, west-managed — not a second hand-transcribed copy).  Sourcing from the n48gbg-labelled DTSI is correct for this n44 SoC spec: see the R9A09G056N44GBG variant note above (devicetree-identical for the M33 peripherals).  That DTSI carries no `clocks = <&cpg ...>` reference at all for any node in scope, so no `clocks` field is emitted.  `adc_12bit` and `gpio` ARE modelled in the DTSI (adc0-2, gpio0-11) but at a different instance granularity than their `peripherals:` count (channels/pins vs. units/ports) and are deliberately left unprojected rather than emit a count-mismatched list.  The other 21 `peripherals:` keys have no node in this devicetree at all.  Regenerate via `python3 scripts/gen_soc_peripheral_instances.py`; do not hand-edit."
+  ]
+}

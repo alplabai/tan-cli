@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # tan CI — the Python package job (installs the declared package + runs
-# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
-# platform-mapping check, and the sdist/wheel build-floor proof.
+# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the workflow-security
+# audit, and the sdist/wheel build-floor proof. The npm-shim platform-mapping
+# check went with the shim itself (tan-cli#1054).
 #
 # BRANCH PROTECTION (tan-cli#392, tan-cli#269 -- DONE; tan-cli#439)
 # =================================================================
@@ -82,6 +83,36 @@ on:
           are the cheapest insurance in the pipeline.
         type: boolean
         default: false
+      skip_ceiling_interpreter:
+        description: >
+          Skip the `python-newest` job -- the one that floats `python-version:
+          "3.x"` and runs the whole suite on whatever CPython that resolves to
+          today. `release.yml`'s `gates` call passes `true`; nothing else does.
+          A tag is the one run where a floating interpreter cannot be allowed
+          to decide the outcome: CPython ships a minor between the last PR run
+          and the tag, this job reds, `build` (`release.yml`, `needs: [verify-
+          version, gates, python-gates]`) skips, and the tag is SPENT with no
+          Release behind it. That is not hypothetical -- it is `v0.5.0-rc3`
+          (#319), which died exactly that way against alp-sdk `dev` instead of
+          against CPython, and it is why the alp-sdk `ref:` in the `python`
+          job below is pinned rather than floating. A frozen tag against a
+          moving target passes today and fails tomorrow with nothing here
+          altered; the fix is the same fix, applied to the same shape.
+
+          The POLARITY is deliberate and is the trap worth naming: an input
+          spelled `run_ceiling_interpreter` with `default: true` would read
+          `null` on `pull_request`/`push`/`merge_group` (the `inputs` context
+          exists only for `workflow_call` -- see the `python` job's
+          `timeout-minutes` expression, which relies on exactly that), and
+          `null` is falsy, so the job would silently vanish from every PR --
+          the runs it exists for. Spelled as a SKIP defaulting false, the
+          absent-`inputs` case falls the right way by construction.
+
+          `github.event_name != 'workflow_call'` would NOT work here and is
+          not what this uses: in a called workflow the `github` context is the
+          CALLER's, so a tag run reads `push`, and the guard would never fire.
+        type: boolean
+        default: false
 
 # A newer push to a PR supersedes the run in flight. Never cancel a push-to-main
 # run: a rapid second merge would leave the first commit with no CI status.
@@ -104,9 +135,11 @@ jobs:
   # workflow, so a tag published a PyInstaller freeze of code no CI step had
   # ever imported, let alone tested. The cargo jobs that used to sit above it
   # could not see it -- they compiled a different language in a different
-  # directory -- and tan-cli#269 has since deleted them outright. THIS job and
-  # parity.yml's `python-tests` matrix are now the whole of the correctness
-  # gate; there is nothing else left to hide behind.
+  # directory -- and tan-cli#269 has since deleted them outright. THIS job,
+  # the `python-newest` job below it (the same selection on the newest
+  # CPython rather than the `requires-python` floor this job pins --
+  # tan-cli#1126) and parity.yml's `python-tests` matrix are now the whole of
+  # the correctness gate; there is nothing else left to hide behind.
   #
   # Zero failures is the gate, not a count. The suite is still growing as ports
   # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
@@ -114,23 +147,43 @@ jobs:
   # xfails are green. Pinning a number would turn every landed port into a red
   # build.
   #
-  # tan-cli#372: this is also the ONLY place in CI that runs `python/tests/gates`
-  # (which includes the frozen-issue-code delegate `test_frozen_issue_codes.py`)
-  # on a non-Linux host -- and it does not, since this job is `ubuntu-latest`
-  # only. `parity.yml`'s cross-OS `python-tests` job explicitly
-  # `--ignore=tests/gates` (that suite already runs, always, in `parity.yml`'s
-  # `seam1-plan-shape` job -- also `ubuntu-latest` only). Recorded as a
-  # decision, not an oversight: `tests/gates` is pure source parsing (`ast`
-  # over `python/tan/**`, text scans over the same), with no OS-dependent
-  # behaviour to lose by staying single-platform -- the path handling it does
-  # do is verified platform-clean (`_rel` in `test_frozen_issue_codes.py`
-  # normalises `\`->`/`; every cross-file assembled suffix resolves via
-  # `_ASSEMBLED_SUFFIXES` regardless of host). Adding a second or third OS here
-  # would cost real CI minutes for zero coverage this scan can lose on Windows
-  # or macOS specifically. Revisit if a future gate under `tests/gates` reads
-  # something host-dependent (a real path separator, a subprocess, PATH
-  # resolution) -- that gate would need its own cross-OS run, not a blanket
-  # widening of this job.
+  # tan-cli#372: this is also the ONLY place in CI that runs the WHOLE of
+  # `python/tests/gates` (which includes the frozen-issue-code delegate
+  # `test_frozen_issue_codes.py`) on a non-Linux host -- and it does not,
+  # since this job is `ubuntu-latest` only. `parity.yml`'s cross-OS
+  # `python-tests-shard` job explicitly `--ignore=tests/gates` (that suite
+  # already runs, always, in `parity.yml`'s `seam1-plan-shape` job and in
+  # `python-newest` below -- both also `ubuntu-latest` only, so the non-Linux
+  # claim above is untouched by either). Recorded as a decision, not an
+  # oversight: `tests/gates` is, with the one exception recorded below
+  # (tan-cli#1152), pure source parsing (`ast` over `python/tan/**`, text
+  # scans over the same), with no OS-dependent behaviour to lose by staying
+  # single-platform -- the path handling it does do is verified
+  # platform-clean (`_rel` in `test_frozen_issue_codes.py` normalises
+  # `\`->`/`; every cross-file assembled suffix resolves via
+  # `_ASSEMBLED_SUFFIXES` regardless of host). Adding a second or third OS
+  # here would cost real CI minutes for zero coverage this scan can lose on
+  # Windows or macOS specifically.
+  #
+  # tan-cli#1152: the premise broke for exactly the shape this paragraph's
+  # own escape clause (below) names -- a gate that reads a subprocess. Since
+  # tan-cli#907 `tests/gates/test_module_size_budget_log_d_entries_are_immutable.py`
+  # shells real `git` (`rev-list --full-history`, `log --name-status`, merge
+  # construction, blob compares), which IS host-dependent in a way the rest
+  # of `tests/gates` is not -- measured red on a shallow local Windows
+  # checkout for a real reason (git 2.38.1.windows.1) before this was fixed.
+  # That one file, and only that file, now gets its own cross-OS run:
+  # `parity.yml`'s `python-tests-shard` job runs it a second time, on
+  # `windows-latest` and `macos-latest` (`ubuntu-latest` already has it, here
+  # and in `seam1-plan-shape` and `python-newest`) -- see that job's own step
+  # and `test_module_size_budget_log_d_entries_are_immutable.py`'s own module
+  # docstring for the CRLF/history-simplification hazards that run exists to
+  # catch. This is that gate's own cross-OS run, not a blanket widening of
+  # this job -- the rest of `tests/gates` stays exactly as single-platform as
+  # the paragraph above argues for. Revisit only if ANOTHER gate under
+  # `tests/gates` starts reading something host-dependent (a real path
+  # separator, a subprocess, PATH resolution); it would need the same
+  # treatment, not a rerun of this one's widening.
   python:
     runs-on: ubuntu-latest
     # Two numbers, because this job has two workloads and one flat cap has to
@@ -139,7 +192,8 @@ jobs:
     # `sdk_parity` (declared above, `type: boolean, default: false`) is the
     # whole difference: it switches on the planner byte-parity and
     # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
-    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    # 1163 tests. `release.yml`'s `gates` job (which calls this workflow with
+    # `sdk_parity: true`) passes true; nothing else does.
     #
     #   PR / merge_group  6-11 min   measured across the last 25 successful
     #                                runs (min 6m; p100 11m, run 32174278683)
@@ -165,12 +219,52 @@ jobs:
     # expressions or it will red on this line.
     timeout-minutes: ${{ inputs.sdk_parity && 60 || 30 }}
     steps:
+      # `fetch-depth: 0` (tan-cli#970 review, blocker 1): the default
+      # depth-1 shallow clone made `python/tests/gates/
+      # test_module_size_budget_log_append_only.py` unable to see ANY
+      # commit's own git parents (`HEAD^@` exits 0 with empty stdout on a
+      # shallow graft), so its real enforcement test read that as a
+      # repository root commit and `pytest.skip`ped -- in EVERY run of this
+      # job, silently, since the day it was written. `0`, not a small fixed
+      # number: that gate now also walks every commit since the PR's own
+      # base ref (`git rev-list <base>..HEAD`), which needs the full
+      # ancestry back to wherever this branch diverged, not a fixed depth
+      # that would eventually be wrong again for an old-enough PR. This
+      # checkout is also what makes `origin/<base>` resolvable at all for
+      # that same gate -- actions/checkout documents `fetch-depth: 0` as
+      # fetching all history for all branches, not just this ref's own.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
+      # tan-cli#907 wired this step in; tan-cli#1057 split the data it
+      # checks into `python/tests/gates/module_size_budget.d/`, one record
+      # file per measured module, which is why the step no longer names a
+      # single JSON file. The split removes the COMMON conflict shape (two
+      # branches touching different modules now write different paths) but
+      # not the reason this step exists: a merge that brings in one side's
+      # edit to a module together with the other side's record for it leaves
+      # a syntactically valid, semantically STALE record with no conflict
+      # marker at all, and nothing about a text merge can know that.
+      # `regen_module_size_budget.py --check` is the one thing that
+      # re-measures the checked-out tree and compares it EXACTLY (not the
+      # ratchet's tolerant drift window) against the committed records --
+      # and until this step existed it ran in NO workflow at all (its own
+      # module docstring said so, verbatim), so a stale-merge case would
+      # surface only as a cluster of unrelated-looking failures deep inside
+      # `test_module_size_budget.py`'s several ratchet tests, instead of one
+      # targeted diagnostic. Run early, before installing anything else this
+      # job needs, so stale records fail FAST with ONE targeted message
+      # ("... is stale: ... Run `python scripts/regen_module_size_budget.py`
+      # to refresh it") instead of several. Needs nothing but the checkout +
+      # this Python (stdlib only: argparse/ast/json/pathlib) -- no package
+      # install, no alp-sdk checkout.
+      - name: module_size_budget.d/ matches the checked-out tree (regen --check)
+        working-directory: python
+        run: python scripts/regen_module_size_budget.py --check
       # tan-cli#503: `tests/commands/test_completion_command.py`'s zsh-driven
       # cases (`test_zsh_format_completion_*`) are `skipif(not zsh on PATH)` --
       # a skip, not a failure, so a runner image that happens to lack zsh
@@ -189,21 +283,37 @@ jobs:
       # that shipped (`tan/cli.py` imports `click.testing`, typer stopped
       # depending on click, and a clean install therefore died at import while
       # every developer machine passed). Installing the package resolves exactly
-      # what a customer's `pip install alp-tan` resolves. Extras stay out: the
+      # what a customer's `pip install tan-cli` resolves. Extras stay out: the
       # `monitor` extra is optional at runtime by definition, and installing it
       # here would hide a module-scope `import serial` from the gate below.
       #
       # Deliberately ASYMMETRIC with python-binaries.yml, which installs
       # `-e ".[monitor]"`: the release artifact carries the extra because a frozen
       # binary cannot gain pyserial later, while this job must keep testing the
-      # extras-LESS shape, which is what `pip install alp-tan` gives a customer
+      # extras-LESS shape, which is what `pip install tan-cli` gives a customer
       # and the only shape in which `test_declared_dependencies.py` can catch an
       # extras-only import escaping to module scope. Do not "fix" one to match
       # the other.
       - name: install the declared package
         run: pip install -e ./python
+      # `pytest-xdist` alongside the runner, not extra: `tests/gates/
+      # test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_
+      # xdist_worker` needs it PRESENT to prove the `config.workerinput`
+      # worker-skip guard at all (it `importorskip`s otherwise) -- this job
+      # is one of the two `tests/gates` legs in CI (the other is parity.yml's
+      # `seam1-plan-shape`), and before this line neither installed xdist, so
+      # that test SKIPPED in every CI leg while reading as covered (#916
+      # review, Major 2). Installing it here does not turn `-n`/parallelism
+      # on for the rest of this job's `pytest` step below -- xdist only
+      # activates under `-n`/`--dist`, neither of which this job passes.
+      #
+      # `coverage` alongside them, for the `audit_vacuous_gate_shapes.py`
+      # step at the end of this job: that audit is the only thing in any
+      # workflow that measures which `tests/gates` loops NEVER ITERATE, and
+      # it cannot do that from a static walk. Installed here rather than in
+      # the step so an install failure reads as an install failure.
       - name: install the test runner
-        run: pip install pytest
+        run: pip install pytest pytest-xdist coverage
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
       #
@@ -398,12 +508,151 @@ jobs:
       # tagged one. `fetch-depth: 0` is not needed for the same reason it
       # is not needed there: `git fetch --tags` pulls every tag regardless of
       # depth, and `v0.16.0` points AT this commit.
+      #
+      # OWED MOVE, STILL NOT MAKEABLE (tan-cli#791). None of the three bumps
+      # above carry ADR-0028's artefacts -- they moved this pin for reasons
+      # unrelated to the model-engine relocation. This checkout still predates
+      # every artefact ADR-0028 publishes on the alp-sdk side -- `npu_toolchain.
+      # vela` in `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/
+      # npu_ops/**` op-support tables, the deletion of `scripts/alp_model/`
+      # with the regenerated C fixtures that names (`ab6968e2`), and the
+      # public `tests/fixtures/models/person_detect_int8.tflite` real-model
+      # fixture (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470,
+      # which is still OPEN, so there is no post-merge SHA to move this `ref:`
+      # to yet. Until there is, twelve tests under `python/tests/model/` SKIP
+      # against this checkout instead of failing against it, each naming the
+      # one artefact it is missing (`python/tests/conftest.py`'s capability
+      # predicates). Move this `ref:` -- in the same change as `parity.yml`'s
+      # `PINNED_SDK_TAG` and both freshness pins, as always -- onto an alp-sdk
+      # commit carrying `npu_toolchain.vela`, in the SAME merge window as
+      # alp-sdk#1470. A pin left behind after #1470 merges leaves the whole
+      # relocated model engine unmeasured while this job still reports green,
+      # which is the one outcome this job exists to prevent.
+      #
+      # `eb96112b` -> `722320a1` (tan-cli#996/#1001), moved in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` and
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and `test_planner_relocation_
+      # freshness.py`'s `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` --
+      # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # per-fixture re-measurement.
+      #
+      # `f1b1c9df` -> `0914da38` (tan-cli#1103), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the full per-fixture re-measurement. `tests/fixtures/
+      # planner_oracle/` WAS re-captured against `0914da38` (required to
+      # keep `PINNED_PLANNER_ORACLE_SDK_REF` and `PROVENANCE.txt` in the
+      # lockstep `test_planner_oracle_ref_tracks_pinned_sdk_tag.py`
+      # enforces), but this move's own
+      # `scripts/alp_orchestrate/{kconfig,topology,validate}.py` delta is
+      # NOT a byte-emission change: no `test_planner_emit_parity` board
+      # exercises the new `os: baremetal` stock-token refusal
+      # (`validate.py`) or the `isinstance` guards (`kconfig.py`/
+      # `topology.py`, already present on tan's side via `tan.core.os_class`,
+      # tan-cli#870/#914/#957/#962), so the recapture is a zero-file diff --
+      # only `PROVENANCE.txt`'s own `alp-sdk ref` line moved.
+      # `0914da38` -> `ff27f179` (tan-cli#1151, the #1118 re-sync), moved in
+      # the SAME change as `parity.yml`'s `PINNED_SDK_TAG` /
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the full per-fixture re-measurement. Unlike the two
+      # moves above, this one IS a byte-emission change: alp-sdk#1855
+      # rewrites bare alp-sdk-tree paths in `--emit scaffold` output, so
+      # `python/tan/templates/vendored/` was re-vendored (9 files) and 17
+      # `DELIBERATE_EDITS` retired in the same change. The planner oracle
+      # recapture is still a zero-file diff -- that fixture does not capture
+      # the scaffold emit.
+      #
+      # `eff266b6` -> `15b2f32c` (tan-cli#1239/#1223), moved in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_
+      # SDK_REF` and `test_planner_relocation_freshness.py`'s
+      # `PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG` comment for
+      # the full per-fixture re-measurement (planner oracle: a REAL 87-of-700
+      # emit diff this time, all three behavioural upstream commits named
+      # there). `HAND_PORT_PINNED_SDK_COMMIT` ALSO moves in this same change
+      # -- `scripts/gen_zephyr_board.py` (a `HAND_PORT_HASHES` source)
+      # changed in this range in a way that is NOT inert (a `rtc_alarm.risk`
+      # metadata-shape change crashing the AEN board-tree emit outright, and
+      # a genuinely new V2N/V2M board `.dts` generator this SDK ref now
+      # ships), and this job's own `python-tests-shard`/`sdk_parity` binds
+      # `ALP_SDK_ROOT` to `PINNED_SDK_TAG` for `test_planner_emit_parity.py`,
+      # which calls that exact hand-ported code for every board -- moving
+      # the mirror pin without the hand-port audit reds that comparison
+      # regardless. Both fixes are ported in this same change; see that
+      # pin's own comment in `test_planner_relocation_freshness.py` for the
+      # measurement. `scripts/alp_project_loader.py` (the other changed
+      # `HAND_PORT_HASHES` source) is inert for `tan/planner/` on its own.
+      #
+      # `15b2f32c` -> `20fec7a7` (tan-cli#1248), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and
+      # both of `test_planner_relocation_freshness.py`'s pins -- see
+      # `parity.yml`'s `PINNED_SDK_TAG` comment for the re-measurement.
+      # `HAND_PORT_PINNED_SDK_COMMIT` moves too, for the same reason as the
+      # move above: `scripts/gen_zephyr_board.py` changed (alp-sdk#2036 adds
+      # the `e1m_i2c0` board-layer pinctrl group and `&i2c2` node every AEN
+      # board tree now carries), and this job's `sdk_parity` leg compares
+      # tan's hand-port against that exact file for every board.
+      #
+      # `81a9d515` -> `c81cb5db` (tan-cli#1269 hand-finish, tan-cli#1275),
+      # moved in the SAME change as `parity.yml`'s `PINNED_SDK_TAG` /
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and both of
+      # `test_planner_relocation_freshness.py`'s pins -- see `parity.yml`'s
+      # `PINNED_SDK_TAG` comment for the full re-measurement (planner
+      # oracle: a REAL 80-of-700-file diff, entirely attributed to
+      # alp-sdk#2053's `mram_main.base` resolution; alp-sdk#2088's
+      # composite-alias verification fires on every one of those same
+      # boards but moves no byte of its own). `HAND_PORT_PINNED_SDK_COMMIT`
+      # moves too: `scripts/gen_zephyr_board.py` changed in range
+      # (#2053, docstring only) and this job's `sdk_parity` leg compares
+      # tan's hand-port against that exact file for every board.
+      #
+      # `c81cb5db` -> `79c834e65` (review of tan-cli#1291), moved in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_
+      # SDK_REF` and both of `test_planner_relocation_freshness.py`'s pins --
+      # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # commit-by-commit audit (alp-sdk#2311/#2312/#2288, plus #1470/#2281
+      # inert-for-tan metadata additions). `HAND_PORT_PINNED_SDK_COMMIT`
+      # moves too: `scripts/gen_zephyr_board.py` changed in range (#2288,
+      # BEHAVIOURAL -- the BRD_I2C-to-CA55 move, ported into
+      # `tan/planner/zephyr_board.py` in this same change) and this job's
+      # `sdk_parity` leg compares tan's hand-port against that exact file for
+      # every board.
+      #
+      # `79c834e65` -> `34c11c9de` (tan-cli#1278), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF`, all
+      # three of `test_planner_relocation_freshness.py`'s pins (STRICT_LOADERS
+      # included this time, alp-sdk#2328), `planner_oracle/PROVENANCE.txt` and
+      # the vendored scaffold -- see `parity.yml`'s `PINNED_SDK_TAG` comment
+      # for the audit (#866/#2469/#2316/#2597/#2024/#915). The hand-port pin
+      # moves because `gen_zephyr_board.py`, `alp_project_loader.py`,
+      # `alp_template.py`, `alp_project_emit/hw_info.py` and
+      # `alp_cli/validator.py` all changed in range.
+      #
+      # `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF`,
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` and
+      # `HAND_PORT_PINNED_SDK_COMMIT`, `planner_oracle/PROVENANCE.txt` and the
+      # vendored scaffold's vendor point -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the audit (#2705/#2735/#2673/#2674/#2677/#2679/#2695/
+      # #2678/#2653/#2670). `STRICT_LOADERS_PINNED_SDK_COMMIT` stays put
+      # (`scripts/strict_loaders.py` unchanged in range).
+      #
+      # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
+      # between them. `python/scripts/pin_move_verify.py`'s
+      # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
+      # refuses ("found 0 readable") rather than guessing if anything is
+      # inserted; putting this note between them is exactly how that broke
+      # in tan-cli#1151's first cut, caught by
+      # `tests/scripts/test_pin_move_verify.py::
+      # test_extract_ci_sdk_parity_ref_against_the_real_file`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          ref: 84a6e0d211d6cc7898e1c3827cfff9b43ed309c7
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
@@ -439,35 +688,330 @@ jobs:
       # them silently.
       - name: pytest
         working-directory: python
+        env:
+          # `test_module_size_budget_log_append_only.py`'s base-ref
+          # discovery (tan-cli#970 review, blocker 2): this job triggers on
+          # `merge_group` (see the `on:` block above), and GitHub Actions
+          # does not populate `GITHUB_BASE_REF` for that event (only
+          # `pull_request`/`pull_request_target`) -- without this, a
+          # `merge_group` run would hit that gate's `BaseRefUnresolved` and
+          # fail loudly (by design) instead of resolving a real base. Empty
+          # on every other trigger (`push`, `workflow_call`), which is
+          # exactly when that gate's own fallback -- no PR/merge-queue base
+          # applies to this run -- is the correct answer.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
+      # tan-cli#1145. A gate whose loop never iterates cannot fail, and no
+      # static walk can tell: the loop looks fine, its assertions look
+      # thorough, and the collection it iterates is empty every time. This
+      # step re-runs `tests/gates` under `coverage` and reports any `for`
+      # whose header line executed while no line of its body ever did, plus
+      # any gate FILE that executed no `assert` at all. Reviewed instances
+      # are declared, with a reason each, in `python/tests/gates/
+      # _vacuous_gate_shapes_core.py`; anything undeclared fails here.
+      #
+      # AFTER the pytest step, not before: the audit's own child run is what
+      # produces the coverage data, so a suite that is already red produces a
+      # meaningless measurement -- and the step above is the better place to
+      # learn that. It refuses to report on a red child run for the same
+      # reason.
+      #
+      # THIS JOB ONLY, and the reason is COST, nothing subtler. Three legs
+      # run `tests/gates`: this one, `parity.yml`'s `seam1-plan-shape`, and
+      # `python-newest` below (see the `--ignore=tests/gates` note at the top
+      # of this file, which names all three). Adding a second full execution
+      # of the directory to each -- measured at `1235 passed, 112 skipped in
+      # 32.29s` plain against `61.27s` under `coverage` -- buys nothing this
+      # job does not already give. It is NOT that a bound `ALP_SDK_ROOT`
+      # would measure something wrong: binding one only unskips tests, which
+      # can only SHRINK the never-iterated set, so seam1 could produce fewer
+      # findings but never a false one. (An earlier draft of this comment
+      # argued the opposite and was refuted by its own monotonicity claim.)
+      #
+      # The pass/skip counts are ENVIRONMENT-BOUND and are stated with their
+      # environment rather than as bare truths: CPython 3.12.3 on Linux, no
+      # `ALP_SDK_ROOT` / `ALP_SDK_HAND_PORT_ROOT` / `ALP_SDK_STRICT_LOADERS_
+      # ROOT` bound, with `pytest-xdist` and `pyserial` both INSTALLED, on
+      # this branch merged with `dev` at `2915b209`. 109 of the 112 skips are
+      # SDK-root-gated; the other three are
+      # `test_never_raises_contract_holds.py`'s "has no parse step of its own
+      # to malform". A round-5 figure of `1197 passed, 59 skipped` did not
+      # reproduce for the reviewer and is replaced rather than defended --
+      # the wall-clock ratio is the load-bearing part of this comment, and it
+      # held (32.29s against 61.27s, 1.90x).
+      #
+      # The consequence is disclosed rather than implied: `python` is not a
+      # required context (see the BRANCH PROTECTION block at the top of this
+      # file), so a new never-iterating loop reds VISIBLY on the PR without
+      # blocking the merge. The structural half -- every allow-list row still
+      # naming a real loop and carrying a classified, line-free reason, the
+      # tautology and swallowed-assert walks, and every negative control --
+      # lives in `python/tests/gates/test_vacuous_gate_shapes.py` and
+      # therefore DOES block, through seam1.
+      #
+      # `TAN_MERGE_GROUP_BASE_REF` is bound HERE and not only on the pytest
+      # step above: this step spawns its OWN `pytest tests/gates` child, which
+      # inherits the job-wide environment (including
+      # `GITHUB_EVENT_NAME=merge_group`) but NOT a step-scoped `env:` set on a
+      # different step. Without it, `test_module_size_budget_log_append_only.
+      # py::test_the_ledger_only_ever_appends_since_the_prs_base` hits
+      # `BaseRefUnresolved` and fails by design on every merge-queue run --
+      # measured `1 failed, 1234 passed, 112 skipped`, and rc=0 in 63.39s
+      # with the binding in place -- and the audit, which refuses to report
+      # on a red child run, exits 1 having measured nothing.
+      # `test_the_audit_step_binds_the_merge_group_base_ref` pins this.
+      - name: no undeclared vacuous gate shapes (tests/gates under coverage)
+        working-directory: python
+        env:
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python scripts/audit_vacuous_gate_shapes.py
 
-  # The npm shim's platform -> asset table is DATA in a postinstall script, so
-  # nothing compiled it, tested it, or noticed when it drifted. It has drifted
-  # in BOTH directions: it once served `-gnu` while install.sh and the VS Code
-  # extension served `-musl` (a musl host downloaded a binary that could not
-  # execute), and from v0.5.0 the correct answer reversed -- PyInstaller cannot
-  # produce the static `-musl` artefact the retired Rust target did, so Linux is
-  # `-gnu` again. This job is what keeps the shim, install.sh and the contract
-  # doc from separating, whichever direction is currently correct.
-  # Node's own test runner, so there is nothing to install.
-  shim:
+  # THE OTHER HALF OF THE INTERPRETER POLICY (tan-cli#1126). The `python` job
+  # above pins `"3.12"`, the `requires-python` FLOOR; `parity.yml`'s
+  # `seam1-plan-shape` floats `"3.x"`, the CEILING -- see that job's own
+  # `python-version` block for why the spread is deliberate and what it has
+  # caught. This job closes the hole the spread had: seam1's selection is
+  # `tests/gates` plus two `tests/parity` seam files (`test_seam1_field_diff`,
+  # `test_seam1_tan_reconciliation`) and the SDK emit/kconfig/bootstrap parity
+  # steps -- NOT the whole suite, and in particular not `tests/core`. So for
+  # two tests the full suite was RED on 3.14.7 while every required context
+  # stayed green, and it stayed that way until somebody happened to run the
+  # whole suite on the newer interpreter by hand. A check that cannot report
+  # the thing it exists to catch is the shape this milestone has spent a week
+  # removing.
+  #
+  # So: the same floating `"3.x"`, the WHOLE suite, one ubuntu leg. Not a
+  # matrix -- the cross-OS dimension is already covered at the floor by
+  # parity.yml's 15-leg `python-tests-shard`, and this job is answering a
+  # different question ("does the newest interpreter agree with the floor?"),
+  # which one host answers as well as three for a repo whose interpreter-
+  # dependent surface is pure `pathlib`/`ntpath` string logic. Three of the
+  # FOUR known divergences to date (`_IGNORED_ERRNOS`, `Path.resolve
+  # (strict=False)` symlink loops, `ntpath.isabs`, and -- found in PR #1137's
+  # review -- `tan/core/bootstrap.py`'s `resolve_workspace_target`, where a
+  # rooted-but-driveless `--workspace` relocates a checkout on 3.12.3 and
+  # raises from 3.13.15 on) were measured identically on POSIX for exactly
+  # that reason. The fourth is a real, user-visible product divergence with no
+  # test pinning it, filed separately; this job cannot report what nothing
+  # asserts, which is the standing limit on what any interpreter leg buys.
+  #
+  # ON THE RELEASE PATH THIS JOB DOES NOT RUN -- `if:` below, and the
+  # `skip_ceiling_interpreter` input at the top of this file, which
+  # `release.yml`'s `gates` call passes `true`. The float's cost is paid on
+  # PRs and in the merge queue, where a red is re-runnable and a fix is
+  # cheap; on a tag the same red spends the tag (`v0.5.0-rc3` / #319 is the
+  # precedent, for the same shape with alp-sdk `dev` in place of CPython).
+  # A tag therefore ships tested at the FLOOR, which is the interpreter the
+  # `requires-python` promise is anchored on -- and the ceiling verdict for
+  # that same code already exists, from the PR and merge-queue runs that
+  # merged it.
+  #
+  # NOT `continue-on-error`, and deliberately so. A non-blocking divergence
+  # reporter is the same silent shape in a new costume: it would go orange in
+  # a corner of the checks list and be scrolled past. When a new CPython minor
+  # ships and reds this job on an unrelated PR, that is the policy working --
+  # fix the code, or record an explicit exception with a reason. Do not pin
+  # this to a version to make it quiet; pinning is a decision that belongs in
+  # `python/tests/gates/test_interpreter_policy.py`, where it has to be stated.
+  #
+  # Kept deliberately CLOSE to the `python` job's shape -- same zsh install,
+  # same `pip install -e ./python`, same whole-`tests` selection -- because a
+  # divergence reporter that runs a DIFFERENT selection than the job it is
+  # compared against cannot tell "3.14 disagrees" from "these two jobs do not
+  # run the same thing".
+  #
+  # WHAT IT DOES NOT COVER, stated plainly rather than implied by the word
+  # "whole". The SELECTION is the whole suite (`pytest tests`), but this job
+  # binds no fixture roots, so measured on 3.14.7: 7673 collected, 1365
+  # skipped (17.8%), which splits into THREE groups, not two:
+  #
+  #     696 (9.1%)  name `ALP_PLANNER_ORACLE_ROOT`
+  #     572 (7.5%)  name `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (or "a real
+  #                 alp-sdk checkout")
+  #      97 (1.3%)  ordinary host/toolchain gates -- Windows-only
+  #                 `install.ps1`, vela, tflite, a not-yet-built binary,
+  #                 `ALP_SDK_INTERNAL`, `ALP_DRPAI_TVM_HOME`, `ALP_E2E_ROOT`
+  #                 -- which every leg skips alike, at every interpreter
+  #
+  # (Classification rule, so the number is reproducible: `pytest -rs`, oracle
+  # first, then SDK, then everything else. An earlier draft of this comment
+  # said "1268 SDK-gated", which merged the first two groups and made
+  # `ALP_SDK_ROOT` look like it closes 16.5% when it closes 7.5%. It also
+  # called them "tests about another repository", which was wrong in a
+  # different way: they exercise `tan/planner/`'s OWN relocated code and need
+  # a bound checkout only as DATA.)
+  #
+  # So the honest claim is: the ceiling runs the fixture-free ~82%, and the
+  # planner families are measured at the FLOOR only.
+  #
+  # Not fixed here, deliberately, and NOT for the reason an earlier draft
+  # gave. That draft said binding would add "a THIRD copy of the alp-sdk pin",
+  # which is false twice over: there are already three literal SHAs
+  # (`ci.yml:535`, `parity.yml:683`, `parity.yml:779`), and binding needs NO
+  # copy at all -- `getting-started.yml:318-328` and
+  # `unsharded-python-canary.yml:170` read `PINNED_SDK_TAG` out of
+  # `parity.yml` with `sed` at runtime, and the first of those even errors
+  # with "do NOT add a second copy of the SHA here". The real reasons:
+  #
+  #   * a single `ALP_SDK_ROOT` bind buys 7.5%, not the 18% the merged number
+  #     suggested. The BIGGER half needs `ALP_PLANNER_ORACLE_ROOT`, and that
+  #     one wants a checkout at `PINNED_PLANNER_ORACLE_SDK_REF` specifically
+  #     -- a SECOND pin. (`parity.yml:697-698` names both pins and the
+  #     lockstep rule between them; `parity.yml:2377` and `:2897` are the
+  #     checkouts that consume the oracle one. NOT
+  #     `tests/fixtures/planner_oracle/PROVENANCE.txt`, which an earlier
+  #     draft cited: that file records the resolved SHA and names
+  #     `PINNED_SDK_TAG`, never `PINNED_PLANNER_ORACLE_SDK_REF`.) So closing
+  #     the gap properly is two roots and two pins, not one env var.
+  #   * a ceiling job wired to both doubles this job's coupling to alp-sdk
+  #     state, for families the floor already covers -- and a red arriving
+  #     from that coupling is, at a glance, indistinguishable from the
+  #     interpreter verdict this job exists to deliver. That is the failure
+  #     `clean-host.yml:86-87` names: "A gate that goes red for a reason
+  #     unrelated to its subject stops being read." This job's whole value is
+  #     that its red means one thing.
+  #
+  #     Stated at its real size, because an earlier draft of this bullet
+  #     overclaimed: the specific tan-cli#895 failure it leaned on -- the two
+  #     pins DISAGREEING, which cost 19 cases across 19 boards on all three
+  #     OSes after two sign-offs -- is now caught unconditionally by #895's
+  #     own fix, `tests/gates/test_planner_oracle_ref_tracks_pinned_sdk_tag
+  #     .py`, measured at `28 passed` with neither root bound. A pin
+  #     disagreement therefore reds in the plain local bar before any job
+  #     sees it, and a two-root ceiling job would never be the first or only
+  #     place it surfaced. Bullets 1 and 3 carry this decision on their own;
+  #     this one is the smaller point that the ceiling job's red should mean
+  #     one thing, not the historical incident.
+  #   * the families are also the slow ones -- `parity.yml` shards them four
+  #     ways per OS with a dedicated `parity, whole` leg beside that -- and
+  #     they already run per push at the floor, `ALP_SDK_ROOT`-bound, on
+  #     three OSes. Unmeasured on the CEILING, not unmeasured.
+  #
+  # Revisit if a planner-family divergence is ever found across interpreters;
+  # that changes the trade, and nothing here should be read as claiming it
+  # cannot happen.
+  #
+  # The size-ratchet/version checks are omitted for a different and settled
+  # reason: they are genuinely interpreter-independent (`ast` over source,
+  # JSON compare), measured `already matches the measured tree` under 3.12.3,
+  # 3.13.15 and 3.14.7 alike, and they already run in the `python` job.
+  #
+  # This job's first real signal was worth reading, and it has since been
+  # acted on. 3.14.7 emits `DeprecationWarning: pathlib.PurePath.as_uri() is
+  # deprecated and scheduled for removal in Python 3.19`, and the same for
+  # `nturl2path`. Both were filed rather than hidden in a `filterwarnings`
+  # (tan-cli#1140), and the halves resolved differently:
+  #
+  #   * `PurePath.as_uri()` WAS the exporter `tan/core/uri_reference.py` is
+  #     built on -- its output is the SARIF `artifactLocation.uri` -- so the
+  #     removal would have broken the envelope surface. That module now
+  #     carries the body itself (`_absolute_path_to_file_uri`); the emitted
+  #     bytes are pinned identical per input, on whichever interpreter runs.
+  #   * `nturl2path` STAYS, in one test, deliberately. It is the only
+  #     spelling that performs the Windows conversion from a POSIX host, and
+  #     two of the three platforms that suite runs on are POSIX
+  #     (`parity.yml`'s `python-tests-shard` matrix `os:`); `urllib.request`
+  #     -- the replacement the message names -- would do the POSIX conversion
+  #     on those two legs and leave a test that passes and covers nothing.
+  #
+  # NOT "this repo has no Windows host". An earlier draft of this comment said
+  # that and it is false: `parity.yml`'s `python-tests-shard` job runs
+  # `python/tests` on a matrix `os:` of
+  # `[ubuntu-latest, windows-latest, macos-latest]` with
+  # `runs-on: ${{ matrix.os }}`, on every `pull_request`, and that is what the
+  # three required `python -- pytest across python/ (<os>)` contexts roll up.
+  # The true premise, and the one the reasoning above actually rests on, is
+  # that an `ntpath`/`PureWindowsPath` string oracle asks the Windows question
+  # on all three legs and while the change is being written, whereas a real
+  # Windows filesystem operation asks it on one leg only and only after a push
+  # (tan-cli#1153, which retired the claim from every site that carried it;
+  # that issue's canonical statement, including the two coverage holes the
+  # Windows shards do have, lives in
+  # `python/tests/core/test_uri_reference.py`'s header).
+  #
+  # Cited by job and key, not by offset, deliberately: this comment carried
+  # `:2279`/`:2284`/`:2302`/`:2382` and every one of them rotted inside a week
+  # -- `parity.yml` is a file several PRs a week touch. `grep -n
+  # "python-tests-shard" .github/workflows/parity.yml` re-derives an offset
+  # whenever one is genuinely wanted.
+  #
+  # One consequence lands on THIS job specifically. The Windows shard's
+  # `actions/setup-python` step pins `python-version: "3.12"`, where
+  # `Path.as_uri()` is not host-dispatched at all, so no required context can
+  # catch a future PR that "finishes the migration" by taking the replacement
+  # the deprecation names:
+  # that mutation is `37 passed` on 3.12.3 and 3.13.15 and reds only at the
+  # ceiling. This advisory job is the only one that can see it -- which is an
+  # argument for reading its log, not for trusting the required five alone.
+  #
+  # So both warnings are still REPORTED in this log, now from two documented
+  # test-side oracles rather than from product code, and no `filterwarnings`
+  # hides either. See `tests/core/test_uri_reference.py`'s header.
+  python-newest:
+    name: "python · pytest on the newest CPython"
+    # PRs and the merge queue only -- see `skip_ceiling_interpreter` at the top
+    # of this file for why a floating interpreter must not be able to decide a
+    # tag's outcome, and why the polarity is a SKIP rather than a RUN.
+    # `inputs` is null off the `workflow_call` path, so this reads
+    # `!null` == true on `pull_request`/`push`/`merge_group`.
+    if: ${{ !inputs.skip_ceiling_interpreter }}
     runs-on: ubuntu-latest
-    # Under a minute on every run sampled, PR and release tag alike. 10 is a
-    # hang catcher for the pip install, not a budget.
-    timeout-minutes: 10
+    # The `python` job measures 6-11 min for the same selection at the floor
+    # (see its own comment). 30 is the same hang catcher it uses on the PR leg,
+    # not a budget.
+    timeout-minutes: 30
     steps:
+      # `fetch-depth: 0` for the same reason the `python` job takes it:
+      # `tests/gates/test_module_size_budget_log_append_only.py` walks real git
+      # ancestry and SKIPS silently on a depth-1 graft.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          fetch-depth: 0
+      # THE INTERPRETER POLICY, ceiling half -- see this job's header comment
+      # above, parity.yml's seam1 block, and the gate that enforces the pair,
+      # python/tests/gates/test_interpreter_policy.py.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          node-version: "24" # same major release.yml's publish_npm job packs with
-      # The FILE, not the directory: `--test <dir>` resolves its argument as a
-      # module on node 26 and dies with MODULE_NOT_FOUND, so the directory form
-      # would make this job's result depend on the runner image's node.
-      - name: pin the platform -> asset mapping
-        run: node --test npm-shim/test/libc-mapping.test.js
-
+          python-version: "3.x" # ceiling -- NOT the floor every other job pins
+      # Reported, not assumed: `"3.x"` resolves on GitHub's schedule, so the
+      # run log has to say which interpreter this verdict is about, or a red
+      # here is un-diagnosable six weeks later. Also the fail-fast on the
+      # degenerate case -- if `"3.x"` ever resolved to the floor itself, this
+      # job would be a duplicate of `python` and would report agreement it
+      # never tested.
+      - name: report (and require) an interpreter above the floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'import sys; print("resolved interpreter:", sys.version)'
+          floor="$(python -c 'import re,tomllib;print(re.search(r">=\s*([0-9]+\.[0-9]+)",tomllib.load(open("python/pyproject.toml","rb"))["project"]["requires-python"]).group(1))')"
+          have="$(python -c 'import sys;print("%d.%d" % sys.version_info[:2])')"
+          echo "requires-python floor: ${floor}; this job: ${have}"
+          if [ "${have}" = "${floor}" ]; then
+            echo "::error::\"3.x\" resolved to ${have}, which IS the declared floor -- this job would duplicate the \`python\` job and report agreement it never tested. Either a newer CPython is not yet available to setup-python (wait), or the floor has been raised to meet the ceiling, in which case the spread is over and python/tests/gates/test_interpreter_policy.py is where that decision gets recorded."
+            exit 1
+          fi
+      # Same reason as the `python` job: without zsh the zsh-driven completion
+      # cases SKIP, and a skip on this leg against a run on the other is a
+      # difference in SELECTION masquerading as agreement.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
+          fi
+      - name: install the declared package
+        run: pip install -e ./python
+      - name: install the test runner
+        run: pip install pytest pytest-xdist
+      - name: pytest
+        working-directory: python
+        env:
+          # `merge_group` does not populate `GITHUB_BASE_REF` -- same binding
+          # the `python` job makes, same gate depending on it.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python -m pytest tests -q
   # `build-system.requires` is a promise to anyone building the sdist/wheel
   # themselves -- a downstream packager, a distro, an offline mirror -- and
   # until this job existed NOTHING in CI stood behind it. Every other Python
@@ -483,7 +1027,10 @@ jobs:
   # measures.
   wheel-floor:
     runs-on: ubuntu-latest
-    # Under a minute on every run sampled. Same reasoning as `shim` above.
+    # Under a minute on every run sampled: a pip install and one build, no
+    # test suite. 10 is a hang catcher, not a budget. (This used to defer to
+    # the `shim` job's identical reasoning; that job retired with the npm
+    # shim in tan-cli#1054.)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -547,14 +1094,32 @@ jobs:
   # to look.
   #
   # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
-  # trusting it. Same invocation, zizmor 1.29.0:
+  # trusting it. Same rule set, zizmor 1.29.0, `--no-config` (NOT this job's
+  # own `run:` invocation below -- that one loads `.github/zizmor.yml`, and
+  # since tan-cli#899 the workflows themselves also carry two inline
+  # `# zizmor: ignore[...]` comments). `--no-config` strips the CONFIG FILE
+  # ONLY -- it does NOT strip inline ignores, measured: `--no-config
+  # --min-severity medium --no-online-audits .github/workflows/` on this
+  # tree is `rc=0, 18 ignored, 58 suppressed` (re-run for the current count,
+  # don't trust this one -- it drifts with the tree; only the with/without
+  # `--no-config` agreement is load-bearing), the inline ignores still
+  # honoured. The `dev @ 01374d4` snapshot below is comparable for a
+  # different reason: it PRE-DATES tan-cli#899, so it carries neither the
+  # config-file ignores nor the inline ones -- not because `--no-config`
+  # would strip the inline ones if it were run on this tree. Stripping
+  # inline ignores too needs `--no-ignores`, per `.github/zizmor.yml`'s own
+  # NON-VACUITY recipe:
   #
   #   this tree      rc=0    no finding at or above medium
   #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
   #                          12 excessive-permissions, 6 template-injection
   #
   # So it fails on every class the PR that introduced it fixed, not merely on
-  # nothing.
+  # nothing. This is `.github/zizmor.yml`'s own NON-VACUITY measurement, not
+  # a second one taken here -- and it is NOT the recipe for checking whether
+  # THIS file's own suppressions (the `run:` step below, with its config and
+  # inline ignores loaded) are still catching something real. For that,
+  # `.github/zizmor.yml`'s header names `--no-ignores`.
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
@@ -584,10 +1149,65 @@ jobs:
       #
       # `--no-online-audits` keeps the gate hermetic: no token, no API, no
       # rate limit deciding whether CI is green. Verified to reach the same
-      # verdict as a networked run on this tree, which is what the
-      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      # verdict as a networked run on this tree.
       #
-      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
-      # two entries and both carry their argument in full.
+      # That agreement does NOT extend to the two `artipacked` sites this
+      # gate must still catch if their suppression ever slipped --
+      # `planner-resync.yml`'s and `release.yml`'s `dev` checkouts, each
+      # carrying its own inline `# zizmor: ignore[artipacked]` comment
+      # (tan-cli#899). Measured, with both comments removed:
+      # `--no-online-audits` reports `rc=13` (the two now-unsuppressed
+      # `artipacked` findings, at medium), while a real networked run reports
+      # `rc=0` -- opposite verdicts at exactly those sites, not the same one.
+      # Offline being the STRICTER direction there is the safe way for a
+      # hermetic gate to err, so it does not undermine this job running
+      # without a token; it does mean "same verdict as networked" is a
+      # property of the reviewed, suppressed tree, not a guarantee that
+      # survives a suppression going missing.
+      #
+      # The baseline is `.github/zizmor.yml`, picked up automatically. Since
+      # tan-cli#899 it holds no `rules.*.ignore` entries of its own -- `rules:
+      # {}` is a required stub, not policy. Both suppressions now live inline,
+      # at the steps they excuse; the reviewed count is kept current in
+      # `.github/zizmor.yml`'s own header, under INVENTORY (not this file's --
+      # this job only runs the audit `.github/zizmor.yml` configures).
       - name: audit .github/workflows
         run: zizmor --min-severity medium --no-online-audits .github/workflows/
+      # `.github/zizmor.yml`'s header keeps a hand-maintained INVENTORY of
+      # the inline `artipacked` suppressions (tan-cli#899) so a reviewer can
+      # audit both in one place. That INVENTORY can drift from the tree in
+      # TWO different ways -- tan-cli#919 round 3 found the guard against a
+      # COUNT drift itself disagreeing with zizmor, in BOTH directions, no
+      # matter how it was patched: three prior rounds each closed three
+      # evasions and opened five more, because
+      # `python/tests/gates/test_zizmor_inventory_count.py` modelled a step
+      # by YAML INDENTATION while zizmor actually associates an inline
+      # `# zizmor: ignore[...]` comment with the finding's LINE RANGE (the
+      # whole step, indentation irrelevant) -- a different model of what a
+      # step is, not a fixable regex bug. That gate is deleted;
+      # `python/scripts/check_zizmor_inventory.py` (below) asks zizmor
+      # itself instead of re-implementing its comment association, so it
+      # cannot disagree with zizmor's verdict -- it IS zizmor's verdict.
+      # tan-cli#929 then found the COUNT check alone still passes when a
+      # step is simply RENAMED (two renamed-past-each-other sites count the
+      # same) -- see that script's own docstring and `.github/zizmor.yml`'s
+      # `DRIFT THIS INVENTORY CATCHES, AND HOW` section for the `id:`-keyed
+      # fix.
+      #
+      # `--no-ignores` strips every inline ignore and re-surfaces the
+      # `artipacked` findings they were suppressing (`.github/zizmor.yml`'s
+      # own NON-VACUITY recipe). On a tree with real suppressions to strip
+      # that exits 14 by design -- findings at or above `--min-severity
+      # medium` is the expected SUCCESS path for this probe, not a failure,
+      # so the step does not fail on zizmor's exit code; it fails only on
+      # `check_zizmor_inventory.py`'s own exit status.
+      - name: inline artipacked suppressions match the zizmor.yml INVENTORY
+        run: |
+          set +e
+          zizmor --min-severity medium --no-online-audits --no-ignores --format json .github/workflows/ \
+              >"$RUNNER_TEMP/no-ignores.json" 2>"$RUNNER_TEMP/no-ignores.log"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/no-ignores.log"
+          python3 python/scripts/check_zizmor_inventory.py \
+              "$RUNNER_TEMP/no-ignores.json" .github/zizmor.yml "$rc"

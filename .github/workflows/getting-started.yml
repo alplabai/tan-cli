@@ -213,7 +213,7 @@ jobs:
       # interpreter is a different BUILD of CPython, not just a different
       # version: measured on this job, `/opt/hostedtoolcache/Python/3.12.13/
       # x64/lib/libpython3.12.so.1.0` froze a 28485720 B `dist/tan` (ceiling
-      # 16500000) from the SAME source that freezes to 14042352 B inside this
+      # 16800000) from the SAME source that freezes to 14042352 B inside this
       # container (artifact_ceilings.env's own x86_64-unknown-linux-gnu
       # measurement). No new dependency and no new import produced that --
       # PyInstaller bundles the interpreter it runs under, and a hosted-runner
@@ -230,10 +230,24 @@ jobs:
       # binutils is installed INSIDE the container (PyInstaller shells out to
       # `objdump` on Linux and slim-bullseye lacks it) rather than on the host,
       # since the host no longer runs PyInstaller at all.
+      #
+      # DELIBERATELY UNPINNED (tan-cli#989 review, finding 3): "the SAME
+      # artifact release.yml ships" above is about the BUILD IMAGE (matching
+      # release.yml's glibc floor, so the interpreter build is identical, not
+      # a hosted-runner CPython lookalike) -- it is not a claim that this leg
+      # resolves the identical hash-pinned dependency set release.yml's
+      # `build` job and clean-host.yml's `freeze-and-smoke` job now do
+      # (`--require-hashes -r release-requirements.lock.txt`). This install
+      # stays a live PyPI resolution on purpose: this job smoke-tests the
+      # first-install path end to end (install.sh -> bootstrap -> init ->
+      # build), and a live resolution here keeps catching an upstream
+      # dependency-set drift on the day it actually happens, rather than only
+      # after the next lock-update PR regenerates and merges.
       - name: freeze tan from this checkout in python:3.12-slim-bullseye (python/scripts/build_binary.sh) and swap it in
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src python:3.12-slim-bullseye bash -euc '
+          IMG=$(bash scripts/ci/docker-pull.sh python:3.12-slim-bullseye)
+          docker run --rm -v "$PWD/python:/src" -v "$PWD/scripts:/scripts:ro" -w /src "${IMG}" bash -euc '
             bash /scripts/ci/apt-bounded.sh update -qq
             bash /scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
@@ -317,12 +331,48 @@ jobs:
 
       # `alp-workspace/` holds the checkout and NOTHING else, on purpose.
       # `west init -l` builds the workspace in the checkout's PARENT, so
-      # bootstrap guards a parent that holds any other entry -- and under a CI
-      # runner's non-terminal stdio that guard REFUSES outright rather than
-      # offering to relocate. Cloning into $GITHUB_WORKSPACE (which already holds
-      # this repo) would hit that refusal and the job would never reach
-      # bootstrap's real work. A dedicated parent is also what the guard's own
-      # remedy tells a customer to create.
+      # bootstrap guards a parent that holds any other entry
+      # (`parent_needs_workspace_guard`, tan/core/bootstrap.py). Cloning into
+      # $GITHUB_WORKSPACE -- which already holds this repo -- would trip it.
+      #
+      # What tripping it COSTS changed at tan-cli#302, and this comment used to
+      # state the pre-#302 behaviour: it said the guard "REFUSES outright rather
+      # than offering to relocate" under a CI runner's non-terminal stdio. It no
+      # longer refuses. A dirty parent with no `--workspace` now RELOCATES the
+      # checkout into `<parent>/alp-workspace` automatically, on every run, TTY
+      # or not -- `workspace_guard_target_occupied_refusal`'s own docstring says
+      # the port "takes NO input on this decision on ANY run", and
+      # tests/commands/test_bootstrap_command.py:965-1022 drives exactly that
+      # under `--format json`. The single surviving refusal is that same
+      # function's: the relocation target already exists AND already holds
+      # content of its own.
+      #
+      # Both behaviours fail this job loudly, and neither is silent -- an
+      # earlier draft of this comment claimed the relocation was silent and
+      # the more dangerous of the two, and both halves were wrong.
+      # `bootstrap_cmd.py`'s `relocate_checkout` caller raises it through
+      # `log.warn("workspace-relocated", ...)`, and `Log.take_issues` puts it
+      # on the envelope at `severity: "warning"` (the `escalate_blocking and
+      # code in WORKSPACE_BLOCKING` ternary; relocation is not blocking). The
+      # very same step below then fails on any warning outside its
+      # `EXPECTED_WARNINGS` set, which holds only `bootstrap.python-floor-skew`.
+      # So a relocation dies right here, not somewhere downstream.
+      # `rollback_relocation_after`'s docstring puts it plainly: the
+      # `workspace-relocated` warning "already drained into this run's issues".
+      #
+      # Cited by SYMBOL rather than line, deliberately. An earlier draft of
+      # this same comment cited `:435-439` for `EXPECTED_WARNINGS` and its own
+      # nine added lines pushed that block to `:444` in the very commit that
+      # wrote the citation. It also pointed at the `bootstrap.workspace-
+      # relocated` emitter inside `print_env_issues`, which is the `--print-env`
+      # PROJECTION ("a real run WOULD move ...") and can never fire in this
+      # step, since this step passes `--format json` and no `--print-env`.
+      #
+      # The dedicated parent still matters, for the plainer reason: tripping
+      # the guard would fail this job at `bootstrap.workspace-relocated`, a
+      # code that reads as unrelated to what the job is testing, and a
+      # dedicated parent is also what the guard's own remedy tells a customer
+      # to create.
       - name: clone alp-sdk into a dedicated workspace parent
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -340,6 +390,28 @@ jobs:
       # anyway.
       - name: tan bootstrap (venv + west workspace + SDK python deps)
         working-directory: alp-workspace
+        env:
+          # tan-cli#1163. `tan bootstrap`'s final phase lists the Zephyr SDK
+          # releases through the GitHub API, whose anonymous quota is counted
+          # PER SOURCE IP and shared across every hosted runner in the region --
+          # so it is exhausted by traffic that is not ours, and the job dies
+          # with `403 API rate limit exceeded` for a reason unrelated to the
+          # change under test. Measured three times in one day on PRs touching
+          # neither bootstrap nor the SDK.
+          #
+          # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
+          # (tan-cli#840's probe, and the manual `west sdk install` retry):
+          # the probe invokes `gh`, which reads GH_TOKEN, and the west retry
+          # reads GH_TOKEN itself to stage a netrc for `west` -- since
+          # tan-cli#1185 no step in this repo hands a credential to a tool on
+          # a flag. This step invokes
+          # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
+          # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
+          # and the tan-specific name cannot change `gh`'s ambient behaviour
+          # inside this step. tan passes it to `west sdk install` out of band,
+          # so it reaches no argv, log, `--dry-run` plan or envelope
+          # (tan-cli#1143). Listing public releases needs no scopes.
+          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # stderr is captured AND echoed: in `--format json` the envelope is the
@@ -474,10 +546,62 @@ jobs:
 
       # ---- 7. the Zephyr SDK, via tan's own printed remedy ------------------
 
-      # tan does not run this itself -- `west sdk install` needs an initialised
-      # west workspace, and build_readiness.rs prints it as the `fix` string
-      # instead (`west sdk install --version <v> -t arm-zephyr-eabi`). Running
-      # exactly that command here is the only way the printed remedy gets tested.
+      # tan-cli#840: before running the remedy, ask whether upstream's release
+      # LIST is answering at all.
+      #
+      # `west sdk install --version <v>` resolves <v> against
+      # `GET /repos/zephyrproject-rtos/sdk-ng/releases`, and when that endpoint
+      # answers `[]` it reports the empty list in the same words it uses for a
+      # version that genuinely does not exist:
+      #
+      #   FATAL ERROR: Unavailable SDK version: 1.0.1.Please select from the list below:
+      #
+      # The blank line after that colon is the entire tell. Measured 2026-08-17
+      # on run 32039026116: the list endpoint answered `[]` while
+      # `releases/latest` still resolved to v1.0.1 and both release assets
+      # served HTTP 200 by direct URL. The pin was not the cause. (alp-sdk's
+      # own scripts/check_toolchain_lock.py re-derives it from the Zephyr
+      # revision; that script is in the OTHER repository, so nothing here
+      # leans on it -- the probe below claims only what it measures.) Reaching
+      # that conclusion cost one full investigation.
+      #
+      # THE DECISION LIVES IN A FILE, NOT HERE. The dangerous direction is a
+      # FALSE outage: it skips the real ARM build this job exists for while
+      # the job still reports green. `python/scripts/sdk_release_list_probe.py`
+      # therefore claims an outage only on the exact conjunction measured above
+      # (list empty WHILE the release is alive), and
+      # `tests/scripts/test_sdk_release_list_probe.py` drives every other row
+      # of that truth table -- an unmeasurable list, and an empty list beside
+      # an unreachable `latest`, both PROCEED.
+      - name: probe the upstream sdk-ng release list (tan-cli#840)
+        id: sdk_list
+        working-directory: alp-workspace
+        env:
+          # Same token and the same reason as the install step below:
+          # unauthenticated calls are rate-limited PER IP, shared across every
+          # hosted runner in the region. `contents: read` lists public
+          # releases.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Read from the pinned SDK metadata/toolchains.json -- the same
+          # authority the install step below reads, deliberately read again
+          # rather than threaded through a step output, which would be a second
+          # place the pin could be wrong.
+          version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
+          python3 "${GITHUB_WORKSPACE}/python/scripts/sdk_release_list_probe.py" --version "${version}"
+
+      # tan-cli#1163: "tan does not run this itself" was true when written and
+      # is not now -- `tan bootstrap` HAS run `west sdk install` since ADR 0021
+      # Lane 1 P1 / tan-cli#474 (`bootstrap_cmd.py:3788` -> `toolchain_phase`
+      # -> `_acquire_toolchain`), unless `--no-toolchain`/`--no-west`. The
+      # bootstrap step above depends on that phase running, so the two comments
+      # contradicted each other 200 lines apart. (`build_readiness.rs` is the
+      # frozen Rust oracle, not a live code path.)
+      #
+      # This step still earns its keep for the reason the rest of the sentence
+      # gives: `tan doctor` prints this exact command as its `fix` string, and
+      # running it verbatim here is the only way the printed remedy is tested.
       #
       # The version comes from the SDK's own metadata/toolchains.json, the same
       # read parity.yml's seam2 does and the same file
@@ -485,6 +609,9 @@ jobs:
       # ZEPHYR_SDK_INSTALL_VERSION against. Hardcoding it here would be a third
       # copy of a pin that already has one authority.
       - name: install the Zephyr SDK (west sdk install, the printed remedy)
+        # Skipped while upstream cannot list its releases -- west would
+        # blame the pin. See the probe step above.
+        if: steps.sdk_list.outputs.outage != 'true'
         working-directory: alp-workspace
         env:
           # `west sdk install` lists the SDK releases through the GitHub API, and
@@ -500,8 +627,13 @@ jobs:
           # limit to the authenticated per-repo quota and needs no new secret --
           # `contents: read` is enough to list public releases.
           #
-          # Passed via env rather than inlined into the command so the token is
-          # not part of an argv that gets echoed.
+          # Named here and read by the `run:` block below, which stages it into
+          # a private netrc rather than passing it on a flag -- see the
+          # tan-cli#1143 block there. An earlier revision of this comment said
+          # the env form kept the token "not part of an argv that gets echoed":
+          # true of the workflow SOURCE, false of the process. The flag it
+          # defended expanded `${GH_TOKEN}` straight into west's argv, where it
+          # sat in the host process table for the whole multi-minute download.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -510,13 +642,73 @@ jobs:
           command -v west
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           echo "Zephyr SDK pin from alp-sdk metadata/toolchains.json: ${version}"
-          # NOTE: `--personal-access-token` is an authentication detail of THIS
-          # runner, not part of the remedy tan prints. The command under test is
-          # still `west sdk install --version <v> -t arm-zephyr-eabi`; a customer
-          # on a home IP has their own unauthenticated quota and needs no token.
-          # Retry the whole install (tan-cli#689). The GH_TOKEN above lifts the
-          # API rate limit on `fetch_releases`, but that is only the FIRST
-          # network call this makes. `setup.sh -t arm-zephyr-eabi` then fetches
+          # tan-cli#1185: this runner's credential travels in a netrc, NOT on
+          # `--personal-access-token`. A flag lands the value in the host
+          # process table for the whole multi-minute download, readable by
+          # anything else executing in this job -- which is exactly why `tan
+          # bootstrap` hands the same token to the same `west` out of band
+          # (tan-cli#1143, `bootstrap_cmd._stage_sdk_credential`) instead of on
+          # a flag. This step was the last site in the repo doing the opposite,
+          # and a workflow contradicting the invariant is what the next author
+          # copies; the next copy may not be a run-scoped `secrets.GITHUB_TOKEN`.
+          #
+          # It also makes the step test the remedy more exactly. Authentication
+          # is an artefact of THIS runner and no part of what tan prints, and
+          # the command below is now literally `west sdk install --version <v>
+          # -t arm-zephyr-eabi` -- what a customer pastes. A customer on a home
+          # IP has their own anonymous quota and needs no credential at all.
+          #
+          # Why a netrc reaches west: `west sdk install` reads a credential from
+          # that flag and from NO environment variable of its own (Zephyr v4.4.1
+          # `scripts/west_commands/sdk.py`; tan pins the same fact in
+          # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`), but its GitHub call
+          # goes through `requests`, which reads a netrc path from $NETRC and
+          # applies it. Same one-machine document tan writes
+          # (`toolchain_provision.netrc_text`): api.github.com / x-access-token.
+          netrc_dir="$(mktemp -d)"
+          # Removed on EVERY exit path -- success, an exhausted retry, the
+          # `exit 1` below, or `set -e` firing anywhere in between. Under
+          # $TMPDIR, never inside the repo working tree.
+          trap 'rm -rf "${netrc_dir}"' EXIT
+          chmod 0700 "${netrc_dir}"
+          # `printf` is a shell builtin, so the token is not in a child's argv
+          # here either; the `umask` means the file is never briefly readable by
+          # anyone else in the window between creation and `chmod`.
+          ( umask 0077
+            printf 'machine api.github.com\n  login x-access-token\n  password %s\n' \
+                   "${GH_TOKEN}" > "${netrc_dir}/netrc" )
+          chmod 0600 "${netrc_dir}/netrc"
+          export NETRC="${netrc_dir}/netrc"
+          # Prove the staged credential AUTHENTICATES, before spending minutes on
+          # a download whose success would not distinguish "the token reached
+          # api.github.com" from "the shared anonymous quota happened to be
+          # free". A green step is not evidence of the first, and a check that
+          # cannot tell them apart is how tan-cli#1185 sat here for four rounds
+          # of hardening beside it.
+          #
+          # `curl --netrc-file` reads the same document `requests` reads from
+          # $NETRC, so this measures the FILE and the token rather than this
+          # step's intent. GitHub's anonymous core quota is 60/hour and any
+          # authenticated identity is far above it, so `<= 60` is unambiguous.
+          #
+          # Hard-fails ONLY on that unambiguous negative, which is a real defect
+          # in the staging above. An unreachable or unparseable endpoint warns
+          # and continues: that is the network, not this step's subject, and a
+          # check that reds for a reason unrelated to its subject stops being
+          # read (this repo's own `sdk list --online` precedent in
+          # clean-host.yml). So it CAN fail, and only for the right reason.
+          core_limit="$(curl -sS --max-time 30 --netrc-file "${NETRC}" https://api.github.com/rate_limit 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["limit"])' 2>/dev/null || echo unknown)"
+          if [ "${core_limit}" = "unknown" ]; then
+            echo "::warning::could not read api.github.com/rate_limit to confirm the staged netrc authenticates; continuing (that is the network, not the credential)" >&2
+          elif [ "${core_limit}" -le 60 ]; then
+            echo "::error::the staged netrc did not authenticate: GitHub reports a core rate limit of ${core_limit}/hour, which is the ANONYMOUS per-IP quota. The token is not reaching api.github.com, so this download runs on a quota shared with every hosted runner in the region (tan-cli#1143 / tan-cli#1185)." >&2
+            exit 1
+          else
+            echo "staged netrc authenticates: GitHub core rate limit ${core_limit}/hour (anonymous is 60)"
+          fi
+          # Retry the whole install (tan-cli#689). The credential staged above
+          # lifts the API rate limit on `fetch_releases`, but that is only the
+          # FIRST network call this makes. `setup.sh -t arm-zephyr-eabi` then fetches
           # the GNU toolchain separately, and no token affects that leg:
           #
           #   Installing 'arm-zephyr-eabi' GNU toolchain ...
@@ -534,8 +726,7 @@ jobs:
           # subject stops being read." Three attempts, backing off; still fails
           # loudly if the network is genuinely unavailable.
           for attempt in 1 2 3; do
-            if west sdk install --version "${version}" -t arm-zephyr-eabi \
-                   --personal-access-token "${GH_TOKEN}"; then
+            if west sdk install --version "${version}" -t arm-zephyr-eabi; then
               break
             fi
             if [ "${attempt}" -eq 3 ]; then
@@ -589,6 +780,8 @@ jobs:
       # ---- 9. tan build -----------------------------------------------------
 
       - name: tan build (real ARM build of the scaffolded project)
+        # No Zephyr SDK means no toolchain to build with.
+        if: steps.sdk_list.outputs.outage != 'true'
         working-directory: alp-workspace/my-app
         run: |
           set -euo pipefail
@@ -607,6 +800,8 @@ jobs:
       # project `tan init` wrote sixty seconds earlier, which is the part no gate
       # covered.
       - name: the scaffolded project produced an ARM ELF
+        # Asserts about a build that did not run.
+        if: steps.sdk_list.outputs.outage != 'true'
         working-directory: alp-workspace/my-app
         run: |
           set -euo pipefail
@@ -635,6 +830,10 @@ jobs:
       # clean`, so this cannot pass by reusing the ELF section 9 already built
       # -- still resolves `west` through the venv with none of it on PATH.
       - name: "dirty host 1/3: west in the venv, absent from bare PATH (tan-cli#299)"
+        # Requires `tan doctor` exit 0. Without the SDK, `zephyrSdk` is a
+        # `fail` and exit_code_for turns any fail into 4, so this would red
+        # accusing the tan-cli#299 false-refusal -- which is not happening.
+        if: steps.sdk_list.outputs.outage != 'true'
         working-directory: alp-workspace/my-app
         run: |
           set -euo pipefail
@@ -763,6 +962,9 @@ jobs:
       # PYTHON_MINIMUM_REQUIRED for the Zephyr tree) and a value nothing in
       # this real toolchain would coincidentally match (3.99).
       - name: "dirty host 3/3: stale $ZEPHYR_BASE + stale ~/.alp/sdk-default must not leak into the report (tan-cli#301)"
+        # Its bare `tan doctor` runs under `set -euo pipefail`, so the same
+        # exit 4 kills the step before a single tan-cli#301 assertion runs.
+        if: steps.sdk_list.outputs.outage != 'true'
         working-directory: alp-workspace/my-app
         run: |
           set -euo pipefail

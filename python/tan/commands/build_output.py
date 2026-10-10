@@ -20,10 +20,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.commands.build_cmd import SDK_MARKER, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import resolve_sdk_tiered
+from tan.core.sdk_discovery import resolve_sdk_root_ladder, resolve_sdk_tiered
+from tan.core.shapes import SDK_MARKER
 from tan.core.system_manifest import (
-    MANIFEST_FILE,
+    find_manifest,
+    manifest_candidates,
     SystemManifest,
     SystemManifestError,
     parse_system_manifest,
@@ -71,7 +72,7 @@ class ProjectContext:
     sdk: SdkInfo | None
     #: `ActiveSdk.broken_project_pin` carried through (tan-cli#263 review) --
     #: `size`/`image`'s own `_run` turns this into the shared
-    #: `sdk.project-pin-unresolved` warning via `sdk_cmd.project_pin_issue`.
+    #: `sdk.project-pin-unresolved` warning via `sdk_discovery.project_pin_issue`.
     broken_project_pin: str | None = None
     #: `ActiveSdk.tier`, unconditionally -- unlike `sdk` above, set even when
     #: nothing resolved to a usable checkout (`sdk is None`), which is exactly
@@ -80,7 +81,7 @@ class ProjectContext:
     sdk_source_tier: str = "none"
     #: `ActiveSdk.foreign_global_default_for` carried through (tan-cli#464) --
     #: `size`/`image`'s own `_run` turns this into
-    #: `sdk_cmd.global_default_foreign_project_issue`, the sibling warning to
+    #: `sdk_discovery.global_default_foreign_project_issue`, the sibling warning to
     #: `broken_project_pin` above.
     foreign_global_default_for: str | None = None
 
@@ -142,9 +143,12 @@ def resolve_metadata_sdk_root(
     child checkout supplies the memory budget while the envelope's `sdk` stays
     absent. Collapsing them would change which budget resolves.
 
-    A missing SDK is NOT fatal (the retired Python's `find_sdk_root` die is
-    deliberately dropped): the budget resolves `unknown` and measurement still
-    runs.
+    An ABSENT `--sdk-root` with no checkout found is NOT fatal (the retired
+    Python's `find_sdk_root` die is deliberately dropped): the budget resolves
+    `unknown` and measurement still runs. A non-empty `--sdk-root` that fails
+    the loader-marker check returns `None` here too, but `size` treats THAT as
+    fatal (`size.sdk-root-unresolved`, tan-cli#1463): a typo'd flag silently
+    ignored is the bug.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
@@ -160,7 +164,8 @@ def resolve_metadata_sdk_root(
 
 
 def read_sdk_som_and_soc(
-    metadata_root: str, sku: str
+    metadata_root: str, sku: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None, explain_unsupported: bool = False,
 ) -> tuple[str, str | None, list[dict], float | None, list[tuple[str, float | None]]] | None:
     """`(silicon, silicon_variant, variants, soc_flash_mb, soc_cores)` for
     `sku`'s SoM preset + SoC JSON under `<sdk>/metadata` -- port of the ONE
@@ -181,12 +186,33 @@ def read_sdk_som_and_soc(
     Imported locally, not at module level: `size_cmd` already imports this
     module for `resolve_project_context`/`resolve_metadata_sdk_root`, so a
     top-level import the other way would cycle.
+
+    *warnings* (tan-cli#964), when given, is threaded to BOTH leaf readers --
+    a caller that does not pass it is entirely unaffected: `_read_som_preset`/
+    `_read_soc` only validate when the caller supplies a collector, so this
+    parameter defaults to a no-op. `tan debug-config` now passes one too
+    (tan-cli#964 review, major 5) -- this docstring used to name it as the
+    one caller that did not; it was.
+
+    *skipped* (tan-cli#964 review, major 6): same threading, same default,
+    for the "skip-but-disclose" half -- `missing_schema_note`'s notes rather
+    than `validate_document`'s violations.
     """
     from tan.commands.size_cmd import _read_soc, _read_som_preset  # noqa: PLC0415
 
     preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
-    preset = _read_som_preset(preset_path)
+    preset = _read_som_preset(
+        preset_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
+    )
     if preset is None:
+        # Say WHY (tan-cli#1354 bench round 7: a stale alp-sdk checkout whose presets are
+        # schema_version 1 made every caller report a bare "unreadable"): a caller that
+        # passed a `skipped` collector AND `explain_unsupported` gets the real cause as a note
+        # (`tan size` keeps its own, richer `size.som-schema-version-skipped` instead).
+        if skipped is not None and explain_unsupported:
+            note = _unsupported_preset_note(preset_path)
+            if note is not None:
+                skipped.append(note)
         return None
     silicon, silicon_variant = preset
     if not silicon:
@@ -195,8 +221,36 @@ def read_sdk_som_and_soc(
     if len(parts) != 3:
         return silicon, silicon_variant, [], None, []
     soc_path = os.path.join(metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json")
-    variants, soc_flash_mb, soc_cores = _read_soc(soc_path)
+    variants, soc_flash_mb, soc_cores = _read_soc(
+        soc_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
+    )
     return silicon, silicon_variant, variants, soc_flash_mb, soc_cores
+
+
+def _unsupported_preset_note(path: str) -> str | None:
+    """`<path>: not read -- unsupported SoM preset schema_version 1 (tan needs 2) --
+    update alp-sdk` when the preset parses but declares a version tan does not read;
+    `None` for any other reason it could not be used (missing, unparseable)."""
+    from tan.commands.size_cmd import _read_text  # noqa: PLC0415
+    from tan.core.som_schema_version import SOM_SCHEMA_VERSION, is_supported_som_schema_version
+    from tan.core.system_manifest import load_yaml_document  # noqa: PLC0415
+
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        root = load_yaml_document(text)
+    except Exception:  # noqa: BLE001 -- unparseable is `unreadable`, not this
+        return None
+    if not isinstance(root, dict):
+        return None
+    version = root.get("schema_version")
+    if is_supported_som_schema_version(version):
+        return None
+    return (
+        f"{path.replace(chr(92), '/')}: not read -- unsupported SoM preset schema_version "
+        f"{version} (tan needs {SOM_SCHEMA_VERSION}) -- update alp-sdk"
+    )
 
 
 def resolve_app_base(app_path: str | None, workspace_root: str) -> str:
@@ -258,7 +312,7 @@ def load_manifest(build_root: str) -> tuple[str, SystemManifest]:
     Every failure is one of the two exceptions above, so neither command can
     ever let an OSError, a decode error or a YAML error escape as a traceback.
     """
-    path = os.path.join(build_root, MANIFEST_FILE)
+    path = find_manifest(build_root)
     try:
         # `newline=""`: no universal-newline translation, matching Rust's
         # `read_to_string`. Explicit encoding, never the locale default -- a
@@ -267,6 +321,9 @@ def load_manifest(build_root: str) -> tuple[str, SystemManifest]:
         with open(path, encoding="utf-8", newline="") as handle:
             text = handle.read()
     except (OSError, UnicodeDecodeError, ValueError) as err:
+        if isinstance(err, FileNotFoundError):
+            # Neither spelling exists: name both paths tried (tan-cli#1405).
+            path = " or ".join(manifest_candidates(build_root))
         raise ManifestUnavailable(path, str(err)) from err
     try:
         return text, parse_system_manifest(text)

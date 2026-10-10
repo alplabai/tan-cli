@@ -59,7 +59,13 @@ import textwrap
 from pathlib import Path
 from typing import Any, Optional
 
+from tan.core.document_guards import DocumentGuards
+from tan.core.subprocess_env import spawn_env
+
 from .models import BoardProject, OrchestratorError
+
+#: The malformed-document register, bound to THIS module's curated class.
+_GUARDS = DocumentGuards(OrchestratorError)
 
 # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
 # kconfig_symbols.py (tan-cli#459 review): `west_program` resolves the
@@ -357,8 +363,15 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
             f"-DEXTRA_KCONFIG_TARGETS={_KCONFIG_TARGET}",
             f"-DEXTRA_KCONFIG_TARGET_COMMAND_FOR_{_KCONFIG_TARGET}={target_cmd}",
         ]
-        proc = subprocess.run(configure_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True)
+        # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
+        # kconfig_symbols.py: `env=spawn_env()` on both `west build` spawns
+        # below is a tan-only addition (tan-cli#992) -- alp-sdk's own copy
+        # has no such restore because it never ships as a frozen PyInstaller
+        # bundle whose LD_LIBRARY_PATH would otherwise leak into the child.
+        proc = subprocess.run(
+            configure_cmd, cwd=zephyr_base.parent,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=spawn_env({"PYTHONIOENCODING": "utf-8"}))
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build --cmake-only -b "
@@ -367,19 +380,30 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # `add_custom_target` never runs at configure time -- `-t` builds
         # it explicitly (a second, separate `west build`).
         build_cmd = [west, "build", "-d", str(build_dir), "-t", _KCONFIG_TARGET]
-        proc = subprocess.run(build_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True)
+        proc = subprocess.run(
+            build_cmd, cwd=zephyr_base.parent,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=spawn_env({"PYTHONIOENCODING": "utf-8"}))
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` failed "
                 f"for board '{board_triple}':\n{proc.stderr.strip()}")
-        if not output_json.is_file():
-            raise OrchestratorError(
-                f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` "
-                f"completed but never wrote {output_json} -- never emit a "
-                f"partial/empty menu")
-
-        raw = output_json.read_text(encoding="utf-8")
+        # tan-cli#1162, and a RELOCATED divergence from alp-sdk's own
+        # `scripts/alp_orchestrate/kconfig_symbols.py`, which still spells
+        # this as an `is_file()` pre-flight plus a bare `read_text`. This
+        # artefact is written by an EXTERNAL `west build -t` subprocess, so
+        # a directory in its place, a non-UTF-8 dump or an unreadable mode
+        # are things a third-party build step really leaves -- each escaped
+        # raw before, into `kconfig_cmd.py:541`'s `kconfig.emit-failed`
+        # envelope (or `generate_cmd.py:890`'s) naming the exception TYPE.
+        # `never wrote` is preserved byte for byte through `absent=`; what
+        # the pre-flight silently folded into it now says `cannot read`.
+        raw = _GUARDS.require_readable_text(
+            output_json,
+            what=f"the `{_KCONFIG_TARGET}` dumper's output",
+            absent=(f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` "
+                    f"completed but never wrote {output_json} -- never emit "
+                    f"a partial/empty menu"))
         if not raw.strip():
             # `west build -t <target>` can report success (rc 0) while the
             # custom target's own command silently produced nothing -- a

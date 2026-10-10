@@ -16,15 +16,23 @@ the port:**
   build root included -- BEFORE any filesystem call. A candidate that IS the
   project root, an ancestor of it, or a bare filesystem/drive/UNC root is
   REFUSED and reported, never silently dropped and never removed. That covers
-  the `rm -rf $UNSET_VAR` shape: `--build-root ""`, `.` and `..` all resolve to
-  the project root or above, as does a manifest `build_dir: ""`.
+  the `rm -rf $UNSET_VAR` shape: `--build-root ""` is refused outright, and a
+  manifest `build_dir` that resolves onto the project root (or the
+  `--build-root` tree), above it, or onto a directory holding a `board.yaml` is
+  refused. `--build-root X` names a project TREE and clean removes `<X>/build`
+  (tan-cli#1482), so `.` and `..` are valid trees, not refusals.
+* **Deliberate oracle divergence (tan-cli#1482):** the v0.4.1 binary removes X
+  itself, joined onto the project root. tan cleans `<X>/build`, with X anchored
+  at the current directory, so the same X passed to `build` and `clean` never
+  touches X's sources. Do not "fix" this back in a parity sweep.
 * The screen is NOT "must stay under the build root", and must not become that.
   `confine_to_build_root` -- the hardened containment guard this module DOES
   reuse, see [`_subsumed_by_build_root`] -- answers a different question, and
   two of the three target classes the oracle removes are legitimately OUTSIDE
   the build root: the app-root `.alp-build-state.json`, and an out-of-tree slice
-  `build_dir` such as a Yocto tmp dir. Verified against the Rust binary:
-  `tan clean --build-root ../outside` removes `../outside` and exits 0.
+  `build_dir` such as a Yocto tmp dir. (The v0.4.1 binary removed
+  `../outside` for `--build-root ../outside`; tan now removes
+  `../outside/build`, see the divergence note above.)
   Applying containment to every target would refuse two supported cases and
   diverge from the oracle on a destructive command. The rule is "not
   catastrophic", not "not outside" (`path_guard.rs:100-103`).
@@ -45,7 +53,8 @@ checkout is probed for its loader marker (`scripts/alp_project.py`, I-31) and
 otherwise untouched: removing a build directory needs no SDK, and invoking one
 would give `clean` a dependency it deliberately does not have (I-32, port-spec
 anti-pattern #22). The only project input beyond the arguments is
-`<build_root>/system-manifest.yaml`, which this project's own build wrote.
+`<build_root>/system-manifest.yaml` (build_root being `<X>/build` or
+`<project_root>/build`), which this project's own build wrote.
 
 Every failure path emits a coded envelope. An escaping traceback puts nothing
 parseable on stdout and the extension then renders an empty panel with no
@@ -79,8 +88,6 @@ a PATH handed to a recursive removal.
 from __future__ import annotations
 
 import os
-import shutil
-import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,10 +96,24 @@ from typing import Any
 import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.dir_removal import (
+    is_link,
+    os_error_text,
+    remove_dir as _remove_dir,
+)
+from tan.core.dir_removal import (
+    _retry_after_clearing_readonly,  # noqa: F401 -- re-exported for tests, see the removal block below
+)
+from tan.core.sdk_discovery import (
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+    sdk_search_summary,
+)
 from tan.core.shapes import SDK_MARKER
+from tan.core.system_manifest import find_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -140,6 +161,13 @@ def _rust_join(base: str, rel: str) -> str:
     return os.path.join(base, rel)
 
 
+def _cwd_or_dot() -> str:
+    try:
+        return os.getcwd()
+    except OSError:
+        return "."
+
+
 def _normalize(path: str) -> str:
     """Lexically collapse `.`/`..` without touching the filesystem --
     `path_guard::normalize`.
@@ -151,7 +179,8 @@ def _normalize(path: str) -> str:
     One known divergence, unreachable here: Rust's `normalize` pops past the
     start, so a relative `..` collapses to the empty path where `normpath`
     keeps `..`. Every input below is already absolute (the project root is
-    cwd-anchored, and the build root and slice dirs are joined onto it), so the
+    cwd-anchored, the build root is `<tree>/build` with the tree cwd-anchored, and
+    slice dirs are joined onto the clean root), so the
     difference cannot be reached.
     """
     return os.path.normpath(path)
@@ -330,7 +359,10 @@ def _subsumed_by_build_root(build_root: str, resolved: str) -> bool:
 
 
 def plan_clean_targets(
-    project_root: str, build_root: str, slices: list[dict[str, Any]]
+    clean_root: str,
+    build_root: str,
+    slices: list[dict[str, Any]],
+    project_root: str | None = None,
 ) -> _Plan:
     """Ordered, de-duplicated removal targets -- `clean::clean_targets`.
 
@@ -348,15 +380,28 @@ def plan_clean_targets(
     single unlink of one fixed name under the project root, never a recursive
     removal -- matching the oracle's own exemption.
     """
+    # `clean_root` is the tree a relative slice `build_dir` resolves against (the
+    # `--build-root` tree X, or the project root without the flag);
+    # `project_root` is the real project root and is screened separately, so a
+    # manifest slice dir that resolves onto it is refused even when it sits
+    # inside X.
+    if project_root is None:
+        project_root = clean_root
+
+    def _unsafe(path: str) -> bool:
+        return is_unsafe_removal_target(project_root, path) or is_unsafe_removal_target(
+            clean_root, path
+        )
+
     candidates: list[tuple[str, _Rejected | None]] = [
         (build_root, _Rejected(build_root, "build-root")),
-        (_rust_join(project_root, STATE_FILE), None),
+        (_rust_join(clean_root, STATE_FILE), None),
     ]
     for entry in slices:
         raw = entry.get("build_dir")
         if not isinstance(raw, str):
             continue
-        resolved = _rust_join(project_root, raw)
+        resolved = _rust_join(clean_root, raw)
         if not _subsumed_by_build_root(build_root, resolved):
             core_id = entry.get("core_id", "")
             candidates.append(
@@ -372,7 +417,14 @@ def plan_clean_targets(
         if key in seen:
             continue
         seen.append(key)
-        if rejection is None or not is_unsafe_removal_target(project_root, path):
+        if rejection is None or not (
+            _unsafe(path)
+            or (
+                rejection.origin == "slice"
+                and not is_link(path)
+                and os.path.isfile(os.path.join(path, "board.yaml"))
+            )
+        ):
             plan.targets.append(path)
         else:
             plan.rejected.append(rejection)
@@ -563,8 +615,10 @@ def _read_manifest(build_root: str) -> tuple[list[dict[str, Any]], str | None]:
     both the directory and the non-UTF-8 cases. Only a document that WAS read
     and could not be understood is a warning.
     """
+    # tan-cli#1482: the nested `<X>/build/system-manifest.yaml` spelling is
+    # found the way size/image/flash find it.
     try:
-        text = Path(build_root, MANIFEST_NAME).read_text(encoding="utf-8")
+        text = Path(find_manifest(build_root)).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError, ValueError):
         return [], None
     return parse_manifest_slices(text)
@@ -574,158 +628,20 @@ def _read_manifest(build_root: str) -> tuple[list[dict[str, Any]], str | None]:
 # Removal
 # ---------------------------------------------------------------------------
 
-
-def is_link(path: str) -> bool:
-    """Whether `path` is a link that must not be followed -- a POSIX symlink, a
-    Windows directory symlink, OR a Windows JUNCTION.
-
-    **`os.path.islink` is not this test.** On Windows `ntpath.islink` returns
-    True only for `IO_REPARSE_TAG_SYMLINK`; a junction is
-    `IO_REPARSE_TAG_MOUNT_POINT`, and `stat.S_ISLNK` is False for it as well.
-    Measured on this host: for `build/` junctioned at an out-of-tree directory,
-    `os.path.islink` and `S_ISLNK` both report False while
-    `st_reparse_tag == IO_REPARSE_TAG_MOUNT_POINT`. A guard written on
-    `os.path.islink` therefore lets a junction reach `shutil.rmtree` -- which
-    has its OWN, correct check (`shutil._rmtree_islink`, mirrored here) and
-    refuses, so nothing outside the tree is destroyed, but the junction is then
-    never cleaned and the run reports a spurious `remove-failed`. This was a
-    live defect in the first cut of this port, caught only by diffing against
-    the Rust binary.
-    """
-    try:
-        st = os.lstat(path)
-    except (OSError, ValueError):
-        return False
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    attributes = getattr(st, "st_file_attributes", 0)
-    return bool(
-        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        and getattr(st, "st_reparse_tag", 0)
-        == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1)
-    )
-
-
-def os_error_text(err: BaseException) -> str:
-    """An `OSError` rendered the way Rust's `io::Error` Display renders it:
-    `<system message> (os error <code>)`.
-
-    Python's own `str(OSError)` is `[WinError 32] <message>: '<path>'`, which
-    both differs from the oracle and repeats a path the message already names.
-    The Windows error code (`winerror`) is preferred over the translated
-    `errno`, matching Rust, which reports the raw OS code.
-
-    One character still differs on Windows: `FormatMessageW` ends its sentences
-    with a period and Rust keeps it, while Python's `strerror` strips it. Not
-    synthesized here -- guessing at punctuation inside a system message is worse
-    than a documented one-character divergence in a warning string.
-    """
-    if not isinstance(err, OSError):
-        return str(err)
-    code = getattr(err, "winerror", None) or err.errno
-    if err.strerror is None or code is None:
-        return str(err)
-    return f"{err.strerror} (os error {code})"
-
-
-#: The two functions `shutil.rmtree` hands its error hook that CANNOT be called
-#: with one positional argument. On POSIX `rmtree` runs the fd-based
-#: `_rmtree_safe_fd` walk, which reports failures of `os.open` (shutil 3.12
-#: lines 682 and 781) and `os.close` (692/712/791/808) through the same hook as
-#: the one-argument `os.scandir`/`os.unlink`/`os.rmdir`/`os.lstat`. `os.open`
-#: needs `flags` and `os.close` takes an fd, not the path the hook is handed --
-#: so retrying either is a `TypeError`, not a repair. Windows' `_rmtree_unsafe`
-#: never passes these, which is why the crash was POSIX-only.
-_NOT_RETRYABLE_WITH_PATH_ALONE = frozenset({os.open, os.close})
-
-
-def _reraise_removal_failure(func, path, exc) -> None:
-    """Re-raise the failure `shutil.rmtree` reported, so the caller's
-    `except (OSError, ValueError)` sees it and answers `clean.remove-failed`.
-
-    `exc` is the exception under `onexc` and an `exc_info` TUPLE under the
-    deprecated `onerror` (see `_RMTREE_HOOK`), so both shapes are unwrapped
-    here. A hook that has nothing to re-raise still must not return quietly --
-    `rmtree` would then report the tree as removed -- so the fallback states the
-    operation that failed.
-    """
-    if isinstance(exc, tuple) and len(exc) == 3:
-        exc = exc[1]
-    if isinstance(exc, BaseException):
-        raise exc
-    raise OSError(f"{getattr(func, '__name__', func)} failed on {path}")
-
-
-def _retry_after_clearing_readonly(func, path, exc=None) -> None:
-    """`shutil.rmtree` error hook: clear the read-only bit and retry once.
-
-    Rust's `remove_dir_all` deletes a read-only file on Windows outright (it
-    passes `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE`), where `shutil.rmtree`
-    fails the WHOLE tree with `[WinError 5] Access is denied`. Measured against
-    the Rust binary: one read-only file inside `build/` had Rust remove the
-    build dir and exit 0 while the port left every artefact in place and warned.
-    Read-only build outputs are ordinary -- some toolchains mark generated files
-    that way -- so this is the primary path, not an exotic one.
-
-    `st_mode | S_IWUSR` rather than a bare `S_IWRITE`: on POSIX the latter would
-    replace the whole mode with `0o200` and strip the owner's read/execute bits
-    from a directory mid-walk. A failure here propagates out of `rmtree` and is
-    reported by the caller as `clean.remove-failed`.
-
-    The retry is only attempted for a `func` that a path alone can drive
-    ([`_NOT_RETRYABLE_WITH_PATH_ALONE`]). It used to end in a bare `func(path)`,
-    so a build directory the invoking user OWNS but cannot open -- a
-    `chmod -R a-r` or tar-preserved tree, where `os.chmod` SUCCEEDS and
-    `os.open` is what failed -- raised `TypeError: open() missing required
-    argument 'flags' (pos 2)`. That is neither `OSError` nor `ValueError`, so it
-    sailed past the caller's best-effort guard, aborted the target loop and hit
-    `clean`'s outer catch-all: exit 5, `clean.internal-failure`, and every
-    remaining target (`.alp-build-state.json` and every out-of-tree slice dir)
-    silently skipped. Measured on the oracle for the same tree: exit 0, a
-    `clean.remove-failed` WARNING, and the state file removed -- which is what
-    re-raising the original failure restores.
-    """
-    if func in _NOT_RETRYABLE_WITH_PATH_ALONE:
-        _reraise_removal_failure(func, path, exc)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
-    try:
-        func(path)
-    except TypeError:
-        # Belt and braces for a future `shutil` that routes one more
-        # many-argument callable through this hook: the removal still failed,
-        # and it must be reported as such rather than escaping as a `TypeError`.
-        _reraise_removal_failure(func, path, exc)
-
-
-#: `shutil.rmtree`'s error-hook keyword. `onerror` is deprecated from 3.12 and
-#: scheduled for removal; `onexc` does not exist before it. Selected once here so
-#: the call site stays a single expression on either interpreter -- the handler
-#: signature is compatible because it ignores its third argument, which is the
-#: only thing the two hooks disagree about (`exc_info` tuple vs exception).
-_RMTREE_HOOK = "onexc" if sys.version_info >= (3, 12) else "onerror"
-
-
-def _remove_dir(path: str) -> None:
-    """Remove a directory target recursively, never following a link out of the
-    tree.
-
-    A link ([`is_link`]) is unlinked ITSELF, exactly as the oracle's
-    `remove_dir_all` does on Windows: verified against the Rust binary with
-    `build/` junctioned at an out-of-tree directory -- the junction goes, the
-    target's contents stay. `shutil.rmtree` handles the ordinary case and never
-    recurses through a link INSIDE the tree, so both arms are contained.
-
-    `os.rmdir` before `os.unlink`: on Windows a junction or directory symlink is
-    removed by `RemoveDirectory`, and `unlink` fails on it; on POSIX `rmdir`
-    fails on a symlink and `unlink` is what removes it.
-    """
-    if is_link(path):
-        try:
-            os.rmdir(path)
-        except OSError:
-            os.unlink(path)
-        return
-    shutil.rmtree(path, **{_RMTREE_HOOK: _retry_after_clearing_readonly})
+# `is_link`/`os_error_text`/`_reraise_removal_failure`/
+# `_retry_after_clearing_readonly`/`_RMTREE_HOOK`/`remove_dir` MOVED to
+# `tan.core.dir_removal` (tan-cli#790, imported at the top of this file):
+# `tan sdk remove` needs the identical read-only-retry/junction-safe removal
+# `tan clean` already carries, and `tan.core` may import no `tan.commands.*`
+# module, so the shared primitives had to live below both rather than inside
+# either. Re-imported under their ORIGINAL names (`_remove_dir` is
+# `remove_dir` aliased), so every internal call site below is unchanged and
+# so the existing test suite's `monkeypatch.setattr(clean_cmd, "_remove_dir",
+# ...)` and `from tan.commands.clean_cmd import is_link, os_error_text,
+# _retry_after_clearing_readonly` keep resolving exactly as before -- a
+# monkeypatch only cares which module ATTRIBUTE it overwrites, never which
+# module originally defined the value that attribute pointed at, and an
+# `import` binds a module-level attribute the same way a `def` would.
 
 
 # ---------------------------------------------------------------------------
@@ -746,8 +662,24 @@ def _cli_workspace_root(project_arg: str | None) -> Path:
     return Path(cwd if project_arg is None else _rust_join(cwd, project_arg))
 
 
+def _sdk_root_refusal(sdk_root_arg: str | None, workspace_root: Path) -> str:
+    """`clean.sdk-root-not-found`'s message (tan-cli#1444): where tan looked
+    and the flag that fixes it, the same shape as `flash.sdk-root-not-found`
+    (#1423). `--sdk-root` is terminal (I-31): no other tier was tried, so that
+    branch does not claim the ladder was searched."""
+    if sdk_root_arg is not None:
+        return (
+            f"Cannot locate alp-sdk root. `--sdk-root {sdk_root_arg}` is not an "
+            "alp-sdk checkout (no `scripts/alp_project.py` under it)."
+        )
+    return (
+        f"Cannot locate alp-sdk root. {sdk_search_summary(workspace_root)} "
+        f"To fix it, {NO_SDK_NEXT_STEPS}."
+    )
+
+
 def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
-    """Whether `build_cmd.resolve_sdk_root_ladder` would resolve a checkout --
+    """Whether `tan.core.sdk_discovery.resolve_sdk_root_ladder` would resolve a checkout --
     the guard behind `clean.sdk-root-not-found`.
 
     `--sdk-root` is TERMINAL (I-31): an explicit path without the loader marker
@@ -832,18 +764,22 @@ def _run(
     workspace_root, board_yaml = resolve_project_paths(project_arg, board_yaml_arg)
     # tan-cli#236: `boardYaml` reported only when the file really exists.
     project = Project.resolved(workspace_root, board_yaml)
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk` -- never a
+    # bare `None` -- so `broken_project_pin`/`foreign_global_default_for` are
+    # read off it unconditionally, whether or not `.path` resolved. `sdk` (the
+    # envelope's `SdkInfo`) is the one field that still depends on `.path`: no
+    # checkout means no `sdk` block, exactly as before.
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
-    sdk = SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk) if resolved_sdk else None
-    pin_issue = (
-        project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
-        if resolved_sdk
+    sdk = (
+        SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk)
+        if resolved_sdk.path is not None
         else None
     )
-    foreign_issue = (
-        global_default_foreign_project_issue(resolved_sdk.foreign_global_default_for)
-        if resolved_sdk
-        else None
+    pin_issue = project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
+    foreign_issue = global_default_foreign_project_issue(
+        resolved_sdk.foreign_global_default_for
     )
+    resolution_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
 
     # App base: a non-`.` positional roots the removal at that app dir,
     # overriding `--project`; `.` falls back to the resolved workspace.
@@ -858,55 +794,87 @@ def _run(
 
     # SDK-root guard -- faithful to `alp_clean.py`'s `log.die('Cannot locate
     # alp-sdk root.')`. Arguably YAGNI (removing a build dir needs no SDK), but
-    # the oracle keeps it, so the port keeps it.
-    if not sdk_root_resolves(sdk_root_arg, _cli_workspace_root(project_arg)):
-        message = "Cannot locate alp-sdk root."
+    # the oracle keeps it, so the port keeps it. tan-cli#1444: the message
+    # names where tan looked and the flag that fixes it, as flash's does
+    # (#1423); `test_clean_parity.json` is history only, nothing replays it.
+    guard_root = _cli_workspace_root(project_arg)
+    if not sdk_root_resolves(sdk_root_arg, guard_root):
+        message = _sdk_root_refusal(sdk_root_arg, guard_root)
         return _Outcome(
             exit_code=ExitCode.RUNTIME_FAILURE,
             data=_report("", dry_run, [], 0),
             project=project,
             sdk=sdk,
-            issues=[Issue("clean.sdk-root-not-found", "error", message)],
+            # tan-cli#468: a broken `.alp/sdk-path` pin (or a foreign
+            # `globalDefault`) with NO other tier resolving anything used to
+            # report this refusal alone -- `resolved_sdk` was a bare `None`
+            # here, dropping both facts on the floor.
+            issues=[*resolution_issues, Issue("clean.sdk-root-not-found", "error", message)],
             text=[f"clean: {message}"],
         )
 
-    # `--build-root`: absolute as-is, relative against the project root,
-    # default `<project_root>/build`. The default is deliberately NOT
-    # normalized -- the oracle normalizes only the flag branch, and
-    # `data.buildRoot` is a compared field.
+    # DELIBERATE oracle divergence (v0.4.1 removes X itself): do not revert in a
+    # parity sweep. `--build-root X` means what it means to `tan build` / `size` / `image` /
+    # `flash` (tan-cli#1405/#1411, #1482): X is the PROJECT TREE the build ran
+    # under (absolute as-is, relative against the CURRENT DIRECTORY), and the
+    # build output lives in `<X>/build`, which is what clean removes. Passing the
+    # same X to `build` and `clean` therefore never touches X's sources. Without
+    # the flag it is `<project_root>/build`. The default is deliberately NOT
+    # normalized -- `data.buildRoot` is a compared field.
+    clean_root = project_root
+    refusal: str | None = None
     if build_root_arg is not None:
-        build_root = _normalize(_rust_join(project_root, build_root_arg))
+        if build_root_arg == "":
+            # `rm -rf $UNSET_VAR` shape: an empty value is never a tree name.
+            tree = _normalize(project_root)
+            build_root = tree
+            refusal = "an empty --build-root"
+        else:
+            tree = _normalize(
+                build_root_arg if os.path.isabs(build_root_arg)
+                else _rust_join(_cwd_or_dot(), build_root_arg)
+            )
+            clean_root = tree
+            build_root = _rust_join(tree, "build")
+            if not _has_normal_component(tree):
+                refusal = f"`{tree}` is a filesystem root"
     else:
         build_root = _rust_join(project_root, "build")
 
-    # Fail fast, BEFORE the manifest is read: `--build-root ""` / `.` / `..`
-    # each resolve to the project root or above. Refusing here is what stops
-    # the `rm -rf $UNSET_VAR` shape reaching a recursive removal at exit 0.
-    if is_unsafe_removal_target(project_root, build_root):
-        why = (
-            f"refusing to remove `{build_root}`: a build root may not be the "
-            "project root, an ancestor of it, or a filesystem root"
-        )
+    # Fail fast, BEFORE the manifest is read: the target may not be the project
+    # root, an ancestor of it, a filesystem root, or a directory that is itself a
+    # project tree (holds a board.yaml) -- the `rm -rf` shapes that reach a
+    # recursive removal at exit 0.
+    if refusal is None and (
+        is_unsafe_removal_target(project_root, build_root)
+        or is_unsafe_removal_target(clean_root, build_root)
+    ):
+        refusal = "a build root may not be the project root, an ancestor of it, or a filesystem root"
+    if (
+        refusal is None
+        and not is_link(build_root)
+        and os.path.isfile(os.path.join(build_root, "board.yaml"))
+    ):
+        refusal = "it holds a board.yaml, so it is a project tree, not a build directory"
+    if refusal is not None:
+        why = f"refusing to remove `{build_root}`: {refusal}"
         return _Outcome(
             exit_code=ExitCode.RUNTIME_FAILURE,
             data=_report(build_root, dry_run, [], 0),
             project=project,
             sdk=sdk,
-            issues=[Issue("clean.unsafe-build-root", "error", why)],
+            # tan-cli#468: same reasoning as the guard above -- this refusal
+            # can fire even when `resolved_sdk.path` is `None`.
+            issues=[*resolution_issues, Issue("clean.unsafe-build-root", "error", why)],
             text=[f"clean: {why}"],
         )
 
     text: list[str] = []
-    issues: list[Issue] = []
-    if pin_issue is not None:
-        # tan-cli#263 review: `clean` reached the SDK guard above (something
-        # DID resolve), so the pin's silent fallthrough belongs in the same
-        # place every other non-fatal notice here lands.
-        issues.append(pin_issue)
-    if foreign_issue is not None:
-        # tan-cli#464: same reasoning, for a `globalDefault` answer a
-        # DIFFERENT project's bootstrap relocation actually decided.
-        issues.append(foreign_issue)
+    # tan-cli#263 review / tan-cli#464: `pin_issue`/`foreign_issue` computed
+    # once, above, from the one `resolved_sdk` -- this is the SAME pair the
+    # two refusals above prepend, read back rather than recomputed so all
+    # three paths can never disagree about whether either warning applies.
+    issues: list[Issue] = list(resolution_issues)
 
     # Best-effort, manifest-aware sweep. Absence (or an unreadable file) is
     # silent; a parse/version error is a warning, NEVER fatal -- clean must not
@@ -918,7 +886,7 @@ def _run(
             text.append(f"clean: {detail}")
         issues.append(Issue("clean.manifest-unreadable", "warning", detail))
 
-    plan = plan_clean_targets(project_root, build_root, slices)
+    plan = plan_clean_targets(clean_root, build_root, slices, project_root)
 
     records: list[dict[str, str]] = []
     removed = 0
@@ -1018,7 +986,11 @@ def clean(
         None,
         "--build-root",
         metavar="PATH",
-        help="Override the build root to remove (default: <APP_PATH>/build).",
+        help=(
+            "Project tree to clean, the same meaning as `tan build --build-root`: "
+            "removes <PATH>/build (default tree: <APP_PATH>). Relative to the "
+            "current directory. Refused if the target holds a board.yaml."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="List the paths that would be removed; delete nothing."

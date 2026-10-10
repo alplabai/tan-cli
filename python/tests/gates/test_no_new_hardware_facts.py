@@ -42,6 +42,15 @@ PATTERNS = (
 #: Every entry is DEBT unless marked OK. The value of this gate is that the list
 #: cannot grow silently.
 ALLOWED: dict[str, str] = {
+    "link_target.py": (
+        "OK (tracked debt): the `diagnostics.link: itcm` allow-list of the two "
+        "SKUs the Flow C ITCM retarget is bench-proven on (E1M-AEN801/AEN803, "
+        "tan-cli#1350 review). A deliberately conservative PROOF list, not a "
+        "resolved fact -- every other Ensemble SKU is refused until someone "
+        "proves it. It belongs in the SoM preset metadata once alp-sdk grows a "
+        "`flow_c_itcm_proven` field; until then the list lives here, in the "
+        "one file that enforces it."
+    ),
     "explain_cmd.py": "OK: customer-facing prose; naming real parts is the feature",
     "hw_info.py": (
         "OK: EMITTED customer-facing prose, not a resolved fact. The `E1M-AEN801` "
@@ -58,7 +67,7 @@ ALLOWED: dict[str, str] = {
     ),
     "bootstrap.py": "OK: guidance prose naming the bridge a customer may build",
     "scaffold.py": (
-        "DEBT (largest): DEFAULT_SOM_SKU, IOT_STARTER_SUPPORTED_SKU, _FAMILY_TREES "
+        "DEBT (largest): DEFAULT_SOM_SKU, TEMPLATE_SUPPORTED_SKUS, _FAMILY_TREES "
         "and sku.startswith(('E1M-V2N','E1M-V2M')) branching -- tan picks a template "
         "tree by SKU FAMILY, which is the vendor branching I-26 forbids. Retires when "
         "the template catalogue declares its family mapping in metadata."
@@ -78,11 +87,6 @@ ALLOWED: dict[str, str] = {
         "FALLBACK for a doctor run with no --sdk-root, kept byte-identical to today's "
         "metadata value; retires once doctor refuses to run without a resolved SDK."
     ),
-    "flash_plan.py": (
-        "DEBT: _DEFAULT_JLINK_DEVICE, inherited byte-identically from crates/tan-cli "
-        "builders.rs -- a pre-existing I-26 breach in the Rust, kept faithful by the "
-        "port rather than fixed silently."
-    ),
     "new_som_cmd.py": (
         "MIXED. `DEFAULT_BOARD = \"E1M-EVK\"` is DEBT: a UI default only, not a "
         "value the file trusts -- every accepted --default-board (including this "
@@ -91,7 +95,7 @@ ALLOWED: dict[str, str] = {
         "LOUD (`default board 'E1M-EVK' does not match any name: in "
         "metadata/boards/`) instead of silently shipping a wrong one -- unlike an "
         "address or pin name, this one cannot drift into a silently-wrong "
-        "artifact. The remaining five hits (E1M-AEN801/E1M-V2N102/E1M-NX9101) are "
+        "artifact. The remaining hits (E1M-AEN801/E1M-V2N102) are "
         "OK: teaching prose embedded in the GENERATED skeleton's comments, "
         "pointing a vendor at real committed example presets for 'the two core "
         "shapes' / pad_routes / helper_firmware conventions -- inherited "
@@ -106,6 +110,21 @@ ALLOWED: dict[str, str] = {
         "example SKU -- the same 'naming real parts is the feature' category "
         "explain_cmd.py/bootstrap.py are OK for, not a fact tan decides "
         "anything from silently."
+    ),
+    "orchestrator.py": (
+        "OK: `YOCTO_MACHINE_UNBUILDABLE`'s per-MACHINE refusal messages (#1982, "
+        "tan-cli#1239) name the five AEN A32-cluster SKUs (E1M-AEN{501,601,701,"
+        "801,803}) in EMITTED customer-facing prose explaining WHY a `bitbake` "
+        "target was refused -- 'naming real parts is the feature' category "
+        "explain_cmd.py/bootstrap.py/pinmux_cmd.py are OK for, not a fact tan "
+        "decides anything from: the dict is keyed by MACHINE string (the "
+        "decision input), and the SKU mentions are inside the message VALUE "
+        "only. Ported verbatim, byte-for-byte, from alp-sdk's own "
+        "scripts/alp_orchestrate/orchestrator.py -- the SAME dict "
+        "scripts/check_yocto_machine_tree_parity.py consults there (that file's "
+        "own comment: 'do not fork a second list') -- so paraphrasing the "
+        "prose here would make the next planner re-sync a hand-merge instead "
+        "of a diff, the same reasoning zephyr_board.py's entry below gives."
     ),
     "zephyr_board.py": (
         "DEBT: two `E1M-EVK` mentions inside EMITTED devicetree prose (the generated "

@@ -15,8 +15,11 @@ If `[hello] tick 0` doesn't appear, the suspect list is short:
 3.  **Console wiring** -- the app is running but your terminal is
     on the wrong UART, wrong baud rate, or wrong USB enumeration.
 
-Pin down which one BEFORE moving on to `gpio-button-led` or
-`i2c-scanner`.
+Pin down which one BEFORE moving on to alp-sdk's
+[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/examples/peripheral-io/gpio-button-led)
+or
+[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc2/examples/peripheral-io/i2c-scanner)
+-- neither is part of this scaffolded project.
 
 ## What this shows
 
@@ -31,13 +34,15 @@ Pin down which one BEFORE moving on to `gpio-button-led` or
 
 ```bash
 # Standalone, native_sim (host binary; no hardware needed):
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
 west build -b native_sim/native/64 . \
-    -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
+    -- -DEXTRA_CONF_FILE=generated/alp.conf -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
 west build -t run
 
 # On real silicon, point -b at the SoM's Zephyr board target.
 # Example for E1M-AEN801:
-west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
+west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
 ```
 
@@ -60,7 +65,7 @@ tio -b 115200 <your-serial-device>
 
 Per-OS device naming (and the alternative terminals each OS
 prefers) is documented in
-[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
+[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/cross-platform-setup.md)
 section 7.7.
 
 <!-- cross-platform-lint:ignore -->
@@ -95,9 +100,9 @@ LPT)").
 
 ## Reference
 
-- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/firmware-quickstart.md)
+- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/firmware-quickstart.md)
   -- single-OS bring-up walk-through.
-- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/cross-platform-setup.md)
+- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/cross-platform-setup.md)
   -- Windows/macOS/Linux toolchain + serial-port notes.
-- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc2/docs/troubleshooting.md)
   -- common boot/flash/console failures + fixes.

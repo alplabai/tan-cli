@@ -186,7 +186,7 @@ def test_the_success_envelope_names_the_checkout_it_read(tmp_path, monkeypatch):
 
 
 def _write_pin(workspace: Path, target: Path) -> None:
-    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_discovery._pointer_target`
     reads -- mirrors `test_sdk_discovery_ladders._write_pin`."""
     (workspace / ".alp").mkdir(parents=True, exist_ok=True)
     (workspace / ".alp" / "sdk-path").write_text(
@@ -237,18 +237,16 @@ def test_no_sdk_bound_refuses_and_names_what_it_could_not_find(tmp_path, monkeyp
     assert result.exit_code == 1, result.output
     doc = json.loads(result.stdout)
     assert doc["ok"] is False
-    assert doc["issues"] == [
-        {
-            "code": "explain.sdk-root-unresolved",
-            "severity": "error",
-            "message": (
-                "alp-sdk root is unresolved, so no diagnostic catalogue could be "
-                "read -- get an alp-sdk checkout (`git clone "
-                "https://github.com/alplabai/alp-sdk`), then point tan at it with "
-                "`--sdk-root <path>`."
-            ),
-        }
-    ]
+    (issue,) = doc["issues"]
+    assert issue["code"] == "explain.sdk-root-unresolved"
+    assert issue["severity"] == "error"
+    # tan-cli#1463: the unchanged remedy is followed by where the ladder looked.
+    assert issue["message"].startswith(
+        "alp-sdk root is unresolved, so no diagnostic catalogue could be "
+        "read -- get an alp-sdk checkout (`git clone "
+        "https://github.com/alplabai/alp-sdk`), then point tan at it with "
+        "`--sdk-root <path>`. Neither `--sdk-root`"
+    )
     # Nothing was resolved, so nothing is claimed: the `sdk` key is ABSENT
     # rather than reporting a root the run never read.
     assert "sdk" not in doc
@@ -520,19 +518,27 @@ def test_the_template_and_target_paths_carry_no_code_mode_keys(
     unconditional key would be a wire change for three selectors that gained
     nothing -- and the extension reads an absent key with a `?? []` fallback,
     so absence is the honest shape for a mode that did not run. The `sdk` key
-    is absent for the same reason: these paths resolve no checkout."""
+    is absent for the same reason: these paths resolve no checkout.
+
+    `som` (tan-cli#866) is the one exception, by design: it IS unconditional
+    on a project-template hit (`minimal-app` here), because that selector
+    kind is the one with a SoM concept at all -- absent, same as `diagnostic`/
+    `suggestions`, on the other two kinds this case also covers."""
     result = _run(tmp_path, monkeypatch, *argv, "--format", "json")
 
     assert result.exit_code == 0, result.output
     doc = json.loads(result.stdout)
     assert doc["data"]["selector"] == {"kind": kind, "value": value}
-    assert set(doc["data"]) == {
+    expected_keys = {
         "schemaVersion",
         "selector",
         "summary",
         "details",
         "available",
     }
+    if kind == "project-template":
+        expected_keys.add("som")
+    assert set(doc["data"]) == expected_keys
     assert "sdk" not in doc
 
 

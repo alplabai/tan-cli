@@ -46,7 +46,7 @@ collide) still cannot match. Nor can the wrapper's own
 scripts/ci/apt-bounded.sh itself -- `$SUDO`/`$APT` are variable references,
 never the literal token `sudo`/`apt-get` at a command position.
 
-Files scanned: every `.github/workflows/*.yml` AND every `scripts/**/*.sh` --
+Files scanned: every `.github/workflows/*.yml`/`*.yaml` AND every `scripts/**/*.sh` --
 `scripts/e2e-container.sh` ran its own raw `apt-get update -qq` invisibly to
 a workflow-only scan (tan-cli#860 review finding #4); a shell helper is just
 as capable of hanging CI as a workflow step.
@@ -93,7 +93,11 @@ _ALLOW_MARKER = "# apt-bounded:allow"
 def _target_files(root: Path):
     workflows_dir = root / ".github" / "workflows"
     if workflows_dir.is_dir():
-        yield from sorted(workflows_dir.glob("*.yml"))
+        # GitHub Actions accepts both `.yml` and `.yaml`; a `.yml`-only glob
+        # gives a future `.yaml` workflow zero coverage from this gate
+        # (tan-cli#854/#855 review, same pattern fixed in
+        # test_parity_workflow_concurrency_and_timeouts.py).
+        yield from sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")])
     scripts_dir = root / "scripts"
     if scripts_dir.is_dir():
         yield from sorted(scripts_dir.rglob("*.sh"))
@@ -308,6 +312,23 @@ def test_a_raw_call_in_a_shell_script_fails(tmp_path: Path) -> None:
     problems = find_problems(tmp_path)
     assert len(problems) == 1
     assert "scripts" in problems[0] and "e2e-container.sh" in problems[0]
+
+
+def test_a_dot_yaml_workflow_is_scanned_too(tmp_path: Path) -> None:
+    """The `*.yaml` half of the widening (`_target_files`) had ZERO test
+    coverage: every other fixture in this module writes a `.yml` file, so a
+    mutation back to `sorted(workflows_dir.glob("*.yml"))` left every other
+    test green. Write a raw `apt-get update` into a `.yaml` file and require
+    it be caught -- this is the one fixture that actually exercises the
+    `*.yaml` glob."""
+    _write_workflow(
+        tmp_path,
+        "zz.yaml",
+        "          sudo apt-get update -o Acquire::http::Timeout=30",
+    )
+    problems = find_problems(tmp_path)
+    assert len(problems) == 1
+    assert "zz.yaml" in problems[0]
 
 
 def test_this_repos_own_workflows_and_scripts_are_clean() -> None:

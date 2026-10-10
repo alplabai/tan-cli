@@ -1,0 +1,55 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/model-build-no-models/expected.json
+=================================================================
+
+Recorded on    : 2026-09-01
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#253
+Branch         : feat/253-model-envelope-fixtures (off dev @ b3c40619)
+
+This is a NEW golden, not a re-recording: there was no previous recording to
+be wrong. `tan model` shipped three subcommands (`SUBCOMMANDS = ("build",
+"doctor", "check")`, `python/tan/commands/model_cmd.py`) with zero
+`contract/envelopes` coverage while every other command surface had some —
+the gap tan-cli#253 was re-scoped onto after the Rust oracle it originally
+named was deleted in `2883cdf4`.
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), the case's inputs copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, then normalised through the harness's own `normalise()` (PATH_KEYS
+`\` -> `/`, the scratch path down to `__WORKDIR__`). The recording reused the
+harness's own `fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`
+rather than reimplementing them (contract/README.md, "Regenerating a golden"
+step 1). Python 3.12.3, lane-private venv, Linux, `tan` resolved from this
+worktree.
+
+What this case pins
+--------------------
+`tan model build --sdk-root ./sdk --format json` against a board.yaml that
+declares a `som.sku` and NO `models:` block: the clean EMPTY success --
+`ok: true`, `exitCode: 0`, `issues: []`, `data.sku` read from the board
+(`E1M-AEN801`) and `data.built: []`. Nothing declared is not an error; this is
+the state `_run_build` returns before it ever reaches an adapter, which is what
+makes it deterministic on a box with no NPU compiler installed.
+
+It also pins the envelope's `sdk` block for this command (`root: "./sdk"`,
+`sourceTier: "sdkRootFlag"`) and the `project.root`/`project.boardYaml` pair --
+the resolution `model` reports were dropped entirely before tan-cli#497.
+
+Fixture inputs
+---------------
+`sdk/scripts/alp_project.py` is a MARKER only, the same synthetic-checkout
+convention `presets-heterogeneous-som`, `examples-catalog` and
+`debug-config-preview-zephyr-mcu-sdk-identity` already use: `_has_loader`
+(`python/tan/commands/build_output.py`) accepts a checkout carrying that path
+as a `--sdk-root`. It is never executed -- with no `models:` to build, nothing
+reads `metadata/**` and no Python is spawned, which is why this case needs no
+`metadata/` tree at all.
+
+Fully deterministic: no host state is read, so no `env.json`.

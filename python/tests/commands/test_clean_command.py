@@ -565,7 +565,7 @@ def test_a_second_pass_reports_nothing_to_remove(tmp_path, monkeypatch):
     assert_canary_intact(tmp_path)
 
 
-@pytest.mark.parametrize("raw", ["", ".", "..", "../.."])
+@pytest.mark.parametrize("raw", [""])
 def test_an_unsafe_build_root_is_refused_and_the_project_survives(raw, tmp_path, monkeypatch):
     """The `rm -rf $UNSET_VAR` shape, end to end. Before the guard, all of these
     recursively removed the source tree and exited 0."""
@@ -582,6 +582,131 @@ def test_an_unsafe_build_root_is_refused_and_the_project_survives(raw, tmp_path,
     assert doc["data"]["removed"] == 0
     assert survivors(tmp_path) == before, f"--build-root {raw!r} deleted something"
     assert_canary_intact(tmp_path)
+
+
+@pytest.mark.parametrize("raw", [".", "..", "../.."])
+def test_build_root_is_the_project_tree_and_only_its_build_dir_goes(raw, tmp_path, monkeypatch):
+    """tan-cli#1482: `--build-root X` means what it means to `tan build` -- X is
+    the project TREE and clean removes `<X>/build`, so `.`/`..` name a tree and
+    never the sources themselves."""
+    # Nested two levels so `../..` still lands inside tmp_path (xdist-safe).
+    root = tmp_path / "a" / "b"
+    proj = make_project(root)
+    isolate(monkeypatch, root, proj)
+    tree = (proj / raw).resolve()
+    (tree / "build").mkdir(exist_ok=True)
+    (tree / "build" / "stale.o").write_text("x")
+
+    result = runner.invoke(app, ["clean", "--build-root", raw, "--format", "json"])
+    assert result.exit_code == 0, result.stdout
+    doc = json.loads(result.stdout)
+    assert doc["data"]["buildRoot"] == str(tree / "build")
+    assert not (tree / "build").exists()
+    assert (proj / "src" / "main.c").is_file() and (proj / "board.yaml").is_file()
+    assert_canary_intact(root)
+
+
+def test_a_manifest_slice_dir_resolving_onto_the_project_root_is_refused(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1482 blocker: with `--build-root ..` the real project root (cwd)
+    sits inside X, and a manifest `build_dir` naming it must still be refused."""
+    proj = make_project(tmp_path)
+    sub = proj / "sub"
+    (sub / "src").mkdir(parents=True)
+    (sub / "src" / "main.c").write_text("int main(void){return 0;}")
+    (sub / "board.yaml").write_text("schema_version: 1\n")
+    (proj / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        '- core_id: c\n  os: zephyr\n  build_dir: "sub"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+    isolate(monkeypatch, tmp_path, sub)
+
+    for extra in (["--dry-run"], []):
+        result = runner.invoke(
+            app, ["clean", "--build-root", "..", "--format", "json", *extra]
+        )
+        doc = json.loads(result.stdout)
+        assert result.exit_code == 1, result.stdout
+        assert "clean.unsafe-target" in [i["code"] for i in doc["issues"]]
+        assert all(t["path"] != str(sub) or t["action"] == "refused-unsafe" for t in doc["data"]["targets"])
+        assert (sub / "src" / "main.c").is_file() and (sub / "board.yaml").is_file()
+
+
+def test_a_manifest_slice_dir_holding_a_board_yaml_is_refused(tmp_path, monkeypatch):
+    proj = make_project(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "board.yaml").write_text("schema_version: 1\n")
+    (other / "main.c").write_text("x")
+    (proj / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {}\nslices:\n"
+        f'- core_id: c\n  os: zephyr\n  build_dir: "{other.as_posix()}"\n  status: ok\n'
+        "helper_mcus: []\nboot_order: []\n"
+    )
+    isolate(monkeypatch, tmp_path, proj)
+    result = runner.invoke(app, ["clean", "--format", "json"])
+    assert result.exit_code == 1, result.stdout
+    assert (other / "main.c").is_file()
+
+
+def test_a_build_root_whose_build_dir_holds_a_board_yaml_is_refused(tmp_path, monkeypatch):
+    """tan-cli#1482 blocker: never delete a directory that is a project tree."""
+    proj = make_project(tmp_path)
+    other = tmp_path / "other" / "build"
+    other.mkdir(parents=True)
+    (other / "board.yaml").write_text("schema_version: 1\n")
+    (other / "main.c").write_text("x")
+    isolate(monkeypatch, tmp_path, proj)
+
+    result = runner.invoke(app, ["clean", "--build-root", "../other", "--format", "json"])
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
+    assert "board.yaml" in doc["issues"][0]["message"]
+    assert (other / "main.c").is_file()
+
+
+def test_the_same_build_root_to_build_and_clean_never_touches_sources(tmp_path, monkeypatch):
+    """The reported scenario: cwd=ws, project in ws/proj, `--build-root proj`."""
+    ws = tmp_path / "ws"
+    proj = ws / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "board.yaml").write_text("schema_version: 1\n")
+    (proj / "src" / "main.c").write_text("x")
+    (proj / "build").mkdir()
+    (proj / "build" / "o").write_text("x")
+    (ws / "alp-sdk" / "scripts").mkdir(parents=True)
+    (ws / "alp-sdk" / "scripts" / "alp_project.py").write_text("")
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+
+    result = runner.invoke(
+        app, ["clean", "--build-root", "proj", "--sdk-root", "alp-sdk", "--format", "json"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert not (proj / "build").exists()
+    assert (proj / "board.yaml").is_file() and (proj / "src" / "main.c").is_file()
+
+
+def test_clean_sweeps_the_nested_manifest_of_a_build_root(tmp_path, monkeypatch):
+    """tan-cli#1482: `<build>/build/system-manifest.yaml` (the spelling #1405
+    consumers accept) names an out-of-tree slice dir that must be swept."""
+    proj = make_project(tmp_path)
+    oot = tmp_path / "yocto-tmp"
+    oot.mkdir()
+    (oot / "a.bin").write_text("x")
+    nested = proj / "build" / "build"
+    nested.mkdir()
+    (nested / "system-manifest.yaml").write_text(manifest(oot.as_posix()))
+    isolate(monkeypatch, tmp_path, proj)
+
+    result = runner.invoke(app, ["clean", "--format", "json"])
+    assert result.exit_code == 0, result.stdout
+    assert not oot.exists()
 
 
 @pytest.mark.parametrize("build_dir", ["", ".", "..", "../../.."])
@@ -626,13 +751,14 @@ def test_a_build_root_outside_the_tree_is_still_removable(tmp_path, monkeypatch)
     Rust binary, which removes `../outside` and exits 0. This is why `clean`
     cannot screen every target with `confine_to_build_root`."""
     proj = make_project(tmp_path)
-    (tmp_path / "oot").mkdir()
-    (tmp_path / "oot" / "tmp.txt").write_text("x")
+    (tmp_path / "oot" / "build").mkdir(parents=True)
+    (tmp_path / "oot" / "build" / "tmp.txt").write_text("x")
     isolate(monkeypatch, tmp_path, proj)
 
     result = runner.invoke(app, ["clean", "--build-root", "../oot", "--format", "json"])
     assert result.exit_code == 0
-    assert not (tmp_path / "oot").exists()
+    assert not (tmp_path / "oot" / "build").exists()
+    assert (tmp_path / "oot").is_dir()
     assert_canary_intact(tmp_path)
 
 
@@ -647,6 +773,43 @@ def test_a_missing_sdk_root_fails_before_anything_is_removed(tmp_path, monkeypat
     assert [i["code"] for i in doc["issues"]] == ["clean.sdk-root-not-found"]
     assert doc["data"]["buildRoot"] == ""
     # Absent, not null -- `sdk` is omitted when nothing resolved.
+    assert "sdk" not in doc
+    assert survivors(tmp_path) == before
+    assert_canary_intact(tmp_path)
+
+
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#468. `resolve_sdk` returned a bare `None` whenever nothing
+    resolved, dropping `broken_project_pin` on the floor -- so a workspace
+    whose `.alp/sdk-path` names a checkout that no longer exists, with no
+    sibling for the wide ladder to fall through to either, reported
+    `clean.sdk-root-not-found` alone. Nothing here resolves at all, so this is
+    only the tan-cli#263 diagnostic gap, not a wrong-checkout `clean` (which
+    cannot happen -- `clean.sdk-root-not-found` refuses before anything is
+    removed).
+
+    Fails against dev: `doc["issues"]` there is `clean.sdk-root-not-found`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    proj = make_project(tmp_path, marker=False)
+    isolate(monkeypatch, tmp_path, proj)
+    (proj / ".alp").mkdir()
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    before = survivors(tmp_path)
+
+    result = runner.invoke(app, ["clean", "--format", "json"])
+    assert result.exit_code == 1
+    doc = json.loads(result.stdout)
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "clean.sdk-root-not-found",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    # Absent, not null -- still no usable checkout, so still no `sdk` block.
     assert "sdk" not in doc
     assert survivors(tmp_path) == before
     assert_canary_intact(tmp_path)
@@ -995,14 +1158,18 @@ def test_the_project_root_named_through_a_symlinked_parent_is_refused(tmp_path, 
     0 with `issues: []`. Reproduced on the port AND on the frozen oracle, which
     is why the resolved re-test is a deliberate divergence rather than a
     regression fix."""
-    proj = make_project(tmp_path)
+    # `--build-root X` removes `<X>/build`, so the project root is named
+    # `build` here for the target to land on it.
+    base = tmp_path / "outer"
+    base.mkdir()
+    proj = make_project(tmp_path).rename(base / "build")
     isolate(monkeypatch, tmp_path, proj)
     (tmp_path / "wlink").symlink_to(tmp_path, target_is_directory=True)
 
     result = runner.invoke(
         app,
         ["clean", "--sdk-root", str(proj), "--project", str(proj),
-         "--build-root", str(tmp_path / "wlink" / "proj"), "--format", "json"],
+         "--build-root", str(tmp_path / "wlink" / "outer"), "--format", "json"],
     )
     doc = json.loads(result.stdout)
     assert result.exit_code == 1
@@ -1010,9 +1177,9 @@ def test_the_project_root_named_through_a_symlinked_parent_is_refused(tmp_path, 
     assert doc["data"]["targets"] == []
     # Resolution is for the COMPARISON only: the reported build root keeps the
     # spelling the caller typed.
-    assert doc["data"]["buildRoot"] == str(tmp_path / "wlink" / "proj")
+    assert doc["data"]["buildRoot"] == str(tmp_path / "wlink" / "outer" / "build")
     assert (proj / "src" / "main.c").is_file()
-    assert_canary_intact(tmp_path)
+    assert (tmp_path / "CANARY.txt").read_text() == "CANARY"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs an ordinary directory symlink")
@@ -1029,12 +1196,12 @@ def test_an_ancestor_of_the_project_named_through_a_symlinked_parent_is_refused(
     recurses), and it is specifically a symlinked PARENT that used to slip
     through."""
     outer = tmp_path / "outer"
-    proj = outer / "proj"
+    proj = outer / "build" / "proj"
     (proj / "scripts").mkdir(parents=True)
     (proj / "scripts" / "alp_project.py").write_text("")
     (proj / "src").mkdir()
     (proj / "src" / "main.c").write_text("int main(void){return 0;}")
-    (outer / "sibling_sources.txt").write_text("A CUSTOMER'S WORK")
+    (outer / "build" / "sibling_sources.txt").write_text("A CUSTOMER'S WORK")
     (tmp_path / "home").mkdir()
     monkeypatch.chdir(proj)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -1050,7 +1217,7 @@ def test_an_ancestor_of_the_project_named_through_a_symlinked_parent_is_refused(
     assert result.exit_code == 1
     assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
     assert doc["data"]["targets"] == []
-    assert (outer / "sibling_sources.txt").read_text() == "A CUSTOMER'S WORK"
+    assert (outer / "build" / "sibling_sources.txt").read_text() == "A CUSTOMER'S WORK"
     assert (proj / "src" / "main.c").is_file()
 
 
@@ -1063,13 +1230,14 @@ def test_a_symlink_spelled_as_the_build_root_is_still_removable(tmp_path, monkey
     `unsafe-build-root` refusal and leave the stale link behind."""
     proj = make_project(tmp_path)
     isolate(monkeypatch, tmp_path, proj)
-    link = tmp_path / "buildlink"
+    (tmp_path / "x").mkdir()
+    link = tmp_path / "x" / "build"
     link.symlink_to(proj, target_is_directory=True)
 
     result = runner.invoke(
         app,
         ["clean", "--sdk-root", str(proj), "--project", str(proj),
-         "--build-root", str(link), "--format", "json"],
+         "--build-root", str(tmp_path / "x"), "--format", "json"],
     )
     doc = json.loads(result.stdout)
     assert result.exit_code == 0
@@ -1091,7 +1259,7 @@ def test_an_out_of_tree_build_root_reached_through_a_symlink_stays_removable(
     `--build-root ../outside`, which the oracle removes at exit 0)."""
     proj = make_project(tmp_path)
     isolate(monkeypatch, tmp_path, proj)
-    outside = tmp_path / "elsewhere" / "yocto-tmp"
+    outside = tmp_path / "elsewhere" / "yocto-tmp" / "build"
     outside.mkdir(parents=True)
     (outside / "artefact.bin").write_text("x")
     (tmp_path / "elink").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
@@ -1106,3 +1274,26 @@ def test_an_out_of_tree_build_root_reached_through_a_symlink_stays_removable(
     assert doc["issues"] == []
     assert not outside.exists()
     assert_canary_intact(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1482 -- the read-only retry hook must not follow links
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permission bits, non-root")
+def test_read_only_retry_never_chmods_through_a_symlink(tmp_path):
+    from tan.core.dir_removal import remove_dir
+
+    outside = tmp_path / "outside_f"
+    outside.write_text("x")
+    outside.chmod(0o444)
+    tree = tmp_path / "rt" / "b" / "d"
+    tree.mkdir(parents=True)
+    (tree / "link").symlink_to(outside)
+    (tree / "dang").symlink_to(tmp_path / "nonexistent")
+    tree.chmod(0o555)
+
+    remove_dir(str(tmp_path / "rt" / "b"))
+    assert not (tmp_path / "rt" / "b").exists()
+    assert (outside.stat().st_mode & 0o777) == 0o444

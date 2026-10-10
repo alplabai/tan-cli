@@ -84,8 +84,8 @@ from typing import Any
 import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import ActiveSdk
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.sdk_discovery import ActiveSdk, with_sdk_search
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
@@ -104,7 +104,6 @@ SCHEMA_VERSION = "pinmux-capability-v1"
 #: -- there is no separate `v2n-m1.yaml` table, so it maps to `"v2n"` too.
 _FAMILY_PREFIX_TABLE = (
     ("E1M-AEN", "aen"),
-    ("E1M-NX9", "imx93"),
     ("E1M-V2N", "v2n"),
     ("E1M-V2M", "v2n"),
 )
@@ -136,7 +135,7 @@ def _is_safe_family_stem(family: str) -> bool:
     POSIX it also accepts `C:\\x` and `..\\..\\x` as ordinary filenames.
 
     No dot is admitted because no `metadata/pinmux/*.yaml` stem has ever
-    contained one (`aen`, `imx93`, `v2n`); admitting one to be liberal would
+    contained one (`aen`, `v2n`); admitting one to be liberal would
     buy nothing and hand back the `.`/`..` component this rejects outright.
     """
     return bool(family) and all(c.isascii() and (c.isalnum() or c in "-_") for c in family)
@@ -333,7 +332,12 @@ def _resolve(
         )
         return sdk, resolved_family, None, [], issues, ExitCode.VALIDATION_FAILURE
 
-    if sdk is not None and resolved_family is not None:
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk`, never a
+    # bare `None` -- `sdk.path` is what says whether a usable checkout
+    # resolved, so both branches below guard on that instead of `sdk`'s own
+    # (now-unconditional) truthiness. `Path(sdk.path)` would otherwise raise
+    # on a `None` the moment `resolved_family` alone gated this branch.
+    if sdk.path is not None and resolved_family is not None:
         table_dir = Path(sdk.path) / "metadata" / "pinmux"
         try:
             # `resolve_confined` resolves BOTH sides and compares components,
@@ -402,7 +406,7 @@ def _resolve(
                         )
                     )
                     exit_code = ExitCode.VALIDATION_FAILURE
-    elif sdk is None:
+    elif sdk.path is None:
         # tan-cli#497 defect 7: when `--sdk-root` WAS given and the loader-marker
         # check rejected it, name the value. The bare string below is the answer
         # for BOTH cases today, so a typo'd flag read as "alp-sdk root is
@@ -415,7 +419,9 @@ def _resolve(
                 "warning",
                 rejected_sdk_root_message(sdk_root, "Cannot read the pinmux table.")
                 if sdk_root
-                else "alp-sdk root is unresolved; cannot read the pinmux table.",
+                else with_sdk_search(
+                    "alp-sdk root is unresolved; cannot read the pinmux table.", root
+                ),
             )
         )
 
@@ -534,7 +540,12 @@ def pinmux(
         data,
         issues,
         exit_code,
-        sdk=SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None,
+        # tan-cli#468: `sdk` (from `_resolve`) is now a real `ActiveSdk` even
+        # when nothing usable resolved -- `.path` is what says whether there
+        # is a checkout to report, `sdk is not None` alone no longer does.
+        sdk=SdkInfo.from_resolution(sdk.path, sdk)
+        if sdk is not None and sdk.path is not None
+        else None,
     )
     if json_mode:
         emit(envelope)

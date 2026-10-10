@@ -1,9 +1,0 @@
-# postinstall.js output, not source: the unpacked PyInstaller freeze
-# (`tan-cli-lib/{tan[.exe], _internal/}`, ~40 MB) and the staging directory it
-# is assembled in. Anyone who runs `npm install` in this directory materialises
-# both, and this repo has already committed a build tree by accident once
-# (python/.venv-e2e, 3327 files, public history). A package-local file rather
-# than a root rule so it travels with the thing it describes; npm packs from
-# package.json's `files` allowlist, so neither is ever published either.
-/tan-cli-lib/
-/.tan-install-*/

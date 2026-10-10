@@ -21,6 +21,12 @@ loaders, so a board.yaml `tan build` accepts is the same board.yaml
 `tan validate` (which shells the SDK validator, itself routed through
 alp-sdk's own copy of this module) accepts.
 
+`fast_safe_load()` is the lenient sibling: exactly `yaml.safe_load`
+semantics (duplicate keys keep the last value) for hot readers that do not
+opt into rejection (`sdk_compat.load_family_table`). Both YAML paths parse
+with libyaml's C parser whenever PyYAML was built with it, and fall back to
+the pure-Python one otherwise (alp-sdk #2328).
+
 Zero dependencies beyond PyYAML on purpose, same rationale as alp-sdk's
 copy: this is a leaf every metadata-ingestion boundary can import without
 creating a cycle.
@@ -40,7 +46,7 @@ class DuplicateKeyError(ValueError):
 
 
 def _no_duplicates_mapping_constructor(
-    loader: yaml.SafeLoader, node: yaml.MappingNode
+    loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode
 ) -> dict[str, Any]:
     # Duplicate-key detection must run on the node's OWN explicit pairs
     # BEFORE `flatten_mapping()` splices in `<<: *anchor` merge-key
@@ -73,7 +79,14 @@ def _no_duplicates_mapping_constructor(
     return mapping
 
 
-class _StrictLoader(yaml.SafeLoader):
+# libyaml's C parser when PyYAML was built with it (its wheels are), the
+# pure-Python one otherwise. Same SafeConstructor either way, so the same
+# values and the same duplicate-key rejection -- only ~10x faster to parse
+# (alp-sdk #2328).
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class _StrictLoader(_SAFE_LOADER):
     pass
 
 
@@ -88,6 +101,15 @@ def strict_yaml_load(text: str, source: str | Path = "<string>") -> Any:
         return yaml.load(text, Loader=_StrictLoader)
     except DuplicateKeyError as e:
         raise DuplicateKeyError(f"{source}: {e}") from e
+
+
+def fast_safe_load(text: str) -> Any:
+    """Exactly `yaml.safe_load(text)`, parsed by libyaml when available.
+
+    For the hot metadata readers that want stdlib semantics (duplicate keys
+    keep the last value) rather than `strict_yaml_load`'s rejection.
+    """
+    return yaml.load(text, Loader=_SAFE_LOADER)
 
 
 def _no_duplicates_object_pairs_hook(

@@ -22,7 +22,10 @@ from tan.commands.build.toolchain import NO_TOOLCHAIN_ADVICE
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.build_plan import BuildPlan
 from tan.core.plan_tokens import (
+    DeferredPlaceholder,
+    DeferredPolicy,
     LeftoverToken,
+    PLAN_TOKEN_NAMES,
     PLAN_PATH_MODE_TOKENED,
     TokenValues,
     UnknownPlanPathMode,
@@ -31,6 +34,9 @@ from tan.core.plan_tokens import (
     sdk_commit_mismatches,
     substitute_plan_tokens,
 )
+from tan.envelope import Issue
+from tan.core.subprocess_env import spawn_env
+from tan.core.sysbuild_image import rescope_sysbuild_extra_conf
 from tan.core.tool_lookup import resolve_tool
 
 
@@ -105,6 +111,7 @@ def _is_own_git_checkout(sdk_root: Path, git_exe: str | None) -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -143,11 +150,90 @@ def git_short_head(sdk_root: Path) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
     return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _deferred_extra_note(plan: BuildPlan, e: LeftoverToken, policy: DeferredPolicy) -> str:
+    """What to append to a `build.plan-token-unresolved` message so the
+    refusal also says what a malformed `deferredPlaceholders` cost, or how a
+    config-artefact placeholder could have been accepted (tan-cli#1302)."""
+    notes = ""
+    if plan.deferred_placeholders_problem is not None:
+        notes += (
+            f" Note: {plan.deferred_placeholders_problem} -- the field was ignored, so no "
+            f"`${{NAME}}` placeholder was exempt."
+        )
+    elif e.deferrable:
+        name = e.token[2:-1]
+        if policy.has_plan_list:
+            notes += (
+                f" If `{e.token}` is a placeholder meant for the build host or the device, "
+                f"the plan's `deferredPlaceholders` has to list `{name}` "
+                f"(alplabai/alp-sdk#2696); it does not."
+            )
+        else:
+            notes += (
+                f" If `{e.token}` is a placeholder meant for the build host or the device, "
+                f"it is accepted only when the plan's `deferredPlaceholders` lists `{name}` "
+                f"(alplabai/alp-sdk#2696); this plan carries no `deferredPlaceholders` at "
+                f"all -- re-emit it with a current planner."
+            )
+    return notes
+
+
+def _deferred_text(d: DeferredPlaceholder) -> str:
+    if d.live_kconfig:
+        return (
+            f"placeholder `${{{d.name}}}` in `{d.field}` sits on a live line of a Kconfig "
+            f"fragment; Kconfig does not expand `${{{d.name}}}`, so the firmware will carry "
+            f"the literal text unless something substitutes it before the build"
+        )
+    return (
+        f"placeholder `${{{d.name}}}` in `{d.field}` is left as written for the build "
+        f"host or the device to supply; tan does not substitute it"
+    )
+
+
+def deferred_placeholder_issues(
+    plan: BuildPlan, deferred: list[DeferredPlaceholder]
+) -> list[Issue]:
+    """The envelope issues for tan-cli#1302: one issue per placeholder NAME
+    left standing in a config artefact (`info`, or `warning` when any
+    occurrence is on a live Kconfig line), plus `build.plan-warning`s for a
+    malformed `deferredPlaceholders` and for a plan path token listed in it."""
+    issues: list[Issue] = []
+    if plan.deferred_placeholders_problem is not None:
+        text = f"[deferred-placeholders-malformed] {plan.deferred_placeholders_problem} -- ignoring the field"
+        if plan.plan_path_mode == PLAN_PATH_MODE_TOKENED:
+            text += (
+                ", so no `${NAME}` placeholder is exempt from the unresolved-token refusal"
+            )
+        issues.append(Issue("build.plan-warning", "warning", text))
+    bugs = [n for n in plan.deferred_placeholders or () if n in PLAN_TOKEN_NAMES]
+    if bugs:
+        listed = ", ".join(f"`{n}`" for n in bugs)
+        issues.append(
+            Issue(
+                "build.plan-warning",
+                "warning",
+                f"[deferred-placeholders-plan-token] `deferredPlaceholders` lists the plan "
+                f"path token(s) {listed} -- a planner bug: tan substitutes those and they are "
+                f"never deferred; ignoring the entries",
+            )
+        )
+    by_name: dict[str, list[DeferredPlaceholder]] = {}
+    for d in deferred:
+        by_name.setdefault(d.name, []).append(d)
+    for occurrences in by_name.values():
+        pick = next((d for d in occurrences if d.live_kconfig), occurrences[0])
+        severity = "warning" if pick.live_kconfig else "info"
+        issues.append(Issue("build.deferred-placeholder", severity, _deferred_text(pick)))
+    return issues
 
 
 def apply_plan_token_substitution(
@@ -159,6 +245,8 @@ def apply_plan_token_substitution(
     python: str,
     toolchain_root: str | None,
     toolchain_advice: str = NO_TOOLCHAIN_ADVICE,
+    deferred_out: list[DeferredPlaceholder] | None = None,
+    project_root: str | None = None,
 ) -> tuple[BuildPlan, list[SliceDemotion]]:
     """Apply the build-plan token-substitution pass to `plan` before
     materialise writes anything or a slice command runs. A no-op unless
@@ -173,7 +261,12 @@ def apply_plan_token_substitution(
     resolver's own reason instead, which distinguishes "this host has none"
     from "this host has SEVERAL and nothing picking between them"
     (tan-cli#547): two different fixes, and only the second one names the
-    installs the caller can choose from."""
+    installs the caller can choose from.
+
+    `deferred_out` (tan-cli#1302), when given, receives every `${NAME}` that
+    was deliberately left standing in a `configArtefacts[*].contents` value
+    (see `DeferredPolicy` for the exact rule). A caller that passes nothing
+    still gets the exemption -- it just cannot report it."""
     if plan.plan_path_mode is None:
         return plan, []
     if plan.plan_path_mode != PLAN_PATH_MODE_TOKENED:
@@ -188,13 +281,17 @@ def apply_plan_token_substitution(
     # base dir. They coincide only in the default config -- a tokened plan
     # substituting ${PROJECT_ROOT} from one while slices actually run under
     # the other would silently build against the wrong tree.
-    if board_yaml_path is None:
+    # `project_root` is the `board.yaml`-less route's own (tan-cli#1359: `tan
+    # build --board`): there is no board.yaml to derive it from, so the caller
+    # names it (the build root) instead.
+    if board_yaml_path is None and project_root is None:
         raise TokenSubstitutionError(
             "build.plan-invalid",
             "a `planPathMode: tokened` plan needs a resolved board.yaml to derive "
             "${PROJECT_ROOT} from -- pass `--board-yaml <PATH>` or run from a project.",
         )
-    project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
+    if project_root is None:
+        project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
 
     if project_root_diverges_from_exec_base(project_root, exec_base):
         raise TokenSubstitutionError(
@@ -242,15 +339,17 @@ def apply_plan_token_substitution(
     values = TokenValues(
         sdk_root=sdk_root, project_root=project_root, python=python, toolchain_root=toolchain_root
     )
+    policy = DeferredPolicy(plan.deferred_placeholders)
     try:
-        out, demoted = substitute_plan_tokens(plan, values)
+        out, demoted = substitute_plan_tokens(plan, values, policy)
     except LeftoverToken as e:
         raise TokenSubstitutionError(
             "build.plan-token-unresolved",
             f"plan is `planPathMode: tokened` but field `{e.field}` still names the literal "
             f"token `{e.token}` after substitution -- an SDK-side token this CLI does not "
             f"resolve (only ${{SDK_ROOT}}, ${{PROJECT_ROOT}}, ${{PYTHON}}, ${{TOOLCHAIN_ROOT}} "
-            f"are known). Upgrade tan, or check the plan for a bug.",
+            f"are known). Upgrade tan, or check the plan for a bug."
+            + _deferred_extra_note(plan, e, policy),
         ) from e
     except UnresolvedToolchainRoot as e:
         raise TokenSubstitutionError(
@@ -261,6 +360,15 @@ def apply_plan_token_substitution(
         ) from e
     except UnknownPlanPathMode as e:
         raise TokenSubstitutionError("build.plan-invalid", str(e)) from e
+
+    if deferred_out is not None:
+        deferred_out.extend(policy.exempted)
+
+    # alp-sdk#866: a sysbuild slice's `-D<image>_EXTRA_CONF_FILE` prefix was
+    # derived from the project root the plan was EMITTED in; re-derive it from
+    # the substituted app dir so a relocated plan still configures its image
+    # (see `tan.core.sysbuild_image` for why this rewrites rather than refuses).
+    out = rescope_sysbuild_extra_conf(out)
 
     slice_demotions = [
         SliceDemotion(

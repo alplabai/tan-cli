@@ -32,16 +32,17 @@ SKIPS -- visibly, naming the missing variable.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
-from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
-
-SDK = sdk_root()
+# `_bound_sdk` is a pytest fixture, imported for its side effect -- the
+# same idiom `_baremetal_support`'s consumers use for `bound_sdk_root`.
+from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
@@ -66,15 +67,6 @@ AEN801_PRESET = "e1m_modules/E1M-AEN801.yaml"
 AEN301_PRESET = "e1m_modules/E1M-AEN301.yaml"
 E8_SOC = "socs/alif/ensemble/e8.json"
 E3_SOC = "socs/alif/ensemble/e3.json"
-
-
-@pytest.fixture(autouse=True)
-def _bound_sdk():
-    """`tan/planner` refuses to resolve `metadata/**` before an SDK root is
-    bound (`planner_root.py`), and `_resolve_sku`'s error path renders a
-    path relative to it -- so bind before importing anything that reads."""
-    bind_sdk_root(SDK)
-    yield
 
 
 def _emit(*args):
@@ -160,6 +152,20 @@ class _MutatedMetadata:
             f"quality-tasks-v1.json declares no task {task_id!r}")
         path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
+    def drop_yaml_key(self, relpath: str, *keys: str) -> None:
+        """Delete a nested YAML key via a `yaml.safe_load`/`safe_dump`
+        round-trip -- simulates an alp-sdk checkout whose YAML predates the
+        key's introduction (alp-sdk#2036's `e1m_i2c0` on-module link), the
+        YAML counterpart of `json_del` for a JSON spec."""
+        path = self.root / relpath
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        node = doc
+        for key in keys[:-1]:
+            node = node[key]
+        assert keys[-1] in node, f"{relpath} has no {'.'.join(keys)}"
+        del node[keys[-1]]
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
     def drop_schema_property(self, schema_relpath: str, prop: str) -> None:
         """Simulate an alp-sdk checkout that predates the commit which added
         *prop* to `metadata/schemas/<schema_relpath>` --
@@ -174,6 +180,24 @@ class _MutatedMetadata:
 
 def _dts(files: dict[str, str]) -> str:
     return next(v for k, v in files.items() if k.endswith(".dts"))
+
+
+def _flat(text: str) -> str:
+    r"""Collapse a C block comment's `\n * ` continuations and runs of
+    whitespace, so an assertion can match prose that `_c_comment()` /
+    `textwrap` REFLOWED to comment width without pinning where the line
+    breaks happen to land. alp-sdk's own
+    `tests/scripts/test_gen_zephyr_board.py` grew the same helper for the
+    same reason (alp-sdk#2046, alp-sdk#2062).
+
+    It deliberately does NOT undo a HYPHEN break: `textwrap` (with
+    `break_on_hyphens`, the default `_c_comment` uses) may split
+    `bench-validated` across lines, which flattens to `bench- validated`.
+    So a literal spanning a hyphen is still unsafe here -- match on a
+    hyphen-free fragment, or on one whose wrap position is fixed because
+    nothing variable precedes it.
+    """
+    return " ".join(re.sub(r"\n\s*\*\s?", " ", text).split())
 
 
 # ======================================================================
@@ -239,10 +263,89 @@ def test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay():
     assert "(Alif Ensemble E3)" in pinctrl
     # No E8 fact may survive anywhere in the E3 tree. The SoC-JSON path in
     # the generated-file banner legitimately says `e3.json`, never `e8`.
+    #
+    # ONE exception, scrubbed from pinctrl.dtsi ONLY and only after pinning
+    # that it occurs there exactly once: `_aen_e1m_i2c0_pinctrl_group()`
+    # cites the E8 bench run as the PROVENANCE of a pad config that
+    # on-module-links.yaml itself scopes to the whole AEN family
+    # ("Family-scoped -- one file backs every AEN SKU and both M55 cores"),
+    # not as a claim about THIS SKU's own silicon identity -- unlike the
+    # header banner / overlay include / IRQ-count facts this loop exists to
+    # catch, which genuinely differ per SoC and must never leak.
+    #
+    # UPDATED for alp-sdk#2046, which deliberately did NOT silence that
+    # citation on a non-E8 part the way alp-sdk#1988 silences
+    # `rtc_alarm.risk`: the emitted pad VALUE (bias-pull-down) is unchanged
+    # and still correct for every part, so the citation stays and is
+    # QUALIFIED ("bench-validated ONLY on the E8 ... has NOT been
+    # independently repeated on the E3"). Two consequences for this scrub,
+    # both load-bearing:
+    #   * the sanctioned text is now a whole PARAGRAPH, not alp-sdk#2036's
+    #     single sentence; and
+    #   * `_c_comment()` REFLOWS it to comment width, so
+    #     "bench-validated 2026-06-15 on the E8" no longer occurs as a
+    #     contiguous substring at all -- it wraps as "bench-\n\t * validated
+    #     2026-06-15 on the E8". Scrubbing that literal now removes NOTHING
+    #     and the old form of this assertion read 0 == 1.
+    # So the scrub runs on the FLATTENED text and is delimited by the
+    # paragraph's own opening and closing clauses, neither of which a line
+    # break can split (see `_flat`). It is still exact: anything outside
+    # that one span fails, and `.dts` / `Kconfig.defconfig` get no
+    # exception whatsoever.
+    #
+    # Whether E8-evidenced `bias-pull-down` holds on E3 silicon is alp-sdk's
+    # question (the #1988 per-part-map class); tan emits the bytes verbatim.
+    bench_open = "input-enable + bias-pull-down:"
+    bench_close = "but that silence is not proof either way."
+    flat_pinctrl = _flat(pinctrl)
+    assert flat_pinctrl.count(bench_open) == 1, (
+        "the one sanctioned E8 bench-provenance paragraph must open exactly "
+        "once, in pinctrl.dtsi -- a second copy is not covered by this "
+        "exception")
+    assert flat_pinctrl.count(bench_close) == 1, (
+        "the sanctioned paragraph must close exactly once -- if its wording "
+        "moved, re-pin this scrub rather than widening it")
+    start = flat_pinctrl.index(bench_open)
+    end = flat_pinctrl.index(bench_close, start) + len(bench_close)
+    sanctioned = flat_pinctrl[start:end]
+    # The citation must still be EMITTED and part-qualified: alp-sdk#2046's
+    # whole point is that silence is not the fix, so a scrub that passed
+    # because the paragraph vanished would be the wrong kind of green.
+    assert "bench-validated ONLY on the E8" in sanctioned
+    assert "independently repeated on the E3" in sanctioned
+    scrubbed = flat_pinctrl[:start] + flat_pinctrl[end:]
+    assert "E8" not in scrubbed, (
+        "pinctrl.dtsi carries an E8 fact OUTSIDE the sanctioned "
+        "bench-provenance paragraph")
+    for name, emitted in (("dts", dts), ("Kconfig.defconfig", kconfig)):
+        assert "E8" not in emitted, f"{name} still carries an E8 fact"
     for name, emitted in (("dts", dts), ("Kconfig.defconfig", kconfig),
                           ("pinctrl.dtsi", pinctrl)):
-        assert "E8" not in emitted, f"{name} still carries an E8 fact"
         assert "ensemble_e8" not in emitted, f"{name} still includes the E8 overlay"
+
+
+def test_the_ae822_port15_risk_note_is_scoped_to_actual_e8_silicon():
+    """The regression `test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay`
+    above caught for real: `on-module-links.yaml`'s `rtc_alarm.risk` string
+    is evidenced ONLY against "The AE822 DFP" (the E8 part's own datasheet),
+    but the file scopes itself to "the E1M-AEN family", not to a part -- so
+    an unscoped emitter put an E8-specific register-layout warning into
+    every AEN SKU's `.dts`, E3/E4/E6 included. The fix gates it on the SoC
+    JSON's own `part`, not on the on-module wiring (which IS shared across
+    the family): an E1M-AEN301 (E3) must not carry it, an E1M-AEN801 (E8,
+    unmutated -- this IS the AE822 part the note is evidenced against) must
+    still carry it.
+    """
+    with _MutatedMetadata() as mm:
+        dts_e8 = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "AE822 DFP warns for port 15" in dts_e8
+    assert "LPGPIO_CTRL_n register" in dts_e8
+
+    with _MutatedMetadata() as mm:
+        _port_aen301(mm)
+        dts_e3 = _dts(_emit("E1M-AEN301", "m55_hp", mm.root))
+    assert "AE822 DFP warns for port 15" not in dts_e3
+    assert "LPGPIO_CTRL_n register" not in dts_e3
 
 
 def test_the_peripherals_overlay_is_read_from_the_soc_json():
@@ -507,6 +610,86 @@ def test_overlapping_memory_map_regions_raise():
     assert "overlap" in str(excinfo.value)
 
 
+# ======================================================================
+# alp-sdk#2073: the whole-device-alias exception in _aen_check_map_overlaps
+# ======================================================================
+
+
+def test_whole_device_alias_does_not_overlap_its_own_partitions():
+    """`mram_main` deliberately spans the same 5632 KiB window that
+    `mcuboot`/`he_slot0`/`hp_slot0`/`reserved`/`storage`/`atoc` subdivide
+    (alp-sdk#2073) -- its `base` resolves to a real address (alp-sdk#2053)
+    and must NOT be reported as overlapping every region inside it.
+    `tan.planner.aperture.classify_region()` already carries this exact
+    "extent == aperture exactly" exception; this pins that
+    `_aen_check_map_overlaps()` agrees with it instead of refusing the
+    very shape the SoM presets declare on purpose."""
+    with _MutatedMetadata() as mm:
+        files = _emit("E1M-AEN801", "m55_hp", mm.root)
+    assert "alp_e1m_aen801_m55_hp/board.yml" in files
+
+
+def test_whole_device_alias_exception_does_not_swallow_a_real_overlap():
+    """The whole-device-alias exception must be narrow: a genuine overlap
+    between two ordinary partitions is still refused even while
+    `mram_main` (also spanning the whole window, resolved since
+    alp-sdk#2053) sits in the same `memory_map:`."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, "name: hp_slot0,  base: 0x802b0000",
+               "name: hp_slot0,  base: 0x802a0000")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    assert "overlap" in str(excinfo.value)
+
+
+def test_two_whole_device_aliases_raise_instead_of_going_uncompared():
+    """The whole-device-alias exclusion drops matching rows from the
+    pairwise overlap comparison entirely -- so two rows that BOTH match the
+    aperture exactly would otherwise never be compared against each other
+    at all, silently accepting a duplicate alias. `classify_region()` would
+    call both `flash`, so neither becomes an IPC carve-out target either
+    way, but a duplicate whole-device alias is still a bad input and must
+    be refused, not passed through quietly (review of alp-sdk#2073)."""
+    with _MutatedMetadata() as mm:
+        mm.sub(
+            AEN801_PRESET,
+            "- { name: mram_main, base: 0x80000000, size_kib: 5632, "
+            "accessible_from: [a32_cluster, m55_he, m55_hp], "
+            "cacheable: true, write_authority: composite }",
+            "- { name: mram_main, base: 0x80000000, size_kib: 5632, "
+            "accessible_from: [a32_cluster, m55_he, m55_hp], "
+            "cacheable: true, write_authority: composite }\n"
+            "  - { name: mram_dup,  base: 0x80000000, size_kib: 5632, "
+            "accessible_from: [a32_cluster, m55_he, m55_hp], "
+            "cacheable: true, write_authority: customer_runtime }")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "'mram_main'" in message
+    assert "'mram_dup'" in message
+    assert "only one whole-device alias" in message
+
+
+def test_same_base_smaller_size_is_not_a_whole_device_alias():
+    """A region flush with the aperture's low edge but one KiB short of its
+    full extent is a genuine (mis-sized) partition, not the whole-device
+    alias -- it must still overlap `mcuboot` at the same base and be
+    refused. This is the one test that still catches a predicate loosened
+    to `lo == full_lo` alone (dropping the `hi == full_hi` half) IF the
+    duplicate-whole-device-alias guard above is ever removed -- today that
+    loosening also makes `mcuboot` match as a second "alias", so the
+    duplicate-alias refusal fires first and two other tests here go red
+    too; this test is what still fails on the loosening alone (review of
+    alp-sdk#2073)."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET,
+               "name: mram_main, base: 0x80000000, size_kib: 5632",
+               "name: mram_main, base: 0x80000000, size_kib: 5631")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    assert "overlap" in str(excinfo.value)
+
+
 def test_an_mcuboot_base_off_the_mram_window_raises():
     """`mcuboot`'s base IS the soc-nv-flash child's offset-0 origin, but the
     child's own node address was a hardcoded `0x80000000` literal -- so a map
@@ -523,3 +706,402 @@ def test_an_mcuboot_base_off_the_mram_window_raises():
     message = str(excinfo.value)
     assert "anchors 'mcuboot' at 0x80008000" in message
     assert "0x80000000" in message
+
+
+# ======================================================================
+# alp-sdk#2036: e1m_i2c0 (SoC I2C2) board-layer pinctrl group + DT node
+# ======================================================================
+
+
+def test_the_e1m_i2c0_pinctrl_group_carries_the_metadata_pads_and_pinmux_order():
+    """SoC I2C2 (e1m_i2c0, portable alp-i2c0) gets its own board-layer
+    pinctrl group.  Pinmux order is SCL then SDA, matching the
+    bench-validated `aen-i2c2-eeprom-regcheck` / `aen-eeprom-manifest`
+    overlays verbatim -- NOT the SDA-first order `_aen_i2c_pinctrl_group`'s
+    BRD_I2C group above happens to use."""
+    with _MutatedMetadata() as mm:
+        pinctrl = _emit("E1M-AEN801", "m55_hp", mm.root)[
+            "alp_e1m_aen801_m55_hp/alp_e1m_aen801_m55_hp-pinctrl.dtsi"]
+    assert "\tpinctrl_i2c2: pinctrl_i2c2 {\n" in pinctrl
+    assert (
+        "\t\t\tpinmux = <PIN_P5_6__I2C2_SCL_C>, <PIN_P5_7__I2C2_SDA_C>;\n"
+        in pinctrl
+    )
+    assert "\t\t\tinput-enable;\n" in pinctrl
+    assert "\t\t\tbias-pull-down;\n" in pinctrl
+
+
+def test_the_e1m_i2c0_dts_node_and_alias_are_emitted():
+    """The `&i2c2` board-layer node + the `alp-i2c0` alias
+    `alp_i2c_open(.bus_id = ALP_E1M_I2C0)` resolves through
+    `DT_ALIAS(alp_i2c0)` -- alp-sdk#2036's `_aen_e1m_i2c0_dts()`."""
+    with _MutatedMetadata() as mm:
+        dts = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "&i2c2 {\n" in dts
+    assert '\tstatus = "okay";\n' in dts
+    assert "\tpinctrl-0 = <&pinctrl_i2c2>;\n" in dts
+    assert "\tclock-frequency = <I2C_BITRATE_STANDARD>;\n" in dts
+    assert "\t\talp-i2c0 = &i2c2;\n" in dts
+
+
+def test_a_missing_e1m_i2c0_on_module_link_is_refused():
+    """Every AEN board tree needs `e1m_i2c0` alongside `brd_i2c` /
+    `rtc_alarm` in `on-module-links.yaml` -- alp-sdk#2036 hard-requires it
+    the same way those two are already hard-required, no SDK-vintage floor
+    (every released alp-sdk predates `on-module-links.yaml` entirely, so
+    this emitter already needs a post-release checkout regardless)."""
+    with _MutatedMetadata() as mm:
+        mm.drop_yaml_key(
+            "e1m_modules/aen/on-module-links.yaml", "on_module_links",
+            "e1m_i2c0")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "'e1m_i2c0'" in message
+
+
+# ======================================================================
+# alp-sdk#2046: the E8 bench citation is scoped to the part it was measured
+# on; tan-cli#1253: both per-part maps are shape-checked on load
+# ======================================================================
+
+ON_MODULE_LINKS = "e1m_modules/aen/on-module-links.yaml"
+
+
+def test_e1m_i2c0_bench_validation_is_scoped_to_the_part_it_was_measured_on():
+    """`on_module_links.e1m_i2c0.bench_validation` is a per-part map, same
+    pattern as `rtc_alarm.risk` (alp-sdk#1988) -- its only entry (`E8`) is
+    evidenced against an E8 bench run, so a board tree for any OTHER part
+    must say so instead of inheriting the E8 citation unqualified
+    (alp-sdk#2046). Unlike `rtc_alarm.risk`, the citation itself must still
+    appear (not be silently dropped) because the emitted pad VALUE is
+    unchanged and correct for every part -- only the claim of WHICH part it
+    was bench-validated on must not overreach."""
+    with _MutatedMetadata() as mm:
+        mm.json_set(E8_SOC, "part", "E3")
+        pinctrl = _emit("E1M-AEN801", "m55_hp", mm.root)[
+            "alp_e1m_aen801_m55_hp/alp_e1m_aen801_m55_hp-pinctrl.dtsi"]
+    # Comment prose is reflowed to house-style width, so match on the
+    # flattened text rather than a literal that could straddle a wrapped
+    # line break -- see `_flat`.
+    flat = _flat(pinctrl)
+    assert "bench-validated ONLY on the E8" in flat
+    assert "NOT been" in flat
+    assert "independently repeated on the E3" in flat
+    # Still bias-pull-down: alp-sdk#2046 is explicit that the emitted pad
+    # VALUE never changes on the strength of either part-scoping or either
+    # pull-direction reading.
+    assert "bias-pull-down;" in pinctrl
+    assert "Ensemble E8" not in pinctrl
+    assert "Alif E8" not in pinctrl
+
+    # The genuine, unmutated E8 board must still cite its own bench run
+    # plainly, without the "NOT been independently repeated" hedge.
+    with _MutatedMetadata() as mm:
+        real_pinctrl = _emit("E1M-AEN801", "m55_hp", mm.root)[
+            "alp_e1m_aen801_m55_hp/alp_e1m_aen801_m55_hp-pinctrl.dtsi"]
+    assert (
+        "input-enable + bias-pull-down: bench-validated 2026-06-15 on "
+        "the E8," in real_pinctrl)
+    assert "bench-validated ONLY on the E8" not in real_pinctrl
+
+
+def test_e1m_i2c0_bench_validation_must_be_a_part_keyed_map():
+    """`_load_aen_on_module_links()` shape-checks
+    `e1m_i2c0.bench_validation` the same way it already shape-checks
+    `rtc_alarm.risk` (alp-sdk#1988, alp-sdk#2046): reverting the YAML to a
+    flat-string form must raise `ZephyrBoardEmitError`, naming the file,
+    rather than an uncaught `AttributeError` from the `.get(part)` lookup
+    deep in `_aen_e1m_i2c0_pinctrl_group()`."""
+    with _MutatedMetadata() as mm:
+        mm.sub(ON_MODULE_LINKS,
+               "    bench_validation:\n      E8: >-\n",
+               "    bench_validation: >-\n")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "on-module-links.yaml" in message
+    assert "e1m_i2c0.bench_validation" in message
+
+
+def test_rtc_alarm_risk_must_be_a_part_keyed_map():
+    """tan-cli#1253. tan carried alp-sdk#1988's per-part `risk:` READER
+    (`(alarm.get("risk") or {}).get(part)` in `_aen_brd_i2c_dts`) without
+    the matching shape CHECK in `_load_aen_on_module_links()`, so a
+    metadata author who wrote the pre-#1988 flat-string form got
+    `AttributeError: 'str' object has no attribute 'get'` from inside the
+    emitter -- an uncurated traceback naming neither the file nor the
+    field, for an ordinary authoring mistake.
+
+    A curated `ZephyrBoardEmitError` must replace it, and must name both
+    the file and `rtc_alarm.risk` so the author knows what to edit."""
+    with _MutatedMetadata() as mm:
+        mm.sub(ON_MODULE_LINKS,
+               "    risk:\n      E8: >-\n",
+               "    risk: >-\n")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "on-module-links.yaml" in message
+    assert "rtc_alarm.risk" in message
+    # The curated refusal must also teach the SHAPE, not just name the
+    # field -- this is the message that replaces the AttributeError.
+    assert "must be a map keyed by" in message
+
+
+# ======================================================================
+# alp-sdk#2062: OSPI0 NOR + HyperRAM population is read from the SoM preset
+# ======================================================================
+
+#: Anchors for the `_MutatedMetadata.sub()` calls below -- the real,
+#: unmutated E1M-AEN801.yaml text for the ospi0/hyperram `chip:` +
+#: `assembled:` pair, kept in one place so every test below shares it.
+_OSPI0_BLOCK = (
+    "      chip:           IS25WX256-JHLE      # ISSI xSPI NOR, "
+    "U10 footprint (same part E1M-AEN803 fits, #2041)\n"
+    "      # NOT populated on this SKU.  E1M-AEN803 is the SKU "
+    "that fits both external\n"
+    "      # memories; E1M-AEN801 fits neither and runs from "
+    "the SoC's on-die MRAM.\n"
+    "      # The footprint exists on the shared PCB -- see the "
+    "R2 netlist -- which is\n"
+    "      # why the part is still described here.\n"
+    "      assembled:      false")
+_HYPERRAM_BLOCK = (
+    "    chip:           S80KS5122GABHM02  # Infineon/Cypress HyperRAM, "
+    "U9 footprint (same part E1M-AEN803 fits, #2041)\n"
+    "    # NOT populated on this SKU -- see the ospi0 note above.  "
+    "This key is\n"
+    "    # load-bearing: `assembled` defaults to TRUE, so omitting it "
+    "made every\n"
+    "    # consumer treat the HyperRAM as fitted, and the boot banner "
+    "advertised\n"
+    "    # 256 Mbit of external RAM on a module that has none.\n"
+    "    assembled:      false")
+
+
+def test_ospi0_storage_banner_names_are_read_from_the_som_preset():
+    """The boot/storage banner's OSPI0 NOR + HyperRAM part names used to be
+    generator constants (Macronix `MX25UM25645` + Winbond `W958D8NB`)
+    applied to every AEN SKU -- alp-sdk#2062: E1M-AEN803 fits the same
+    U10/U9 footprint with a different, measured part (ISSI NOR,
+    Infineon/Cypress HyperRAM). The real, unmutated E1M-AEN801 board must
+    name its own preset's parts, not the old hardcoded ones, say NOT
+    populated (its real `assembled: false` state on BOTH devices), and the
+    MRAM-partition-map comment further down must say the same thing -- not
+    the old, separately-hardcoded "not populated on this batch" that could
+    (and did) disagree with the banner above it."""
+    with _MutatedMetadata() as mm:
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert "IS25WX256-JHLE" in flat
+    assert "S80KS5122GABHM02" in flat
+    assert (
+        "OSPI0 NOR (IS25WX256-JHLE) + HyperRAM (S80KS5122GABHM02) are "
+        "not populated, so there is no external XIP / flash device" in flat)
+    assert (
+        "MRAM-only: OSPI0 NOR (IS25WX256-JHLE) + HyperRAM "
+        "(S80KS5122GABHM02) are not populated, so boot" in flat)
+    assert "not populated on this batch" not in flat
+    assert "MX25UM25645" not in flat
+    assert "W958D8NB" not in flat
+
+
+def test_ospi0_storage_banner_reflects_a_populated_preset():
+    """A SoM preset that DOES populate OSPI0 must get banner prose (and the
+    MRAM-partition-map comment) that says so, naming whatever parts its own
+    preset declares for BOTH devices independently -- mutating only `ospi0`
+    (leaving `hyperram`'s real chip: string untouched) would let a
+    hardcoded HyperRAM name pass this test unnoticed, which is exactly the
+    shape of bug this fix exists for (mutated off E1M-AEN801, since no
+    shipped SKU with a real board tree populates it today)."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TEST-NOR-PART\n"
+               "      assembled:      true")
+        mm.sub(AEN801_PRESET, _HYPERRAM_BLOCK,
+               "    chip:           TEST-RAM-PART\n"
+               "    assembled:      true")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert "TEST-NOR-PART" in flat
+    assert "TEST-RAM-PART" in flat
+    # alp-sdk#2062 review round 3: a true die-level fact ("OSPI_XIP_SER does
+    # not exist") does not prove XIP is impossible here -- Alif's own
+    # ospi_psram_xip.c still calls aes_enable_xip() under that same guard.
+    # The real, non-overreaching reason: hal_alif's OWN XIP enable path
+    # targets that absent register, and flash_ospi_alif.c's
+    # flash_driver_api (#915) never calls it -- true regardless of silicon
+    # capability.
+    assert (
+        "OSPI0 NOR (TEST-NOR-PART) + HyperRAM (TEST-RAM-PART) are "
+        "populated; neither is used for XIP boot here (hal_alif's "
+        "alif_hal_ospi_xip_enable() targets the XIP_SER register, "
+        "absent on this die, and flash_ospi_alif.c's flash_driver_api "
+        "never calls it -- #915)" in flat)
+    assert (
+        "MRAM-only regardless: OSPI0 NOR (TEST-NOR-PART) + HyperRAM "
+        "(TEST-RAM-PART) are populated; hal_alif's "
+        "alif_hal_ospi_xip_enable() targets the XIP_SER register, "
+        "absent on this die, and flash_ospi_alif.c's flash_driver_api "
+        "never calls it -- #915" in flat)
+    assert "not populated" not in flat
+    # The die-level fact must never stand alone as the "why" -- if a future
+    # edit reintroduces "so" right after it, this is the wrong conclusion
+    # the fact alone does not support (round 3 finding).
+    assert "does not exist on this die -- so" not in flat
+    assert "XIP_SER does not exist on this die, so" not in flat
+
+
+def test_ospi0_storage_banner_describes_mixed_population_per_device():
+    """NOR populated, HyperRAM not -- alp-sdk#2062 review round 2: a naive
+    `bool(ospi0.assembled) or bool(hyperram.assembled)` printed "OSPI0 NOR +
+    HyperRAM are populated" for this case, false for the HyperRAM half.
+    Each device must be described on its own instead of merged into one
+    shared verb once they disagree, and (round 4) the XIP sentence must say
+    "the populated device is not used" -- not "neither", which implies both
+    declared devices agree when only one of the two actually does."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TEST-NOR-PART\n"
+               "      assembled:      true")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert (
+        "OSPI0 NOR (TEST-NOR-PART) is populated; HyperRAM "
+        "(S80KS5122GABHM02) is not populated; the populated device is "
+        "not used for XIP boot here" in flat)
+    assert "NOR + HyperRAM are populated" not in flat
+    assert "neither is used" not in flat
+
+
+def test_ospi0_storage_banner_describes_bom_optional():
+    """`assembled: "optional"` (the real state of every
+    E1M-AEN{301,401,501,601,701} preset) is Python-truthy -- `bool(
+    "optional")` -- so a naive check printed "are populated on this SKU"
+    for the exact BOM question that field exists to leave open. Mutated off
+    E1M-AEN801 because every SKU that carries `"optional"` for real fails
+    earlier in `emit_zephyr_board()` and so can't reach this code any other
+    way today.
+
+    Round 2 finding: "BOM-optional, not assumed populated" followed by an
+    unqualified "there is no external XIP / flash device" contradicts
+    itself -- a BOM-optional part MAY be fitted. The sentence must hedge
+    with "assumed" on both halves."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TEST-NOR-PART\n"
+               "      assembled:      optional")
+        mm.sub(AEN801_PRESET, _HYPERRAM_BLOCK,
+               "    chip:           TEST-RAM-PART\n"
+               "    assembled:      optional")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert (
+        "OSPI0 NOR (TEST-NOR-PART) + HyperRAM (TEST-RAM-PART) are "
+        "BOM-optional, not assumed populated, so no external XIP / "
+        "flash device is assumed" in flat)
+    assert "are populated" not in flat
+    assert "there is no external XIP / flash device;" not in flat
+
+
+def test_ospi0_storage_banner_assembled_key_absent_reads_as_populated():
+    """A DECLARED device block with no `assembled:` key at all reads as
+    populated (schema default `true`) -- distinct from an entirely ABSENT
+    block (next test), which must NOT. Mutation-checked: changing
+    `dev.get("assembled", True)` to `dev.get("assembled")` turns this test
+    red (the key-absent NOR would read as `not_populated` instead);
+    restoring makes it green again."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TEST-NOR-PART")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert "OSPI0 NOR (TEST-NOR-PART) is populated" in flat
+
+
+def test_ospi0_storage_banner_chip_tbd_prints_no_part_name():
+    """`chip: TBD` on an otherwise-populated device must not print a literal
+    "(TBD)" part name. Mutation-checked: deleting the `_is_tbd()` guard
+    (`if not chip or _is_tbd(chip): chip = None`) turns this test red
+    ("(TBD)" would appear); restoring makes it green again."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TBD\n"
+               "      assembled:      true")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert "OSPI0 NOR is populated" in flat
+    assert "(TBD)" not in flat
+
+
+def test_ospi0_storage_banner_omits_an_undeclared_device_block():
+    """The schema only requires `on_module.silicon` -- omitting `hyperram:`
+    (or `ospi_memories:`) entirely is valid, and is a DIFFERENT fact from a
+    declared-but-key-omitted block: the old code's
+    `on_module.get("hyperram") or {}` collapsed both to `{}`, so an
+    undeclared HyperRAM hit the same `assembled` default as a
+    declared-with-omitted-key one and was printed as "populated" (round 4).
+    An undeclared device must be left out of the clause entirely -- never
+    named "not populated" either, since there is no declared device to
+    describe. Mutation-checked: reverting `hyperram =
+    on_module.get("hyperram")` to `... or {}` turns this test red
+    ("HyperRAM is populated" would appear); restoring makes it green
+    again."""
+    with _MutatedMetadata() as mm:
+        mm.sub(AEN801_PRESET, _OSPI0_BLOCK,
+               "      chip:           TEST-NOR-PART\n"
+               "      assembled:      true")
+        mm.sub(
+            AEN801_PRESET,
+            "  # External HyperRAM -- volatile XIP / scratch RAM, "
+            "separate from the\n"
+            "  # NOR flash above.  Shares the OSPI0 octal controller "
+            "with the flash,\n"
+            "  # separated only by chip-select (HyperRAM = CS0, NOR = "
+            "CS1).\n"
+            "  hyperram:\n"
+            f"{_HYPERRAM_BLOCK}\n"
+            "    capacity_mbit:  512             # 512 Mbit (64 MiB) "
+            "-- the part, if fitted\n"
+            "    interface:      ospi0\n"
+            "    chip_select:    0                 # OSPI0 CS0 -- U9 "
+            "-> OSPI0_SS0 per the R2 netlist\n",
+            "")
+        flat = _flat(_dts(_emit("E1M-AEN801", "m55_hp", mm.root)))
+    assert "OSPI0 NOR (TEST-NOR-PART) is populated" in flat
+    assert "HyperRAM" not in flat
+    assert "not populated" not in flat
+
+
+# ======================================================================
+# tan-cli#1393: the AEN `alp,som-power` node (alp-sdk#2784, `4b206c8a6`)
+# ======================================================================
+
+ON_MODULE_LINKS = "e1m_modules/aen/on-module-links.yaml"
+
+
+def test_the_aen_board_carries_the_som_power_node():
+    with _MutatedMetadata() as mm:
+        dts = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "\tsom_power: som-power {" in dts
+    assert '\t\tcompatible = "alp,som-power";' in dts
+    assert 'compatible = "alp,som-power-domain";' in dts
+
+
+def test_a_pre_power_domain_checkout_names_the_alp_sdk_vintage():
+    """A checkout from before alp-sdk#2784 has an `on-module-links-v1` file
+    and no `power_domains` property in the v2 schema -- an SDK floor, not a
+    gap in this SoM's metadata."""
+    with _MutatedMetadata() as mm:
+        mm.drop_schema_property("on-module-links-v2.schema.json", "power_domains")
+        mm.sub(ON_MODULE_LINKS, "schemaVersion: on-module-links-v2",
+               "schemaVersion: on-module-links-v1")
+        with pytest.raises(_sdk_too_old_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "this alp-sdk predates the AEN SoM `power_domains:` block" in message
+    assert "alp-sdk#2784" in message
+
+
+def test_a_wrong_schema_version_on_a_new_checkout_is_an_authoring_gap():
+    with _MutatedMetadata() as mm:
+        mm.sub(ON_MODULE_LINKS, "schemaVersion: on-module-links-v2",
+               "schemaVersion: on-module-links-v1")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    assert "expected 'on-module-links-v2'" in str(excinfo.value)

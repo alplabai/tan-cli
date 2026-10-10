@@ -44,8 +44,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+from urllib.request import url2pathname
 
 import pytest
 from typer.testing import CliRunner
@@ -65,6 +68,16 @@ SDK: Path | None = sdk_root()
 
 #: `diagnostic-v1.schema.json`'s `$defs/diagnostic.properties.code.pattern`.
 _CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_subprocess_engine(monkeypatch):
+    """Everything below drives the SPAWN path against a stand-in
+    `scripts/validate_board_yaml.py`, which is now the opt-in engine
+    (`TAN_VALIDATE_ENGINE=subprocess`, tan-cli#270); the default engine is
+    covered, against the stand-in-free real SDK and hermetically, in
+    `test_validate_inprocess_engine.py`."""
+    monkeypatch.setenv(validate_cmd.VALIDATE_ENGINE_ENV, "subprocess")
 
 
 def _write(tmp_path, text):
@@ -171,9 +184,21 @@ def test_sarif_shape(tmp_path, monkeypatch):
         "endLine": 1,
         "endColumn": 1,
     }
-    assert result_entry["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == (
-        "./board.yaml"
-    )
+    artifact_location = result_entry["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert artifact_location["uri"] == "./board.yaml"
+    # tan-cli#1117: the relative reference above now DOES resolve, against a
+    # base declared in `originalUriBaseIds`. This is a SHAPE check only --
+    # both keys are present and well-formed; the load-bearing proof that
+    # `urljoin(base, uri)` actually names the real file lives in
+    # `test_a_relative_sarif_uri_resolves_to_the_real_file` below, stated
+    # against `os.path.exists`/`os.path.samefile` rather than by re-deriving
+    # the base's own string (tan-cli#1117's own "trap" note: a round-1
+    # predecessor of this test computed its expectation by calling the base
+    # function itself and could never go red on a wrong base).
+    assert artifact_location["uriBaseId"] == "%CWD%"
+    base_entry = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    assert base_entry.startswith("file://")
+    assert base_entry.endswith("/")
 
 
 def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
@@ -192,6 +217,186 @@ def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
     run = doc["runs"][0]
     assert len(run["results"]) == 2
     assert len(run["tool"]["driver"]["rules"]) == 1
+
+
+def _sarif_artifact_location(output: str) -> tuple[dict, dict]:
+    """`(artifactLocation, run)` out of one `--format sarif` invocation's
+    stdout -- shared by the three tan-cli#1117 urljoin-property tests below,
+    each of which builds its OWN expectation independently of this helper's
+    caller (this only parses the document; it asserts nothing)."""
+    run = json.loads(output)["runs"][0]
+    return run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"], run
+
+
+def test_a_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkeypatch):
+    """tan-cli#1117's acceptance criterion for the DEFAULT invocation
+    (`root="."`), stated as a property -- `urljoin(base, uri)` names the real
+    file -- rather than a pinned string. `base` and `uri` are read out of the
+    document's OWN `originalUriBaseIds`/`uriBaseId` pair; the real file's
+    path comes from `tmp_path`, never from any function under test. This is
+    the exact proof tan-cli#1117 was filed with a measured counterexample
+    for: a round-1 attempt's declared base resolved `./board.yaml` onto a
+    DIFFERENT, nonexistent file (`EXISTS? False`)."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(tmp_path / "board.yaml")
+
+
+def test_a_project_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkeypatch):
+    """The `--project sub` invocation tan-cli#1117's acceptance criteria name
+    explicitly: the measured pre-fix defect CANCELLED OUT here by accident (a
+    missing trailing slash and a `root`-anchored base happened to offset each
+    other for this one case, per `cwd_base_uri`'s own docstring) -- so this
+    case alone cannot tell a correct fix from the old, coincidentally-right
+    one. Proven the same independent way as the default-invocation sibling
+    above, against a DIFFERENT real file so the two cannot pass by aliasing
+    onto the same path."""
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    _write(sub, "som: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", "sub", "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(sub / "board.yaml")
+
+
+def test_an_absolute_board_yaml_sarif_uri_names_the_real_file_with_no_base(
+    tmp_path, monkeypatch
+):
+    """The third tan-cli#1117 acceptance invocation: an absolute
+    `--board-yaml` needs no declared base at all -- its `uri` is already
+    absolute, so `urljoin` on it is a no-op regardless of what a base would
+    say. Proven as the same real-file property as the two relative cases
+    above, independent of `test_absolute_board_yaml_uri_is_a_file_uri_but_
+    boardyamlpath_stays_host_native`'s own string-shape pin."""
+    monkeypatch.chdir(tmp_path)
+    board = tmp_path / "elsewhere.yaml"
+    board.write_text("som: E1M-AEN701\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(board)
+
+
+def test_an_absolute_project_sarif_uri_also_names_the_real_file_with_no_base(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1117 review round 2 nit: the no-base branch is reachable
+    through an absolute `--project`, not just an absolute `--board-yaml` --
+    `resolve_board_path` joins `root` (verbatim, absolute here) with the
+    leaf, so `board_path` itself comes out absolute and `_sarif_document`
+    must gate the same way. Only `--board-yaml` was covered before this
+    test; both inputs reach [`is_absolute_path_reference`] through the SAME
+    `board_path` string, so this is a coverage gap closed, not a new branch
+    -- the property proven is identical to the sibling above."""
+    monkeypatch.chdir(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write(project_dir, "som: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", str(project_dir), "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(project_dir / "board.yaml")
+
+
+def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_native(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1097's whole point, proven as a divergence rather than two
+    separate pins: driving the SAME absolute `--board-yaml` through
+    `--format json` and `--format diagnostic-v1` must produce documents that
+    DISAGREE on this field's spelling. `data.boardYamlPath` stays
+    host-native; only the two `uri` fields ([`_issue_to_diagnostic`],
+    [`_sarif_document`]) go through
+    `tan.core.uri_reference.path_to_uri_reference`. A future sweep that
+    "unifies" the two contracts would make `uri` and `boardYamlPath` agree
+    again, and this assertion is what catches that.
+
+    This test asserts `data.boardYamlPath` only -- it does NOT exercise
+    `--input`'s spawn argv. That is the non-`--offline` SPAWN path, asserted
+    separately by `test_a_valid_board_passes_without_offline`'s own
+    `command_line.endswith("--input ./board.yaml")`, and is untouched by
+    this PR by inspection: the `command_line` string is built directly from
+    `board_path` (`f"{python_binary} {script} --input {board_path}"`),
+    nowhere near `path_to_uri_reference`."""
+    monkeypatch.chdir(tmp_path)
+    board = tmp_path / "elsewhere.yaml"
+    board.write_text("som: E1M-AEN701\n", encoding="utf-8")
+
+    result_json = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "json"]
+    )
+    assert result_json.exit_code == int(ExitCode.VALIDATION_FAILURE), result_json.output
+    envelope = json.loads(result_json.output)
+    assert envelope["data"]["boardYamlPath"] == str(board)
+
+    result_diag = runner.invoke(
+        app,
+        ["validate", "--offline", "--board-yaml", str(board), "--format", "diagnostic-v1"],
+    )
+    assert result_diag.exit_code == int(ExitCode.VALIDATION_FAILURE), result_diag.output
+    uri = json.loads(result_diag.output)["diagnostics"][0]["uri"]
+    assert uri == Path(str(board)).as_uri()
+    assert uri != envelope["data"]["boardYamlPath"]
+
+    result_sarif = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "sarif"]
+    )
+    assert result_sarif.exit_code == int(ExitCode.VALIDATION_FAILURE), result_sarif.output
+    sarif_doc = json.loads(result_sarif.output)
+    sarif_run = sarif_doc["runs"][0]
+    sarif_location = sarif_run["results"][0]["locations"][0]["physicalLocation"][
+        "artifactLocation"
+    ]
+    assert sarif_location["uri"] == uri
+    # tan-cli#1117: an ABSOLUTE `--board-yaml` reference already resolves on
+    # its own, so `_sarif_document` declares neither key for it -- SARIF
+    # 2.1.0 SS3.4.4 says a location whose `uri` is absolute must not also
+    # carry `uriBaseId`. `test_sarif_shape` pins the RELATIVE case, where
+    # both are now present.
+    assert "uriBaseId" not in sarif_location
+    assert "originalUriBaseIds" not in sarif_run
+
+
+def test_relative_board_yaml_uri_stays_the_pinned_relative_reference(tmp_path, monkeypatch):
+    """The separator-less default case both `test_diagnostic_v1_schema_
+    violation_carries_one_diagnostic` and `test_sarif_shape` already pin at
+    `"./board.yaml"` -- restated here as its own test, next to the absolute
+    case above, because tan-cli#1097's relative-vs-absolute decision (see
+    `tan.core.uri_reference.path_to_uri_reference`'s docstring) is that a
+    relative `board_path` is returned UNCHANGED, not resolved to an absolute
+    `file:` URI. `"./board.yaml"` is already a legal relative URI reference
+    per RFC 3986 SS4.2, and this is the assertion that a future change to
+    that decision would have to update deliberately."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "diagnostic-v1"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert json.loads(result.output)["diagnostics"][0]["uri"] == "./board.yaml"
 
 
 def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):
@@ -344,6 +549,102 @@ def test_missing_board_yaml_is_validation_failure_on_both_paths(tmp_path, monkey
         assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
         assert envelope["data"]["outcome"] == "failed"
         assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-missing"]
+
+
+def test_a_symlink_loop_project_yields_a_clean_document_not_a_traceback(tmp_path, monkeypatch):
+    """tan-cli#1117's hard requirement: a caller-supplied `--project`
+    containing a symlink LOOP must still answer the `board-yaml-missing`
+    envelope at exit 2, never a raw traceback.
+
+    Measured, pre-fix, on a round-1 attempt of this issue's own base-
+    declaration work: `Path.resolve(strict=False)` on a caller-supplied
+    `--project` raised on a self-referential symlink, and that raise
+    re-entered `validate_cmd.py`'s own `except Exception as err:` handler,
+    whose `_emit` -> `_sarif_document` path raised the SAME error a second
+    time -- exit 1, empty stdout, no envelope at all. `.resolve()`'s own
+    symlink-loop behaviour is not even uniform across pathlib versions
+    (measured directly against 3.12.3/3.13.15/3.14.7 via `python-build-
+    standalone`, see `cwd_base_uri`'s own docstring for the exact numbers) --
+    reason enough on its own not to depend on which exception a given
+    interpreter happens to raise. This module's fix touches no caller-
+    supplied path at all ([`cwd_base_uri`] reads only `Path.cwd()`), so this
+    test also stands as the regression guard against a FUTURE change
+    reintroducing a `.resolve()`/`.readlink()` call on
+    `--project`/`--board-yaml`.
+
+    `--format sarif`, not `--format json`: this is the exact invocation
+    tan-cli#1117 measured the crash against, and it is also the format
+    [`cwd_base_uri`] feeds -- the two are exercised together."""
+    monkeypatch.chdir(tmp_path)
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("this host cannot create a self-referential symlink")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", "loop", "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    doc = json.loads(result.output)
+    run = doc["runs"][0]
+    assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["validate-board-yaml-missing"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "loop/board.yaml"
+    assert location["uriBaseId"] == "%CWD%"
+    # tan-cli#1117 review round 2 nit: asserted as the same urljoin +
+    # samefile PROPERTY the three sibling tests above use, not by restating
+    # `cwd_base_uri`'s own implementation expression (`tmp_path.as_uri() +
+    # "/"`) -- `loop` is itself the symlink loop, so the real file this
+    # resolves onto is `loop/board.yaml`'s NON-existent target; the property
+    # this loop case actually owes is that the base is a well-formed,
+    # slash-terminated `file:` URI naming the real CWD, independent of the
+    # missing-file outcome the guard above already refused on.
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    assert base.startswith("file://")
+    assert base.endswith("/")
+    local_cwd = Path(url2pathname(urlsplit(base).path))
+    assert local_cwd.samefile(tmp_path)
+
+
+def test_a_removed_cwd_yields_a_clean_document_not_a_traceback(tmp_path, monkeypatch):
+    """tan-cli#1117 review round 2 BLOCKER, end-to-end: `cwd_base_uri()`
+    calls `Path.cwd()`, which raises `FileNotFoundError` when the process's
+    OWN working directory has been removed -- not caller-supplied data, but
+    a real filesystem call this exporter makes unconditionally on the
+    happy path. Pre-fix, that raise reached `_sarif_document` from INSIDE
+    `validate_cmd.py`'s own `except Exception as err:` handler and
+    double-faulted there (measured by review: exit 1, empty stdout, no
+    envelope at all -- `dev` gives exit 2 with a document). `validate()` now
+    computes the base via `cwd_base_uri_or_none()` ONCE, before this guard
+    or any other can fire, so a removed CWD degrades to the SAME no-base
+    document `dev` gave before tan-cli#1117 rather than crashing.
+
+    tan-cli#1117 review round 4: `os.getcwd()` is made to raise via
+    `monkeypatch.setattr` rather than by `os.rmdir`-ing the real CWD --
+    POSIX allows deleting a process's own working directory, Windows does
+    not (`os.rmdir` on the process CWD raises `PermissionError [WinError
+    32]`, measured failing this exact test on `windows-latest` CI). `chdir`
+    to a REAL, still-existing `tmp_path` supplies the "no `board.yaml`
+    here" half portably (a relative `Path("./board.yaml").exists()` asks
+    the OS to resolve against the process's real CWD, not `os.getcwd()`, so
+    it is unaffected by the patch below); patching `os.getcwd` supplies the
+    "the base computation itself fails" half `cwd_base_uri_or_none` is
+    actually about, without touching a real directory at all."""
+    monkeypatch.chdir(tmp_path)
+
+    def _raise_removed_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _raise_removed_cwd)
+    result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    doc = json.loads(result.output)
+    run = doc["runs"][0]
+    assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["validate-board-yaml-missing"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
 
 
 def test_missing_board_yaml_message_names_where_and_remedy(tmp_path, monkeypatch):
@@ -566,6 +867,34 @@ def _spawn(tmp_path, monkeypatch, validator_body: str, fmt: str = "json"):
     )
     result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", fmt])
     return result, sdk
+
+
+def _spawn_refused(root, monkeypatch, *patches):
+    """tan-cli#1262: a spawn-path run whose validator script EXISTS (so none
+    of the three guards fires on the setup itself), with `patches` then
+    installing whatever makes this particular run refuse. Returns the parsed
+    envelope. Used only to assert what is ABSENT from `data`, so the helper
+    deliberately does not care about the exit code.
+
+    Patching the global `subprocess.run` is NOT enough to reach the spawn:
+    guard 3 probes the interpreter's version with a `subprocess.run` of its
+    own, so a patch that raises lands on the GUARD and the run refuses with
+    `validate.python-too-old` having never spawned anything. Measured, as the
+    first red run of the test below. Callers that want the spawn must
+    neutralise guard 3 explicitly -- which is why this takes a varargs list
+    rather than a single patch."""
+    project = root / "project"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    sdk = _make_sdk(root / "alp-sdk", _stub(code=0))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
+    for patch in patches:
+        patch()
+    result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", "json"])
+    return json.loads(result.output)
 
 
 def test_a_valid_board_passes_without_offline(tmp_path, monkeypatch):
@@ -837,17 +1166,276 @@ def test_legacy_fail_and_warn_lines_keep_their_own_severities(tmp_path, monkeypa
     assert {i["code"] for i in envelope["issues"]} == {"validate.schema-violation"}
 
 
-def test_the_exit_status_to_outcome_map_is_the_oracles(tmp_path, monkeypatch):
-    """`classify_validation_outcome`, verbatim -- including that 2 and 3 are
-    NOT `failed` (they are their own named outcomes) and that everything
-    outside 0-3 is. Pinned as a unit, since today's SDK validator only ever
-    exits 0 or 1 and no end-to-end test can reach the other rows."""
+def test_the_exit_status_to_outcome_map_covers_every_status_the_sdk_returns(
+    tmp_path, monkeypatch
+):
+    """The whole of `_STATUS_OUTCOME`, pinned as a unit.
+
+    Rows 0-3 are `classify_validation_outcome` verbatim -- including that 2
+    and 3 are NOT `failed` (they are their own named outcomes). Rows 4 and 5
+    are tan-cli#1262's, and are this port's own: the frozen oracle maps
+    neither, and its measured table in `validate_cmd`'s module docstring shows
+    exit 5 landing on `failed` there.
+
+    This test was named `..._is_the_oracles` and its docstring said "today's
+    SDK validator only ever exits 0 or 1 and no end-to-end test can reach the
+    other rows". Both halves were wrong, and the second is what made the
+    first survive review: `scripts/validate_board_yaml.py` RETURNS 0, 1, 3, 4
+    and 5, and never 2 (measured at alp-sdk v0.16.0 and at
+    `dev`/`cfeafd148cb16d24a0e6c2feb7749769fec8f992`, identical at both; 3, 4
+    and 5 are `EXIT_SDK_REVISION_UNSUPPORTED`, `EXIT_SDK_REVISION_UNKNOWN` and
+    `EXIT_SDK_REVISION_NOT_BUILDABLE`, each returned from its `main()`).
+
+    EVERY row here is reachable end-to-end, exit 2 included -- a claim the
+    first revision of tan-cli#1262 got wrong in the other direction, writing
+    "exit 2 is the ONE row here no end-to-end test can reach". `main()`'s
+    return value is not the child's exit status: the PROCESS exits 2 when the
+    interpreter cannot open the script, which
+    `test_a_stub_sdk_without_the_validator_script_still_reaches_exit_2` below
+    now pins end-to-end. Rows 3, 4 and 5 are reached by the tests just
+    below."""
     assert validate_cmd.classify_validator_status(0) == "clean"
     assert validate_cmd.classify_validator_status(1) == "schema-violation"
     assert validate_cmd.classify_validator_status(2) == "missing-preset"
     assert validate_cmd.classify_validator_status(3) == "hardware-revision"
+    assert validate_cmd.classify_validator_status(4) == "hardware-revision-unknown"
+    assert validate_cmd.classify_validator_status(5) == "hardware-revision-not-buildable"
     assert validate_cmd.classify_validator_status(77) == "failed"
     assert validate_cmd.classify_validator_status(None) == "failed"
+    # The constants, not just the strings: these are wire contract (the issue
+    # code is `validate.<outcome>`), so a rename that kept the mapping intact
+    # would still be a breaking change and must be seen here.
+    assert validate_cmd.OUTCOME_HARDWARE_REVISION_UNKNOWN == "hardware-revision-unknown"
+    assert (
+        validate_cmd.OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE
+        == "hardware-revision-not-buildable"
+    )
+
+
+def test_a_stub_sdk_without_the_validator_script_still_reaches_exit_2(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262 review: exit 2's row in `_STATUS_OUTCOME` is LIVE, and
+    this is the end-to-end proof. The first revision of #1262 rewrote four
+    registry notes and two comments to call it unreachable, reasoning from
+    `validate_board_yaml.py`'s `main()` never RETURNING 2 -- but the map keys
+    off the spawned CHILD PROCESS's exit status, and the process exits 2 when
+    the interpreter cannot open the script at all. This module's own docstring
+    had recorded that measurement twice, at the tan-cli#257/#258 guard and in
+    its `--no-color` paragraph, and the claim was written anyway.
+
+    The input: a checkout carrying the `scripts/alp_project.py` loader marker
+    -- so `is_sdk_root` accepts it and the tan-cli#257/#258 guard does NOT
+    fire -- but no `scripts/validate_board_yaml.py`. That is what a stub or
+    half-synced SDK looks like, and it is reachable through the `discovery`
+    and project-pin tiers too, where no guard screens it at all.
+
+    What the user gets is the wrong-verdict class #1262 was filed about,
+    inverted: a BROKEN SDK INSTALL reported under a code whose registered
+    severity is `warning`, naming the customer's board. Not fixed here --
+    fixing it is a separate refusal-guard change -- but pinned, so nobody
+    deletes the row on the theory that nothing reaches it."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    scripts = tmp_path / "alp-sdk" / "scripts"
+    scripts.mkdir(parents=True)
+    # The loader marker EXISTS -- this is a real-looking checkout ...
+    (scripts / "alp_project.py").write_text("", encoding="utf-8")
+    # ... but the validator it must spawn does not.
+    assert not (scripts / "validate_board_yaml.py").exists()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
+
+    result = runner.invoke(
+        app, ["validate", "--sdk-root", str(tmp_path / "alp-sdk"), "--format", "json"]
+    )
+    envelope = json.loads(result.output)
+    # The row is reached: the child exited 2, and 2 maps to `missing-preset`.
+    assert envelope["data"]["validatorExitStatus"] == 2
+    assert envelope["data"]["outcome"] == "missing-preset"
+    assert [i["code"] for i in envelope["issues"]] == ["validate.missing-preset"]
+    # And the reason it is the WRONG verdict, pinned as the defect it is: the
+    # message is about tan's own broken checkout, under a code about the
+    # customer's board.
+    assert "validate_board_yaml.py" in envelope["issues"][0]["message"]
+
+
+def test_a_hw_rev_that_is_not_in_the_table_is_not_reported_as_a_tan_crash(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262, THE regression, exit-4 half. alp-sdk returns
+    `EXIT_SDK_REVISION_UNKNOWN` (4) when the requested `hw_rev` is not a key
+    in its resolved table at all. Before #1262 that fell through
+    `_STATUS_OUTCOME.get(status, OUTCOME_FAILED)` onto `validate.failed`,
+    whose published description is "the validator ran but produced no usable
+    verdict ... a crash" -- so a user-actionable refusal was indistinguishable
+    from tan falling over, and alp-studio's pre-build gate had to degrade and
+    let the build proceed rather than hard-block on what might be an
+    infrastructure fault.
+
+    The exit CODE is unchanged at 2 (`ValidationFailure`) -- it always was,
+    since every non-clean outcome exits 2 here per tan-cli#262. The code alone
+    was never the distinction; the issue code is."""
+    result, _sdk = _spawn(
+        tmp_path,
+        monkeypatch,
+        _stub(stderr="FAIL sdk-compat: hw_rev 'rev-z' is not a known revision\n", code=4),
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "hardware-revision-unknown"
+    assert [i["code"] for i in envelope["issues"]] == [
+        "validate.hardware-revision-unknown"
+    ]
+    # The whole point: NOT the generic crash code.
+    assert "validate.failed" not in result.output
+    # `_severity_for_outcome`'s default -- only `missing-preset` is a warning.
+    assert envelope["issues"][0]["severity"] == "error"
+    # The validator's own diagnostic reaches the user, not a synthesized
+    # "Validation ended with outcome ..." placeholder.
+    assert "is not a known revision" in envelope["issues"][0]["message"]
+
+
+def test_a_hw_rev_whose_status_refuses_a_build_is_not_reported_as_a_tan_crash(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262, exit-5 half. `EXIT_SDK_REVISION_NOT_BUILDABLE` (5): the
+    `hw_rev` IS a key in the resolved table, but its declared `status:`
+    (`reserved`, `tbd`, or absent) refuses a build. Its own code upstream
+    because its remedy is its own -- "pick a revision whose status is
+    buildable", not exit 4's "pick a revision that exists" and not exit 3's
+    "pin a different SDK" -- and therefore its own outcome here, for the same
+    reason. It too used to arrive as `validate.failed`."""
+    result, _sdk = _spawn(
+        tmp_path,
+        monkeypatch,
+        _stub(stderr="FAIL sdk-compat: hw_rev 'rev-c' has status 'reserved'\n", code=5),
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "hardware-revision-not-buildable"
+    assert [i["code"] for i in envelope["issues"]] == [
+        "validate.hardware-revision-not-buildable"
+    ]
+    assert "validate.failed" not in result.output
+    # Exit 5 is NOT exit 4: the two refusals stay apart on the wire, which is
+    # the whole reason alp-sdk spends two exit codes on them.
+    assert "validate.hardware-revision-unknown" not in result.output
+    assert "has status 'reserved'" in envelope["issues"][0]["message"]
+
+
+def test_the_spawn_envelope_carries_the_raw_validator_exit_status(tmp_path, monkeypatch):
+    """tan-cli#1262 item 3: `data.validatorExitStatus` reports the child's
+    returncode VERBATIM, so `.get(..., OUTCOME_FAILED)` stops being lossy.
+
+    77 deliberately: an UNMAPPED status is the case the key exists for. A
+    validator that grows an exit this build does not name still reaches the
+    consumer as a number it can act on, instead of collapsing into `failed`
+    with nothing left to re-derive the distinction from. A mapped status is
+    covered too, so the field is proven to carry the real number rather than
+    only appearing on the fallback path."""
+    # A fresh tmp subdirectory per run: `_spawn` mkdirs both the project and
+    # the stand-in SDK, so the three cases cannot share one root.
+    result, _sdk = _spawn(tmp_path / "a", monkeypatch, _stub(stderr="mystery\n", code=77))
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "failed"
+    assert envelope["data"]["validatorExitStatus"] == 77
+
+    mapped, _sdk = _spawn(
+        tmp_path / "b", monkeypatch, _stub(stderr="FAIL sdk-compat: nope\n", code=4)
+    )
+    assert json.loads(mapped.output)["data"]["validatorExitStatus"] == 4
+
+    clean, _sdk = _spawn(tmp_path / "c", monkeypatch, _stub(stdout="board.yaml: clean\n"))
+    assert json.loads(clean.output)["data"]["validatorExitStatus"] == 0
+
+
+def test_the_spawn_path_guards_carry_no_validator_exit_status(tmp_path, monkeypatch):
+    """tan-cli#1262 review item 13. `data.validatorExitStatus` must be absent
+    on every spawn-path refusal that never got a returncode, so a future
+    refactor threading the status into `fail()` cannot publish a STALE number
+    -- which would be worse than omitting it, since the whole value of the
+    field is that a consumer can trust it as the child's real exit.
+
+    Three shapes, all routed through `fail()`: guard 3's interpreter floor
+    (nothing spawned yet), a spawn that could not launch (no process at all),
+    and a timeout (the child started, so `TimeoutExpired` carries no
+    returncode to report). The timeout is the subtle one -- it does NOT go
+    through `fail()`, it builds a `_Result` and falls through to the shared
+    `_emit`, which is exactly the path a careless `validator_status=` default
+    would contaminate."""
+    def _boom(*_a, **_k):
+        raise OSError("no such interpreter")
+
+    def _hang(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="validator", timeout=1)
+
+    # Guard 3: the interpreter is below the SDK's declared floor.
+    too_old = _spawn_refused(
+        tmp_path / "floor",
+        monkeypatch,
+        lambda: monkeypatch.setattr(
+            validate_cmd, "_python_too_old", lambda *_a, **_k: "interpreter too old"
+        ),
+    )
+    assert [i["code"] for i in too_old["issues"]] == ["validate.python-too-old"]
+    assert "validatorExitStatus" not in too_old["data"]
+
+    # Guard 3 has to be neutralised in the two cases below, or the patched
+    # `subprocess.run` trips ITS interpreter probe first and nothing spawns --
+    # see `_spawn_refused`'s docstring.
+    def _floor_ok():
+        monkeypatch.setattr(validate_cmd, "_python_too_old", lambda *_a, **_k: None)
+
+    # A spawn that never launched.
+    launch_failed = _spawn_refused(
+        tmp_path / "launch",
+        monkeypatch,
+        _floor_ok,
+        lambda: monkeypatch.setattr(subprocess, "run", _boom),
+    )
+    assert [i["code"] for i in launch_failed["issues"]] == ["validate.spawn-failed"]
+    assert "validatorExitStatus" not in launch_failed["data"]
+
+    # A timeout: the child STARTED, so there is still no returncode.
+    timed_out = _spawn_refused(
+        tmp_path / "timeout",
+        monkeypatch,
+        _floor_ok,
+        lambda: monkeypatch.setattr(subprocess, "run", _hang),
+    )
+    assert timed_out["data"]["outcome"] == "failed"
+    assert "did not finish within" in timed_out["issues"][0]["message"]
+    assert "validatorExitStatus" not in timed_out["data"]
+
+
+def test_the_offline_envelope_carries_no_validator_exit_status(tmp_path, monkeypatch):
+    """The other half of tan-cli#1262 item 3, and the half that protects the
+    three committed `validate-offline-*` conformance goldens: `--offline`
+    spawns nothing, so there is no validator exit status and the key is
+    ABSENT -- never `null`, which would assert a run that did not happen.
+
+    Asserted on a CLEAN offline run and on a refusing one, because the key is
+    added at one place in `_emit` that both reach."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    clean = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert clean.exit_code == int(ExitCode.SUCCESS), clean.output
+    assert "validatorExitStatus" not in json.loads(clean.output)["data"]
+
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n", encoding="utf-8"
+    )
+    refused = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert refused.exit_code == int(ExitCode.VALIDATION_FAILURE), refused.output
+    assert json.loads(refused.output)["data"]["outcome"] == "schema-violation"
+    assert "validatorExitStatus" not in json.loads(refused.output)["data"]
 
 
 def test_an_unparseable_refusal_still_puts_one_issue_on_the_wire(tmp_path, monkeypatch):
@@ -1130,6 +1718,19 @@ def test_the_rich_fields_reach_both_machine_documents(tmp_path, monkeypatch):
         "endLine": 2,
         "endColumn": 18,
     }
+    # tan-cli#1117 review round 3 MAJOR: the only assertions on this
+    # PRIMARY production SARIF path (a real, non-`--offline` `tan validate`)
+    # used to stop at `region` -- `artifactLocation` itself, the field this
+    # whole issue is about, was asserted only on `--offline` runs routed
+    # through `fail()`. Proven as the same urljoin + `samefile` property the
+    # `--offline` tests use, against the real spawn-path project directory.
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert location["uriBaseId"] == "%CWD%"
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(second / "project" / "board.yaml")
 
 
 # ───────────────── #376's acceptance criterion, on a REAL SDK ─────────────────
@@ -1162,7 +1763,7 @@ def test_a_real_sdk_backed_board_passes_without_offline(tmp_path, monkeypatch):
     `_planner_python` is pinned to `sys.executable` for determinism, NOT to
     dodge a failure: it otherwise falls back to bare PATH `python`/`python3`
     (see its docstring), whose third-party imports are whatever the host
-    happens to have. The interpreter running pytest has alp-tan's own
+    happens to have. The interpreter running pytest has tan-cli's own
     `jsonschema`/`PyYAML` installed, which is what the real validator needs.
     """
     monkeypatch.chdir(tmp_path)

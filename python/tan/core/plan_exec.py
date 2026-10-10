@@ -144,6 +144,69 @@ def sdk_stamp_action(
     return SdkStampAction.KEEP if cached == current else SdkStampAction.PRISTINE
 
 
+class PristineSkipped(StrEnum):
+    """Why an explicit `tan build --pristine` did NOT wipe a slice's build
+    dir -- port of the Rust oracle's `PristineSkipped`
+    (`crates/tan-core/src/plan_exec.rs`, pre-tan-cli#269 deletion). Every
+    member has a fixed `.reason()` sentence below rather than a message
+    assembled at each call site, so `build.pristine-skipped` always names the
+    SAME fact for the SAME cause.
+
+    `NEVER_CONFIGURED` is not one of the two structural safety guards
+    (`BUILD_DIR_OVERRIDDEN`/`CWD_OUTSIDE_BUILD_ROOT`) -- it is the ordinary
+    "nothing to wipe" case, and (per the oracle's own comment) the only one
+    of the three a stock plan reaches today: `write_sdk_stamp` itself
+    creates `<cwd>/build`, so after any prior slice the directory exists
+    holding nothing but tan's own stamp file."""
+
+    BUILD_DIR_OVERRIDDEN = "build-dir-overridden"
+    CWD_OUTSIDE_BUILD_ROOT = "cwd-outside-build-root"
+    NEVER_CONFIGURED = "never-configured"
+
+    def reason(self) -> str:
+        """One clause naming what stopped the wipe -- phrased as the reason,
+        not as an apology, verbatim from the oracle's own `reason()`."""
+        return {
+            PristineSkipped.BUILD_DIR_OVERRIDDEN: (
+                "the slice redirects west's build dir (`-d`/`--build-dir`), so tan "
+                "cannot know which directory to wipe"
+            ),
+            PristineSkipped.CWD_OUTSIDE_BUILD_ROOT: (
+                "the plan cwd is not under `build/`, so the wipe target could hold "
+                "files the build never created"
+            ),
+            PristineSkipped.NEVER_CONFIGURED: (
+                "that build dir has no CMakeCache.txt — it was never configured, "
+                "so there was nothing to wipe"
+            ),
+        }[self]
+
+
+def pristine_suppression(
+    force_pristine: bool,
+    build_dir_overridden: bool,
+    cwd_under_build_root: bool,
+    cache_configured: bool,
+) -> PristineSkipped | None:
+    """Whether an explicit `--pristine` was suppressed, and why -- `None` when
+    the wipe actually happened or none was asked for (tan-cli#183, tan-cli#427).
+
+    ONE decision for all THREE suppression paths, rather than a message
+    bolted onto whichever branch the caller happens to be in. Order is
+    most-specific-first: an overridden build dir is reported even when the
+    cwd would also have failed, because that is the fact the user must
+    change first."""
+    if not force_pristine:
+        return None
+    if build_dir_overridden:
+        return PristineSkipped.BUILD_DIR_OVERRIDDEN
+    if not cwd_under_build_root:
+        return PristineSkipped.CWD_OUTSIDE_BUILD_ROOT
+    if not cache_configured:
+        return PristineSkipped.NEVER_CONFIGURED
+    return None
+
+
 def sdk_stamp_key(sdk_root: str | None, sdk_commit: str | None) -> str | None:
     """The identity [`sdk_stamp_action`] actually compares, and the executor
     writes to `.tan-sdk-root`: the resolved SDK root path alone is not enough,

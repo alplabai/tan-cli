@@ -37,7 +37,9 @@
 #
 # As of this PR, NEITHER side of the contract has its secrets provisioned:
 # `alplabai/tan-cli` (this repo) has no `ALP_CI_APP_ID` / `ALP_CI_APP_PRIVATE_KEY`
-# (checked: `gh secret list` shows only `CARGO_REGISTRY_TOKEN`/`NPM_TOKEN`),
+# (checked 2026-09-03: `gh secret list` shows only `PYPI_TOKEN`, itself
+# unreferenced and slated for revocation -- `CARGO_REGISTRY_TOKEN` and
+# `NPM_TOKEN` are both gone with their jobs),
 # so this job cannot even MINT a token to call alp-e2e's dispatches endpoint;
 # and `alplabai/alp-e2e` does not have them either (its own receiver's header
 # says so), so even a successful dispatch could not get a Check Run posted

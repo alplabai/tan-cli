@@ -1,0 +1,72 @@
+schema_version: 1
+generated_by: scripts/alp_orchestrate.py
+hw_info:
+  sku: E1M-V2N101
+  som_hw_rev: r2
+  board_name: E1M-X-EVK
+  board_hw_rev: r1
+  silicon: renesas:rzv2n:n44
+slices:
+- core_id: a55_cluster
+  os: yocto
+  app: alp-image-edge
+  machine: e1m-v2n101-a55
+  toolchain: poky-glibc
+  status: pending
+  flash_method: yocto_wic_to_sd_or_emmc
+  flash_args:
+    target: e1m-v2n101-a55
+- core_id: m33_sm
+  os: zephyr
+  app: ./src
+  board: alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33
+  toolchain: arm-zephyr-eabi
+  status: pending
+  flash_method: zephyr_west_flash
+  flash_args: {}
+ipc: []
+helper_mcus:
+- name: gd32_bridge
+  chip: gd32g553
+  flash_policy: recovery_only
+  update_channel: alp_ota_spi_bridge
+boot_order: []
+memory:
+- name: ddr_main
+  source: soc_derived
+  kind: unresolved
+  status: ok
+  base: 1207959552
+  size_bytes: 4294967296
+  write_authority: customer_runtime
+  accessible_from:
+  - a55_cluster
+  - m33_sm
+- name: ocram_low
+  source: soc_derived
+  kind: unresolved
+  status: ok
+  base: 65536
+  size_bytes: 524288
+  write_authority: customer_runtime
+  accessible_from:
+  - a55_cluster
+  - m33_sm
+- name: m33_tcm
+  source: soc_derived
+  kind: unresolved
+  status: ok
+  base: 2147483648
+  size_bytes: 131072
+  write_authority: customer_runtime
+  accessible_from:
+  - m33_sm
+ownership:
+  e1m_uart0: a55
+  e1m_uart1: a55
+  e1m_spi0: a55
+  e1m_can0: a55
+  e1m_can1: a55
+
+# boot_order is empty -- add a `boot_order:` list to metadata/e1m_modules/E1M-V2N101.yaml when the
+# bring-up order is finalised.

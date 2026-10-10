@@ -72,14 +72,14 @@ curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | 
 See [`docs/release-contract.md`](docs/release-contract.md) for asset names,
 manual verification, and OS support.
 
-The v0.5 release publishes four archives:
+Every release from v0.5.0 on publishes four archives:
 
 - Windows x64
 - Linux x64 with glibc
 - macOS x64
 - macOS arm64
 
-Linux arm64, Linux musl, and Windows arm64 do not have prebuilt v0.5 archives.
+Linux arm64, Linux musl, and Windows arm64 do not have prebuilt archives.
 Install from source on those hosts.
 
 ### From source
@@ -107,10 +107,13 @@ For serial monitoring, install the optional dependency from the checkout:
 python3 -m pip install "./python[monitor]"
 ```
 
-`tan` is not published on PyPI, and `@alplabai/tan` is not currently published
-on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
-longer built from this repository and not the current program. Use a GitHub
-release or a source checkout.
+`tan` is not on PyPI **yet**: `release.yml`'s `publish_pypi` job exists and is
+opt-in, off until the repository variable `TAN_PYPI_PUBLISH` is `true` and a
+pending publisher is configured on pypi.org (tan-cli#1054). PyPI is the
+intended standalone channel; the npm shim that used to be advertised here is
+retired, and the `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI,
+no longer built from this repository and not the current program. Until the
+first upload lands, use a GitHub release or a source checkout.
 
 ### What a build needs
 
@@ -131,7 +134,9 @@ check for this, on every native-Windows host: it warns when none of those
 binaries is on `PATH` and names the same `winget` command. It does not wait for
 the Zephyr SDK to be missing first — a host that already has the SDK and no
 7-Zip is exactly the host whose next `west sdk install` dies with
-`Zephyr SDK setup requires '7z'` (tan-cli#736).
+`Zephyr SDK setup requires '7z'` (tan-cli#736). `tan bootstrap`'s own
+cross-toolchain phase (below) checks for the same thing before it ever runs
+`west sdk install` itself, and refuses cleanly instead of hitting that error.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -157,9 +162,6 @@ Start in an empty working directory:
 ```sh
 git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk
-source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
-export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
-west sdk install --version 1.0.1 -t arm-zephyr-eabi
 tan init --name my-app
 cd my-app
 
@@ -171,22 +173,140 @@ tan run --flash --confirm
 
 What those commands do:
 
-1. `bootstrap` prepares west, Zephyr, the Python environment, and SDK
-   dependencies, into a workspace venv at `alp-workspace/.venv` (next to the
-   SDK checkout by default).
-2. `west` lives only inside that venv, so activate it and point `ZEPHYR_BASE`
-   at the workspace before running `west sdk install` -- it installs the
-   Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that `tan build` needs;
-   `bootstrap` does not install it, and `tan doctor --fix` does not either.
-   On a minimal Linux host this step also needs `file` on PATH
-   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
-   host-tools step fails with "Host tools installation failed" and names
-   nothing. alp-sdk's `metadata/bootstrap.json`
+1. `bootstrap` prepares west, Zephyr, the Python environment and SDK
+   dependencies into a workspace venv **next to the SDK checkout** -- which
+   for the Quickstart's own invocation means `./.venv`, not
+   `alp-workspace/.venv`: `west init -l ./alp-sdk` forces the west topdir to
+   be the checkout's PARENT, and starting in an empty directory makes that
+   parent the current directory. `alp-workspace/` appears only in the two
+   cases further down: you pass `--workspace`, or the directory held
+   something besides the checkout and `bootstrap` relocated it there for
+   you.
+
+   `bootstrap` then, as its final phase (ADR 0021 Lane 1 P1),
+   acquires the Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that
+   `tan build` needs for real silicon, into the artifact-keyed store
+   `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or
+   `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning that same
+   version). It reads the version to install from the SDK checkout's own
+   `metadata/toolchains.json`, so a pin bump there reaches you on your next
+   `tan bootstrap` with no `tan` upgrade needed. A second `tan bootstrap`
+   against the same pin is near-instant: it probes the existing install's
+   compiler and re-verifies its stamp rather than reinstalling. Pass
+   `--no-toolchain` to skip this phase (the rest of `bootstrap` is
+   unaffected, and `native_sim` builds never need a cross toolchain at all).
+   What the phase verifies (tan-cli#1496): `west sdk install` checks only the
+   minimal SDK bundle, against the release `sha256.sum`; the SDK's `setup.sh`
+   then fetches the toolchain archive with no check at all. So `tan` compares
+   alp-sdk's sha256 pins (`metadata/toolchains.json`) with that sum before and
+   after west runs, passes `--no-gnu-toolchains`, and downloads the toolchain
+   archive itself, hashing it against the pin while it streams. The minimal
+   bundle is therefore verified only through the sum (`tan` never holds its
+   bytes), and nothing is re-hashed from disk afterwards. A mismatch, an
+   ambiguous or duplicated sum entry, or a sum or archive that cannot be
+   fetched (offline, a SOCKS proxy) refuses with `bootstrap.toolchain-pin-mismatch`
+   or `bootstrap.toolchain-pin-unverified` and stamps nothing; `--no-toolchain`
+   skips the phase. The stamp records `pinChecked`; a toolchain installed by an
+   older `tan` is kept but reported as never compared with the pin.
+   This phase does **not** need `file` on PATH, on any host: it passes
+   `--no-hosttools` to the underlying `west sdk install` (tan-cli#1176), so
+   the SDK's own host-tools step -- the part that needs `file`, and that dies
+   with "Host tools installation failed" naming nothing without it -- never
+   runs at all. That is deliberate: it is what lets this phase complete on a
+   host carrying only the prerequisites above. What it skips is the SDK's
+   `hosttools/` bundle, so this phase installs no `dtc`, `openocd`, `bossac`
+   or `qemu-system-*`; Zephyr treats `dtc` and `openocd` as optional and a
+   real-silicon build needs neither, but if you want them, run the manual
+   command below WITHOUT `--no-hosttools` (and then you do need `file`).
+   This phase lists the SDK releases through the GitHub API, whose anonymous
+   quota is counted **per source IP** -- so behind a shared office egress, a
+   corporate VPN or a runner pool it can be exhausted by traffic that is not
+   yours, and the download fails with `403 API rate limit exceeded`. Set
+   `$TAN_GITHUB_TOKEN` to authenticate it. The token needs no scopes --
+   listing public releases requires none.
+
+   `tan` also reads `$GH_TOKEN` and `$GITHUB_TOKEN`, in that order behind
+   `$TAN_GITHUB_TOKEN`, so an existing `gh auth login` session or a CI job's
+   own token authenticates the download with nothing new to set. That means
+   an **ambient** `$GH_TOKEN` you set for something else will be used here
+   too; `$TAN_GITHUB_TOKEN` overrides it for `tan` alone, and unsetting all
+   three restores the anonymous download exactly as it was. Every message
+   `tan` prints about this names the **variable**, never its value, and the
+   `bootstrap.sdk-credential-unstaged` warning tells you when a variable was
+   set but not used.
+
+   How the token is handled, since it is a secret:
+
+   - **Environment only, never a flag.** There is deliberately no
+     `--github-token`: a flag value lands in shell history, in the host
+     process table for the whole multi-minute download, and in the argv
+     people paste into bug reports.
+   - **Never an argv element.** `tan` stages it in a private `netrc` and
+     points `west sdk install` at it with `$NETRC`, so it appears in no log,
+     no `--dry-run` plan, no `data.plannedCommands` and no JSON envelope.
+   - **Offered to `api.github.com` and to nothing else.** This is *narrower*
+     than `west sdk install --personal-access-token`, which puts an
+     `Authorization` header on the session: a netrc credential is matched per
+     host, so the release CDN that serves the actual multi-hundred-megabyte
+     archive never sees your token.
+   - **It touches disk.** The staged `netrc` is a real file -- mode `0600`
+     inside a `0700` directory under the toolchain root, deleted when the
+     download returns and swept on the next `tan bootstrap` if a crash
+     skipped that. It is deliberately not under `$TMPDIR`: that sweep
+     identifies what to delete by NAME, and a name is only proof of
+     ownership inside a directory `tan` owns. The sweep also leaves alone
+     anything recent enough to belong to a concurrent `tan bootstrap` --
+     under six hours old — so two `tan` runs at once cannot silently
+     de-authenticate each other.
+   - **It replaces your own `netrc` for that one child.** `$NETRC` has no
+     `~/.netrc` fallback behind it, so an unrelated credential in your own
+     `~/.netrc` is not visible to `west sdk install` while `tan` is
+     authenticating the download. Nothing is set at all when you supply no
+     token.
+   - **`tan` stops claiming it if it cannot verify the route.** The netrc
+     hand-off depends on how the Zephyr in your workspace handles credentials,
+     which `tan` neither owns nor pins. Before printing that it authenticated
+     the download, `tan` checks the `west sdk install` in that workspace still
+     matches what the hand-off was measured against; if it does not, you get a
+     `bootstrap.sdk-credential-unverified` warning naming what to do instead,
+     rather than an assurance that quietly stopped being true.
+2. If you skip the toolchain phase, or need to point at a different pin, run
+   `west sdk install` by hand from inside the workspace venv:
+
+   ```sh
+   source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
+   export ZEPHYR_BASE="$PWD/zephyr"
+   west sdk install --version 1.0.1 -t arm-zephyr-eabi
+   ```
+
+   the exact command `tan doctor`'s `zephyrSdk` check also names, so it
+   stays correct if that pin ever moves. On a minimal Linux host this also
+   needs `file` on PATH (Debian/Ubuntu: `sudo apt-get install -y file`);
+   without it the SDK's own host-tools step fails with "Host tools installation failed" and names nothing. alp-sdk's `metadata/bootstrap.json`
    (`manualInstallHints.posix.note[2]`) calls a missing `file` "WARN-only, not
    a bootstrap.sh prerequisite", and both statements are true: that note is
    written for the `--no-hosttools` invocation in its own `note[0]`, which
    never runs the host-tools step. The command above installs host tools, so
    it needs `file`. Add `--no-hosttools` and it does not.
+
+   Those two paths are the Quickstart's own layout -- an empty starting
+   directory and no `--workspace`, so the west topdir is the current
+   directory. **Do not hand-adjust them for a different layout: ask `tan`.**
+   `tan bootstrap` prints the activate and `ZEPHYR_BASE` lines for the
+   workspace it actually created, and `tan bootstrap --print-env` reprints
+   them at any time, on stdout so the block can be redirected into a file.
+   Note that the venv-activation line it emits is a **comment**: sourcing
+   that output sets `ZEPHYR_BASE` and `ZEPHYR_TOOLCHAIN_VARIANT` but does
+   NOT activate the venv, so run the `source ...` line yourself as well.
+   Reach for it if you passed `--workspace <path>`, whose venv is
+   `<path>/.venv` and Zephyr `<path>/zephyr`, or if `bootstrap` relocated
+   the checkout into `alp-workspace/` because the starting directory held
+   something besides the checkout, whose venv is then `alp-workspace/.venv`.
+   `tan build` and `tan doctor` always use the resolved west workspace's
+   `zephyr/`; an `env ZEPHYR_BASE=<other tree>` override is **ignored**. When
+   it names a different tree they say so (`build.zephyr-base-ignored`, info;
+   the `zephyrBase` doctor check). To build against another tree, run `tan`
+   from that workspace.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
@@ -200,16 +320,24 @@ What those commands do:
    `ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in
    the manifest -- the same three-way gate `tan flash --confirm` already has.
    This is deliberate, not a bug: a fresh checkout must not silently
-   reprogram an attached module.
+   reprogram an attached module. On an Alif Flow D slice (`alif_mram_jlink`,
+   the AEN MRAM path) the write also needs `--atoc-unqueryable`, a separate
+   acknowledgement that it replaces the board's entire ATOC. A Flow A slice
+   (`zephyr_west_flash` on the `alif_flash` runner, over the SE-UART) is
+   checked by the runner itself, which refuses to delist a resident entry;
+   `--replace-atoc` overrides that check, and is never the same flag -- see
+   [SETOOLS setup](docs/setools.md).
 
-Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
-check names the exact `west sdk install` command above too, so it stays
-correct if that pin ever moves. `tan doctor --fix` installs missing
-prerequisites, but only at a real, interactive terminal -- it is a no-op
-(exit 4) under a pipe, a redirect, or CI, so it is not a scripted-
-onboarding remedy. It never spawns `sudo` itself: it runs a prerequisite's
-manifest install command directly when already root, and otherwise prints
-the exact command to run by hand.
+Run `tan doctor` if setup or toolchain discovery fails; its `toolchain` check
+reports stamp-vs-pin for the resolved project (a version-skewed or
+never-verified install is a `fail` naming `tan bootstrap`, never a silent
+"looks present"), and its `zephyrSdk` check answers the broader "does any
+toolchain exist on this host at all" question, unconditionally. `tan doctor
+--fix` installs missing prerequisites, but only at a real, interactive
+terminal -- it is a no-op (exit 4) under a pipe, a redirect, or CI, so it is
+not a scripted-onboarding remedy. It never spawns `sudo` itself: it runs a
+prerequisite's manifest install command directly when already root, and
+otherwise prints the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:
@@ -235,28 +363,99 @@ move.
 | Check a project | `tan validate` |
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
-| Flash an existing build | `tan flash --confirm` |
+| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write; a Flow A slice refused by the `alif_flash` runner's ATOC guard takes `--replace-atoc` instead — see [SETOOLS setup](docs/setools.md)) |
+| RAM-run an AEN image over J-Link (no MRAM write) | `tan flash --ram --core m55_he --confirm` (see the note below on `DEMCR.TRCENA`) |
+| Read the attached SW-DP / core, or a few words of memory (read-only J-Link) | `tan probe identify`, `tan probe read 0x80010000 4` (see [`tan probe`](docs/setools.md#tan-probe-read-only-j-link-identity-and-memory-read-tan-cli1406)) |
+| Pulse nRESET once through J-Link (no flash, no halt) | `tan reset --probe-usb-path 3-4.2` (see [`tan reset`](docs/reset.md)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |
 | Generate configuration files | `tan generate` |
 | Check the host setup | `tan doctor` |
-| Start a serial monitor | `tan monitor` |
+| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --port rfc2217://gw:4001 --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
 | Generate debugger settings | `tan debug-config` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |
 | Explain a template or generation target | `tan explain` |
 | Show help | `tan <command> --help` |
 
-On a multi-core SoM, `debug-config` needs `--core <name>` to pick a target;
-without it, it exits 2 with `debug-config.target-kind-ambiguous`.
+When a project's `build/system-manifest.yaml` names more than one debug
+target class (e.g. a `yocto` A-cluster slice beside a `zephyr` M-core slice),
+`debug-config` exits 2 with `debug-config.target-kind-ambiguous`; pass
+`--target-kind <zephyr-mcu|baremetal-mcu|yocto-userspace|native-host>`, or
+`--core <core_id>` to narrow to one slice. A multi-core SoM whose cores all
+share one target class (e.g. two Zephyr cores) is unaffected -- the classes
+fold to one and no flag is needed.
 
-The full command surface also includes `scaffold`, `completion`, `diff`,
-`pinmux`, `inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`,
-`model`, and `new-som`. `migrate`, `lock`, and `quality` forward to their
+`tan --help` is the authoritative list. Beyond the commands above, the surface
+includes `bootstrap`, `doctor`, `validate`, `generate`, `examples`, `sdk`,
+`monitor`, `probe`, `reset`, `scaffold`, `completion`, `diff`, `pinmux`,
+`inspect`, `trace`, `support-bundle`, `kconfig`, `faultdecode`, `model`, and
+`new-som`. `tan probe identify` / `tan probe read ADDR [WORDS]` is a read-only
+J-Link inspector (it never writes, erases, halts, resets or runs). `migrate`, `lock`, and `quality` forward to their
 corresponding `west alp-*` commands: `migrate` requires `--check`,
 `--preview`, or `--apply`; `quality` requires `--profile`. The other
 commands run directly in `tan`.
+
+`tan model` has nine subcommands: `build` (compile `board.yaml` `models:` into
+`.alpmodel` packages), `doctor` (NPU-compiler toolchain availability), `check`,
+`list` (declared models next to what is already built), `zoo` (the SDK's model
+zoo; `--sku` filters to a SoM), `add <id>` (add a zoo model to the project),
+`prep <model.onnx>` (INT8-quantize with an accuracy report), and `run
+<model.onnx>` / `ab <model.onnx>` (time a host reference run, or compare two
+models). `run` and `ab` take `--device` to also report the on-device tier,
+from `--capture FILE` or live (a RAM-run of the built `diagnostics.link: itcm`
+project; the live form resets the device and needs `--confirm`). Run `tan model
+--help` for every flag.
+
+`tan clean --build-root PATH` takes the same PATH as `tan build --build-root` (the
+project tree, relative to the current directory) and removes `PATH/build`; it
+refuses a target that holds a `board.yaml`.
+
+`tan flash`, `tan size` and `tan image` accept `--build-root PATH` to read the
+`system-manifest.yaml` from a build root other than `<project>/build`, the same
+root `tan build --build-root` wrote to.
+
+`diagnostics.console:` in `board.yaml` accepts `auto`, `ram`, `uart` and `alp`;
+`alp` is an alias of `uart` and produces identical output.
+
+`tan model check` statically screens a declared model's NPU eligibility with
+no NPU toolchain installed. It reports `npu-eligible` | `cpu-certain` |
+`undetermined` -- deliberately never `fits`, which is reserved for a real
+compile or a bench measurement. For what those words do and do not claim, and
+for the MAC-weighted `computeOnNpuPctMax` figure, see
+[`docs/model-check-static-screen.md`](docs/model-check-static-screen.md).
+
+`tan flash --ram` (AEN Flow C) loads an ITCM-linked image over J-Link and runs it
+without touching MRAM. When tan's J-Link session ends it clears `DEMCR.TRCENA`
+(bit 24), which stops the DWT cycle counter (`CYCCNT`) and ITM trace in the
+running image about 10 ms after start, while the envelope still reports
+`ok: true`. Firmware that reads `CYCCNT` or emits trace must set `TRCENA` again
+after start, or the cycle counts it prints are wrong. Every successful `--ram`
+run (and its `--dry-run`) carries the info issue
+`flash.ram-debugger-detach-clears-trcena` as a reminder.
+
+Experimental (tan-cli#1372, off by default, pending a bench A/B): with `--ram-console`,
+setting `TAN_FLASH_RAM_HOLD=1` keeps the load session open for the `--wait` window
+(`... go; Sleep <wait_ms>; exit`, no halt after `go`, no DEMCR/DWT write) and the
+following `ram_console_buf` reread session does not wait again. The session timeout
+covers the wait, the envelope reports `ram.holdSession: true`, and the TRCENA info
+issue then says the clear happens at session close, after the wait.
+
+`--watch <addr>[:<words>][@<period-ms>]` (repeatable, `--ram` only) samples target
+memory in the same J-Link session that starts the image, for the `--wait` window,
+for example `tan flash --ram --core m55_he --confirm --wait 5 --watch 0x42002000@50`.
+Reads are `mem32` only, spaced by J-Link `Sleep <ms>` (read-only on memory, but a register read -- FIFO, clear-on-read status, clock-gated block -- may have side effects); `words` defaults to 1 (max 64)
+and the period to 100 ms (10..60000). The samples land in `data.watch[]` as
+`{address, words, index, elapsedMs, values}`. J-Link prints no timestamps, so
+`elapsedMs` is the scheduled offset after `go`, not a measurement (each read adds SWD
+latency). A watched run does not sleep again before `--ram-console`. Refused before
+any spawn, `--dry-run` included: an unaligned address, zero or more than 64 words, a
+period outside 10..60000 ms, more than 8 watches or 2000 samples
+(`flash.ram-watch-invalid`), and the HP TCM windows `0x50000000..0x57FFFFFF` (ITCM + DTCM),
+whose read from an HE attach leaves the core unhaltable until a PIN reset
+(`flash.ram-watch-unsafe-address`). Samples missing from the transcript come back
+with `values: null` and a `flash.ram-watch-incomplete` warning (a distinct message when NO sample returned data). `ram.watch.spawnMs` is the wall-clock of the whole load J-Link spawn, including connect/halt/loadbin and any `--jlink` wrapper overhead (the board-farm shim adds about 45 s): an upper bound on the watch span, NOT a drift measure (J-Link prints no timestamps).
 
 For Alif Ensemble MRAM flashing with SETOOLS, see
 [`docs/setools.md`](docs/setools.md).
@@ -282,7 +481,9 @@ one-off override:
 tan build --sdk-root /path/to/alp-sdk
 ```
 
-`tan sdk list` and `tan sdk current` work in v0.5. `tan sdk install` and
+`tan sdk list`, `tan sdk current` and `tan sdk remove <version|path>` work
+today (`remove` refuses the active or pinned install, or a path outside the
+cache root, unless `--force`). `tan sdk install` and
 `tan sdk switch` are not implemented yet, so clone the SDK yourself and use
 `--sdk-root` or let `tan init` write the project pin.
 
@@ -297,8 +498,11 @@ tan build --format json
 The stable top-level envelope is:
 
 ```text
-{command, ok, exitCode, project, sdk, data, issues}
+{command, ok, exitCode, project, data, issues}
 ```
+
+plus an optional `sdk` object, present only on commands that resolved an
+alp-sdk checkout -- absent, never null, when none was resolved.
 
 **You do not need a flag for this.** tan already treats a run as
 non-interactive when `stdin` or `stderr` is not a terminal — piped, redirected,
@@ -319,7 +523,7 @@ of that, and **every registered command parses them**:
 `tan/core/global_flags.py` holds the shared spec and injects it into any
 command that does not already declare the flag itself. What keeps that true is
 split in two. `tests/gates/test_global_flags_gate.py` fails the build for the
-29 commands that reject an unknown option; it cannot speak for `lock`,
+30 commands that reject an unknown option; it cannot speak for `lock`,
 `migrate` and `quality`, which register `ignore_unknown_options`
 (`west_forward_cmd.py`) and would swallow an undeclared flag into the `west`
 passthrough rather than reject it — those three are held by
@@ -329,25 +533,49 @@ options either: a leading one is relocated across the subcommand boundary, so
 `tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
 `tan --ci` with no subcommand is `No such option: --ci`.
 
-`tan build` parses them and then refuses the whole invocation — and not only
-these two. Seven of the ten flags in that shared set are deferred there
-(`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
-`--non-interactive`, `--ci`; `build_cmd.py`'s `_DEFERRED_FLAGS`), each with the
-same envelope but for the message, which names the flag it refused. Of those
-ten only `--project`, `--board-yaml` and `--sdk-root` survive; `build`'s own
-`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root` and
-`--format` are unaffected:
+`tan build` accepts all ten of the shared flags (`global_flags.py`'s
+`_GLOBAL_FLAG_SPECS`) — zero of them refuse the invocation. Three —
+`--project`, `--board-yaml`, `--sdk-root` — are already declared by `build`
+itself and pass through untouched. The other seven — `--target`, `--all`,
+`--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci` — are
+accepted and dropped, the SAME `accept_global_flags` mechanism 17 other
+commands already use: the oracle's own `cli.rs` declares them ONLY on the
+shared `GlobalArgs` struct and `build`'s Rust handler never read them either,
+so this is not a narrower stand-in for refusing them, it is the identical
+oracle behaviour.
+
+Separately, four flags LOCAL to `build` — never part of the shared set —
+still refuse the invocation outright (tan-cli#427): `--plan`, `--manifest`,
+`--manifest-from` and `--no-auto-bootstrap`. Each is RETIRED rather than
+deferred or accepted — parsed (never a Click typo error) but refused with
+`build.flag-retired` (exit 2), naming what to do instead directly in the
+message: `--plan-from` (with `--materialise`/`--execute`) for `--plan`, a
+native `tan build`'s own `build/system-manifest.yaml` for `--manifest`,
+opening the file directly for `--manifest-from`, and running `tan bootstrap`
+yourself for `--no-auto-bootstrap` — this port has no implicit "run
+`tan bootstrap` on a missing Zephyr workspace" trigger for that one to
+disable, and is not building one just to give the flag something to switch
+off, so it is retired outright rather than left pending.
+`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root`,
+`--format` and `--pristine` are unaffected by either bucket:
 
 ```console
-$ tan build --ci --format json
-{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build --ci` is
- deferred and not available in this build (see
- https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
- "severity":"error","message":"..."}]}
+$ tan build --ci --plan-from plan.json --format json
+{"command":"build","ok":true,"exitCode":0,"project":{...},
+ "data":{"schemaVersion":1,...},"issues":[]}
+$ tan build --no-auto-bootstrap --format json
+{"command":"build","ok":false,"exitCode":2,...,"issues":[{"code":"build.flag-retired",
+ "severity":"error","message":"`--no-auto-bootstrap` is retired: `tan build` never
+ bootstraps implicitly, so there is nothing for it to disable -- run `tan bootstrap`
+ yourself when a workspace needs preparing."}]}
 ```
 
-So a script that adds `--ci` to every tan invocation breaks on `build`.
-Elsewhere it does three separate things, and only the first is consent:
+So a script that adds `--ci` to every tan invocation no longer breaks on
+`build` — none of the ten shared flags refuse. Of the four BUILD-local flags
+that do refuse, each names itself and says what to run instead:
+`--no-auto-bootstrap` is retired rather than pending (tan-cli#427), because
+`tan build` never bootstraps implicitly. Elsewhere `--ci` does three separate
+things, and only the first is consent:
 
 * **Consent**, on the two commands that read the flag for it — `doctor --fix`
   (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s
@@ -372,9 +600,10 @@ Elsewhere it does three separate things, and only the first is consent:
   consumer sees.
 
 Rely on the stdio rule for the consent half; reach for `--ci` on `doctor` and
-`scaffold` when you want that refusal regardless of what stdio looks like, and
-never on `build`, which refuses `--verbose`, `--quiet`, `--no-color`,
-`--target` and `--all` identically.
+`scaffold` when you want that refusal regardless of what stdio looks like —
+`build` accepts and drops `--ci` (and `--verbose`, `--quiet`, `--no-color`,
+`--target`, `--all`, `--non-interactive`) identically, doing nothing with any
+of them.
 
 ## How tan fits with the SDK
 
@@ -448,6 +677,7 @@ survives as the frozen captures under `python/tests/fixtures/oracle_captures/`.
 ## More documentation
 
 - [Release assets and verification](docs/release-contract.md)
+- [`tan model check` and the static NPU-eligibility screen](docs/model-check-static-screen.md)
 - [SETOOLS setup](docs/setools.md)
 - [Development roadmap](docs/ROADMAP.md)
 - [Changelog](CHANGELOG.md)

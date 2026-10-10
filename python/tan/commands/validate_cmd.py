@@ -7,11 +7,37 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   checkout, no subprocess, no network. This is the path the two committed
   conformance fixtures exercise, which is why their ``data.commandLine`` is
   ``""``.
-* without ``--offline`` the real validator is the SDK's own
-  ``scripts/validate_board_yaml.py``, spawned as a subprocess. tan does not
-  reimplement alp-sdk's schema: the SDK owns ``metadata/schemas/`` and
-  ADR-0017's doctrine is to consume what exists. **PORTED (tan-cli#376)** --
-  see "the spawn path" below. Until #376 this branch refused with
+* without ``--offline`` the real validator is a PORT of the SDK's own
+  ``scripts/validate_board_yaml.py``, **run in-process since tan-cli#270**
+  (``tan.core.board_validator_run``; ``tests/parity/test_board_validator_parity.py``
+  holds it byte-for-byte to the script over the SDK's examples and an invalid-
+  board corpus, and ``HAND_PORT_HASHES`` pins the four SDK sources it was cut
+  from). tan still does not vendor alp-sdk's schema: the SDK owns
+  ``metadata/schemas/`` and ADR-0017's doctrine is to consume what exists, so
+  the port reads ``metadata/**`` out of the resolved checkout. The port returns
+  what the script's process would have (exit status + stderr), and that goes
+  through the SAME ``analyze_validator_output`` below -- the status map, issue
+  codes and envelope are unchanged.
+
+  **Version skew (the one behavioural difference).** The port applies the
+  validator rules tan was audited against (``PORTED_FROM_SDK_COMMIT``) to
+  WHATEVER checkout is bound; the spawned script always matched the bound one.
+  A newer SDK's extra checks are not applied (tan warns with
+  ``validate.sdk-validator-newer`` when the bound checkout's validator sources
+  hash differently from the pinned ones), and a crash reading such a
+  checkout is reported as ``validate.failed`` saying tan's validator could not
+  read this SDK -- not as a board defect. ``TAN_VALIDATE_ENGINE=subprocess``
+  runs the bound SDK's own validator instead.
+
+  **Why the spawn path below still exists:** that env var pins it
+  deliberately (the parity test's reference side, the skew escape hatch),
+  ``tan diff`` shares its helpers, and ``validate.spawn-failed`` /
+  ``validate.python-too-old`` are registered codes it alone can emit -- the
+  registry's retired-spelling gate matches a bare suffix across ``tan/``, so
+  they cannot be retired while ``diff.spawn-failed`` / ``diff.python-too-old`` /
+  ``bootstrap.python-too-old`` share it. On the default engine no interpreter is
+  probed and ``data.commandLine`` is ``""``. **PORTED (tan-cli#376)** -- see
+  "the spawn path" below. Until #376 this branch refused with
   ``validate.spawn-not-implemented`` at exit 2, which made the DEFAULT
   invocation the root quickstart documents (``tan validate``) incapable of
   validating anything, and -- because exit 2 is also the genuine
@@ -44,7 +70,7 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   could not produce a verdict" is still the validator's verdict, in every
   shape it takes here -- GENERALLY, and now that #376 has landed the spawn
   path, that generality is what carries the decision: every reachable
-  ``OUTCOME_FAILED`` (an exit status outside the 0-3 range the resolver
+  ``OUTCOME_FAILED`` (an exit status outside the 0-5 range the resolver
   names, a validator that crashed with a traceback, a validator that ran past
   [`VALIDATOR_TIMEOUT_S`]) emits ``ExitCode.VALIDATION_FAILURE`` (2), not
   ``RuntimeFailure`` (1) -- do not "fix" that back to oracle parity; that
@@ -90,9 +116,9 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   5, 77            failed                            1
   =============== =============================== ===
 
-  So ``validate.failed`` is specifically the "anything outside the 0-3 range
-  the resolver maps by number" case -- NOT every non-clean status, and in
-  particular not exit 2 or 3, which have their own named outcomes. A reader
+  So ``validate.failed`` is specifically the "anything outside the range the
+  resolver maps by number" case -- NOT every non-clean status, and in
+  particular not 2, 3, 4 or 5, which have their own named outcomes. A reader
   must not infer "any nonzero -> failed" from this docstring. The ``rc``
   column above is the ORACLE's, measured, and stays 1 for the ``failed`` row
   -- that is a fact about ``target/debug/tan.exe``, not a decision, and must
@@ -100,6 +126,21 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   tan-cli#262 above -- a divergence recorded in prose here rather than in the
   table because the table is a record of what was measured, not of this
   port's choices.
+
+  **tan-cli#1262: this port's range is 0-5, so the table above is the
+  oracle's history, not this command's map.** The oracle was measured against
+  a contrived validator; the REAL one returns 4 and 5 as well, and those get
+  their own outcomes here rather than the oracle's ``failed`` -- see
+  [`_STATUS_OUTCOME`], which carries the measurement and the argument.
+
+  **The raw status is now carried too** (also #1262):
+  ``data.validatorExitStatus`` reports ``out.returncode`` verbatim on the
+  spawn path, so the ``.get(..., OUTCOME_FAILED)`` fallback stops being
+  lossy -- a future validator exit this table does not yet name still arrives
+  as a NUMBER a consumer can act on, not just as ``failed``. The key is
+  OMITTED, not ``null``, wherever no validator returned a status: the whole
+  ``--offline`` path, all three guards, a spawn-LAUNCH failure, and a timeout
+  (the child was killed, so ``TimeoutExpired`` carries no returncode).
 
   ``validate.spawn-not-implemented`` is GONE as of #376 (the branch that
   emitted it is), and its ``contract/issue-codes.json`` entry deleted rather
@@ -276,11 +317,6 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import (
-    _is_sdk_root,
-    _planner_python_resolution,
-    resolve_sdk_root_ladder,
-)
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 
 # `_python_too_old` is IMPORTED, not re-spelled: `generate_cmd` and `model_cmd`
@@ -291,9 +327,28 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # oracle's own "(VS Code users can instead set alpSdk.pythonPath)" sentence. A
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.sdk_discovery import with_sdk_search
+# tan-cli#1031: this resolver MOVED to `tan.core.board_context` so `tan
+# scaffold` could reuse it instead of growing a fourth project/board
+# resolver. Aliased to the private name this module's call site (and
+# `test_validate_command.py`'s prose) already spells; an alias is not a
+# second definition, which `tests/gates/test_shared_helpers_have_one_
+# definition.py` documents at length.
+from tan.core.board_context import resolve_board_path as _resolve_board_path
 from tan.core.global_flags import accept_global_flags
-from tan.core.shapes import rejected_sdk_root_message
+from tan.core.sdk_discovery import (
+    _planner_python_resolution,
+    resolve_sdk_root_ladder,
+    sdk_resolution_issues,
+)
+from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
+from tan.core.subprocess_env import spawn_env
+from tan.core.uri_reference import (
+    cwd_base_uri_or_none,
+    is_absolute_path_reference,
+    path_to_uri_reference,
+)
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -311,6 +366,91 @@ DATA_SCHEMA_VERSION = "1"
 #: cannot tell from a slow project. Read through the module at call time, so a
 #: test can shorten it.
 VALIDATOR_TIMEOUT_S = 300
+
+#: tan-cli#270: `tan validate` runs the SDK's board.yaml validator IN-PROCESS
+#: (`tan.core.board_validator_run`). Setting this to `subprocess` pins the
+#: earlier engine -- spawning `<sdk>/scripts/validate_board_yaml.py` -- as a
+#: deliberate choice, like `TAN_GENERATE_EXECUTOR=subprocess`. It is the
+#: reference side of the engine-parity test, and what `tan diff`'s cross-check
+#: still shares (`VALIDATOR_SCRIPT`).
+VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
+
+
+#: tan-cli#270: the alp-sdk commit the in-process validator was audited against
+#: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
+PORTED_FROM_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"
+
+
+def _bound_sdk_version(sdk_root: Path) -> str:
+    """`metadata/sdk_version.yaml`'s version, for the skew message."""
+    from tan.commands.sdk_cmd import parse_sdk_version_yaml
+
+    try:
+        text = (Path(sdk_root) / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "(version unknown)"
+    return "v" + (parse_sdk_version_yaml(text) or "(unknown)")
+
+
+def _subprocess_engine_requested() -> bool:
+    return os.environ.get(VALIDATE_ENGINE_ENV, "").strip().lower() == "subprocess"
+
+
+def subprocess_engine_requested() -> bool:
+    """Public name for the engine choice, shared with `tan diff`."""
+    return _subprocess_engine_requested()
+
+
+def skew_warning(sdk_root: Path) -> str | None:
+    """Message for `validate.sdk-validator-newer`, or None when the bound
+    checkout's validator sources are the ones the port was audited against."""
+    from tan.core.board_validator_skew import skewed_sources
+
+    skewed = skewed_sources(sdk_root)
+    if not skewed:
+        return None
+    return (
+        f"the bound alp-sdk ({_bound_sdk_version(sdk_root)}) has validator sources "
+        f"newer than the ones tan's built-in validator was ported from "
+        f"({PORTED_FROM_SDK_COMMIT[:8]}): {', '.join(skewed)}. Rules added since are "
+        "not applied, so a clean verdict here may not match the SDK's own validator "
+        f"-- run with {VALIDATE_ENGINE_ENV}=subprocess to use it."
+    )
+
+
+def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _Result]:
+    """The default engine: `(status, stderr, result)`, crash-as-skew handling
+    included. Shared by `tan validate` and `tan diff` so both give one verdict."""
+    from tan.core.board_validator_run import run_board_validator
+
+    run = run_board_validator(board_path, sdk_root)
+    result = analyze_validator_output(run.status, run.stderr)
+    if _is_interpreter_crash(run.stderr):
+        # See the "Version skew" paragraph of the module docstring: a crash on a
+        # checkout that has moved past the audited commit is tan's gap, not a
+        # defect in the customer's board.
+        last = run.stderr.strip().splitlines()[-1]
+        result = _Result(
+            OUTCOME_FAILED,
+            (
+                _Finding(
+                    "error",
+                    "tan's built-in validator could not read this SDK "
+                    f"(bound alp-sdk {_bound_sdk_version(sdk_root)}; the "
+                    f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
+                    "This is not a verdict on board.yaml -- retry with "
+                    f"{VALIDATE_ENGINE_ENV}=subprocess to run the SDK's own "
+                    f"validator. Underlying error: {last}",
+                ),
+            ),
+        )
+    if result.outcome != OUTCOME_CLEAN and not result.findings:
+        result = _Result(
+            result.outcome,
+            (_synthesised_finding(result.outcome, run.stderr, used_workspace_venv=True),),
+        )
+    return run.status, run.stderr, result
+
 
 #: `<sdk>/scripts/validate_board_yaml.py` -- the script the oracle spawns
 #: (`crates/tan-cli/src/commands/validate.rs::run_spawn`). NOT
@@ -359,25 +499,71 @@ _SARIF_SCHEMA_URI = (
     "sarif-schema-2.1.0.json"
 )
 
-#: Outcome strings, verbatim from `tan_core::validate::Outcome::as_str`. The
-#: issue code is `validate.<outcome>`, so these strings are wire contract.
+#: The SARIF `originalUriBaseIds` key `_sarif_document` declares for its
+#: `sarif_base` parameter (tan-cli#1117, computed by
+#: `tan.core.uri_reference.cwd_base_uri_or_none`). SARIF 2.1.0 SS3.4.4
+#: (EXAMPLE 2, `"uriBaseId": "%srcroot%"`) notes a `uriBaseId` "can be any
+#: string" and does not require the `%` wrapping, but its own example uses
+#: it and this repo invents no other convention to match, so the same
+#: spelling is followed.
+_SARIF_URI_BASE_ID = "%CWD%"
+
+#: Outcome strings. The first five are verbatim from
+#: `tan_core::validate::Outcome::as_str`; the two `hardware-revision-*`
+#: siblings are this port's own (tan-cli#1262 -- the frozen oracle has no
+#: `Outcome` variant for either). The issue code is `validate.<outcome>`, so
+#: these strings are wire contract.
 OUTCOME_CLEAN = "clean"
 OUTCOME_SCHEMA_VIOLATION = "schema-violation"
 OUTCOME_MISSING_PRESET = "missing-preset"
 OUTCOME_HARDWARE_REVISION = "hardware-revision"
+#: tan-cli#1262. Named after the upstream constants they carry
+#: (`EXIT_SDK_REVISION_UNKNOWN` = 4, `EXIT_SDK_REVISION_NOT_BUILDABLE` = 5)
+#: rather than invented here, because the whole reason each has its OWN exit
+#: code upstream is that a caller can act on it mechanically: alp-sdk's own
+#: comments give the remedies as "pick a revision that exists" (4) and "pick a
+#: revision whose status is buildable" (5), neither of which is exit 3's "pin a
+#: different SDK, or change hw_rev".
+OUTCOME_HARDWARE_REVISION_UNKNOWN = "hardware-revision-unknown"
+OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE = "hardware-revision-not-buildable"
 OUTCOME_FAILED = "failed"
 
-#: Validator exit status -> outcome, verbatim from
-#: `tan_core::validate::classify_validation_outcome`. Anything else -- and a
-#: `None` status (killed, never started) -- is `OUTCOME_FAILED`. Today's
-#: `validate_board_yaml.py` only ever exits 0 or 1; 2 and 3 are kept because
-#: they are the shared vocabulary the TS/extension side classifies by, not
-#: because this SDK reaches them.
+#: Validator exit status -> outcome. Rows 0-3 are verbatim from
+#: `tan_core::validate::classify_validation_outcome`; rows 4 and 5 are this
+#: port's own (tan-cli#1262). Anything else -- and a `None` status (killed,
+#: never started) -- is `OUTCOME_FAILED`.
+#:
+#: **Reachability, MEASURED against alp-sdk v0.16.0 and `dev` at
+#: `cfeafd148cb16d24a0e6c2feb7749769fec8f992`** (both identical on this point;
+#: re-measure rather than trusting this line, and re-pin it when you do):
+#: `scripts/validate_board_yaml.py` returns 0, 1, 3, 4 and 5 -- 3, 4 and 5
+#: being `EXIT_SDK_REVISION_UNSUPPORTED`, `EXIT_SDK_REVISION_UNKNOWN` and
+#: `EXIT_SDK_REVISION_NOT_BUILDABLE`, all three returned from its `main()`.
+#: It never returns 2.
+#:
+#: **Exit 2's row is nonetheless LIVE, and the distinction is the whole
+#: point of this paragraph**: these keys are the CHILD PROCESS's exit status,
+#: not the script's return value. `main()` never returns 2, but the process
+#: still exits 2 when the interpreter cannot open the script (MEASURED -- see
+#: this module's docstring at the tan-cli#257/#258 guard, `python.exe: can't
+#: open file '...\\scripts\\validate_board_yaml.py'`, exit 2, read here as
+#: `missing-preset`) or when argparse rejects a flag (measured too, in the
+#: `--no-color` paragraph of that same docstring). The #257/#258 guard below
+#: closes only the `sdkRootFlag` tier; a stub checkout resolved through
+#: `discovery` or a project pin, or a present-but-unreadable script, still
+#: reaches this row. Do not re-derive it as dead: an earlier revision of this
+#: very comment did, contradicting both docstring measurements above it.
+#: Until #1262 rows 4 and 5 were absent, so both fell through to
+#: `OUTCOME_FAILED` -- a code published as "produced no usable verdict ... a
+#: crash" -- which made a real hw_rev refusal indistinguishable from `tan`
+#: falling over and left alp-studio's pre-build gate no choice but to degrade.
 _STATUS_OUTCOME = {
     0: OUTCOME_CLEAN,
     1: OUTCOME_SCHEMA_VIOLATION,
     2: OUTCOME_MISSING_PRESET,
     3: OUTCOME_HARDWARE_REVISION,
+    4: OUTCOME_HARDWARE_REVISION_UNKNOWN,
+    5: OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE,
 }
 
 #: `Issue.severity` -> SARIF `level`, mirroring
@@ -522,16 +708,14 @@ class BoardShapeError(Exception):
 def _load_yaml(text: str) -> Any:
     """Parse YAML using PyYAML when present, else a minimal top-level reader.
 
-    tan ships no YAML dependency of its own (`typer` + `rich` only), and the
-    offline path must work with nothing installed. PyYAML is used when it
-    happens to be importable -- it usually is, since a Zephyr workspace needs
-    it -- and otherwise we fall back to reading only what the structural checks
-    actually consult: which top-level keys exist and whether each is a scalar
+    PyYAML is a declared base dependency, so the ImportError branch below is
+    only a stale-venv fallback, not the normal offline path. It degrades to
+    reading only what the structural checks actually consult: which top-level keys exist and whether each is a scalar
     or a block. That is enough to distinguish `som: <scalar>` from
     `som:` + an indented mapping, which is exactly what the checks below ask.
     """
     try:
-        import yaml  # noqa: PLC0415  (optional at runtime, by design)
+        import yaml  # noqa: PLC0415  (stale-venv fallback below)
     except ImportError:
         return _top_level_shape(text)
     try:
@@ -844,24 +1028,6 @@ def _synthesised_finding(
     return _Finding("error", message)
 
 
-def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str, str]:
-    """Return `(project_root, board_yaml_path)`, both as the CLI reports them.
-
-    Mirrors `resolve_offline_board_path`: the root defaults to the literal `"."`
-    and the board path stays RELATIVE, which the conformance fixtures pin
-    (`project.root == "."`, `boardYamlPath == "./board.yaml"`).
-    """
-    root = project if project else "."
-    if board_yaml and os.path.isabs(board_yaml):
-        return root, board_yaml
-    leaf = board_yaml or "board.yaml"
-    # Joined as STRINGS, not via pathlib: `Path(".") / "board.yaml"` normalises
-    # to `board.yaml`, but Rust's `Path::new(".").join("board.yaml")` keeps the
-    # `./`, and the conformance fixtures pin `"./board.yaml"`.
-    sep = "" if root.endswith(("/", "\\")) else "/"
-    return root, f"{root}{sep}{leaf}"
-
-
 #: The position both exporters fall back to when NOTHING located the finding:
 #: every offline structural check (`board.yaml` parses fine; the finding is
 #: about the whole document), a legacy `FAIL`/`WARN` line, and any rich block
@@ -921,7 +1087,19 @@ def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> di
     `= see:` line is no longer discarded on the way past -- that URL is the
     child's, not tan's, and it exists."""
     diagnostic = {
-        "uri": board_path,
+        # tan-cli#1097: rendered through `path_to_uri_reference`, not
+        # `board_path` bare -- a filesystem PATH is not a URI reference (on
+        # Windows this was `C:\w\proj\board.yaml`, which no editor matches
+        # by document URI, so the diagnostic attached to nothing, silently).
+        # Fixed at the exporter, here and at the SARIF `artifactLocation`
+        # below -- not in the path resolver; see `tan.core.uri_reference`'s
+        # module docstring for the relative-vs-absolute split. This closes
+        # the defect for an ABSOLUTE board path; a RELATIVE `uri` here is
+        # left as a legal relative reference with no base declared -- this
+        # module makes no claim about how a consumer resolves it (see the
+        # module docstring's own note on why an earlier attempt at that,
+        # tied to SARIF's `originalUriBaseIds`, was reverted).
+        "uri": path_to_uri_reference(board_path),
         "range": _lsp_range(finding),
         "severity": issue.severity,
         "code": _diagnostic_code(issue, finding),
@@ -945,7 +1123,19 @@ def _diagnostic_v1_document(
     reported: list[tuple[Issue, _Finding]], board_path: str
 ) -> dict[str, Any]:
     """`metadata/schemas/diagnostic-v1.schema.json`, mirroring
-    `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape."""
+    `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape.
+
+    tan-cli#1117 is deliberately scoped to `--format sarif` ONLY. LSP has no
+    `originalUriBaseIds` equivalent -- a relative `uri` here is resolved by
+    the CLIENT against whatever document root the editor/language server
+    protocol negotiated, not by a base this document could declare -- so a
+    relative `uri` stays exactly as tan-cli#1097 left it: unresolved,
+    undocumented beyond this note. Resolution for the one consumer that
+    matters, `alp-sdk-vscode`, falls to the WRAPPER
+    (`src/alpCli/service.ts`), which shells this CLI and parses its output,
+    not to an LSP client here parsing a protocol tan does not speak. Nothing
+    in this function changed for tan-cli#1117; this docstring paragraph is
+    the missing "say so" tan-cli#1117's own scope item asked for."""
     return {
         "schemaVersion": _DIAGNOSTIC_SCHEMA_VERSION,
         "tool": {"name": "tan", "version": TAN_VERSION},
@@ -969,7 +1159,7 @@ def _sarif_region(finding: _Finding) -> dict[str, int]:
 
 
 def _sarif_document(
-    reported: list[tuple[Issue, _Finding]], board_path: str
+    reported: list[tuple[Issue, _Finding]], board_path: str, sarif_base: str | None
 ) -> dict[str, Any]:
     """SARIF 2.1.0 (`runs[].results[]`), mirroring
     `scripts/alp_cli/diagnostic_format.py:to_sarif`. A separate artefact from
@@ -979,9 +1169,41 @@ def _sarif_document(
     `helpUri` follows `documentationUri` exactly: present on a rule whose
     validator named a `= see:` page, absent otherwise. tan invents none for
     its own codes (it has no landing pages), and `helpUri` is optional in the
-    SARIF 2.1.0 schema."""
+    SARIF 2.1.0 schema.
+
+    tan-cli#1097 review measured that alp-sdk's own `to_sarif`/`_uri` --
+    what "mirroring" above still means for shape -- used to emit
+    `artifactLocation.uri` bare, with no scheme, before this function's `uri`
+    handling diverged from it on purpose (see [`path_to_uri_reference`]).
+    alp-sdk has since paid that same fix upstream (alp-sdk#1932, `43e5b2cb`,
+    inside the `eff266b6` re-sync range this repo now pins) -- confirmed by
+    reading `diagnostic_format.py`'s own `to_sarif`/`_uri` at that ref, not
+    fixed here (a different repo, different release cadence).
+
+    tan-cli#1117: a RELATIVE `artifactLocation.uri` now carries a
+    `uriBaseId` naming `_SARIF_URI_BASE_ID`, and the `run` declares that id
+    in `originalUriBaseIds` pointing at `sarif_base` -- so a spec-conformant
+    consumer resolves the reference the same way regardless of its own CWD,
+    instead of falling back to it by luck. `originalUriBaseIds` is only
+    ADDED when at least one location actually uses it: an absolute
+    `--board-yaml` reference already resolves on its own, and SARIF 2.1.0
+    SS3.4.4 says a location whose `uri` is absolute must NOT also carry a
+    `uriBaseId` -- gated by [`is_absolute_path_reference`], not by sniffing
+    the rendered string (see that function's own docstring for why sniffing
+    is unsound for a driveless Windows path). A round-1 attempt at this PR
+    tried the same shape and got the base itself wrong (anchored on `root`,
+    missing a trailing slash) through code that could crash the command on a
+    caller-supplied `--project` symlink loop; see `tan.core.uri_reference`'s
+    module docstring for that account and how this version avoids both.
+
+    `sarif_base` is PRECOMPUTED -- see `cwd_base_uri_or_none`'s own
+    docstring for why this function never calls it (or [`cwd_base_uri`])
+    itself. `None` (CWD unavailable, or an absolute `board_path`, which never
+    sets `base_needed` below regardless) reports the same thing `dev` gave
+    before tan-cli#1117: a relative `uri` with no declared base."""
     rules: dict[str, dict[str, str]] = {}
     results = []
+    base_needed = False
     for issue, finding in reported:
         code = _diagnostic_code(issue, finding)
         if code not in rules:
@@ -989,6 +1211,14 @@ def _sarif_document(
             if finding.doc_uri:
                 rule["helpUri"] = finding.doc_uri
             rules[code] = rule
+        # tan-cli#1097: `artifactLocation` is a URI reference (SARIF 2.1.0),
+        # never the bare filesystem path this used to emit -- see this
+        # function's own docstring for what is, and is not, resolved by
+        # this fix alone.
+        artifact_location: dict[str, str] = {"uri": path_to_uri_reference(board_path)}
+        if sarif_base is not None and not is_absolute_path_reference(board_path):
+            artifact_location["uriBaseId"] = _SARIF_URI_BASE_ID
+            base_needed = True
         results.append(
             {
                 "ruleId": code,
@@ -1000,29 +1230,35 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
-                            "artifactLocation": {"uri": board_path},
+                            "artifactLocation": artifact_location,
                             "region": _sarif_region(finding),
                         }
                     }
                 ],
             }
         )
+    run: dict[str, Any] = {
+        "tool": {
+            "driver": {
+                "name": "tan",
+                "informationUri": "https://github.com/alplabai/tan-cli",
+                "version": TAN_VERSION,
+                "rules": list(rules.values()),
+            }
+        },
+        "results": results,
+    }
+    if base_needed:
+        # tan-cli#1117: declared once per RUN, not per result -- every
+        # relative `board_path` in one invocation names the same file, so
+        # one base entry covers every location that references it.
+        # `sarif_base` cannot be `None` here: `base_needed` is only ever
+        # set inside the `sarif_base is not None` branch above.
+        run["originalUriBaseIds"] = {_SARIF_URI_BASE_ID: {"uri": sarif_base}}
     return {
         "$schema": _SARIF_SCHEMA_URI,
         "version": "2.1.0",
-        "runs": [
-            {
-                "tool": {
-                    "driver": {
-                        "name": "tan",
-                        "informationUri": "https://github.com/alplabai/tan-cli",
-                        "version": TAN_VERSION,
-                        "rules": list(rules.values()),
-                    }
-                },
-                "results": results,
-            }
-        ],
+        "runs": [run],
     }
 
 
@@ -1060,6 +1296,24 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
     findings: tuple[_Finding, ...] | None = None,
+    # tan-cli#1262: the validator's RAW exit status, for
+    # `data.validatorExitStatus`. `None` means "no validator returned a
+    # status", and the key is then OMITTED rather than emitted as `null` --
+    # the same absent-not-null rule `sdk` follows. `None` is unambiguous here
+    # in a way it is not in `classify_validator_status` (whose `None` is the
+    # oracle's `Option<i32>`): `subprocess.run` yields an `int` returncode on
+    # every platform, so this stays `None` only when none completed.
+    # The value is that returncode VERBATIM, which on POSIX is NEGATIVE for a
+    # signal death (`-9` for SIGKILL) despite the field being named for an
+    # exit status -- the same `-N` `classify_validator_status`'s docstring
+    # already calls out as equally unmapped and equally `failed`.
+    validator_status: int | None = None,
+    # tan-cli#1117 review round 3: NO DEFAULT, deliberately -- see
+    # `cwd_base_uri_or_none`'s own docstring for why this is precomputed
+    # rather than read here. A dropped `sarif_base=` kwarg at any of the
+    # three call sites below is a `TypeError` at the call, not a silently
+    # base-less document.
+    sarif_base: str | None,
 ) -> None:
     # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
     # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
@@ -1125,6 +1379,17 @@ def _emit(
             # existence-filtered.
             "boardYamlPath": board_path,
         }
+        # tan-cli#1262. Set only when a validator actually returned a status,
+        # ABSENT otherwise -- never `null`. Conditional rather than nullable
+        # because the offline path spawns nothing, so a `null` there would
+        # assert a run that did not happen, and because TWO of the three
+        # committed `validate-offline-*` conformance goldens pin `data`
+        # byte-for-byte (`validate-offline-clean` is in
+        # `test_contract_envelopes.DELIBERATE_DIVERGENCE` and therefore
+        # `xfail(strict=True)`, so its `data` is not compared at all -- it
+        # would NOT have caught a leak here).
+        if validator_status is not None:
+            data["validatorExitStatus"] = validator_status
         envelope = Envelope(
             "validate",
             Project.resolved(root, board_path),
@@ -1154,7 +1419,7 @@ def _emit(
         typer.echo(json.dumps(_diagnostic_v1_document(reported, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(reported, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(reported, board_path, sarif_base), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
         if len(reportable) == 1 and reportable[0].code == "validate.board-yaml-missing":
@@ -1254,6 +1519,12 @@ def validate(
 ) -> None:
     """Validate a board.yaml.
 
+    By default the SDK's board.yaml validator runs as a port inside tan. A
+    bound alp-sdk newer than that port may add rules tan does not apply; tan
+    warns (`validate.sdk-validator-newer`) when it can tell. Set the
+    environment variable TAN_VALIDATE_ENGINE=subprocess to run the bound
+    SDK's own scripts/validate_board_yaml.py instead.
+
     `--sdk-root` must stay declared HERE, as a same-named local option, even
     though clap makes it `global = true` in Rust
     (`crates/tan-cli/src/cli.rs`): without it `cli._reorder_global_flags`
@@ -1266,6 +1537,10 @@ def validate(
     having no subprocess to point anywhere, and reports no `sdk` block.
     """
     root, board_path = _resolve_board_path(project, board_yaml)
+
+    # tan-cli#1117 review round 2: computed ONCE, here -- see
+    # `cwd_base_uri_or_none`'s own docstring for why.
+    sarif_base = cwd_base_uri_or_none()
 
     # tan-cli#488 defect 8: the identical unguarded prologue `build_cmd.build`
     # had (see its own comment there) -- everything below this point is now
@@ -1315,7 +1590,7 @@ def validate(
             # gives the refusal the oracle gives, instead of the SDK's own
             # `can't open file ...validate_board_yaml.py` reaching the status map
             # as a verdict about the customer's board.
-            if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
+            if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk):
                 resolved_sdk = None
             if resolved_sdk is not None:
                 sdk_info = SdkInfo.from_resolution(str(resolved_sdk), sdk_resolution)
@@ -1337,6 +1612,7 @@ def validate(
                 issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
                 exit_code=exit_code,
                 sdk=sdk_info,
+                sarif_base=sarif_base,
             )
 
         if not Path(board_path).exists():
@@ -1383,6 +1659,14 @@ def validate(
         #: The validator argv, for `data.commandLine`. Stays `""` on the offline
         #: path and on every guard -- nothing ran.
         command_line = ""
+
+        #: tan-cli#1262: the validator's raw exit status, for
+        #: `data.validatorExitStatus`. Stays `None` -- so `_emit` OMITS the key
+        #: -- everywhere no validator returned one: the whole offline path, all
+        #: three guards, a spawn that failed to launch, and a timeout (the child
+        #: was killed; `TimeoutExpired` carries no returncode).
+        validator_status: int | None = None
+        skew_message: str | None = None
 
         if offline:
             try:
@@ -1468,96 +1752,133 @@ def validate(
                         "structural checks that need no SDK.",
                     )
                     if sdk_root
-                    else "alp-sdk root is unresolved. Use --sdk-root, place the project "
-                    f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
-                    "`tan validate --offline` runs the structural checks that need "
-                    "no SDK.",
+                    else with_sdk_search(
+                        "alp-sdk root is unresolved. Use --sdk-root, place the project "
+                        f"near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}. "
+                        "`tan validate --offline` runs the structural checks that need "
+                        "no SDK.",
+                        os.path.abspath(root),
+                    ),
                     ExitCode.VALIDATION_FAILURE,
                 )
                 return
 
-            script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
-            # tan-cli#652: also captures whether this resolved a `tan
-            # bootstrap` workspace venv or fell back to a bare PATH name --
-            # the flag `_synthesised_finding` below needs to tell "this
-            # interpreter is missing a dependency because no workspace venv
-            # exists yet" apart from any other interpreter defect.
-            python_binary, used_workspace_venv = _planner_python_resolution(
-                os.path.abspath(root), str(resolved_sdk)
-            )
-
-            # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
-            # AFTER the SDK guard because both of its inputs come from the resolved
-            # checkout: the floor is that checkout's own declared
-            # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
-            # BEFORE the spawn because the whole point is to replace alp-sdk's
-            # `dataclass() got an unexpected keyword argument 'slots'` traceback --
-            # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
-            # with the traceback's last line quoted at the user -- with a message
-            # naming the actual defect. `command_line` is still `""` here: nothing
-            # ran, exactly as on guards 1 and 2 and as the oracle reports.
-            floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
-            if (too_old := _python_too_old(python_binary, floor)) is not None:
-                fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
-                return
-
-            # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
-            # never re-parsed, so it is built beside the argv rather than from it.
-            command_line = f"{python_binary} {script} --input {board_path}"
-            try:
-                out = subprocess.run(
-                    [python_binary, script, "--input", board_path],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    # The validator never reads stdin; without this a child that
-                    # somehow prompts would block forever behind the timeout.
-                    stdin=subprocess.DEVNULL,
-                    timeout=VALIDATOR_TIMEOUT_S,
-                    check=False,
+            if not _subprocess_engine_requested():
+                # tan-cli#270: the DEFAULT engine. The SDK's validator is
+                # ported in-process (`tan.core.board_validator_run`), so no
+                # interpreter is probed and nothing is spawned -- the python
+                # floor guard below guards a child interpreter that no longer
+                # exists on this path. The run's (status, stderr) go through
+                # the SAME `analyze_validator_output` a spawned script's did,
+                # so the outcome map, issue codes and envelope are unchanged.
+                # The customer's own file is read HERE, ahead of the engine, so
+                # an undecodable or unreadable board.yaml is the user's to fix
+                # (`validate.board-yaml-unreadable`, like `--offline`), not an
+                # engine crash that blames the SDK.
+                try:
+                    Path(board_path).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as err:
+                    fail(
+                        "board-yaml-unreadable",
+                        f"could not read board.yaml: {err}",
+                        ExitCode.VALIDATION_FAILURE,
+                    )
+                    return
+                validator_status, _stderr, result = run_in_process_engine(
+                    board_path, resolved_sdk
                 )
-            except subprocess.TimeoutExpired:
-                # The child STARTED, so this is a verdict that never arrived, not a
-                # launch failure: `failed` at exit 2, per tan-cli#262.
-                result = _Result(
-                    OUTCOME_FAILED,
-                    (
-                        _Finding(
-                            "error",
-                            f"the SDK validator did not finish within "
-                            f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
-                        ),
-                    ),
-                )
-            except (OSError, ValueError, subprocess.SubprocessError) as err:
-                # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
-                # could not even be started (no interpreter on PATH, the script
-                # unreadable). Nothing validated anything, so this is not a verdict.
-                fail(
-                    "spawn-failed",
-                    f"could not run the SDK validator ({command_line}): {err}",
-                    ExitCode.RUNTIME_FAILURE,
-                )
-                return
+                skew_message = skew_warning(resolved_sdk)
             else:
-                result = analyze_validator_output(out.returncode, out.stderr)
-                if result.outcome != OUTCOME_CLEAN and not result.findings:
-                    # `to_cli_issues`' synthesis: a non-clean run must never reach a
-                    # consumer as "exit 2, zero issues", which reads as no problem.
-                    # `used_workspace_venv=used_workspace_venv` (tan-cli#652) is what
-                    # lets this become "run `tan bootstrap` first" instead of a raw
-                    # `ModuleNotFoundError` when that is the actual cause.
+                script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
+                # tan-cli#652: also captures whether this resolved a `tan
+                # bootstrap` workspace venv or fell back to a bare PATH name --
+                # the flag `_synthesised_finding` below needs to tell "this
+                # interpreter is missing a dependency because no workspace venv
+                # exists yet" apart from any other interpreter defect.
+                python_binary, used_workspace_venv = _planner_python_resolution(
+                    os.path.abspath(root), str(resolved_sdk)
+                )
+
+                # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
+                # AFTER the SDK guard because both of its inputs come from the resolved
+                # checkout: the floor is that checkout's own declared
+                # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
+                # BEFORE the spawn because the whole point is to replace alp-sdk's
+                # `dataclass() got an unexpected keyword argument 'slots'` traceback --
+                # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
+                # with the traceback's last line quoted at the user -- with a message
+                # naming the actual defect. `command_line` is still `""` here: nothing
+                # ran, exactly as on guards 1 and 2 and as the oracle reports.
+                floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
+                if (too_old := _python_too_old(python_binary, floor)) is not None:
+                    fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
+                    return
+
+                # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
+                # never re-parsed, so it is built beside the argv rather than from it.
+                command_line = f"{python_binary} {script} --input {board_path}"
+                try:
+                    out = subprocess.run(
+                        [python_binary, script, "--input", board_path],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        # The validator never reads stdin; without this a child that
+                        # somehow prompts would block forever behind the timeout.
+                        stdin=subprocess.DEVNULL,
+                        timeout=VALIDATOR_TIMEOUT_S,
+                        env=spawn_env(),
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    # The child STARTED, so this is a verdict that never arrived, not a
+                    # launch failure: `failed` at exit 2, per tan-cli#262.
                     result = _Result(
-                        result.outcome,
+                        OUTCOME_FAILED,
                         (
-                            _synthesised_finding(
-                                result.outcome,
-                                out.stderr,
-                                used_workspace_venv=used_workspace_venv,
+                            _Finding(
+                                "error",
+                                f"the SDK validator did not finish within "
+                                f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
                             ),
                         ),
                     )
+                except (OSError, ValueError, subprocess.SubprocessError) as err:
+                    # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
+                    # could not even be started (no interpreter on PATH, the script
+                    # unreadable). Nothing validated anything, so this is not a verdict.
+                    fail(
+                        "spawn-failed",
+                        f"could not run the SDK validator ({command_line}): {err}",
+                        ExitCode.RUNTIME_FAILURE,
+                    )
+                    return
+                else:
+                    # tan-cli#1262: captured BEFORE the mapping consumes it. The
+                    # `.get(..., OUTCOME_FAILED)` fallback is the right default
+                    # for an exit this build does not name, but it must not be all
+                    # a consumer is left with -- an UNMAPPED status reaches the
+                    # wire as a NUMBER, not only as `failed`.
+                    validator_status = out.returncode
+                    result = analyze_validator_output(out.returncode, out.stderr)
+                    if result.outcome != OUTCOME_CLEAN and not result.findings:
+                        # `to_cli_issues`' synthesis: a non-clean run must never reach a
+                        # consumer as "exit 2, zero issues", which reads as no problem.
+                        # `used_workspace_venv=used_workspace_venv` (tan-cli#652) is what
+                        # lets this become "run `tan bootstrap` first" instead of a raw
+                        # `ModuleNotFoundError` when that is the actual cause.
+                        result = _Result(
+                            result.outcome,
+                            (
+                                _synthesised_finding(
+                                    result.outcome,
+                                    out.stderr,
+                                    used_workspace_venv=used_workspace_venv,
+                                ),
+                            ),
+                        )
+
 
         issues = [
             *sdk_context_issues,
@@ -1566,6 +1887,12 @@ def validate(
                 for finding in result.findings
             ),
         ]
+        reported_findings = result.findings
+        if skew_message is not None:
+            # Non-fatal: never changes the outcome or exit code. Kept 1:1 with
+            # `issues` by appending the matching finding too.
+            issues.append(Issue("validate.sdk-validator-newer", "warning", skew_message))
+            reported_findings = (*result.findings, _Finding("warning", skew_message))
         exit_code = (
             ExitCode.SUCCESS
             if result.outcome == OUTCOME_CLEAN
@@ -1579,13 +1906,17 @@ def validate(
             issues=issues,
             exit_code=exit_code,
             command_line=command_line,
+            # tan-cli#1262. `None` -- key absent, not null -- everywhere no
+            # validator returned a status, the offline path included.
+            validator_status=validator_status,
             # `None` on the offline path (never resolved) -- the two committed
             # conformance fixtures are offline runs and stay `sdk`-less.
             sdk=sdk_info,
             # 1:1 with `issues`, built from the same list above -- the
             # diagnostic-v1/SARIF documents read the ALP code, hint,
             # documentation URI and range off these.
-            findings=result.findings,
+            findings=reported_findings,
+            sarif_base=sarif_base,
         )
     except typer.Exit:
         raise
@@ -1603,6 +1934,8 @@ def validate(
                 )
             ],
             exit_code=ExitCode.INTERNAL_FAILURE,
+            # Plain data by now -- see `cwd_base_uri_or_none`'s docstring.
+            sarif_base=sarif_base,
         )
 
 

@@ -24,7 +24,7 @@ def test_archive_name_and_artefact_are_forward_slash_always():
     assert slice_archive_name("m55_hp", "zephyr") == "m55_hp-zephyr.tar.gz"
     assert slice_artefact_rel("m55_hp", "zephyr") == "slices/m55_hp-zephyr.tar.gz"
     assert "\\" not in slice_artefact_rel("m55_hp", "zephyr")
-    assert helper_artefact_rel("gd32_bridge.bin") == "helper-mcus/gd32_bridge.bin"
+    assert helper_artefact_rel("aux_helper.bin") == "helper-mcus/aux_helper.bin"
 
 
 @pytest.mark.parametrize(
@@ -158,7 +158,7 @@ def test_hw_info_and_boot_order_are_carried_verbatim():
 
 # ------------------------------------------------ helper_firmware_candidates
 # alp-sdk#330: a helper's `firmware_path` is SDK-repository-relative
-# (`som-preset-v1.schema.json`), not build-tree-relative, so `build_root` alone
+# (`som-preset-v2.schema.json`), not build-tree-relative, so `build_root` alone
 # rejected a genuinely SDK-shipped firmware.
 
 
@@ -172,7 +172,7 @@ def test_relative_path_tries_build_root_before_sdk_root():
 
 
 def test_relative_path_with_no_sdk_root_only_tries_build_root():
-    rel = "gd32_bridge.bin"
+    rel = "aux_helper.bin"
     candidates = helper_firmware_candidates(rel, "/proj/build", None)
     assert candidates == [("build root", os.path.join("/proj/build", rel))]
 

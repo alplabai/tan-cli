@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 import yaml
 
 from tan.core import scaffold as scaffold_module
@@ -23,12 +24,16 @@ from tan.core.scaffold import (
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
+    FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
+    SomBlockUnsupportedError,
     TemplateDataError,
+    UnreadableSomBlockError,
     UnsupportedSomError,
     app_core_for_sku,
     infer_runtime_for_core_id,
+    is_family_gated,
     is_plain_relative,
     parse_cores,
     plan_template_files,
@@ -37,8 +42,10 @@ from tan.core.scaffold import (
     retarget_board_yaml_som,
     scaffold_tree_preview,
     splice_companion_cores,
+    top_level_key_name,
     vendored_app_core_key,
     vendored_core_ids,
+    vendored_som,
     write_files,
 )
 from tan.planner_root import bind_sdk_root
@@ -233,7 +240,6 @@ def test_minimal_app_board_yaml_app_resolves_to_the_directory_the_planner_actual
 def test_app_core_follows_the_som_family():
     assert app_core_for_sku("E1M-V2N101") == "m33_sm"
     assert app_core_for_sku("E1M-V2M101") == "m33_sm"
-    assert app_core_for_sku("E1M-NX9101") == "m33"
     assert app_core_for_sku("E1M-AEN801") == "m55_hp"
 
 
@@ -282,6 +288,698 @@ def test_retarget_ignores_a_sku_outside_the_som_block():
 
     assert "sku: LEAVE-ME" in out
     assert "sku: E1M-V2N101" in out
+
+
+def test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes():
+    """tan-cli#1008 review round 3: this function used to only ever rewrite
+    `sku:`, so a CROSS-family retarget left a stale `hw_rev:` behind
+    verbatim -- a revision from the ORIGINAL SoM's table, meaningless (or
+    actively misleading, if it happens to collide with an unrelated key)
+    against the retargeted one. Dropping it is the same "honest, not
+    inventive" call already made for a stale trailing comment. (An
+    INTRA-family retarget keeps it instead -- see
+    `test_retarget_keeps_an_intra_family_hw_rev_when_the_sku_changes`,
+    review round 4.)"""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_drops_a_sibling_hw_rev_declared_before_the_sku_line():
+    out = retarget_board_yaml_som(
+        "som:\n  hw_rev: r2\n  sku: E1M-AEN801\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_drops_a_sibling_hw_revs_own_wrapped_comment():
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r2  # Alif-only revision\n"
+        "    # continued\ncores:\n",
+        "E1M-V2N101",
+    )
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_keeps_the_sibling_hw_rev_for_a_no_op_sku():
+    """The SKU is not actually changing (retargeting a tree onto its own
+    vendored SKU is a byte-exact no-op, per `test_retarget_is_byte_exact_
+    for_the_trees_own_sku` above) -- an explicit `hw_rev:` alongside it is
+    still valid for THIS SoM and must survive."""
+    original = "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    assert retarget_board_yaml_som(original, "E1M-AEN801") == original
+
+
+def test_retarget_keeps_an_intra_family_hw_rev_when_the_sku_changes():
+    """tan-cli#1008 review round 4 minor: an INTRA-family retarget (both
+    `E1M-AEN801` and `E1M-AEN301` are `aen`) shares one family
+    `hw-revisions.yaml` table, so the SKU changing is not reason enough to
+    drop it -- the value is still a real, declared revision for the new SKU,
+    and dropping it would silently substitute a DIFFERENT one (the new
+    SKU's own `default_hw_rev:`, possibly with different
+    `pad_route_overrides`) with no warning at all. See
+    `_same_som_family`'s own docstring for the full reasoning."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev: r1\ncores:\n"
+
+
+def test_retarget_drops_the_hw_rev_for_an_unrecognized_sku_shape():
+    """`_same_som_family` cannot judge a SKU that doesn't match the known
+    `E1M-<FAMILY><n>` pattern -- the conservative choice (drop) applies,
+    matching the already-shipped round-3 behaviour rather than guessing."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "CUSTOM-SKU"
+    )
+
+    assert out == "som:\n  sku: CUSTOM-SKU\ncores:\n"
+
+
+def test_retarget_is_a_no_op_with_no_hw_rev_to_drop():
+    out = retarget_board_yaml_som("som:\n  sku: E1M-AEN801\ncores:\n", "E1M-V2N101")
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_a_trailing_comment():
+    """tan-cli#1008 review round 4: `retarget_board_yaml_som`'s scan and
+    `vendored_som`'s reader used to disagree on what counts as the top-level
+    `som:` line -- the scan tolerated a trailing comment/whitespace
+    (`trimmed.startswith("som:")`), the reader did not (`body == "som:"`),
+    so `vendored_som` reported no existing SKU here, `changing_sku` came out
+    `False`, and the stale `hw_rev:` this whole fix exists to drop survived
+    -- silently reintroducing all three defects rounds two and three closed,
+    on exactly the kind of file that already carries a trailing comment.
+    One shared predicate (`_is_som_key_line`) now backs both."""
+    out = retarget_board_yaml_som(
+        "som:  # top-level SoM block\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n",
+        "E1M-V2N101",
+    )
+
+    assert out == "som:  # top-level SoM block\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_trailing_whitespace():
+    out = retarget_board_yaml_som(
+        "som: \n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som: \n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_reads_a_sku_line_under_a_som_key_with_a_trailing_comment():
+    """The reader side of the same round-4 predicate unification: `vendored_som`
+    used to report `(None, None)` here (its exact `body == "som:"` match
+    failed), even though the block plainly opens on this line."""
+    content = "som:  # top-level SoM block\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", "r2")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1008 review round 5: quoted scalars and `som :` (space before colon)
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_strips_quotes_from_both_scalars():
+    """tan-cli#1008 review round 5 major: an unstripped quote defeated
+    the family check outright (`_SKU_FAMILY.match('"E1M-V2N101"')`
+    fails) -- the same `.strip("'\"")` rule
+    `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice` already
+    apply to this identical scalar."""
+    content = 'som:\n  sku: "E1M-V2N101"\n  hw_rev: \'r1\'\ncores:\n'
+
+    assert vendored_som(content) == ("E1M-V2N101", "r1")
+
+
+def test_vendored_som_reads_a_som_key_line_with_a_space_before_the_colon():
+    """tan-cli#1008 review round 5 major: `som :` is valid YAML
+    (`yaml.safe_load("som :\n  sku: x\n")` -> `{"som": {"sku": "x"}}`), and
+    both `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice`
+    already accepted it -- `vendored_som`'s own `_is_som_key_line` (round 4)
+    used a stricter `startswith("som:")` that rejected it, silently
+    reintroducing every defect rounds two through four closed on this exact
+    shape of file."""
+    content = "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_drops_a_cross_family_hw_rev_with_a_space_before_the_soms_colon():
+    """tan-cli#1008 review round 5 major: `_is_som_key_line`'s `som :` fix
+    (see `test_vendored_som_reads_a_som_key_line_with_a_space_before_the_colon`)
+    must also keep the writer's cross-family `hw_rev:` drop working on a
+    file that opens with a spaced `som :` line -- the drop is anchored to
+    `in_som`, which flips on exactly this predicate."""
+    out = retarget_board_yaml_som(
+        "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som :\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_treats_a_quoted_existing_sku_as_a_true_no_op():
+    """tan-cli#1008 review round 5 major, the worse of the two consequences:
+    `changing_sku` is a bare string compare, so an unstripped quote made a
+    genuinely NO-OP retarget (`--som` equal to the file's own SKU) look like
+    a cross-SKU one -- dropping a real, valid `hw_rev:` and silently
+    substituting the SoM's own `default_hw_rev:` (a DIFFERENT declared
+    revision, possibly with different `pad_route_overrides`), with `tan
+    validate` clean and `tan init` reporting no issue. Quotes stripped, the
+    comparison sees the same SKU on both sides and keeps `hw_rev:`."""
+    out = retarget_board_yaml_som(
+        'som:\n  sku: "E1M-AEN801"\n  hw_rev: r1\ncores:\n', "E1M-AEN801"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+
+def test_retarget_keeps_an_intra_family_hw_rev_with_a_quoted_existing_sku():
+    out = retarget_board_yaml_som(
+        'som:\n  sku: "E1M-AEN801"\n  hw_rev: r1\ncores:\n', "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev: r1\ncores:\n"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1008 review round 6: a space before a CHILD key's colon
+# (`hw_rev :`, `sku :`) -- round 5 fixed this for the top-level `som:` line
+# only; the writer's own child-key match stayed a literal
+# `trimmed.startswith("hw_rev:")`/`startswith("sku:")`, silently diverging
+# from the reader's already-tolerant `vendored_som`.
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_reads_a_hw_rev_child_key_with_a_space_before_the_colon():
+    """The reader side was already correct going into round 6 (its
+    `partition(":")` rule tolerates the space); pinned here so a future
+    change to the shared `_split_child_key` helper cannot silently regress
+    it back."""
+    content = "som:\n  sku: E1M-V2N101\n  hw_rev : r2\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-V2N101", "r2")
+
+
+def test_retarget_drops_a_spaced_hw_rev_child_key_on_a_cross_family_retarget():
+    """tan-cli#1008 review round 6 major 1: on `hw_rev : r2` (space before
+    the child key's colon) the reader already saw the key and armed the
+    cross-family `drop_hw_rev` logic, but the writer's literal
+    `trimmed.startswith("hw_rev:")` never matched the line, so the stale
+    sibling `hw_rev:` survived a cross-family retarget verbatim -- reopening
+    the exact tan-cli#743 contradiction (`tan validate` refusing a
+    `sku:`/`hw_rev:` pair no family table declares) that round 3 closed.
+    Measured live: `tan init --from-example multicore/spacedhw-probe --som
+    E1M-V2N101` exited 0 with `hw_rev : r2` still in the scaffolded
+    board.yaml, then `tan validate` hard-errored `sdk-compat: SoM
+    E1M-V2N101 hw_rev 'r2' is not a known hardware revision`."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev : r2\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_rewrites_a_spaced_sku_child_key_on_a_cross_family_retarget():
+    """tan-cli#1008 review round 6 major 2, strictly worse than its parent:
+    at the PARENT commit `vendored_som` returned `(None, "r2")` for a
+    `sku :` line, so `changing_sku` came out `False` and the retarget was an
+    untouched no-op -- annoying but harmless. Once round 5 taught the
+    READER to tolerate `sku :`, `vendored_som` started returning the real
+    SKU, `changing_sku` came out `True`, `drop_hw_rev` armed -- but the
+    WRITER's own `trimmed.startswith("sku:")` still never matched `sku :`,
+    so the loop dropped the sibling `hw_rev:` while leaving `sku :
+    E1M-AEN801` completely unretargeted: `--som E1M-V2N101` silently
+    ignored, `issues: []`, `tan validate` rc 0 against the WRONG SoM. That
+    is the silent revision substitution `_same_som_family` was added in
+    round 4 to prevent, reached via a different door."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku : E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-V2N101"
+    )
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_keeps_a_spaced_hw_rev_child_key_on_an_intra_family_retarget():
+    """The intra-family counterpart of the two majors above: a spaced
+    `hw_rev :` must survive an intra-family retarget exactly as an unspaced
+    one already does (`test_retarget_keeps_an_intra_family_hw_rev_with_a_
+    quoted_existing_sku`) -- the shared `_split_child_key` helper must not
+    over-correct into dropping every spaced child key unconditionally."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev : r1\ncores:\n", "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev : r1\ncores:\n"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1029, Refs #1008: a FLOW-style `som:` mapping (`som: {sku: ...,
+# hw_rev: ...}`, valid YAML but on one physical line) is a shape neither
+# `vendored_som` nor `retarget_board_yaml_som` has ever read -- before this
+# fix the reader silently reported `(None, None)` and the writer silently
+# returned its input byte-for-byte unchanged, so `--som` was discarded with
+# no issue and exit 0. Both now raise `FlowStyleSomError`, sharing the one
+# `_som_flow_style_body` rule (the writer inherits it by calling the reader
+# first).
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_refuses_a_flow_style_som_block():
+    content = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    message = str(excinfo.value)
+    assert "flow style" in message
+    assert "{sku: E1M-AEN801, hw_rev: r1}" in message
+
+
+def test_retarget_refuses_a_flow_style_som_block_instead_of_discarding_som():
+    """tan-cli#1029's own repro: at the parent commit this call returned the
+    INPUT unchanged, byte-for-byte -- `--som E1M-V2N101` silently discarded,
+    the scaffolded board.yaml still naming `E1M-AEN801`. It must now refuse
+    instead of writing the wrong SKU with no issue."""
+    content = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_with_a_space_before_the_colon():
+    """The flow-style refusal must apply through the same `som :` tolerance
+    `_is_som_key_line` already grants the block-style shape (tan-cli#1008
+    round 5) -- a spaced top-level key must not accidentally dodge this
+    refusal by evading `_is_som_key_line` first."""
+    content = "som : {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
+def test_vendored_som_still_reads_a_block_style_som_with_an_inline_flow_looking_comment():
+    """Guards the negative: a block-style `som:` line whose TRAILING COMMENT
+    happens to contain a `{` (a customer explaining the flow alternative in
+    prose, say) must not be misread as flow style -- only real content after
+    the colon, not a comment, triggers the refusal."""
+    content = "som:  # not {sku: ...} style, see below\n  sku: E1M-AEN801\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_anchor():
+    """tan-cli#1035 review major 1: `som: &s` opens a YAML anchor, not a flow
+    mapping -- `yaml.safe_load` still parses `sku:`/`hw_rev:` off the indented
+    lines beneath it (`{"som": {"sku": "E1M-AEN801", "hw_rev": "r1"}}`). An
+    earlier version of `_som_flow_style_body` treated ANY non-comment content
+    after the colon as flow style and raised `FlowStyleSomError` here, which
+    broke a valid block-style file. It must read through, not refuse."""
+    content = "som: &s\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_still_retargets_a_som_line_carrying_a_yaml_anchor():
+    """The writer side of the same regression: `--som` onto an anchored
+    `som: &s` block must still retarget the `sku:` value (and, on a
+    cross-family retarget, still drop the now-stale `hw_rev:`), the same as
+    the equivalent plain `som:\\n  sku: ...` block -- not refuse."""
+    content = "som: &s\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    result = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert result == "som: &s\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_tag():
+    """Same regression, the YAML TAG shape (`som: !!map`) instead of an
+    anchor -- also valid block-style YAML, also not a flow mapping."""
+    content = "som: !!map\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_still_retargets_a_som_line_carrying_a_yaml_tag():
+    content = "som: !!map\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    result = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert result == "som: !!map\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
+    """tan-cli#1035 review round 2's own reopen of #1029: round 2's fix
+    (`stripped.startswith("{")`) tested the RAW text after the colon, so an
+    anchor prefix ahead of a genuine flow mapping (`som: &s {sku: ...,
+    hw_rev: ...}`) made the check fail and the whole line fall through to
+    the block-style path -- `_som_flow_style_body` never fired at all. Both
+    `som: &s` (previous test, block, must READ) and `som: &s {...}` (this
+    test, flow, must REFUSE) must hold at once."""
+    content = "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    assert "flow style" in str(excinfo.value)
+
+
+def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
+    """The writer side of the same reopen: `--som` onto an anchored FLOW
+    `som: &s {...}` block must refuse, not silently return its input
+    byte-for-byte unchanged (#1029's own symptom)."""
+    content = "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
+    """Same reopen, the YAML TAG shape (`som: !!map {...}`) instead of an
+    anchor."""
+    content = "som: !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    assert "flow style" in str(excinfo.value)
+
+
+def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
+    content = "som: !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_an_anchor_and_a_tag():
+    """An anchor AND a tag together are both valid YAML node properties
+    ahead of a value -- `_strip_yaml_node_properties` strips as many
+    property tokens as are present, not just one."""
+    content = "som: &s !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_tag_then_an_anchor():
+    """The REVERSE property order -- `!!map &s {...}` -- since YAML allows
+    an anchor and a tag together in EITHER order (`&s !!map {...}`, the
+    previous test, and `!!map &s {...}`, this one, both `yaml.safe_load`
+    identically). `_strip_yaml_node_properties`'s loop makes no assumption
+    about which property comes first; this pins that the second iteration
+    of the loop is exercised on the OTHER token order too, not just the
+    anchor-then-tag one."""
+    content = "som: !!map &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1041 (the amendment): six more spellings `yaml.safe_load` reads
+# without complaint that used to silently discard `--som` -- a quoted key
+# (`"som":`), a merge key (`<<:`, inside the `som:` block or at the document
+# root), an alias (`som: *s`), and the flow mapping's NEXT-LINE sibling
+# (`som:\n  {...}`, plus a leading comment or an anchor on the `som:` line).
+# The quoted key retargets CORRECTLY (`top_level_key_name` unquotes it); the
+# other five raise `UnreadableSomBlockError`, a new `SomBlockUnsupportedError`
+# leaf alongside `FlowStyleSomError`.
+# ---------------------------------------------------------------------------
+
+
+def test_top_level_key_name_unquotes_a_double_quoted_key():
+    assert top_level_key_name('"som": x') == "som"
+
+
+def test_top_level_key_name_unquotes_a_single_quoted_key():
+    assert top_level_key_name("'som': x") == "som"
+
+
+def test_top_level_key_name_leaves_a_quote_that_is_not_a_key_alone():
+    """The quote-stripping only fires when the closing quote is immediately
+    followed by (optional whitespace then) a `:` -- otherwise this is not a
+    `"key":` shape at all, and the pre-existing colon-split contract
+    (`str.split(":", 1)[0]`) must still hold, quotes and all."""
+    assert top_level_key_name('"not a key, just a quoted string"') == (
+        '"not a key, just a quoted string"'
+    )
+
+
+def test_vendored_som_reads_a_double_quoted_som_key():
+    content = 'som:\n  sku: E1M-AEN801\ncores:\n'
+    quoted = '"som":\n  sku: E1M-AEN801\ncores:\n'
+    assert yaml.safe_load(quoted)["som"] == {"sku": "E1M-AEN801"}
+
+    assert vendored_som(quoted) == vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_single_quoted_som_key():
+    content = "'som':\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_retargets_a_double_quoted_som_key():
+    """The one tan-cli#1041 shape that does NOT refuse -- a quoted `som:`
+    key changes nothing about how the line-oriented scan finds the literal
+    `sku:`/`hw_rev:` children beneath it, only `top_level_key_name`'s own
+    entry point needed to widen."""
+    content = '"som":\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n'
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == '"som":\n  sku: E1M-V2N101\ncores:\n'
+
+
+def test_retarget_retargets_a_single_quoted_som_key():
+    content = "'som':\n  sku: E1M-AEN801\ncores:\n"
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == "'som':\n  sku: E1M-V2N101\ncores:\n"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1060 review finding 1: `_split_child_key`'s docstring claimed it
+# applied "the exact same [`top_level_key_name`] rule the top-level `som:`
+# check applies" while its body stayed a bare `trimmed.partition(":")` that
+# never unquoted a `"sku":`/`'hw_rev':` CHILD key the way `top_level_key_name`
+# already unquotes a quoted top-level `"som":` key above -- the
+# top-level-vs-child divergence tan-cli#1008 round 6 exists to prevent,
+# reopened one call site later. `_split_child_key` now literally calls
+# `top_level_key_name` rather than re-inlining its rule.
+# ---------------------------------------------------------------------------
+
+
+def test_split_child_key_shares_top_level_key_names_quoting_rule():
+    """Direct unit test on the shared helper itself, not just the
+    integration tests below -- pins that `_split_child_key`'s key really is
+    `top_level_key_name`'s answer, so a future re-divergence (a second,
+    stale copy of the quoting rule creeping back into this function) reds
+    here even if some integration test above happens not to exercise it."""
+    assert scaffold_module._split_child_key('"sku": E1M-AEN801') == (
+        "sku",
+        " E1M-AEN801",
+    )
+    assert scaffold_module._split_child_key("'hw_rev': r1") == ("hw_rev", " r1")
+
+
+def test_vendored_som_reads_a_double_quoted_sku_child_key():
+    content = 'som:\n  "sku": E1M-AEN801\ncores:\n'
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801"}
+
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_single_quoted_hw_rev_child_key():
+    content = "som:\n  sku: E1M-AEN801\n  'hw_rev': r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_retargets_a_double_quoted_sku_child_key():
+    """Before this fix, this shape raised `UnreadableSomBlockError` --
+    `entered_som` True (the top-level `som:` line matches) but
+    `found_sku_key` stuck False forever, because `_split_child_key` returned
+    the still-quoted `'"sku"'` for `child_key`, which never equals the
+    literal `"sku"` the scan compares against. There IS a literal `sku:`
+    line here for the writer to rewrite -- quoting the CHILD key changes
+    nothing about that -- so this must retarget, not refuse, the same as a
+    quoted top-level `som:` key already does above."""
+    content = 'som:\n  "sku": E1M-AEN801\ncores:\n'
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_retarget_drops_a_quoted_hw_rev_child_key_on_a_cross_family_retarget():
+    """The cross-family `drop_hw_rev` path also keys off `child_key ==
+    "hw_rev"` -- must fire for a quoted `'hw_rev':` child exactly as it does
+    for the bare spelling (`test_retarget_drops_a_spaced_hw_rev_child_key_
+    on_a_cross_family_retarget`'s round-6 sibling)."""
+    content = "som:\n  sku: E1M-AEN801\n  'hw_rev': r2\ncores:\n"
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_refuses_an_alias_som_value():
+    """`som: *s` -- the whole value is an alias to a mapping defined
+    elsewhere. No `sku:` line ever follows the `som:` line at all, so
+    rewriting one in place is not merely unsupported, it is nowhere to
+    write."""
+    content = "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_an_alias_som_value_instead_of_discarding_som():
+    """tan-cli#1041's own repro for the alias shape: at the parent commit
+    this call returned the INPUT unchanged, byte-for-byte -- `--som
+    E1M-V2N101` silently discarded."""
+    content = "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_merge_key_with_no_explicit_sku_override():
+    """`<<: *base` inside the `som:` block, with no literal `sku:` alongside
+    it -- the real `sku:` value lives entirely in whatever `base` points
+    at, not in a line this scanner can find and rewrite."""
+    content = "base: &b\n  sku: E1M-AEN801\n  hw_rev: r1\nsom:\n  <<: *b\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_merge_key_with_no_explicit_sku_override():
+    content = "base: &b\n  sku: E1M-AEN801\n  hw_rev: r1\nsom:\n  <<: *b\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_retarget_retargets_through_a_merge_key_with_an_explicit_sku_override():
+    """The one merge-key shape that is NOT tan-cli#1041's defect: an
+    explicit `sku:` alongside `<<:` is a literal line this scan already
+    finds and rewrites, same as any other block-style `som:` -- YAML's own
+    override rule (an explicit key beats a merged one) means the retargeted
+    file is correct without this scanner needing to understand merge keys
+    at all."""
+    content = "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-AEN801\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_refuses_a_document_root_merge_key_that_produces_som():
+    """The OTHER reading of "a merge key": `<<:` at the document ROOT
+    (a SIBLING of `cores:`, not nested under any `som:` line) whose target
+    itself defines `som:`. No `som:` TEXT exists anywhere in this file for
+    the line scan to find -- only `vendored_som`'s own `yaml.safe_load`
+    backstop, run when the scan's own `entered_som` never fired, can see
+    this at all."""
+    content = (
+        "base: &b\n  som:\n    sku: E1M-AEN801\n    hw_rev: r1\n"
+        "<<: *b\ncores:\n"
+    )
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_document_root_merge_key_that_produces_som():
+    content = (
+        "base: &b\n  som:\n    sku: E1M-AEN801\n    hw_rev: r1\n"
+        "<<: *b\ncores:\n"
+    )
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block():
+    """The flow mapping's `{` opens on the line AFTER `som:`, not on the
+    `som:` line itself -- `FlowStyleSomError`'s own detector
+    (`_som_flow_style_body`) only ever inspects the `som:` line by design,
+    so this shape falls through it untouched and is caught by the generic
+    "a som: block was entered but no sku: line was found" signal instead."""
+    content = "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block():
+    content = "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block_with_a_comment_first():
+    content = "som: # c\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block_with_a_comment_first():
+    content = "som: # c\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block_behind_an_anchor():
+    content = "som:\n  &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block_behind_an_anchor():
+    content = "som:\n  &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-V2N101")
+
+
+def test_unreadable_som_block_error_is_a_som_block_unsupported_error():
+    """`init_cmd.py`'s three catch sites all catch the BASE class -- pin
+    that both leaves actually derive from it, so a future third leaf that
+    forgets this inheritance fails here rather than only surfacing as a
+    hard `init` crash the first time it fires."""
+    assert issubclass(UnreadableSomBlockError, SomBlockUnsupportedError)
+    assert issubclass(FlowStyleSomError, SomBlockUnsupportedError)
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +1216,38 @@ def test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first():
     assert ids["m55_hp"] == "zephyr"
 
 
+def test_vendored_som_reads_sku_and_an_explicit_hw_rev():
+    """tan-cli#1008 review majors 1+2: the SKU/hw_rev this function returns
+    is read off the PLANNED board.yaml, not `--som`."""
+    content = "som:\n  sku: E1M-V2N101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n"
+    assert vendored_som(content) == ("E1M-V2N101", "r1")
+
+
+def test_vendored_som_hw_rev_is_none_when_absent():
+    content = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_strips_a_trailing_comment():
+    content = "som:\n  sku: E1M-AEN801  # aligned comment\ncores:\n  m55_hp:\n    app: .\n"
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_retargeted_skus_dropped_hw_rev_as_none():
+    """tan-cli#1008 review round 3: `retarget_board_yaml_som` drops a
+    sibling `hw_rev:` when the SKU actually changes -- `vendored_som` reads
+    the result back as `(new_sku, None)`, not the stale original-family
+    value (see `test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes`
+    for the retarget side of this)."""
+    original = "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n  m55_hp:\n    app: .\n"
+    retargeted = retarget_board_yaml_som(original, "E1M-V2N101")
+    assert vendored_som(retargeted) == ("E1M-V2N101", None)
+
+
+def test_vendored_som_returns_none_none_with_no_som_block():
+    assert vendored_som("cores:\n  m33:\n    app: .\n") == (None, None)
+
+
 def test_splice_is_a_no_op_with_no_cores():
     board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
     assert splice_companion_cores(board, []) == board
@@ -532,6 +1262,142 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert "endpoints: [m55_hp, a55_cluster]" in out
     # The companion lands inside the `cores:` block, before the next top-level key.
     assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_the_default_rpmsg_carve_out_is_256_not_the_whole_ocram_low():
+    """tan-cli#921. The injected default was `512`, copied from alp-sdk's
+    commented `metadata/templates/board.yaml` stanza. alp-sdk#1613 then
+    measured that number and found it wrong in a way that only shows up on
+    the Renesas parts: `resolve_carve_outs()` prefers the non-cacheable
+    region smaller-first, and on V2N/V2M the only non-cacheable region
+    reachable from both `a55_cluster` and `m33_sm` is `ocram_low`, which
+    `metadata/socs/renesas/rzv2n/n44.json` gives as exactly `size_kib: 512`.
+    A 512 KiB carve-out therefore consumed that region ENTIRELY, leaving
+    nothing for a second channel.
+
+    alp-sdk#1694 settled on 256 from evidence, not preference:
+    `examples/multicore/rpmsg-aen/board.yaml:68` already used it against
+    `E1M-AEN801`'s `mram_main` (5632 KiB, under 5%), and it is half rather
+    than all of `ocram_low`.
+
+    The derivation lives HERE rather than beside the literal on purpose.
+    `tan/core/scaffold.py` sits at exactly its recorded ratchet (1512 lines,
+    against a nominal 800 cap) and tan-cli#408 is open about that whole
+    module class, so paying a permanent ceiling raise for a comment is the
+    wrong trade -- the value change itself is one token and zero lines. Test
+    files are measured but not gated (tan-cli#817), which makes this the
+    cheapest durable home for the reasoning. `changelog.d/921.fixed.md`
+    carries the same derivation for anyone reading the shipped notes.
+
+    Pinned as an integer through `yaml.safe_load`, not only as a substring:
+    a value written as `"256"` would satisfy a text match while giving the
+    schema a string where it wants a number."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    parsed = yaml.safe_load(out)
+    assert parsed["ipc"][0]["carve_out_kb"] == 256, out
+    assert "carve_out_kb: 512" not in out, (
+        "512 is exactly the whole of ocram_low on V2N/V2M -- a carve-out that "
+        f"size leaves nothing for a second channel:\n{out}"
+    )
+
+
+def test_splice_does_not_add_a_second_ipc_key_when_the_board_declares_one():
+    """tan-cli#925. The append was unconditional, so splicing a companion into
+    a board.yaml that ALREADY declares `ipc:` produced two top-level `ipc:`
+    keys -- and PyYAML does not reject that. It takes the last one, so tan's
+    stub silently replaced the project's real channel.
+
+    Measured against alp-sdk's `multicore-mailbox` scaffold for E1M-AEN801
+    (emitted at `eb96112b`, `PINNED_SDK_TAG` at the time -- tan-cli#996/#1001
+    moved it to `722320a1`; this scaffold's own `ipc:` shape is unaffected by
+    that move):
+
+        top-level 'ipc:' BEFORE splice: 1
+        top-level 'ipc:' AFTER  splice: 2
+        yaml.safe_load: OK          <- no error anywhere
+
+        TEMPLATE's own ipc: [{'kind': 'raw_shmem', 'endpoints': ['m55_hp',
+            'm55_he'], 'carve_out_kb': 4, 'name': 'alp_shmem0'}]
+        AFTER splice, what survives: [{'kind': 'rpmsg', 'name':
+            'alp_default_rpmsg', 'endpoints': ['m55_hp', 'a32_cluster'],
+            'carve_out_kb': 256}]
+
+    `alp_shmem0` is not incidental: both `src/main.c` and `peer/main.c` in
+    that scaffold carry `#define SHMEM_REGION_NAME "alp_shmem0"`, so the
+    generated app would compile against a region its own board.yaml no
+    longer declares."""
+    board = (
+        "som:\n  sku: E1M-AEN801\n"
+        "cores:\n  m55_hp:\n    app: ./src\n  m55_he:\n    app: ./peer\n"
+        "ipc:\n"
+        "  - kind: raw_shmem\n"
+        "    endpoints: [m55_hp, m55_he]\n"
+        "    carve_out_kb: 4\n"
+        "    name: alp_shmem0\n"
+    )
+    out = splice_companion_cores(board, [("a32_cluster", "yocto")])
+
+    assert sum(1 for line in out.splitlines() if line.startswith("ipc:")) == 1, (
+        "a second top-level `ipc:` key was appended; PyYAML keeps only the "
+        f"last, so the board's own channel is discarded:\n{out}"
+    )
+    channels = yaml.safe_load(out)["ipc"]
+    assert [c["name"] for c in channels] == ["alp_shmem0"], (
+        "the board's own channel must survive -- tan must not invent a "
+        f"channel over one the project already declares: {channels}"
+    )
+    # The companion itself is still spliced: the refusal is about the extra
+    # channel, not about the core the user actually asked for.
+    assert yaml.safe_load(out)["cores"]["a32_cluster"]["os"] == "yocto", out
+
+
+def test_splice_still_adds_the_default_channel_when_the_board_declares_none():
+    """Anti-regression for the fix above: the guard must key on the CONTENT
+    having an `ipc:` block, not on anything else. Every vendored scaffold
+    today declares none (`grep -rn '^ipc:' tan/templates/vendored/` is
+    empty), so this is the path that actually runs in the field."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    channels = yaml.safe_load(out)["ipc"]
+    assert [c["name"] for c in channels] == ["alp_default_rpmsg"], channels
+    assert channels[0]["endpoints"] == ["m55_hp", "a55_cluster"]
+
+
+def test_the_ipc_guard_keys_on_a_top_level_key_not_on_the_letters_ipc():
+    """Mutation-derived. Replacing the line-start check with a naive
+    `"ipc" in board_yaml` left BOTH tests above green, so they did not
+    distinguish a correct guard from a sloppy one.
+
+    A substring guard fires on any board.yaml that merely CONTAINS those
+    three letters -- a comment mentioning IPC, a core id like `m33_ipc`, the
+    word "recipe" -- and then silently withholds the default channel from a
+    board that declares none. That is the same silent class as the defect
+    being fixed, pointed the other way."""
+    board = (
+        "# No cross-core channel is declared here; the ipc block is\n"
+        "# deliberately absent (see tan-cli#925).\n"
+        "som:\n  sku: E1M-AEN801\n"
+        "cores:\n  m55_hp:\n    app: ./src\n"
+    )
+    # Case-sensitive on purpose: the mutant this test exists to kill is
+    # `"ipc" in board_yaml`, which does no lowering. An earlier draft asserted
+    # `"ipc" in board.lower()` and passed against a fixture carrying only
+    # "IPC" -- so it believed it was exercising the mutant and was not.
+    assert "ipc" in board, "the fixture must carry the LOWERCASE letters, or it proves nothing"
+    assert not any(line.startswith("ipc:") for line in board.splitlines())
+
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    channels = yaml.safe_load(out).get("ipc")
+    assert channels is not None, (
+        "the default channel was withheld entirely from a board that declares "
+        f"no `ipc:` key -- the guard matched loose text, not a top-level "
+        f"key:\n{out}"
+    )
+    assert [c["name"] for c in channels] == ["alp_default_rpmsg"], channels
 
 
 def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():
@@ -970,13 +1836,6 @@ def test_a_vendored_tree_keeps_its_own_sku_s_cores_byte_for_byte():
     ("sku", "app_core", "dropped"),
     [
         ("E1M-AEN301", "m55_hp", "a32_cluster"),
-        # `E1M-NX9101` used to be a second row here. tan-cli#579 refuses it at
-        # `_vendored_files` -- an NXP SoM no longer reaches the Alif tree at all
-        # -- so this end-to-end shape cannot cover it any more. The transform
-        # itself is still exercised for that SKU, directly, in
-        # `test_cores_retargeting_still_handles_a_family_with_no_tree` below;
-        # dropping the row without moving the coverage would have quietly
-        # retired half of tan-cli#494 defect 2's regression guard.
     ],
 )
 def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
@@ -989,11 +1848,11 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     `--template edge-ai-starter --som E1M-AEN301` wrote `a32_cluster` for an
     Ensemble E3 that has no Cortex-A32 -- `ok:true`, `exitCode 0`, `issues:[]`
     -- and `tan validate` then hard-errored `unknown core id ['a32_cluster']`
-    on the very next command. `--som E1M-NX9101` landed on the Alif tree and
-    kept `m55_hp` against a topology of `a55_cluster`/`m33`, contradicting
-    `app_core_for_sku` in this same module. (That second SKU is now refused
-    outright -- tan-cli#579 -- because fixing its CORE id left the rest of the
-    Alif tree in place and only made the artefact look more plausible.)
+    on the very next command. An unvendored family landed on the Alif tree and
+    kept `m55_hp`, contradicting `app_core_for_sku` in this same module.
+    (Such a family is now refused outright -- tan-cli#579 -- because fixing its
+    CORE id left the rest of the Alif tree in place and only made the artefact
+    look more plausible.)
 
     Both edits only ever REMOVE wrong facts: the app entry is renamed to tan's
     own `app_core_for_sku`, and the companion cluster -- true only of the
@@ -1012,17 +1871,16 @@ def test_a_vendored_tree_re_derives_cores_for_a_sku_that_is_not_its_own(
     assert f"sku: {sku}" in content
 
 
-def test_cores_retargeting_still_handles_a_family_with_no_tree():
-    """tan-cli#494 defect 2's NXP coverage, moved off the `_vendored_files`
-    path that tan-cli#579 now refuses. The TRANSFORM is unchanged and still
-    correct for an NXP SKU -- it is reached through `--board-yaml` and
-    `--from-example`, neither of which goes near `_family_bucket` -- so the
-    refusal must not be read as retiring it."""
+def test_cores_retargeting_handles_a_cross_family_retarget():
+    """tan-cli#494 defect 2's cross-family coverage: the TRANSFORM, called
+    directly (it is also reached through `--board-yaml` and `--from-example`,
+    neither of which goes near `_family_bucket`), retargets the Alif tree's
+    app core onto the V2N family's."""
     content = _board_yaml_of("edge-ai", "edge-ai-starter", "E1M-AEN801")
 
-    retargeted = retarget_board_yaml_cores(content, "E1M-NX9101", "E1M-AEN801")
+    retargeted = retarget_board_yaml_cores(content, "E1M-V2N101", "E1M-AEN801")
 
-    assert "  m33:" in retargeted
+    assert "  m33_sm:" in retargeted
     assert "  m55_hp:" not in retargeted
     assert "  a32_cluster:" not in retargeted
     assert "app: ./src" in retargeted
@@ -1041,10 +1899,10 @@ def test_cores_retargeting_leaves_an_unrecognised_block_alone():
     than half-rewritten -- the transform never guesses. Same rule as
     `retarget_board_yaml_som`'s own untouched-on-no-match behaviour."""
     two_apps = "cores:\n  m55_hp:\n    app: ./a\n  m33:\n    app: ./b\n\nsom:\n  sku: X\n"
-    assert retarget_board_yaml_cores(two_apps, "E1M-NX9101", "E1M-AEN801") == two_apps
+    assert retarget_board_yaml_cores(two_apps, "E1M-V2N101", "E1M-AEN801") == two_apps
 
     no_block = "som:\n  sku: E1M-AEN801\n"
-    assert retarget_board_yaml_cores(no_block, "E1M-NX9101", "E1M-AEN801") == no_block
+    assert retarget_board_yaml_cores(no_block, "E1M-V2N101", "E1M-AEN801") == no_block
 
 
 def test_a_partially_delivered_vendored_tree_is_refused_not_half_written(tmp_path, monkeypatch):
@@ -1136,52 +1994,70 @@ def _board_yaml_of(tree: str, template_id: str, sku: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# tan-cli#579 -- an NXP SKU used to render the Alif tree's content
+# tan-cli#579 -- a family with no vendored tree used to render the Alif tree
 # ---------------------------------------------------------------------------
 
+#: A hypothetical family row with no vendored tree. `_SOM_FAMILIES` carries no
+#: such row today (every family tan knows has a tree), so the refusal path is
+#: exercised by injecting one -- the mechanism is table-driven, and this is the
+#: only way to keep it covered.
+_UNVENDORED_SKU = "E1M-ZZ9101"
 
-def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered():
+
+@pytest.fixture
+def unvendored_family(monkeypatch):
+    families = scaffold_module._SOM_FAMILIES + (("E1M-ZZ9", "m33", None),)
+    monkeypatch.setattr(scaffold_module, "_SOM_FAMILIES", families)
+    monkeypatch.setattr(
+        scaffold_module,
+        "UNSUPPORTED_SOM_FAMILY_PREFIXES",
+        tuple(prefix for prefix, _core, tree in families if tree is None),
+    )
+
+
+def test_a_som_family_with_no_vendored_tree_is_refused_not_rendered(unvendored_family):
     """**tan-cli#579.** `_family_bucket` was
     `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else _FAMILY_TREES[0]`,
-    so E1M-NX9* -- a family `app_core_for_sku` in this same module already
-    knows (`E1M-NX9` -> `m33`) -- fell down the `else` arm onto the Alif tree.
-    Measured on `dev` before this fix: `plan_template_files("sensor-starter",
-    "E1M-NX9101")` returned the E1M-AEN801 tree with every file except
+    so a family `app_core_for_sku` in this same module already knew fell down
+    the `else` arm onto the Alif tree: `plan_template_files("sensor-starter",
+    <that SKU>)` returned the E1M-AEN801 tree with every file except
     `board.yaml` BYTE-IDENTICAL to the Alif render -- `preset: e1m-evk`,
     `chips: [tmp112]`, a README whose build line is `west build -b
     alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .`, and a `CMakeLists.txt`
     that asks the SDK loader for `--emit zephyr-conf --core m55_hp` while
     tan-cli#494's own `retarget_board_yaml_cores` had already rewritten the
-    same scaffold's `cores:` key to `m33`. `tan init` reported `ok: true` /
-    exit 0 / `issues: []` for all of it.
+    same scaffold's `cores:` key. `tan init` reported `ok: true` / exit 0 /
+    `issues: []` for all of it.
     """
     for template_id in ("zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"):
         with pytest.raises(UnsupportedSomError) as excinfo:
-            plan_template_files(template_id, "E1M-NX9101")
-        assert "E1M-NX9101" in str(excinfo.value)
+            plan_template_files(template_id, _UNVENDORED_SKU)
+        assert _UNVENDORED_SKU in str(excinfo.value)
         assert template_id in str(excinfo.value)
 
 
-def test_the_refusal_names_the_two_paths_that_still_work():
+def test_the_refusal_names_the_two_paths_that_still_work(unvendored_family):
     """A refusal that leaves the customer with nothing is a worse defect than
     the one it fixes. `minimal-app` is tan's OWN hand-generated, vendor-neutral
     template (no vendored tree, so `_family_bucket` never runs for it) and
     `--from-example` copies a real SDK example -- both are named."""
     with pytest.raises(UnsupportedSomError) as excinfo:
-        plan_template_files("sensor-starter", "E1M-NX9101")
+        plan_template_files("sensor-starter", _UNVENDORED_SKU)
 
     message = str(excinfo.value)
     assert "minimal-app" in message
     assert "--from-example" in message
 
 
-def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree():
+def test_minimal_app_still_renders_for_a_family_with_no_vendored_tree(unvendored_family):
     """The refusal is scoped to the VENDORED trees. `minimal-app` is
     hand-generated here and carries no vendor content at all, so it is correct
-    for an NXP SoM -- and it is the escape hatch the refusal names."""
-    files = {f.relative_path: f.content for f in plan_template_files("minimal-app", "E1M-NX9101")}
+    for such a SoM -- and it is the escape hatch the refusal names."""
+    files = {
+        f.relative_path: f.content for f in plan_template_files("minimal-app", _UNVENDORED_SKU)
+    }
 
-    assert "sku: E1M-NX9101" in files["board.yaml"]
+    assert f"sku: {_UNVENDORED_SKU}" in files["board.yaml"]
     assert "  m33:\n" in files["board.yaml"]
     assert "m55_hp" not in files["board.yaml"]
 
@@ -1198,10 +2074,38 @@ def test_the_two_family_derivations_read_one_table():
         ("E1M-V2N101", "m33_sm", "E1M-V2N101"),
         ("E1M-V2N102", "m33_sm", "E1M-V2N101"),
         ("E1M-V2M101", "m33_sm", "E1M-V2N101"),
-        ("E1M-NX9101", "m33", None),
     ):
         assert app_core_for_sku(sku) == core, sku
         assert scaffold_module._family_bucket(sku) == tree, sku
+
+
+def test_unsupported_som_family_prefixes_is_derived_not_retyped(unvendored_family):
+    """tan-cli#866: `UNSUPPORTED_SOM_FAMILY_PREFIXES` is a list comprehension
+    over `_SOM_FAMILIES`, so it always names exactly the prefixes whose tree
+    is `None` there. Empty for the real table (every known family has a tree);
+    the injected row shows up in the derivation, so a stale hand-typed copy
+    could not pass."""
+    prefixes = scaffold_module.UNSUPPORTED_SOM_FAMILY_PREFIXES
+    assert prefixes == ("E1M-ZZ9",)
+    for prefix in prefixes:
+        assert scaffold_module._family_bucket(prefix + "101") is None, prefix
+
+
+def test_no_real_som_family_is_unvendored():
+    assert [p for p, _core, tree in scaffold_module._SOM_FAMILIES if tree is None] == []
+
+
+def test_is_family_gated_matches_plan_template_files_own_special_case():
+    """`is_family_gated` must agree with `plan_template_files`'s own
+    `template_id == "minimal-app"` early return -- `False` for that id alone,
+    `True` for every other real template id (`TEMPLATE_IDS`)."""
+    assert is_family_gated("minimal-app") is False
+    for template_id in TEMPLATE_IDS:
+        if template_id == "minimal-app":
+            continue
+        assert is_family_gated(template_id) is True, template_id
+    # And an unknown id is not silently treated as gated.
+    assert is_family_gated("not-a-real-template") is False
 
 
 def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations():

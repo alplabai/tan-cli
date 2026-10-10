@@ -419,3 +419,228 @@ def test_resolve_template_prompts_with_err_true(monkeypatch):
     assert _resolve_template(None, interactive=True) == MODULE_TEMPLATE_IDS[0]
     assert len(calls) == 1
     assert calls[0][1].get("err") is True
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1031: the project's board.yaml is RESOLVED, not ignored
+# ---------------------------------------------------------------------------
+#
+# Every project got `"boardYaml": null` and `// Board context: unavailable`,
+# because this command called no resolver at all -- including a run that
+# passed `--board-yaml <p>/board.yaml`, whose own help text promises it
+# "overrides project resolution". The four cases below are the four
+# invocations tan-cli#1031 reports, re-derived: `--sdk-root` + project
+# resolution, `--board-yaml`, no SDK, and cwd with no `--project`.
+#
+# `--sdk-root` is still unread here (see the `del` in `scaffold_cmd`); it is
+# passed anyway because the report passes it, and a run that started resolving
+# an SDK to answer this would be a different, bigger change than a comment
+# line is worth.
+
+#: The board.yaml `tan init --som E1M-AEN801 --template zephyr-app` writes,
+#: reduced to the fields this command reads. No `os:` anywhere -- see
+#: `tests/core/test_board_context.py` for why that is normal and what it
+#: renders.
+BOARD_YAML = 'som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n'
+
+#: A DIFFERENT board, for the `--board-yaml` override: a different SKU and a
+#: declared OS, so a run that silently fell back to project resolution reports
+#: the other SKU and fails loudly instead of passing by coincidence.
+OTHER_BOARD_YAML = "som:\n  sku: E1M-V2N101\ncores:\n  a55_cluster:\n    os: yocto\n"
+
+
+def board_line(root: Path, module: str) -> str:
+    return next(
+        line
+        for line in (root / "src" / "modules" / module / f"{module}.c")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("// Board context:")
+    )
+
+
+def test_project_resolution_finds_the_board_yaml(tmp_path):
+    """Invocation 1: `--sdk-root <sdk> scaffold --project <p>`, no
+    `--board-yaml`. Was `"boardYaml": null`."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "--sdk-root", str(tmp_path / "sdk"), "scaffold",
+            "--project", str(proj), "--template", "sensor-driver",
+            "--name", "probesens", "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["boardYaml"] == str(proj / "board.yaml")
+    assert board_line(proj, "probesens") == "// Board context: E1M-AEN801 / <unset>"
+    # tan-cli#1031, found on windows-latest: `root` and `boardYaml` must be ONE
+    # spelling of one directory. `str(Path)` is host-native on both sides of
+    # the assertion above, so this holds without a `\`/`/` fold -- and this
+    # line states the invariant directly, host-independently, in case a future
+    # change makes the two literals agree for the wrong reason.
+    assert env["project"]["boardYaml"].startswith(env["project"]["root"])
+
+
+def test_an_explicit_board_yaml_overrides_project_resolution(tmp_path):
+    """Invocation 2, the one tan-cli#1031 calls "the interesting one". The
+    flag names a DIFFERENT board than the one in the project root, so falling
+    back to project resolution reports `E1M-AEN801` and fails here."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+    other = tmp_path / "other-board.yaml"
+    other.write_text(OTHER_BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "--sdk-root", str(tmp_path / "sdk"), "scaffold",
+            "--project", str(proj), "--board-yaml", str(other),
+            "--template", "sensor-driver", "--name", "bctx",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["boardYaml"] == str(other)
+    assert board_line(proj, "bctx") == "// Board context: E1M-V2N101 / yocto"
+
+
+def test_no_sdk_root_still_resolves_the_board(tmp_path):
+    """Invocation 3. The board read is `board.yaml`-only by design, so it does
+    not degrade when no alp-sdk checkout is named or discoverable."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--project", str(proj), "--template", "sensor-driver",
+            "--name", "nosdk", "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["boardYaml"] == str(proj / "board.yaml")
+    assert board_line(proj, "nosdk") == "// Board context: E1M-AEN801 / <unset>"
+
+
+def test_cwd_with_no_project_flag_resolves_the_board(tmp_path):
+    """Invocation 4: `cd <p> && tan scaffold ...`. `"./board.yaml"` keeps the
+    `./` the Rust `Path::new(".").join(...)` shape gives it, which is what
+    `tan validate` reports from the same cwd -- the point of reusing its
+    resolver rather than writing a second one."""
+    (tmp_path / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--template", "sensor-driver", "--name", "cwdtest",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"] == {"root": ".", "boardYaml": "./board.yaml"}
+    assert board_line(tmp_path, "cwdtest") == "// Board context: E1M-AEN801 / <unset>"
+
+
+def test_a_project_with_no_board_yaml_still_reports_null(tmp_path):
+    """`null` is not retired, it is narrowed: it now means "genuinely none"
+    rather than "never looked". `Project.resolved` is the seam that checks --
+    a resolver's `<root>/board.yaml` reported unconditionally would hand a
+    consumer a path that ENOENTs."""
+    env = envelope(
+        run_tan(
+            "scaffold", "--template", "sensor-driver", "--name", "noboard",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["boardYaml"] is None
+    assert board_line(tmp_path, "noboard") == "// Board context: unavailable"
+
+
+@pytest.mark.parametrize(
+    "label,text",
+    [
+        ("empty", ""),
+        ("not a mapping", "- som\n- cores\n"),
+        ("malformed YAML", "som:\n  sku: [unclosed\n"),
+        ("no som.sku", "cores:\n  m55_hp:\n    app: ./src\n"),
+    ],
+)
+def test_a_broken_board_yaml_scaffolds_anyway(tmp_path, label, text):
+    """The module still gets written, the envelope is still an envelope, and
+    the line falls back to `unavailable` -- a broken board.yaml beside the
+    project must not cost the customer the scaffold, and must never surface as
+    a traceback (`envelope()` asserts that directly)."""
+    (tmp_path / "board.yaml").write_text(text, encoding="utf-8")
+    proc = run_tan(
+        "scaffold", "--template", "sensor-driver", "--name", "broken",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, label
+    assert env["ok"] is True, label
+    # The path RESOLVED and the file is really there; only its CONTENT is
+    # unusable. Reporting `null` here would send a reader looking for a
+    # missing file instead of a broken one.
+    assert env["project"]["boardYaml"] == "./board.yaml", label
+    assert board_line(tmp_path, "broken") == "// Board context: unavailable", label
+
+
+# ---------------------------------------------------------------------------
+# --destination vs --project: which one the board is resolved against
+# ---------------------------------------------------------------------------
+#
+# Untested at the time tan-cli#1031 landed; pinned here because it is a real
+# fork and the answer is not self-evident from the issue. Board resolution
+# follows `dest` -- `--destination` if given, else `--project`, else `"."` --
+# which is the SAME value the envelope reports as `project.root`, so the
+# board reported and the root reported can never disagree. `--destination`'s
+# own help calls it "Destination project root", so a caller who passes one
+# has named a different project root, not merely a different output folder.
+
+
+def test_the_board_follows_destination_when_it_and_project_disagree(tmp_path):
+    """`--project <p> --destination <p>/sub`: `<p>/sub/board.yaml` wins, not
+    `<p>/board.yaml`. The two files name different SKUs, so a run that
+    resolved against `--project` reports `E1M-AEN801` and reds here."""
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+    (proj / "sub" / "board.yaml").write_text(OTHER_BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--project", str(proj), "--destination", str(proj / "sub"),
+            "--template", "sensor-driver", "--name", "destwins",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["root"] == str(proj / "sub")
+    assert env["project"]["boardYaml"] == str(proj / "sub" / "board.yaml")
+    assert board_line(proj / "sub", "destwins") == "// Board context: E1M-V2N101 / yocto"
+
+
+def test_a_destination_with_no_board_does_not_fall_back_to_project(tmp_path):
+    """The other half of the same fork: `--destination` names a project root
+    that holds no `board.yaml`, and the answer is `null`/`unavailable` rather
+    than silently reaching back to `--project`'s. Reporting `<p>/board.yaml`
+    here would contradict the `project.root` in the same envelope."""
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--project", str(proj), "--destination", str(proj / "sub"),
+            "--template", "sensor-driver", "--name", "noreach",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["root"] == str(proj / "sub")
+    assert env["project"]["boardYaml"] is None
+    assert board_line(proj / "sub", "noreach") == "// Board context: unavailable"

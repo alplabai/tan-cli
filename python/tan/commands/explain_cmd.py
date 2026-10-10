@@ -27,7 +27,7 @@ against `alp-sdk/docs/superpowers/specs/2026-07-29-tan-port-invariants.md`:
   part-numbers inside the prose (TMP112, BME280, CC3501E, the two SKUs) enter no
   decision here; they are transcribed English, and every one already ships in
   tan via the vendored scaffold trees and `core/scaffold.py`'s
-  `DEFAULT_SOM_SKU`/`IOT_STARTER_SUPPORTED_SKU`. Nothing in this file is keyed
+  `DEFAULT_SOM_SKU`/`TEMPLATE_SUPPORTED_SKUS`. Nothing in this file is keyed
   on a SKU, an address, or a pin.
 
 The ONE derived line is "Default libraries", which reads each template's
@@ -35,6 +35,54 @@ vendored `board.yaml` rather than a registry field
 (`scaffold.vendored_library_names_for`) -- tan-cli#124: the field is
 deliberately blanked for a vendored template and reported "(none)" for
 `edge-ai-starter`, whose scaffold declares `tflite-micro`.
+
+**`data.som` (tan-cli#866): what `tan init` will accept/refuse for this
+template, structured, not just in prose.** A project template's `--template`
+hit carries `data.som.{initAcceptsSkus,initRefusesSkuPrefixes}`, computed by
+`_som_support_data` from `scaffold.TEMPLATE_SUPPORTED_SKUS` /
+`scaffold.UNSUPPORTED_SOM_FAMILY_PREFIXES` -- the SAME two tables `tan init`
+already gates `init.invalid-som` / `init.som-unsupported` on, READ here
+rather than retyped.
+
+**These are `tan init` REFUSAL predictions, not a capability statement --
+name them accordingly and do not rename them back.** (PR #985 review, major
+1.) `TEMPLATE_SUPPORTED_SKUS` is exactly, and only, the set `init_cmd` checks
+before writing a tree; it says nothing about which SKUs alp-sdk's own
+scaffold catalog actually validates a template against. Measured: for every
+template here except `iot-starter`/`multicore-mailbox`, alp-sdk's catalog
+`supported.som_skus` is the narrow `["E1M-AEN801", "E1M-V2N101"]`
+(`tan/templates/vendored/MANIFEST.md`), while `initRefusesSkuPrefixes` here
+publishes `[]` for those same four (no family is unvendored today) -- i.e.
+`tan init` refuses none of them, where the catalog validates 2. That is not a
+bug in this field: tan is SDK-free by design (I-32 above) and `_family_bucket`
+(`tan.core.scaffold`) deliberately falls an unrecognised SKU prefix onto the
+default (Alif) tree rather than refusing it, so `tan init --template
+sensor-starter --som E1M-AEN301` really does exit 0 today. A field NAMED
+"supported" would be lying about capability for those 4 of 7 templates; a
+field that says "what tan init will accept" is exactly true, including for
+a SKU that does not exist (`E1M-ZZZ999` also predicts `ok`, correctly, by
+this policy). `python/tests/gates/test_no_new_hardware_facts.py` already
+tracks the underlying gap as its largest acknowledged debt item, retiring
+only once the SDK catalog's own per-template family mapping is readable from
+`metadata/**` -- that debt is orthogonal to and not resolved by this field;
+do not read `initAcceptsSkus`/`initRefusesSkuPrefixes` as "the SDK says this
+combination works".
+
+Before this PR, the only place a template's SoM restriction was written down
+was inside `details[]` prose ("... (E1M-AEN801 only)"), which a consumer
+would have had to parse and which could silently drift from what `tan init`
+actually enforces -- #866 is named for exactly that string. The `iot-starter`
+description's own parenthetical, and its explanation's Wi-Fi-transport
+sentence, are now GENERATED from the same data (`_only_note`, `_iot_wifi_note`),
+so neither can disagree with it by construction; see
+`tests/commands/test_explain_command.py`'s
+`test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data`
+for the drift gate over every OTHER SKU mention in project-template prose
+(`multicore-mailbox`'s explanation, the one sentence this change did not also
+make generated). Scoped to PROJECT templates only -- module
+templates and generation targets carry no SoM concept, so `data.som` is
+absent (not `null`) on those two selector kinds, the same absent-vs-null
+convention `--code`'s `data.diagnostic`/`data.suggestions` already use.
 
 **Every failure is a coded issue, never a traceback.** Ambiguous selector,
 unknown template, unknown target, and an unreadable vendored tree each map to an
@@ -125,7 +173,13 @@ import typer
 
 from tan.core import error_catalog
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import TemplateDataError, vendored_library_names_for
+from tan.core.scaffold import (
+    TEMPLATE_SUPPORTED_SKUS,
+    UNSUPPORTED_SOM_FAMILY_PREFIXES,
+    TemplateDataError,
+    is_family_gated,
+    vendored_library_names_for,
+)
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -153,6 +207,54 @@ def _code_hint(value: str) -> str:
     if _LOOKS_LIKE_A_DIAGNOSTIC_CODE.match(value):
         return f" Looking for a diagnostic code? Use --code {value} instead."
     return ""
+
+
+def _only_note(skus: tuple[str, ...] | None) -> str:
+    """` (<SKU>[, <SKU>...] only)`, or `""` when `skus` is falsy -- the
+    description's trailing SoM qualifier, DERIVED from `TEMPLATE_SUPPORTED_SKUS`
+    (`tan.core.scaffold`) rather than a hand-typed SKU string in the registry
+    below. tan-cli#866: a hand-typed "(E1M-AEN801 only)" is exactly the second
+    source of truth the issue is about -- it can drift from the data the CLI
+    actually gates `tan init` on, silently, the way a copy-edit here never
+    would if a consumer parsed the sentence instead of `data.som`. Called
+    at MODULE LOAD, building `PROJECT_TEMPLATES` below -- must stay defined
+    ahead of that tuple."""
+    if not skus:
+        return ""
+    return f" ({', '.join(skus)} only)"
+
+
+def _iot_wifi_note(skus: tuple[str, ...] | None) -> str:
+    """`iot-starter`'s explanation sentence about the CC3501E Wi-Fi transport,
+    with its SUPPORTED-SKU mentions (both of them) DERIVED from
+    `TEMPLATE_SUPPORTED_SKUS["iot-starter"]` rather than hand-typed a second
+    time. PR #985 review, major 3: #866 names this sentence, verbatim, as one
+    of the two prose carriers of this restriction the issue is about; before
+    this it was hand-typed independently of `_only_note`'s parenthetical, so
+    a hand-edit of only its trailing SKU passed the whole suite (mutant E in
+    that review). `E1M-V2N101` in the middle clause stays hand-typed: it is
+    not a claim of support (the opposite -- the Wi-Fi path that does NOT
+    exist there yet) and carries no table this module owns; it is the one
+    named entry in `test_explain_command.py`'s `_CONTRAST_MENTIONS`, so a
+    future rewrite that changes which SKU is contrasted still has to update
+    that gate on purpose rather than by accident.
+
+    `skus` empty/`None` is unreachable in practice (`iot-starter` is always a
+    key of `TEMPLATE_SUPPORTED_SKUS`) but degrades to a SKU-free form rather
+    than raising, matching `_only_note`'s style."""
+    if not skus:
+        return (
+            "AEN-only + preview: the CC3501E Wi-Fi transport is "
+            "silicon-validated on the supported SKU only; the Wi-Fi path on "
+            "any other SoM does not exist yet, so --som is fixed for this "
+            "template."
+        )
+    sku = skus[0]
+    return (
+        f"AEN-only + preview: {sku}'s CC3501E Wi-Fi transport is "
+        f"silicon-validated; the E1M-V2N101 Wi-Fi path does not exist yet, "
+        f"so --som is fixed to {sku} for this template."
+    )
 
 
 @dataclass(frozen=True)
@@ -248,15 +350,15 @@ PROJECT_TEMPLATES: tuple[ProjectTemplate, ...] = (
         label="IoT starter",
         description=(
             "West-buildable Wi-Fi + MQTT/TLS telemetry app wired to board.yaml via "
-            "the SDK loader (E1M-AEN801 only)."
+            "the SDK loader"
+            + _only_note(TEMPLATE_SUPPORTED_SKUS.get("iot-starter"))
+            + "."
         ),
         explanation=(
             "Real Zephyr app vendored from the SDK's `iot` scaffold: brings up Wi-Fi "
             "via the CC3501E bridge and publishes an mqtts:// (TLS) MQTT telemetry "
             "reading on a cadence, through the portable <alp/iot.h> surface.",
-            "AEN-only + preview: E1M-AEN801's CC3501E Wi-Fi transport is "
-            "silicon-validated; the E1M-V2N101 Wi-Fi path does not exist yet, so "
-            "--som is fixed to E1M-AEN801 for this template.",
+            _iot_wifi_note(TEMPLATE_SUPPORTED_SKUS.get("iot-starter")),
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your "
             "alp-sdk checkout>`.",
         ),
@@ -300,6 +402,29 @@ PROJECT_TEMPLATES: tuple[ProjectTemplate, ...] = (
             "FAIL.",
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your "
             "alp-sdk checkout>`.",
+        ),
+    ),
+    ProjectTemplate(
+        id="multicore-mailbox",
+        label="Multicore -- mailbox (AEN M55-HP <-> M55-HE)",
+        description=(
+            "Dual-Zephyr-core starter for the Alif Ensemble E8: two Cortex-M55 "
+            "cores, both real project cores."
+        ),
+        explanation=(
+            "Vendored from the SDK's `multicore-mailbox` scaffold. Both cores get "
+            "their own app -- `m55_hp: app: ./src` and `m55_he: app: ./peer` -- "
+            "which is the topology no --template/--cores combination could "
+            "scaffold before (tan-cli#864).",
+            "HP stages a payload in cache-coherent shared SRAM and signals HE "
+            "through the hardware mailbox over the portable <alp/mproc.h> "
+            "raw-shmem + mailbox + hwsem surface; HE echoes it back. Deliberately "
+            "NOT RPMsg -- no framing and no negotiated channel, just a raw pointer "
+            "view over a fixed carve-out plus a doorbell.",
+            "E1M-AEN801 only: the SDK catalog gates this template's "
+            "`supported.som_skus` to that one SKU and refuses to emit it for any "
+            "other, so tan refuses the same set rather than rendering it against "
+            "another tree.",
         ),
     ),
 )
@@ -434,6 +559,7 @@ class ExplainError(Exception):
         exit_code: ExitCode = ExitCode.RUNTIME_FAILURE,
         selector_value: str = "",
         extra_data: dict | None = None,
+        extra_issues: list[Issue] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -445,6 +571,19 @@ class ExplainError(Exception):
         #: miss uses it, to carry `suggestions` next to the refusal instead of
         #: burying the shortlist in an issue message a consumer must re-parse.
         self.extra_data = extra_data or {}
+        #: tan-cli#950: PREPENDED ahead of this error's own `Issue` by
+        #: `_fail`, the same `[*resolution_issues, Issue(...)]` shape
+        #: `clean_cmd._run` / `bootstrap_cmd._refusal` / `new_som_cmd.new_som`
+        #: use. Only `bind_sdk`'s `explain.sdk-root-unresolved` raise
+        #: populates this today (`sdk.project-pin-unresolved` /
+        #: `sdk.global-default-foreign-project`, tan-cli#263 review /
+        #: tan-cli#464): it is the one `ExplainError` site that can compute a
+        #: broken-pin/foreign-default fact and then discard the checkout it
+        #: came from, so it is also the one site the shared `Envelope(...,
+        #: sdk=...)` advisory machinery (`_with_sdk_resolution_advisories`)
+        #: cannot reach -- that machinery fires only when an `SdkInfo` was
+        #: actually built, and `bind_sdk` raises before building one.
+        self.extra_issues = extra_issues or []
 
 
 @dataclass
@@ -480,19 +619,84 @@ def _format_feature_flags(features: tuple[bool, bool, bool, bool]) -> str:
     return f"wifi={wifi} mqtt={mqtt} ble={ble} tls={tls}"
 
 
+def _som_support_data(template_id: str) -> dict[str, object]:
+    """`data.som` for one project template -- what `tan init --template
+    <template_id>` will ACCEPT or REFUSE for `--som`, READ (never retyped)
+    from `TEMPLATE_SUPPORTED_SKUS`/`UNSUPPORTED_SOM_FAMILY_PREFIXES`
+    (`tan.core.scaffold`) so this cannot drift from the refusal it describes
+    (tan-cli#866).
+
+    PR #985 review, major 1: named `initAcceptsSkus`/`initRefusesSkuPrefixes`
+    ON PURPOSE, not `supportedSkus`/`unsupportedSkuPrefixes` -- this is a
+    REFUSAL policy, not a capability statement, and the two provably differ:
+    `tan.core.scaffold._family_bucket` falls an unrecognised SKU prefix onto
+    the default (Alif) tree rather than refusing it, so for every template
+    here except `iot-starter`/`multicore-mailbox`, `initAcceptsSkus` is wider
+    than alp-sdk's own scaffold-catalog `supported.som_skus` (see the module
+    docstring above for the measured gap). A name that said "supported"
+    would claim capability this field cannot back for 4 of 7 templates.
+
+    `initAcceptsSkus` mirrors the `init.invalid-som` allowlist -- `None` when
+    this template carries none. `initRefusesSkuPrefixes` mirrors the
+    `init.som-unsupported` family exclusion -- always `[]` when
+    `initAcceptsSkus` is set, because an exact-SKU allowlist is strictly
+    narrower than (and already implies) that exclusion; repeating it would be
+    a second way to say the same thing, the exact class of duplication this
+    field exists to retire. A template with neither restriction
+    (`minimal-app`, tan's one vendor-neutral, non-family-gated template --
+    `scaffold.is_family_gated` is `False` for it alone) reports
+    `initAcceptsSkus: null, initRefusesSkuPrefixes: []`: `tan init` accepts
+    every SoM for it, unconditionally.
+    """
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None:
+        return {"initAcceptsSkus": list(supported), "initRefusesSkuPrefixes": []}
+    if is_family_gated(template_id):
+        return {
+            "initAcceptsSkus": None,
+            "initRefusesSkuPrefixes": list(UNSUPPORTED_SOM_FAMILY_PREFIXES),
+        }
+    return {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
+
+
+def _family_excluded_note(template_id: str) -> str | None:
+    """One `details[]` line for a FAMILY-gated (but not exact-SKU-gated)
+    project template, DERIVED from `UNSUPPORTED_SOM_FAMILY_PREFIXES` -- `None`
+    when there is nothing to add.
+
+    PR #985 review, minor 5: before this, text mode said nothing at all about
+    the family exclusion for `zephyr-app`/`sensor-starter`/`edge-ai-starter`/
+    `board-diagnostics` even after `data.som.initRefusesSkuPrefixes` started
+    carrying it in JSON -- a human running `tan explain --template zephyr-app`
+    with no `--format json` only discovered the restriction as
+    `init.som-unsupported`, at `tan init` time. `None` for `minimal-app` (not
+    family-gated at all) and for the two exact-SKU-gated templates
+    (`iot-starter`/`multicore-mailbox`): `_only_note` already reports their
+    narrower restriction from the description line, so a second sentence here
+    would repeat it rather than add information."""
+    if template_id in TEMPLATE_SUPPORTED_SKUS or not is_family_gated(template_id):
+        return None
+    if not UNSUPPORTED_SOM_FAMILY_PREFIXES:
+        return None
+    prefixes = ", ".join(UNSUPPORTED_SOM_FAMILY_PREFIXES)
+    return f"Refuses --som for these SoM families: {prefixes}."
+
+
 def _project_template_details(pt: ProjectTemplate) -> list[str]:
-    """Description, per-template explanation, default libraries, default
-    features. Raises `TemplateDataError` when the vendored board.yaml behind
-    the libraries line will not read."""
+    """Description, per-template explanation, the family-exclusion note (when
+    one applies), default libraries, default features. Raises
+    `TemplateDataError` when the vendored board.yaml behind the libraries
+    line will not read."""
     names = vendored_library_names_for(pt.id)
     if names is None:
         names = list(pt.libs)  # `minimal-app` only: no vendored tree to read.
-    return [
-        pt.description,
-        *pt.explanation,
-        f"Default libraries: {_format_library_names(names)}",
-        f"Default features: {_format_feature_flags(pt.features)}",
-    ]
+    details = [pt.description, *pt.explanation]
+    family_note = _family_excluded_note(pt.id)
+    if family_note is not None:
+        details.append(family_note)
+    details.append(f"Default libraries: {_format_library_names(names)}")
+    details.append(f"Default features: {_format_feature_flags(pt.features)}")
+    return details
 
 
 def _module_template_details(mt: ModuleTemplate) -> list[str]:
@@ -587,6 +791,11 @@ def resolve(template: str | None, target: str | None) -> _Result:
                     value=pt.id,
                     summary=f"{pt.label} ({pt.id})",
                     details=_project_template_details(pt),
+                    # tan-cli#866: structured, so a consumer filters a picker
+                    # without parsing `details[]` prose. Project templates
+                    # only -- module templates and generation targets carry
+                    # no SoM concept.
+                    extra_data={"som": _som_support_data(pt.id)},
                 )
         for mt in MODULE_TEMPLATES:
             if mt.id == template:
@@ -653,22 +862,52 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
     problem. Either way this is a refusal naming what it could not find, never
     an empty answer. Both imports are LOCAL so the three SDK-free paths keep
     paying nothing for a mode they never enter.
+
+    tan-cli#950: the unresolved-SDK raise carries `resolution.broken_project_pin`
+    / `.foreign_global_default_for` on `ExplainError.extra_issues` (the
+    `clean_cmd._run` / `bootstrap_cmd._refusal` / `new_som_cmd.new_som` shape --
+    the eighth instance of the tan-cli#900 class). This is the ONE branch that
+    needs it computed explicitly: the SUCCESS return below hands its `SdkInfo`
+    to `_emit`'s `Envelope(..., sdk=...)`, whose own
+    `_with_sdk_resolution_advisories` already discloses the same pair
+    generically from `SdkInfo.broken_project_pin` -- but `bind_sdk` raising
+    here means no `SdkInfo` is ever built, so that shared machinery never
+    runs and the fact would otherwise be discarded with the rest of
+    `resolution`.
     """
-    from tan.commands.build_cmd import resolve_sdk_root_ladder
     from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+    from tan.core.sdk_discovery import (
+        global_default_foreign_project_issue,
+        project_pin_issue,
+        resolve_sdk_root_ladder,
+        with_sdk_search,
+    )
     from tan.core.shapes import SDK_MARKER
 
     cwd = Path.cwd()
     workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
     resolution = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
     if resolution.path is None or not resolution.path.joinpath(*SDK_MARKER).exists():
+        pin_issue = project_pin_issue(resolution.broken_project_pin, resolution.tier)
+        foreign_issue = global_default_foreign_project_issue(
+            resolution.foreign_global_default_for
+        )
         raise ExplainError(
             "explain.sdk-root-unresolved",
-            f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
-            f"read -- {NO_SDK_NEXT_STEPS}.",
-            f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
-            f"could be read -- {NO_SDK_NEXT_STEPS}.",
+            with_sdk_search(
+                f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
+                f"read -- {NO_SDK_NEXT_STEPS}.",
+                workspace_root,
+                sdk_root_arg,
+            ),
+            with_sdk_search(
+                f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
+                f"could be read -- {NO_SDK_NEXT_STEPS}.",
+                workspace_root,
+                sdk_root_arg,
+            ),
             selector_value=code.strip(),
+            extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
         )
     return resolution.path, SdkInfo.from_resolution(str(resolution.path), resolution)
 
@@ -759,6 +998,43 @@ def _data(
         "available": _available(),
         **(extra or {}),
     }
+
+
+def _print_sdk_resolution_warnings(sdk: SdkInfo | None) -> None:
+    """tan-cli#959: `explain: warning: <message>` lines to stderr for every
+    fact `sdk_resolution_issues` finds in `sdk`'s resolution -- the text-mode
+    disclosure of the same `sdk.project-pin-unresolved` /
+    `sdk.global-default-foreign-project` pair `Envelope`'s
+    `_with_sdk_resolution_advisories` already appends to `issues[]` for free
+    under `--format json` (it fires there because `_emit`'s json branch is
+    the only branch that ever constructs an `Envelope`). This is the text
+    branch's own copy of that disclosure, called both from the success path
+    (`explain`, ahead of the summary line) and from `_fail` (ahead of
+    `err.text_line`) -- the two SDK-bound refusal sites, `resolve_code`'s
+    `explain.catalog-unreadable` and `explain.code-unknown`, each bind an
+    `SdkInfo` via `bind_sdk` before raising, so `sdk` is populated there the
+    same way it is on success.
+
+    `sdk` is `None` on every path that never resolved a checkout --
+    `--template`/`--target` (`resolve`'s three raises), the two selector-
+    clash refusals (`explain.positional-template-conflict` fires before
+    `--code` is even cleaned; `explain.ambiguous-selector` fires only once
+    `--code` IS set, but both `_fail` before `bind_sdk` is ever called, so
+    neither attempts checkout resolution), and `bind_sdk`'s own
+    `explain.sdk-root-unresolved` raise (it raises BEFORE building an
+    `SdkInfo`, which is why tan-cli#950 had to carry that one pair through
+    `ExplainError.extra_issues` instead -- the two mechanisms are disjoint by
+    construction, never double-printing the same fact).
+    """
+    if sdk is None:
+        return
+    from tan.core.sdk_discovery import sdk_resolution_issues
+
+    for issue in sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
+    ):
+        for line in wrap_lines([f"explain: warning: {issue.message}"], wrap_width()):
+            print(line, file=sys.stderr)
 
 
 def _emit(
@@ -960,10 +1236,16 @@ def explain(
     if not json_mode:
         # stderr, in both formats: stdout is the envelope channel and nothing
         # else. Matches Rust's `emit()`, which `eprintln!`s every text line.
+        # tan-cli#959: the SDK-resolution advisories (`sdk.project-pin-
+        # unresolved` / `sdk.global-default-foreign-project`) print FIRST,
+        # matching `_fail`'s own order and `bootstrap_cmd._refusal`'s
+        # `warning_lines + outcome.text` -- a caveat about which checkout
+        # answered belongs ahead of the answer itself, not after it.
         # The summary header is a short, bounded "<label> (<id>)" -- never
         # observed over any real width, so it is never run through
         # `wrap_block`; `_print_detail_lines` is where the actual wrap
         # decision lives.
+        _print_sdk_resolution_warnings(sdk)
         print(f"explain: {result.summary}", file=sys.stderr)
         _print_detail_lines(result.details, wrap_width())
     _emit(
@@ -987,6 +1269,23 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
     EMPTY even though the caller named a selector, because nothing was
     explained. `data.available` stays populated."""
     if not json_mode:
+        # tan-cli#950: `err.extra_issues` (today only `bind_sdk`'s broken-pin
+        # / foreign-global-default pair) printed AHEAD of the refusal line --
+        # `bootstrap_cmd._refusal`'s `warning_lines + outcome.text` order --
+        # since this text branch is the only path those facts reach; the JSON
+        # branch below carries them in `issues[]` instead. Without this,
+        # `--format json` would disclose the pin (tan-cli#677's asymmetry).
+        for issue in err.extra_issues:
+            for line in wrap_lines([f"explain: warning: {issue.message}"], wrap_width()):
+                print(line, file=sys.stderr)
+        # tan-cli#959: the other half of the same disclosure -- `sdk` is
+        # populated (not `err.extra_issues`) on the two SDK-BOUND refusals,
+        # `explain.catalog-unreadable` / `explain.code-unknown`, since both
+        # raise from `resolve_code` AFTER `bind_sdk` already built an
+        # `SdkInfo`. Disjoint from the loop above by construction (see
+        # `_print_sdk_resolution_warnings`'s docstring), so this never
+        # double-prints.
+        _print_sdk_resolution_warnings(sdk)
         # A refusal sentence, not a record -- `--template`/`--target` echo
         # the CALLER's own (unbounded-length) input back into it (e.g.
         # "unknown template '<whatever was typed>'"), so this is the one
@@ -1004,7 +1303,7 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
             details=[],
             extra=err.extra_data,
         ),
-        [Issue(err.code, "error", err.message)],
+        [*err.extra_issues, Issue(err.code, "error", err.message)],
         err.exit_code,
         sdk,
     )

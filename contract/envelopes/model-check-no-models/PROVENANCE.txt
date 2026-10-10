@@ -1,0 +1,48 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/model-check-no-models/expected.json
+=================================================================
+
+Recorded on    : 2026-09-01
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#253
+Branch         : feat/253-model-envelope-fixtures (off dev @ b3c40619)
+
+This is a NEW golden, not a re-recording: there was no previous recording to
+be wrong. `tan model` shipped three subcommands (`SUBCOMMANDS = ("build",
+"doctor", "check")`, `python/tan/commands/model_cmd.py`) with zero
+`contract/envelopes` coverage while every other command surface had some —
+the gap tan-cli#253 was re-scoped onto after the Rust oracle it originally
+named was deleted in `2883cdf4`.
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), the case's inputs copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, then normalised through the harness's own `normalise()` (PATH_KEYS
+`\` -> `/`, the scratch path down to `__WORKDIR__`). The recording reused the
+harness's own `fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`
+rather than reimplementing them (contract/README.md, "Regenerating a golden"
+step 1). Python 3.12.3, lane-private venv, Linux, `tan` resolved from this
+worktree.
+
+What this case pins
+--------------------
+`tan model check --sdk-root ./sdk --format json` against a board.yaml that
+declares a `som.sku` and NO `models:` block: the clean EMPTY success --
+`ok: true`, `exitCode: 0`, `issues: []` -- with `check`'s own `data` shape,
+`schemaVersion`/`sku`/`exact`/`models`. `exact: false` is pinned here as the
+default of the `--exact` flag this case does not pass, so a flip of that
+default cannot land unnoticed. `check`'s exit code is ALWAYS `SUCCESS` for a
+run that completed (`model_cmd.py`'s module doc) -- this case pins the
+degenerate end of that: a completed run with nothing to report.
+
+Fixture inputs
+---------------
+Same synthetic marker checkout as `model-build-no-models` -- see that case's
+PROVENANCE for why `sdk/scripts/alp_project.py` alone is enough.
+
+Fully deterministic: no host state is read, so no `env.json`.

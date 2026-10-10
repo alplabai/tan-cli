@@ -81,9 +81,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:  # pragma: no cover
     # Type-checker only. `urllib.request` is deferred into the two functions
@@ -93,17 +92,55 @@ if TYPE_CHECKING:  # pragma: no cover
 
 import typer
 
+from tan.core.atomic_write import atomic_write_text
 from tan.core.global_flags import accept_global_flags
-# Re-exported, NOT respelled: this file used to carry its own
-# `("scripts", "alp_project.py")` under a comment claiming it was "spelled
-# once here" -- it was spelled twice (tan-cli#815). Relocating the I-31
-# marker is a one-line change in `shapes.py` now.
-from tan.core.shapes import SDK_MARKER
 from tan.core.proxy import (
     HTTPS_PROXY_ENV_VARS,
     host_of,
     select_https_proxy,
     unsupported_proxy_scheme,
+)
+# `_has_loader_script`/`_home_alp_dir`/`_read_file` moved to
+# `tan.core.sdk_discovery` alongside `resolve_sdk_tiered` (tan-cli#408 review
+# follow-up) -- `check_sdk_readiness`/`cached_sdk_versions`/
+# `_default_cache_root` below still need them for readiness reporting, which
+# stayed here because it is not part of the discovery/resolution cluster.
+# `_abs_posix`/`_pointer_target` are the same kind of shared filesystem
+# primitive, pulled in for `sdk remove` (tan-cli#790): `_abs_posix` is the
+# cwd-anchored/lexical path form every removal-target comparison below uses,
+# `_pointer_target` is the direct (not `resolve_sdk_tiered`-mediated) read of
+# `~/.alp/sdk-default`'s own `sdkPath`, needed because that pointer can name
+# a checkout THIS workspace does not resolve through at all while still being
+# exactly what removing it would orphan for some OTHER project on the host.
+from tan.core.sdk_discovery import (
+    ActiveSdk,
+    _abs_posix,
+    _has_loader_script,
+    _home_alp_dir,
+    _pointer_target,
+    _read_file,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+    resolve_sdk_tiered,
+    sdk_ladder_divergence_issue,
+)
+from tan.core.sdk_default_registry import (
+    load_raw,
+    normalized_sdk_path,
+    parse_registry,
+    prune_entries_by_sdk_path,
+    registry_path,
+    registry_text,
+)
+from tan.core.sdk_removal import (
+    RemovalOutcome,
+    is_cache_root_itself,
+    is_outside_cache_root,
+    removal_would_damage,
+    removal_would_take_out,
+    remove_sdk_tree,
+    resolve_removal_target,
 )
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
@@ -130,7 +167,8 @@ NETWORK_TIMEOUT_SECONDS = 20.0
 #: more site recommending a subcommand this build refuses.
 AVAILABLE_SUBCOMMANDS = (
     "Available subcommands: list, current, install <version> (refuses -- not "
-    "yet ported), switch <version> (refuses -- not yet ported)"
+    "yet ported), switch <version> (refuses -- not yet ported), "
+    "remove <version|path>"
 )
 
 #: `install`/`switch` refuse outright in this build (`_run_not_ported` below)
@@ -185,168 +223,45 @@ _TLS_HINT = (
 )
 
 
-# ── filesystem primitives (every failure is a value, never an exception) ─────
-
-
-def _read_file(path: Path) -> str | None:
-    """`tan_core`'s injected `read_file`: contents, or `None` on ANY read
-    failure -- missing, a directory, permission-denied, non-UTF-8 bytes.
-
-    `encoding="utf-8"` explicitly (I-27): a bare `read_text()` decodes with the
-    host locale, so a pointer file or `sdk_version.yaml` carrying one non-ASCII
-    byte raises `UnicodeDecodeError` on a cp1252 Windows host and passes on
-    ubuntu CI. Swallowing it to `None` is what the Rust does and is what keeps
-    an unreadable file a reported fact instead of a traceback.
-    """
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _has_loader_script(root: Path) -> bool:
-    """True when `root/scripts/alp_project.py` exists -- `util.rs`'s
-    `has_loader_script`. `Path.exists()` swallows its own `OSError`/`ValueError`
-    (a too-long path, an illegal name), so a pathological pointer value reads as
-    "not an SDK" rather than raising out of a tier lookup."""
-    return root.joinpath(*SDK_MARKER).exists()
-
-
-def _to_posix(path: Path) -> str:
-    """`tan_core::project::to_posix`. The discovery tier's result is a reported
-    path, and every golden-pinned path field is platform-identical forward
-    slashes; `Path` renders `\\` on Windows."""
-    return str(path).replace("\\", "/")
-
-
-def _home_alp_dir() -> Path:
-    """`~/.alp` -- `USERPROFILE` on Windows else `HOME`, falling back to `.`
-    when neither is set (`util.rs`'s `home_alp_dir`). Home of the global default
-    pointer and the install cache, and the reason the conformance harness
-    overrides BOTH variables: a developer's real `~/.alp/sdk-default` would
-    otherwise decide what `sdk current` reports."""
-    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
-    return Path(home or ".") / ".alp"
-
-
-def _read_pointer_json(pointer: Path) -> dict[str, Any] | None:
-    """Parse a pointer file (`.alp/sdk-path`, `~/.alp/sdk-default`) into its
-    dict, or `None` on ANY failure -- missing, unreadable, invalid JSON, or a
-    non-dict shape (a list). Shared by every field reader over this shape so
-    `_pointer_target` and `_pointer_written_for` can never disagree about what
-    counts as an unreadable pointer.
-    """
-    if not pointer.exists():
-        return None
-    raw = _read_file(pointer)
-    if raw is None:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _pointer_target(pointer: Path) -> str | None:
-    """The `sdkPath` out of a `{"sdkPath": ..., "updatedAt": ...}` pointer file.
-
-    One function for both pointers -- `tan_core`'s `resolve_active_sdk`
-    (`<workspace>/.alp/sdk-path`) and `resolve_global_default_sdk`
-    (`~/.alp/sdk-default`) are the same read of the same shape at two paths.
-    Every failure is `None`, matching the Rust's `.ok()?` chain: a hand-edited
-    pointer holding invalid JSON, a list, or no `sdkPath` at all must fall
-    through to the next tier, not abort the command.
-    """
-    parsed = _read_pointer_json(pointer)
-    value = parsed.get("sdkPath") if parsed is not None else None
-    return value if isinstance(value, str) else None
-
-
-def _pointer_written_for(pointer: Path) -> str | None:
-    """The optional `writtenFor` field alongside `sdkPath`/`updatedAt` in
-    `~/.alp/sdk-default` -- which project's bootstrap relocation last wrote
-    this machine-global pointer (tan-cli#464).
-
-    `None` covers both "no opinion" cases the same way, on purpose: a pointer
-    written by an older tan that predates this field, and one this tan wrote
-    for a run that never relocated a checkout FOR a project at all. Neither is
-    a claim that no other project wrote the pointer -- it is the absence of
-    evidence, and `resolve_sdk_tiered` must never manufacture a warning out of
-    it.
-
-    A non-`str`, empty, or non-absolute value is ALSO `None` (measured
-    tan-cli#464 review regression): `writtenFor: ""` used to pass the bare
-    `isinstance(value, str)` check here and reach `_workspace_under(ws, "")`,
-    which resolves `Path("")` to the process's cwd -- so whether the foreign
-    warning fired depended on where the caller happened to be standing, not
-    on anything the pointer actually recorded. Every OTHER project root this
-    field can legitimately hold is written by `bootstrap_cmd._run` as an
-    already-absolute `root` (`Project.resolved`'s own contract), so rejecting
-    a relative or blank one here is not narrowing real coverage ON THE
-    WRITER'S OWN PLATFORM -- but `~/.alp/sdk-default` is one pointer shared by
-    every tan on the host, and a bare `Path(value).is_absolute()` is answered
-    by whichever pathlib flavour the READER's OS picked: `PureWindowsPath`
-    needs a drive letter, so a legitimate `"/home/u/projB"` written by a
-    Linux/macOS tan degraded to "no opinion" the moment a Windows tan read it
-    back, and symmetrically `"C:/projB"` from a Windows writer is non-absolute
-    to `PurePosixPath` on the other two. Accepted here when EITHER
-    `PurePosixPath` or `PureWindowsPath` calls it absolute, so a value either
-    platform's tan legitimately wrote still counts, while `""`/`"."`/a bare
-    relative segment (`"projB/ws"`)/a drive-relative `"C:projB"` stay `None`
-    under both -- the safe degradation is unchanged, only which absolute
-    shapes clear it.
-    """
-    parsed = _read_pointer_json(pointer)
-    value = parsed.get("writtenFor") if parsed is not None else None
-    if not isinstance(value, str) or not value:
-        return None
-    if not PurePosixPath(value).is_absolute() and not PureWindowsPath(value).is_absolute():
-        return None
-    return value
-
-
-def _workspace_under(workspace_root: Path, root: str) -> bool:
-    """Whether `workspace_root` IS `root`, or sits somewhere below it --
-    resolved on both sides so a `..`, a symlink, or Windows' case-folding
-    cannot spoof a match (mirrors `tan.core.fs_confine.resolve_confined`'s own
-    reasoning for the same comparison). Any resolution failure (a path shape
-    the host rejects outright) reads as "not under it" -- the caller treats
-    that as grounds for a WARNING, never a hard failure.
-    """
-    try:
-        return workspace_root.resolve().is_relative_to(Path(root).resolve())
-    except (OSError, ValueError):
-        return False
-
-
-def global_default_pointer_fix_hint(native_path: str) -> str:
+def global_default_pointer_fix_hint(native_path: str, native_registry_path: str) -> str:
     """How to fix -- or safely clear -- an already-written `~/.alp/sdk-
-    default` pointer by hand, given its OS-native absolute path (the caller's
-    to compute: `_home_alp_dir() / "sdk-default"`, rendered through whatever
-    this-platform-separator helper it already has -- `bootstrap_cmd._native`
-    for its callers).
+    default` pointer (`native_path`) AND its origin-keyed sibling
+    `~/.alp/sdk-defaults.json` (`native_registry_path`, tan-cli#466) by hand.
+    Both are the caller's to compute -- `_home_alp_dir() / "sdk-default"` and
+    `sdk_default_registry.registry_path(_home_alp_dir())`, each rendered
+    through whatever this-platform-separator helper it already has
+    (`bootstrap_cmd._native` for its callers).
 
-    `_pointer_target` above degrades every read failure on this exact file
-    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and every
-    tier resolver (`resolve_sdk_tiered`) then falls through to the next tier
-    on that -- so DELETING the file is always a safe recovery, never a step
-    backwards; hand-editing its `"sdkPath"` field is the targeted fix when
-    the caller knows what it should say instead.
+    Names BOTH files, unconditionally, because tan-cli#466's registry is
+    consulted FIRST and a caller cannot tell from the fix-hint's call site
+    alone whether the answer it just got came from the registry or fell
+    through to the legacy pointer -- so a hint naming only one of them could
+    send a reader to edit the file that was not actually the one that
+    answered.
+
+    `_pointer_target` above degrades every read failure on the legacy file
+    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and
+    `sdk_default_registry.parse_registry` degrades every read/parse failure
+    on the registry the identical way, to `{}` -- both resolvers
+    (`resolve_sdk_tiered`) then fall through to the next tier on that, so
+    DELETING either or both files is always a safe recovery, never a step
+    backwards; hand-editing a `"sdkPath"` field is the targeted fix when the
+    caller knows what it should say instead.
 
     Shared so a caller describing this by hand cannot drift from what
-    `_pointer_target` actually reads. `bootstrap_cmd`'s workspace-relocation
-    and rollback-failure messages are why this exists (tan-cli#305 follow-
-    up): they used to send a user -- sometimes one already in a broken,
-    checkout-moved-but-rollback-incomplete state -- to `tan sdk switch
-    --global`, which refuses outright in this build. Naming the pointer file
-    directly, not the command, is also honest about the mechanism `switch`
-    itself would use once ported, so this will not go stale the moment that
-    disposition changes.
+    `_pointer_target`/`parse_registry` actually read. `bootstrap_cmd`'s
+    workspace-relocation and rollback-failure messages are why this exists
+    (tan-cli#305 follow-up): they used to send a user -- sometimes one
+    already in a broken, checkout-moved-but-rollback-incomplete state -- to
+    `tan sdk switch --global`, which refuses outright in this build. Naming
+    the pointer files directly, not the command, is also honest about the
+    mechanism `switch` itself would use once ported, so this will not go
+    stale the moment that disposition changes.
     """
     return (
-        f'delete {native_path} (tan falls through to the next SDK it can '
-        f'resolve), or edit its `"sdkPath"` field by hand'
+        f"delete {native_path} and/or {native_registry_path} (tan falls "
+        f'through to the next SDK it can resolve), or edit the "sdkPath" '
+        f"field(s) by hand"
     )
 
 
@@ -451,251 +366,11 @@ def empty_readiness(sdk_path: str) -> dict[str, Any]:
     }
 
 
-# ── the four-tier precedence chain ──────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class ActiveSdk:
-    """What `sdk current` reports: the active path (or `None`) and the tier that
-    produced it. `tier` is the wire string, camelCase, from `SdkSourceTier`.
-
-    `broken_project_pin` (tan-cli#263) is the raw `sdkPath` a workspace
-    `.alp/sdk-path` pointer held when that file existed but its target failed
-    the loader-script check -- `None` on every other path, including "no
-    pointer file at all". Set once, in the one tier that can discover it,
-    then carried through every LOWER tier this call falls through to: a caller
-    that reports the tier which finally answered must still be able to say a
-    pin existed and did not, rather than silently looking as deliberate as a
-    workspace that was never pinned in the first place. Distinct from a
-    SIXTH `sourceTier` value on purpose -- the tier that actually supplied
-    `path` stays accurate; this is a supplementary fact about a REJECTED
-    candidate, reported by the caller via `issues[]` instead.
-
-    `foreign_global_default_for` (tan-cli#464) is the SAME shape of fact for a
-    different silence: `~/.alp/sdk-default` is machine-global and
-    last-writer-wins across every project that ever relocated a checkout on
-    this host, so a caller resolving through the `globalDefault` tier from a
-    workspace that is neither the project the pointer was last written for
-    nor under the SDK it names is reading an answer left behind by SOMEONE
-    ELSE'S bootstrap -- silently, before this. Set only on the `globalDefault`
-    tier (the only one this ambiguity can apply to); `None` covers both "the
-    pointer was written for (or covers) this workspace" and "the pointer
-    predates `writtenFor` and carries no opinion at all" -- deliberately the
-    same as `broken_project_pin`'s "no pointer" case, since neither is
-    evidence of a mismatch."""
-
-    path: str | None
-    tier: str
-    broken_project_pin: str | None = None
-    foreign_global_default_for: str | None = None
-
-
-def _nearest_ancestor_sdk(start: Path) -> str | None:
-    """The nearest ENCLOSING checkout, walking `start`'s parents upward.
-    `start` itself is deliberately not probed -- every caller checks it first
-    (`tan_core::project::nearest_ancestor_sdk`).
-
-    This is what makes the documented Quickstart resolve: `tan --project
-    examples/<cat>/<name>` puts the workspace root levels BELOW the checkout it
-    was invoked from (tan-cli #101). The walk yields at most ONE path, so it can
-    never turn an otherwise-unambiguous resolution into an ambiguous `None`.
-    """
-    for ancestor in start.parents:
-        if _has_loader_script(ancestor):
-            return _to_posix(ancestor)
-    return None
-
-
-def discover_workspace_sdk(workspace_root: Path) -> str | None:
-    """Auto-discovery for the `discovery` tier: the workspace root itself or its
-    SIBLING `../alp-sdk`, else the nearest enclosing checkout. Two or more
-    candidates is ambiguous, which is `None` -- not a choice.
-
-    **Deliberately NOT `build_cmd.discover_sdk_root`**, which is a different
-    Rust function (`util.rs`'s `discover_sdk_root`) with a WIDER candidate set:
-    it also probes the child `<ws>/alp-sdk` and `../alp-sdk-upstream`, and takes
-    the first match rather than requiring uniqueness. `sdk current` must mirror
-    `tan_core::discover_workspace_sdk` instead, per `resolve_sdk_tiered`'s own
-    doc comment: the tier it reports has to be what build/validate/doctor would
-    actually resolve here, or `sourceTier: "discovery"` names a path no other
-    command agrees with. Reusing the build-side helper would be the tempting
-    de-duplication and it would make the report lie.
-    """
-    candidates: list[str] = []
-    lateral_hit = False
-
-    if _has_loader_script(workspace_root):
-        # Normalised BEFORE the dedup below: on Windows a root spelled with
-        # backslashes and its `parent/alp-sdk` sibling can name the same
-        # directory yet compare unequal as strings, which counted one SDK twice
-        # and reported "ambiguous".
-        candidates.append(_to_posix(workspace_root))
-        lateral_hit = True
-
-    # `parent != self` is pathlib's spelling of Rust's `Path::parent()` returning
-    # `None`: at a filesystem/drive root `Path("C:/").parent` is `Path("C:/")`
-    # itself, so an unguarded probe would invent a `C:/alp-sdk` candidate the
-    # Rust never considers -- flipping `sourceTier` from `none` to `discovery`
-    # for anyone whose cwd is a drive root.
-    parent = workspace_root.parent
-    if parent != workspace_root:
-        sibling = _to_posix(parent / "alp-sdk")
-        if _has_loader_script(Path(sibling)):
-            if sibling not in candidates:
-                candidates.append(sibling)
-            lateral_hit = True
-
-    # A strict fallback, gated on whether THIS folder's lateral probes answered
-    # -- never on the candidate count, which stays unchanged for a folder that
-    # resolved perfectly well but deduped against an earlier one.
-    if not lateral_hit:
-        ancestor = _nearest_ancestor_sdk(workspace_root)
-        if ancestor is not None:
-            candidates.append(ancestor)
-
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
-    """`--sdk-root` > project pin > global default > discovery > nothing
-    (`util.rs`'s `resolve_sdk_tiered` + `tan_core`'s `resolve_sdk_source_tier`).
-
-    `--sdk-root` is TERMINAL and returned as-is **even when it is not a
-    checkout** (I-31). That is not an oversight to tidy: a bad `--sdk-root`
-    surfaces as a `missing` readiness naming the path the user typed, where the
-    Pythonic `if not valid: continue` would silently fall through to a lower
-    tier and report a DIFFERENT SDK than the one they asked for.
-
-    Both pointer tiers are best-effort by contrast -- each is used only while it
-    still points at a real checkout -- so a stale pointer falls through instead
-    of locking the user out of every command. The project pin's own fallthrough
-    is not silent, though (tan-cli#263): its raw target survives on the
-    returned `ActiveSdk.broken_project_pin` no matter which lower tier ends up
-    answering, so a caller can report "this workspace IS pinned, and the pin
-    does not resolve" instead of looking indistinguishable from a workspace
-    that was never pinned at all -- exactly what let a `tan init` run under a
-    since-moved project silently re-resolve a DIFFERENT alp-sdk checkout with
-    `ok: true`, `issues: []`.
-
-    The `globalDefault` tier carries the SAME kind of silence one tier down
-    (tan-cli#464): it is one pointer shared by every project on the host, so a
-    caller resolving through it from a workspace the pointer was not written
-    for -- and that is not even under the SDK it names -- gets no signal that
-    a DIFFERENT project's bootstrap relocation is what actually decided this
-    answer. `foreign_global_default_for` names that project when this run hit
-    exactly that case; `None` when the pointer covers this caller, or predates
-    `writtenFor` and has no opinion. Resolution is unaffected either way --
-    the same root that would have been returned before this field existed
-    still is.
-    """
-    flag = (sdk_root or "").strip()
-    if flag:
-        return ActiveSdk(flag, "sdkRootFlag")
-
-    broken_project_pin: str | None = None
-    pin = _pointer_target(workspace_root / ".alp" / "sdk-path")
-    if pin is not None:
-        if _has_loader_script(Path(pin)):
-            return ActiveSdk(pin, "projectPin")
-        broken_project_pin = pin
-
-    default_pointer = _home_alp_dir() / "sdk-default"
-    default = _pointer_target(default_pointer)
-    if default is not None and _has_loader_script(Path(default)):
-        written_for = _pointer_written_for(default_pointer)
-        foreign = (
-            written_for
-            if written_for is not None
-            and not _workspace_under(workspace_root, written_for)
-            and not _workspace_under(workspace_root, default)
-            else None
-        )
-        return ActiveSdk(default, "globalDefault", broken_project_pin, foreign)
-
-    discovered = discover_workspace_sdk(workspace_root)
-    if discovered is not None:
-        return ActiveSdk(discovered, "discovery", broken_project_pin)
-
-    return ActiveSdk(None, "none", broken_project_pin)
-
-
-def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
-    """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
-    -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
-    `build_cmd.resolve_sdk_root_ladder`/`resolve_sdk_root_wide`), not just `sdk
-    current`. `None` when nothing was rejected, so every call site can do
-    `issue = project_pin_issue(broken, tier); if issue: issues.append(issue)`
-    unconditionally.
-
-    `tan build` is the caller this matters most for: a workspace whose pin
-    silently misses still gets a real build, against whichever SDK the ladder
-    fell through to, with no signal it was not the one `.alp/sdk-path` names
-    -- `sdk current` alone only helps someone already suspicious enough to run
-    it."""
-    if broken_project_pin is None:
-        return None
-    return Issue(
-        "sdk.project-pin-unresolved",
-        "warning",
-        f'.alp/sdk-path names "{broken_project_pin}", which does not resolve '
-        f"to an alp-sdk checkout from the current directory -- falling "
-        f"through to the {tier} tier instead.",
-    )
-
-
-def global_default_foreign_project_issue(foreign_global_default_for: str | None) -> Issue | None:
-    """The tan-cli#464 warning for a `globalDefault` answer that a DIFFERENT
-    project's bootstrap relocation actually decided: `~/.alp/sdk-default` is
-    one pointer, shared and last-writer-wins across every project that ever
-    relocates a checkout on this host, so the earlier of two projects can
-    silently start resolving the later one's SDK the moment the later one
-    bootstraps -- `ok: true`, `issues: []`, same as a caller that was never
-    pinned at all (the maintainer's own #464 repro).
-
-    `None` when `resolve_sdk_tiered` found nothing to warn about -- the
-    pointer covers this caller, or it predates `writtenFor` and carries no
-    opinion -- so every call site can do `issue =
-    global_default_foreign_project_issue(active.foreign_global_default_for);
-    if issue: issues.append(issue)` unconditionally, exactly like
-    `project_pin_issue`. Resolution itself is unchanged by this warning: the
-    root `sdk current` reports is the same root it would have reported before
-    this fix existed."""
-    if foreign_global_default_for is None:
-        return None
-    return Issue(
-        "sdk.global-default-foreign-project",
-        "warning",
-        f'The machine-global default SDK (~/.alp/sdk-default) was last set by '
-        f'a bootstrap relocation in "{foreign_global_default_for}", not by one '
-        f"here -- this workspace is falling through to that project's SDK, "
-        f"which may not be the checkout you expect. Pin this workspace "
-        f"explicitly with `--sdk-root <path>`, or bootstrap here, to stop "
-        f"relying on the shared default.",
-    )
-
-
-def sdk_resolution_issues(
-    broken_project_pin: str | None, tier: str, foreign_global_default_for: str | None
-) -> list[Issue]:
-    """`project_pin_issue` + `global_default_foreign_project_issue`, together,
-    in the order `flash`/`size`/`image` -- the three callers this actually
-    has -- append them: each used to compute this pair only on the happy
-    path and skip it on a manifest-gate early return.
-
-    **Not the only copy.** Twelve other modules still hand-copy the pair
-    directly rather than through here -- most fold in a third, caller-
-    specific issue or use a different order, not the mechanical swap it
-    looks like; left as-is (tan-cli#464 review).
-
-    `[]` when neither fires -- a caller can `issues.extend(...)` unconditionally."""
-    issues: list[Issue] = []
-    pin_issue = project_pin_issue(broken_project_pin, tier)
-    if pin_issue is not None:
-        issues.append(pin_issue)
-    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
-    if foreign_issue is not None:
-        issues.append(foreign_issue)
-    return issues
+# ── the install cache ────────────────────────────────────────────────────────
+# `ActiveSdk`/`resolve_sdk_tiered`/the project-pin and global-default `Issue`
+# builders moved to `tan.core.sdk_discovery` (tan-cli#408 review follow-up,
+# see the module docstring and the top-of-file import) -- `_run_current`
+# below imports them back from there.
 
 
 def _default_cache_root() -> Path:
@@ -1052,14 +727,25 @@ def _fail(
     message: str,
     text_lines: list[str],
     exit_code: ExitCode = ExitCode.RUNTIME_FAILURE,
+    issues: list[Issue] | None = None,
 ) -> None:
-    """A refusal: the given payload plus exactly one `sdk.<code>` error issue.
+    """A refusal: the given payload plus the `sdk.<code>` error issue.
     `exit_code` reaches the envelope as well as the process, so `ok` and
-    `exitCode` can never disagree."""
+    `exitCode` can never disagree.
+
+    `issues` is ADDITIVE, and always FOLLOWS the refusal (tan-cli#1051): the
+    error a caller is being refused for stays `issues[0]` on every branch, so
+    the `issues[0]["code"] == "sdk.<...>"` reading every existing test and
+    consumer does keeps meaning "the reason this failed" rather than
+    "whichever warning happened to be computed first". Its one caller so far
+    is `sdk remove`, carrying the `sdk.project-pin-unresolved` warning for a
+    `.alp/sdk-path` that no longer resolves -- a fact about the workspace that
+    is equally true whether the removal was refused, idempotent, or done, and
+    that must therefore reach the refusal branches too."""
     _emit(
         json_mode=json_mode,
         data=data,
-        issues=[Issue(f"sdk.{code}", "error", message)],
+        issues=[Issue(f"sdk.{code}", "error", message), *(issues or [])],
         exit_code=exit_code,
         text_lines=text_lines,
     )
@@ -1083,7 +769,7 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         # and printed "get an alp-sdk checkout (`git clone ...`)", while
         # `doctor`, `build`, `validate`, `inspect` and `trace` in that SAME cwd
         # all reported `<ws>/alp-sdk` at `sourceTier: "discovery"` through
-        # `build_cmd.resolve_sdk_root_ladder` -- whose own docstring names `sdk
+        # `tan.core.sdk_discovery.resolve_sdk_root_ladder` -- whose own docstring names `sdk
         # current` as one of its thirteen callers, and whose wide-walk TAIL is
         # the tier missing here. `discover_workspace_sdk`'s docstring states the
         # invariant this broke: "the tier it reports has to be what
@@ -1100,11 +786,11 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         # itself is reused rather than its tail re-implemented: this can add an
         # answer where there was none, never change one that already existed
         # (which would move the SDK root under a live workspace), and there is
-        # no third copy of the tier rule to keep true. Function-level import for
-        # the same one-way dependency `build_cmd` -> this module documented at
-        # `sdk_ladder_divergence_issue`'s call site below.
-        from tan.commands.build_cmd import resolve_sdk_root_ladder
-
+        # no third copy of the tier rule to keep true. `resolve_sdk_root_ladder`
+        # is imported at module level, from `tan.core.sdk_discovery`, alongside
+        # `resolve_sdk_tiered` and `ActiveSdk` (tan-cli#408 review follow-up) --
+        # no cycle between this module and that one exists any more, in either
+        # direction.
         ladder = resolve_sdk_root_ladder(sdk_root, workspace_root)
         if ladder.path is not None:
             active = ActiveSdk(
@@ -1153,11 +839,8 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
     # user runs to ask "which SDK am I on?", and in a workspace holding both a
     # child `<ws>/alp-sdk` and a lateral `../alp-sdk` it answers with the
     # narrow one only -- reporting the readiness and VERSION of the checkout
-    # `tan generate` did not use. Function-level import because `build_cmd`
-    # imports THIS module at line 97; the same one-way dependency
-    # `build/manifest.py` works around the same way.
-    from tan.commands.build_cmd import sdk_ladder_divergence_issue
-
+    # `tan generate` did not use. `sdk_ladder_divergence_issue` is imported at
+    # module level, from `tan.core.sdk_discovery` (tan-cli#408).
     divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
     if divergence is not None:
         text = [*text, divergence.message]
@@ -1257,7 +940,8 @@ def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -
 
     Exit 1 (`RuntimeFailure`) -- the same code every other refusal in this
     module already uses (`sdk list` without `--online`, a bare `tan sdk`) and
-    the same one the deferred-verb stubs in `deferred_cmd` settled on.
+    the same one the seven deferred-verb stubs settled on before they shipped
+    (tan-cli#260; their module is gone as of tan-cli#427).
 
     This was exit 5 (`InternalFailure`) until #262, on a docstring that
     justified it as "following `validate_cmd`'s precedent for its own unported
@@ -1309,6 +993,610 @@ def _run_unknown(*, json_mode: bool, subcommand: str | None) -> None:
     )
 
 
+# ── sdk remove (tan-cli#790) ─────────────────────────────────────────────────
+#
+# The one destructive verb in this file, so it earns its own section rather
+# than living beside `install`/`switch`'s refusal stubs. Designed for
+# long-term customer experience the way the maintainer's own standing
+# direction for this class of question asks, spelled out here once rather
+# than re-derived at every call site below:
+#
+#   * an install that is currently load-bearing -- the ACTIVE resolution for
+#     this workspace, the machine-global default, or a project's own
+#     registered pin -- refuses to be removed without `--force`
+#     ([`_load_bearing_reasons`]); silently orphaning any of the three is a
+#     worse failure than a refusal that names exactly what would break;
+#   * removal is IDEMPOTENT: a target that is already absent succeeds at
+#     `data.removed: false`, so a rotation script never has to pre-check;
+#   * a target outside the cache root refuses without `--force` too -- the
+#     footgun guard `is_outside_cache_root` exists for -- but ONLY once it is
+#     confirmed to exist, so an idempotent no-op never trips it;
+#   * the cache ROOT ITSELF -- every install at once, not one of them --
+#     refuses without `--force` too (`is_cache_root_itself`): the outside-root
+#     guard above deliberately does NOT catch this (`target == destination` is
+#     not "outside"), and no version is individually load-bearing for its own
+#     root, so this was the one target `--force`-less `remove` could wipe the
+#     whole cache with, found live during this review;
+#   * every failure names WHAT blocked it (`sdk.remove-active`,
+#     `sdk.remove-outside-root`, `sdk.remove-is-cache-root`,
+#     `sdk.remove-in-use`, `sdk.remove-permission` -- flat, ONE dot, not the
+#     nested `sdk.remove.active` shape the issue's own prose sketches:
+#     `contract/issue-codes.json`'s `sdk.remove-missing-argument` entry
+#     explains why nested is not available on this wire) and what to do
+#     instead (`--force`, for the first three; close the holder, for the
+#     fourth; fix the permissions/attributes by hand, for the fifth) -- the
+#     issue's own bar: "the refusal messages must name what blocked it and
+#     what to do instead".
+#
+# TWO follow-ups closed on top of that design, both about the same refusal.
+#
+# tan-cli#1053 -- the four comparisons behind it were a plain string `==`,
+# which answers the question the CALLER asked rather than the one the
+# FILESYSTEM would answer. On a case-INSENSITIVE volume (NTFS, and macOS's
+# DEFAULT APFS volume -- so this reproduced on a maintainer laptop, not only
+# on Windows) two spellings name ONE directory and compare unequal, so the
+# refusal never fired and the install was removed without `--force`. All four
+# now go through `sdk_removal.removal_would_take_out`, whose own section
+# banner carries the platform reasoning and the limits it still has.
+#
+# tan-cli#1051 -- `remove` deletes the install a workspace's `.alp/sdk-path`
+# names but never touches that FILE, so a forced removal leaves the pin
+# dangling, and `data.resolvesToAfter` then reports `sourceTier: "none"` --
+# which is also what a workspace that was never pinned reports. Measured: the
+# removal came back `issues: []` while `sdk current` in the same directory a
+# moment later carried `sdk.project-pin-unresolved` naming the dangling
+# pointer; two commands disagreeing about one workspace was the defect. Every
+# `_emit`/`_fail` call site below now carries that same warning (`_fail`
+# takes an ADDITIVE `issues` list for it, after the refusal, so `issues[0]`
+# still names what blocked the removal) on EVERY branch -- refusal,
+# idempotent no-op, removal failure, success -- because a dangling pin is a
+# fact about the workspace, not about whether this call deleted anything.
+#
+# The warning carries `resolvesToAfter`'s OWN narrow tier, which is not always
+# the tier `sdk current` names for the same workspace at the same instant.
+# Measured, in the tan-cli#497 workspace shape (a child `<ws>/alp-sdk`, which
+# only the WIDE `resolve_sdk_root_ladder` tail finds):
+#
+#     sdk remove --force : "... falling through to the none tier instead."
+#     sdk current        : "... falling through to the discovery tier instead."
+#
+# That divergence is inherited, not introduced: `resolvesToAfter` has reported
+# the narrow ladder's answer since tan-cli#1028, on the deliberate ground that
+# `remove`'s reported outcome must come from the SAME ladder `remove`'s own
+# refusal consulted (see `_resolves_to_after`'s docstring). Feeding the warning
+# the WIDE tier instead would leave one envelope saying `sourceTier: "none"` in
+# `data` while its own `issues[]` said "falling through to the discovery tier"
+# -- a fresh contradiction inside a single response. Widening BOTH would change
+# a released contract field for exactly that workspace shape and undo
+# tan-cli#1028's stated design. So the warning stays narrow and internally
+# consistent, and the claim that the two commands emit the identical issue --
+# which an earlier draft of this change made in its changelog and pinned with a
+# test that had no discoverable checkout and so passed vacuously -- is simply
+# withdrawn. What IS true, and is what tan-cli#1051 asked for, is that `sdk
+# remove` no longer stays SILENT about a pin `sdk current` warns about.
+#
+# REPORTING, not repair, deliberately: clearing `.alp/sdk-path` was the other
+# live option and is rejected. `--force` on `remove <version>` is consent to
+# delete THAT INSTALL, not consent to rewrite a workspace config file the
+# caller never named, and every refusal above fires BEFORE any filesystem
+# write precisely so the target is the only thing this verb touches. Repair
+# would also be structurally partial -- `remove` can only reach the ONE
+# workspace it ran in, while every OTHER project on the host pinned at the
+# same install stays dangling either way, and only a report can reach those.
+#
+# `sdk list`'s proposed `managed`/`active` columns (tan-cli#790's own "related
+# gap" aside) are deliberately OUT of this change: `sdk list` today reports
+# UPSTREAM GitHub releases, not local installs, so a per-release
+# managed/active flag has no local install to describe until `sdk
+# install`/`sdk switch` are themselves ported (tan-cli#305) -- tracked
+# separately, not bundled into a single-verb change.
+
+
+def _sdk_default_pointer_target() -> str | None:
+    """`~/.alp/sdk-default`'s own `sdkPath`, read DIRECTLY rather than through
+    `resolve_sdk_tiered`. That ladder only ever reports the ONE tier that
+    wins for the CALLER's workspace, and the plain machine-global pointer can
+    name a checkout this workspace's own project pin or registry entry
+    outranks -- so it would never surface as `active.path` here -- while
+    still being exactly what removing it would orphan for every OTHER,
+    unregistered project on the host that falls through to it. `None` on any
+    read/parse failure, the same degrade `_pointer_target` already applies to
+    a missing or malformed pointer.
+    """
+    return _pointer_target(_home_alp_dir() / "sdk-default")
+
+
+def _registered_entries_for(target_posix: str) -> list[tuple[str, str]]:
+    """Every `~/.alp/sdk-defaults.json` `(origin, normalised sdkPath)` whose
+    `sdkPath` names `target_posix` (posix-normalised, matching how the
+    registry itself stores it -- `bootstrap_cmd._write_global_sdk_registry`'s
+    own `_to_posix` write). Sorted for a deterministic message; `[]` on any
+    read/parse failure, matching `parse_registry`'s own best-effort contract.
+
+    Returns the matched SPELLING alongside the origin, not just the origin,
+    because the two callers need it at two different moments: the refusal
+    names the origin BEFORE anything is deleted, while the prune runs AFTER
+    `remove_sdk_tree` -- by which point the target directory is gone and the
+    filesystem arm of `removal_would_take_out` can no longer recognise an
+    alias spelling at all (see `_prune_registry_entries_for`).
+    """
+    raw = _read_file(registry_path(_home_alp_dir()))
+    registry = parse_registry(raw)
+    return sorted(
+        (origin, normalized_sdk_path(sdk_path))
+        for origin, sdk_path in registry.items()
+        # Separator-folded AND platform-compared, never a raw `==` (which is
+        # what this was through tan-cli#1053): a hand-edited registry on
+        # Windows spells the same directory with backslashes,
+        # `normalized_sdk_path` folds those; a case-INSENSITIVE volume (NTFS,
+        # or macOS's default APFS) spells it in another case, and a symlinked
+        # cache spells it through the link -- `removal_would_take_out` is
+        # what answers those. Missing the match here does not merely skip a
+        # tidy-up: this removal then does NOT refuse and silently orphans that
+        # project.
+        if removal_would_take_out(normalized_sdk_path(sdk_path), target_posix)
+    )
+
+
+def _load_bearing_reasons(
+    target_posix: str, active: ActiveSdk, registered: list[tuple[str, str]]
+) -> list[str]:
+    """Every reason removing `target_posix` right now would orphan something
+    live -- the tan-cli#790 design bar itself: "silently orphaning either [the
+    active install or a pinned one] is a worse failure than refusing". `[]`
+    means safe to remove without `--force`. More than one reason can apply at
+    once (the active install for THIS workspace can also be another
+    project's registered default), and the caller reports all of them rather
+    than only the first.
+
+    `registered` is passed IN rather than looked up here (tan-cli#1053
+    review): the caller has to compute it before `remove_sdk_tree` runs
+    anyway, so that the prune afterwards can still recognise the alias
+    spellings whose directory no longer exists, and computing it twice would
+    be two registry reads that can disagree.
+    """
+    reasons: list[str] = []
+    # `removal_would_take_out`, not `==` (tan-cli#1053) -- on a
+    # case-insensitive volume, or through a symlinked cache, two spellings
+    # name ONE directory and a raw string compare answers this in the UNSAFE
+    # direction: no reason is collected, nothing refuses, the workspace is
+    # orphaned.
+    if active.path is not None and removal_would_damage(_abs_posix(active.path), target_posix):
+        reasons.append(f'the active alp-sdk for this workspace (sourceTier "{active.tier}")')
+    default_target = _sdk_default_pointer_target()
+    if default_target is not None and removal_would_damage(
+        _abs_posix(default_target), target_posix
+    ):
+        reasons.append("the machine-global default SDK (~/.alp/sdk-default)")
+    named = {origin for origin, _sdk_path in registered}
+    # `registered` holds entries the removal destroys (equal to, or inside,
+    # the target); an entry whose install CONTAINS the target is damaged too.
+    named |= _registered_containing(target_posix, named)
+    for origin in sorted(named):
+        reasons.append(f'the registered global default for project "{origin}"')
+    return reasons
+
+
+def _registered_containing(target_posix: str, already: set[str]) -> set[str]:
+    """Origins of registry entries whose install CONTAINS `target_posix` (a
+    subtree removal damages them without deleting them), minus `already`."""
+    raw = _read_file(registry_path(_home_alp_dir()))
+    return {
+        origin
+        for origin, sdk_path in parse_registry(raw).items()
+        if origin not in already
+        and removal_would_damage(normalized_sdk_path(sdk_path), target_posix)
+    }
+
+
+def _prune_registry_entries_for(target_posix: str, registered: list[tuple[str, str]]) -> None:
+    """Best-effort: drop every `~/.alp/sdk-defaults.json` entry naming the
+    just-removed `target_posix` -- keeps tan-cli#905's registry honest about
+    what still resolves (`sdk_default_registry.prune_entries_by_sdk_path`),
+    the same read-modify-write shape `bootstrap_cmd._write_global_sdk_registry`
+    already uses for the ORIGIN-pruning half of the identical file. Silent on
+    any failure, matching every other best-effort registry write in this
+    codebase: the removal itself already succeeded by the time this runs, and
+    a registry entry this call could not prune degrades no worse than it
+    already would have before this function existed (`deepest_covering_entry`
+    skips a covering entry whose `sdkPath` fails `_has_loader_script`, so a
+    dead entry left behind answers nobody incorrectly -- it is merely not yet
+    tidied).
+
+    `registered` is the match set computed BEFORE `remove_sdk_tree` ran, and
+    it is what makes this the FIFTH site of tan-cli#1053 rather than a sixth
+    defect (review): this function is called after the target directory is
+    gone, so `removal_would_take_out`'s filesystem arm has nothing left to
+    compare `st_dev`/`st_ino` against and an alias-spelled entry -- the very
+    entry the refusal above correctly named -- would be refused and then NOT
+    pruned, leaving the registry claiming a checkout this call just deleted.
+    Measured exactly that way on the first version of this change. The
+    lexical arm still runs for anything `registered` did not capture (an
+    entry written between the two moments), so this widens the prune and
+    never narrows it.
+    """
+    try:
+        path = registry_path(_home_alp_dir())
+        raw = path.read_text(encoding="utf-8") if path.is_file() else None
+        matched_before_removal = frozenset(sdk_path for _origin, sdk_path in registered)
+
+        def matches(stored: str, target: str) -> bool:
+            return stored in matched_before_removal or removal_would_take_out(stored, target)
+
+        pruned = prune_entries_by_sdk_path(
+            load_raw(raw), sdk_path=target_posix, matches=matches
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(path), registry_text(pruned))
+    except Exception:  # noqa: BLE001 -- best-effort, matching every other registry write
+        pass
+
+
+class _AfterRemoval(NamedTuple):
+    """What `sdk remove` reports about the workspace once this call is done:
+    the `data.resolvesToAfter` payload, and the issues that payload alone
+    cannot express (tan-cli#1051). Paired in ONE return value so a call site
+    physically cannot take the payload and drop the warning -- the shape the
+    defect had before this."""
+
+    data: dict[str, Any]
+    issues: list[Issue]
+
+
+def _resolves_to_after(workspace_root: Path) -> _AfterRemoval:
+    """The narrow `resolve_sdk_tiered` answer for `workspace_root` right now
+    -- tan-cli#1028's answer to "what resolves after this removal". This is
+    NOT necessarily what `tan sdk current` would report for the same
+    workspace at the same instant: it reuses `resolve_sdk_tiered`, the SAME
+    narrow ladder `_load_bearing_reasons`'/`active` above already call
+    (`resolve_sdk_tiered(None, workspace_root)`, `sdk_root` never threaded
+    through from the `--sdk-root` flag either), so `remove`'s own load-bearing
+    refusal logic and its `resolvesToAfter` answer are always asking the same
+    question of the same ladder -- but `_run_current` falls through to the
+    WIDE `resolve_sdk_root_ladder` tail when the narrow ladder finds nothing
+    (tan-cli#497 defect 1) and honours an explicit `--sdk-root`. Neither
+    fallback runs here, so this can report a tier -- or `"none"` -- one below
+    what `sdk current` would say for the identical workspace right after this
+    call returns. Consistency with `remove`'s own refusal ladder wins over
+    parity with `sdk current`'s wider answer; a caller that needs the wider
+    answer still makes the separate `sdk current` call.
+
+    Called at EVERY `_remove_data` call site below, not only on a load-bearing
+    removal (tan-cli#1028's own design question, answered: an always-present
+    field is easier for a caller to code against than one that appears only
+    sometimes). Computed FRESH at each call site -- after `remove_sdk_tree` on
+    the branches that delete something, unchanged on every
+    refusal/idempotent/failed branch -- so it is truthful on both without a
+    second "did this call mutate the tree" flag to keep in sync with the first.
+
+    Mirrors `sdk current`'s own `data` SHAPE (`sdkPath`, `readiness`,
+    `sourceTier`) rather than inventing a fourth shape for the same question
+    -- a caller that already knows how to read `sdk current`'s answer does
+    not have to learn a second shape -- and the no-SDK-resolves case -- the
+    one a caller most needs told about after a load-bearing removal -- comes
+    back exactly as `sdk-current-no-sdk` pins it: `sdkPath: null`, `readiness:
+    null`, `sourceTier: "none"`.
+
+    That `"none"` reading is also why this returns ISSUES beside the payload
+    (tan-cli#1051): a force-removed project pin is left DANGLING, and
+    `"none"` alone cannot be told apart from a never-pinned workspace. The
+    `project_pin_issue` helper is called on the SAME `ActiveSdk` -- so the
+    same NARROW tier -- this payload is built from, so warning and payload
+    can never name different tiers for one workspace. It is NOT the
+    byte-identical issue `sdk current` emits: see the section banner.
+    """
+    resolved = resolve_sdk_tiered(None, workspace_root)
+    data = {
+        "sdkPath": resolved.path,
+        "readiness": check_sdk_readiness(resolved.path) if resolved.path is not None else None,
+        "sourceTier": resolved.tier,
+    }
+    pin_issue = project_pin_issue(resolved.broken_project_pin, resolved.tier)
+    return _AfterRemoval(data, [pin_issue] if pin_issue is not None else [])
+
+
+def _remove_data(
+    *,
+    removed: bool,
+    path: str | None,
+    version: str | None,
+    was_active: bool,
+    freed_bytes: int,
+    resolves_to_after: dict[str, Any],
+) -> dict[str, Any]:
+    """`sdk remove`'s payload shape, built at every call site through this one
+    function so a field can never drift between the idempotent, refused and
+    successful arms below."""
+    return {
+        "subcommand": "remove",
+        "removed": removed,
+        "path": path,
+        "version": version,
+        "wasActive": was_active,
+        "freedBytes": freed_bytes,
+        "resolvesToAfter": resolves_to_after,
+    }
+
+
+def _run_remove(
+    *,
+    json_mode: bool,
+    arg: str | None,
+    destination_arg: str | None,
+    force: bool,
+    workspace_root: Path,
+) -> None:
+    """`tan sdk remove <version|path>` (tan-cli#790) -- see the section banner
+    above this function for the design this implements. Every refusal fires
+    BEFORE any filesystem write, so the three possible outcomes -- refused,
+    idempotently already-absent, or removed -- are the only ones a caller
+    ever has to handle; nothing here can leave a target partially gone in a
+    way a rerun cannot cleanly finish or recover from.
+
+    `active`/`was_active` are resolved ONCE, right after the target itself,
+    and threaded through every branch below (including every refusal) rather
+    than recomputed per-branch -- so `data.wasActive` is truthful on the
+    outside-root refusal too, not just on the one branch that refuses BECAUSE
+    of it.
+    """
+    raw_arg = (arg or "").strip()
+    if not raw_arg:
+        after = _resolves_to_after(workspace_root)
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=None,
+                version=None,
+                was_active=False,
+                freed_bytes=0,
+                resolves_to_after=after.data,
+            ),
+            issues=after.issues,
+            code="remove-missing-argument",
+            message=(
+                "`sdk remove` needs a version name (looked up under --destination) "
+                "or an explicit path naming the install to remove."
+            ),
+            text_lines=[
+                "sdk remove: needs a version or path argument, e.g. `tan sdk remove v0.15.0`."
+            ],
+        )
+        return
+
+    destination = Path(destination_arg).expanduser() if destination_arg else _default_cache_root()
+    resolution = resolve_removal_target(raw_arg, destination)
+    target = resolution.target
+    target_posix = _abs_posix(str(target))
+    version = raw_arg if resolution.is_named_version else None
+
+    active = resolve_sdk_tiered(None, workspace_root)
+    # The SAME helper `_load_bearing_reasons` compares with (tan-cli#1053), not
+    # a second rule: this one is reporting-only, but two comparisons of one
+    # fact that can disagree are a defect waiting to be re-found. Argument
+    # ORDER is load-bearing -- the active install is the CANDIDATE, the thing
+    # being removed is the TARGET -- because the predicate is asymmetric about
+    # symlinks (see its section banner).
+    active_posix = _abs_posix(active.path) if active.path is not None else None
+    was_active = active_posix is not None and removal_would_damage(
+        active_posix, target_posix
+    )
+
+    # `os.path.lexists`, NOT `target.exists()`: the latter FOLLOWS a link, so a
+    # BROKEN symlink or a junction whose target is gone -- an ordinary leftover in
+    # a cache that has had an install removed out from under a `current ->` style
+    # pointer -- reports False while the link itself is still very much on disk.
+    # Answering "already absent" there breaks the idempotence this branch exists to
+    # provide (tan-cli#790's own point 3): the rotation script that trusted the
+    # success then fails on the NEXT install with a path that already exists.
+    # Everything downstream of this gate already handles the link case correctly --
+    # `compute_tree_bytes` charges the link's OWN lstat size, and
+    # `dir_removal.remove_dir` unlinks the link itself rather than following it --
+    # so this predicate was the single place the link was invisible.
+    if not os.path.lexists(target):
+        after = _resolves_to_after(workspace_root)
+        _emit(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+                resolves_to_after=after.data,
+            ),
+            issues=after.issues,
+            exit_code=ExitCode.SUCCESS,
+            text_lines=[f"sdk remove: nothing at {target_posix} -- already absent."],
+        )
+        return
+
+    # Checked BEFORE the outside-root guard, and separately from it:
+    # `is_outside_cache_root` deliberately answers False for `target ==
+    # destination` (a caller CAN name the root on purpose), which left the
+    # single most destructive target -- the whole cache, every version at
+    # once -- completely unguarded: `_load_bearing_reasons` only ever names a
+    # specific version subdirectory, never the root that holds them, so
+    # nothing else in this function would have refused it either. Found live
+    # (`tan sdk remove .` from inside an otherwise-empty cache root, `ok:
+    # true`, no `--force`) -- see `sdk_removal.is_cache_root_itself`.
+    if is_cache_root_itself(target, destination) and not force:
+        after = _resolves_to_after(workspace_root)
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+                resolves_to_after=after.data,
+            ),
+            issues=after.issues,
+            code="remove-is-cache-root",
+            message=(
+                f'"{target_posix}" IS the SDK cache root itself; removing it '
+                "would delete every install under it at once, not a single "
+                "one. Pass --force to remove the entire cache root, or name "
+                "a specific version or path to remove one install."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is the cache root; refusing without --force."
+            ],
+        )
+        return
+
+    if is_outside_cache_root(target, destination) and not force:
+        after = _resolves_to_after(workspace_root)
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+                resolves_to_after=after.data,
+            ),
+            issues=after.issues,
+            code="remove-outside-root",
+            message=(
+                f'"{target_posix}" is outside the SDK cache root '
+                f'"{_abs_posix(str(destination))}". Pass --force to remove an '
+                "explicit path outside the managed cache."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is outside the cache root; refusing without --force."
+            ],
+        )
+        return
+
+    if not resolution.is_named_version:
+        version = check_sdk_readiness(str(target)).get("version")
+
+    # Computed BEFORE any removal and threaded through both users: the prune
+    # at the end of this function runs once the target is gone, and cannot
+    # re-derive an alias match from a filesystem that no longer has it.
+    registered = _registered_entries_for(target_posix)
+    reasons = _load_bearing_reasons(target_posix, active, registered)
+    if reasons and not force:
+        after = _resolves_to_after(workspace_root)
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+                resolves_to_after=after.data,
+            ),
+            issues=after.issues,
+            code="remove-active",
+            message=(
+                f'"{target_posix}" is currently load-bearing: it is '
+                + "; and it is ".join(reasons)
+                + ". Pass --force to remove it anyway."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is still in use; refusing without --force."
+            ],
+        )
+        return
+
+    outcome: RemovalOutcome = remove_sdk_tree(target)
+    if not outcome.ok:
+        failing = (outcome.failing_path or target_posix).replace("\\", "/")
+        after = _resolves_to_after(workspace_root)
+        failure_data = _remove_data(
+            removed=False,
+            path=target_posix,
+            version=version,
+            was_active=was_active,
+            freed_bytes=outcome.freed_bytes,
+            # Recomputed AFTER the attempt, not carried from the pre-attempt
+            # `active` above: `remove_sdk_tree` can fail partway through a
+            # multi-entry tree (`outcome.freed_bytes` above is already
+            # partial-attempt-aware for the identical reason), so the
+            # resolution has to be re-read from the filesystem it just
+            # touched rather than assumed unchanged.
+            resolves_to_after=after.data,
+        )
+        # TWO literal `code=` call sites, deliberately not one dynamic
+        # `f"remove-{outcome.kind}"`: `test_every_issue_code_is_registered.py`
+        # can only resolve a `code=` keyword argument to a registered wire
+        # string when it is a literal at the call site, exactly the same
+        # non-vacuity discipline that gate applies to every OTHER command in
+        # this codebase.
+        if outcome.kind == "in-use":
+            _fail(
+                json_mode=json_mode,
+                data=failure_data,
+                issues=after.issues,
+                code="remove-in-use",
+                message=(
+                    f"could not remove {failing}: {outcome.detail} -- another "
+                    "process still holds this open; close whatever has it open "
+                    "(a shell, a build, an editor, an indexer) and retry."
+                ),
+                text_lines=[f"sdk remove: failed removing {target_posix} (in-use)."],
+            )
+        else:
+            _fail(
+                json_mode=json_mode,
+                data=failure_data,
+                issues=after.issues,
+                code="remove-permission",
+                message=(
+                    f"could not remove {failing}: {outcome.detail} -- tan could "
+                    "not clear the permissions/attributes blocking this; check "
+                    "ownership/ACLs on the path above, or remove it by hand with "
+                    "elevated privileges."
+                ),
+                text_lines=[f"sdk remove: failed removing {target_posix} (permission)."],
+            )
+        return
+
+    _prune_registry_entries_for(target_posix, registered)
+    # tan-cli#1498: a forced subtree removal also damages entries whose
+    # install CONTAINS the target. Those are not pruned (the install they
+    # name still exists), so say so rather than leaving them silent.
+    containing = sorted(_registered_containing(target_posix, {o for o, _p in registered}))
+    after = _resolves_to_after(workspace_root)
+    if containing:
+        after = _AfterRemoval(
+            after.data,
+            [
+                *after.issues,
+                *[
+                    Issue(
+                        "sdk.remove-registry-entry-damaged",
+                        "warning",
+                        f'the registered global default for project "{origin}" names an '
+                        f"install that contained {target_posix}; it was left in "
+                        f"~/.alp/sdk-defaults.json but is now incomplete -- restore "
+                        f"that SDK or remove that registry entry.",
+                    )
+                    for origin in containing
+                ],
+            ],
+        )
+    _emit(
+        json_mode=json_mode,
+        data=_remove_data(
+            removed=True,
+            path=target_posix,
+            version=version,
+            was_active=was_active,
+            freed_bytes=outcome.freed_bytes,
+            resolves_to_after=after.data,
+        ),
+        issues=after.issues,
+        exit_code=ExitCode.SUCCESS,
+        text_lines=[f"sdk remove: removed {target_posix} ({outcome.freed_bytes} bytes freed)."],
+    )
+
+
 # ── the command ─────────────────────────────────────────────────────────────
 
 
@@ -1317,19 +1605,30 @@ def sdk(
         None,
         metavar="SUBCOMMAND",
         help=(
-            "list, current, install, or switch. install/switch are not yet "
-            "ported and refuse in this build -- use --sdk-root instead "
+            "list, current, install, switch, or remove. install/switch are not "
+            "yet ported and refuse in this build -- use --sdk-root instead "
             "(tan-cli#305)."
         ),
     ),
     arg: str = typer.Argument(
-        None, metavar="ARG", help="Version for install, version|path for switch."
+        None,
+        metavar="ARG",
+        help="Version for install, version|path for switch/remove.",
     ),
-    # Accepted and unused: `--destination` only steers `install`/`switch` cache-root
-    # resolution, neither of which is ported. Kept in the surface because dropping
-    # it would turn an argv the shipped Rust binary accepts into a usage error.
+    # `--destination` steers `install`/`switch` cache-root resolution (neither
+    # ported, tan-cli#305) AND `remove`'s (tan-cli#790, live): a bare version
+    # name is looked up under this root, and it is the root `remove`'s
+    # outside-root footgun guard is measured against.
     destination: str = typer.Option(
         None, "--destination", metavar="PATH", help="SDK cache root (default: ~/.alp/sdk-cache)."
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "With remove: also remove the active/pinned install, or a path "
+            "outside the cache root."
+        ),
     ),
     global_: bool = typer.Option(
         False, "--global", help="With switch: pin the machine-global default."
@@ -1384,6 +1683,14 @@ def sdk(
                     "version": None,
                     "scope": "global" if global_ else "project",
                 },
+            )
+        elif subcommand == "remove":
+            _run_remove(
+                json_mode=json_mode,
+                arg=arg,
+                destination_arg=destination,
+                force=force,
+                workspace_root=workspace_root,
             )
         else:
             _run_unknown(json_mode=json_mode, subcommand=subcommand)

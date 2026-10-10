@@ -61,18 +61,19 @@ import typer
 
 from tan.commands import flash_cmd
 from tan.commands.build import execute
-from tan.commands.build_cmd import (
-    BuildError,
-    _abs_posix,
-    _build,
-    _is_sdk_root,
-    resolve_sdk_root_ladder,
-)
-from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.commands.build_cmd import BuildError, _build
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
+from tan.core.sdk_discovery import (
+    _abs_posix,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+)
+from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
+from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -141,7 +142,7 @@ def _exec_native_sim(exe: str) -> tuple[bool, int | None]:
     doc."""
     print(f"run: executing {exe}", file=sys.stderr)
     try:
-        proc = subprocess.run([exe])
+        proc = subprocess.run([exe], env=spawn_env())
         return proc.returncode == 0, proc.returncode
     except OSError as err:
         print(f"run: failed to launch {exe}: {err}", file=sys.stderr)
@@ -260,6 +261,12 @@ def _run(
     # stubbing `flash_cmd._run` themselves. `False` preserves the exact
     # pre-#809 behaviour for every one of them.
     confirm: bool = False,
+    # tan-cli#1252: defaulted for the same reason `confirm` above is -- the
+    # tests that call `_run` directly predate it and reach paths it never
+    # touches.
+    atoc_unqueryable: bool = False,
+    # tan-cli#1267: defaulted for the same reason.
+    replace_atoc: bool = False,
 ) -> tuple[ExitCode, dict[str, Any] | None, list[Issue], list[str]]:
     """Everything between the resolved paths and the envelope. Returns
     `(exit_code, data, issues, text_lines)`."""
@@ -294,22 +301,24 @@ def _run(
     manifest_written, native_sim_target = execute.last_manifest_write()
 
     action = decide_run_action(build_ok, native_sim_target, flash, manifest_written)
+    # tan-cli#1267 review: the two ATOC flags only mean something to a write.
+    ignored = _ignored_flash_flags(action, replace_atoc, atoc_unqueryable)
 
     if action in (RunAction.BUILD_FAILED, RunAction.BUILD_ONLY):
         text = _build_text_lines(build_data, build_issues)
         if action is RunAction.BUILD_ONLY and not json_mode:
             text.append("run: built; pass --flash to program the board.")
-        return build_exit, build_data, build_issues, text
+        return _with_ignored(ignored, (build_exit, build_data, build_issues, text))
 
     if action is RunAction.MANIFEST_STALE:
         issues = [*build_issues, Issue("run.manifest-stale", "error", _MANIFEST_STALE_MESSAGE)]
         text = _build_text_lines(build_data, build_issues) + [_MANIFEST_STALE_MESSAGE]
-        return ExitCode.RUNTIME_FAILURE, build_data, issues, text
+        return _with_ignored(ignored, (ExitCode.RUNTIME_FAILURE, build_data, issues, text))
 
     if action is RunAction.EXECUTE_NATIVE:
-        return _execute_native_arm(
+        return _with_ignored(ignored, _execute_native_arm(
             build_root, sdk_root, manifest_written, build_exit, build_data, build_issues, json_mode
-        )
+        ))
 
     # RunAction.FLASH: hardware target, `--flash`, this run's manifest write
     # confirmed -- reuse the native flash path, targeting the SAME project
@@ -330,8 +339,58 @@ def _run(
         # itself stays deliberate (see flash_plan.py); this only gives `run`
         # the same opt-in `tan flash --confirm` already has.
         confirm_flag=confirm,
+        # tan-cli#1252: forwarded for a sharper reason than `--confirm` above.
+        # `dry_run=False` is HARDCODED on this call, so `run --flash --confirm`
+        # on an AEN Flow D slice can never take a preview path -- it goes
+        # straight to the whole-ATOC guard. Without this line that command
+        # would hit a refusal naming a flag `run` does not accept.
+        atoc_unqueryable=atoc_unqueryable,
+        # tan-cli#1267: same reasoning -- with `dry_run=False` hardcoded, a
+        # Flow A slice whose runner refuses would name a flag `run` lacked.
+        replace_atoc=replace_atoc,
     )
+    # tan-cli#1482: carry the build step's own issues + recap onto this arm as
+    # every other arm does -- a partial build (a skipped slice, a manifest-write
+    # warning) still counts as build_ok, and dropping its warnings here left a
+    # flash result with no sign that a core was not rebuilt.
+    flash_issues = [*build_issues, *flash_issues]
+    flash_text = _build_text_lines(build_data, build_issues) + list(flash_text)
     return flash_exit, flash_data, flash_issues, flash_text
+
+
+def _ignored_flash_flags(
+    action: RunAction, replace_atoc: bool, atoc_unqueryable: bool
+) -> str | None:
+    """The warning for `--replace-atoc`/`--atoc-unqueryable` on a `run` that
+    will not flash, or `None`. Both only act on a write; dropping them with
+    no word would let an operator believe an override or acknowledgement
+    took effect (tan-cli#1267 review)."""
+    flags = [
+        flag
+        for flag, given in (("--replace-atoc", replace_atoc), ("--atoc-unqueryable", atoc_unqueryable))
+        if given
+    ]
+    if action is RunAction.FLASH or not flags:
+        return None
+    return (
+        f"run: {' and '.join(flags)} had no effect -- this run did not flash "
+        "anything (they only act on a write, which needs --flash on a hardware "
+        "target whose build succeeded)."
+    )
+
+
+def _with_ignored(ignored: str | None, result):
+    """`result` (`_run`'s 4-tuple) with the ignored-flag warning appended
+    to its issues and text, when there is one."""
+    if ignored is None:
+        return result
+    exit_code, data, issues, text = result
+    return (
+        exit_code,
+        data,
+        [*issues, Issue("run.flash-flags-ignored", "warning", ignored)],
+        [*text, ignored],
+    )
 
 
 def run(
@@ -343,7 +402,10 @@ def run(
         "never flashes. Arming the write also needs --confirm (or "
         "ALP_FLASH_FORCE=1, or flash_args.confirm: true in the manifest); "
         "without it every slice comes back `planned` and the run exits "
-        "non-zero. Ignored for a native_sim/host target, which always runs "
+        "non-zero. An Alif Flow D slice (alif_mram_jlink) has a SECOND gate and "
+        "can instead come back `failed` once armed, until --atoc-unqueryable "
+        "acknowledges that the write replaces the entire ATOC (tan-cli#1252). "
+        "Ignored for a native_sim/host target, which always runs "
         "the produced binary and never flashes.",
     ),
     core: str = typer.Option(
@@ -360,7 +422,45 @@ def run(
         "Without it (and without ALP_FLASH_FORCE=1 or flash_args.confirm: true "
         "in the manifest) a hardware target is only previewed -- every slice "
         "comes back `planned`, nothing reaches the device, and the run exits "
-        "non-zero (tan-cli#809). Ignored without --flash.",
+        "non-zero (tan-cli#809). On an Alif Flow D slice (alif_mram_jlink) this "
+        "arms the write but does not acknowledge that it replaces the entire "
+        "ATOC: such a slice additionally needs --atoc-unqueryable and is refused "
+        "(`failed`, not `planned`) without it (tan-cli#1252). Ignored without "
+        "--flash.",
+    ),
+    atoc_unqueryable: bool = typer.Option(
+        False,
+        "--atoc-unqueryable",
+        # tan-cli#1252 review: `run` deliberately does NOT offer the manifest
+        # spelling as an alternative here, unlike `tan flash`'s own help. Every
+        # `run --flash` REGENERATES build/system-manifest.yaml before flashing
+        # (RunAction.FLASH requires THIS run's own manifest write), and
+        # `planner/orchestrator._slice_flash_recipe` composes `flash_args` from
+        # a fresh dict carrying only the keys it knows -- so an operator-added
+        # `atoc_unqueryable` is destroyed by the same command that would then
+        # demand it. On `run` the flag is the only spelling that survives.
+        help="With --flash on an Alif Flow D slice (alif_mram_jlink), acknowledge "
+        "that the write REPLACES the entire ATOC: Flow D cannot enumerate what is "
+        "resident, so any boot entry the new ATOC does not name is silently delisted "
+        "while the SES still reports \"[SES] ATOC ok\". Without it such a slice "
+        "refuses. Use the flag here rather than flash_args.atoc_unqueryable: true -- "
+        "that manifest spelling works for `tan flash`, which reads the manifest as "
+        "it stands, but every `run --flash` regenerates build/system-manifest.yaml "
+        "first and a hand-added key does not survive it. This acknowledges the "
+        "replacement only -- arming the write itself still needs --confirm "
+        "(tan-cli#1252).",
+    ),
+    replace_atoc: bool = typer.Option(
+        False,
+        "--replace-atoc",
+        help="With --flash on a zephyr_west_flash slice whose west runner is "
+        "alif_flash (Flow A, over the SE-UART), override that runner's pre-burn "
+        "ATOC guard, which otherwise refuses a write that would silently delist a "
+        "resident entry it does not name, or whose read of the resident ATOC could "
+        "not be verified (tan-cli#1267). Reaches at most one write per run (narrow "
+        "with --core). Flag only: there is no manifest spelling. "
+        "Not the same as --atoc-unqueryable (Flow D), and never accepted in its "
+        "place; on any other slice tan warns instead of passing it.",
     ),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -377,75 +477,102 @@ def run(
     for a host target, or (with --flash) program a hardware target."""
     json_mode = output_format == "json"
 
-    # Same resolution `build_cmd.build` performs (`run` builds via the same
-    # engine, so it must anchor on the same project) -- see that function for
-    # the reasoning behind each step.
-    cwd = Path.cwd()
-    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
-    if board_yaml is not None and not os.path.isabs(board_yaml):
-        board_yaml = os.path.join(str(workspace_root), board_yaml)
-    if board_yaml is None and (workspace_root / "board.yaml").is_file():
-        board_yaml = str(workspace_root / "board.yaml")
-    build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
-    build_root = _abs_posix(build_root)
-    if board_yaml is not None:
-        board_yaml = _abs_posix(board_yaml)
-
-    # Same ladder `build_cmd.build` resolves -- `--sdk-root` > `.alp/sdk-path`
-    # project pin > the machine-global default (`~/.alp/sdk-default`) > the
-    # positional walk (`resolve_sdk_root_ladder`); `run` builds via the same
-    # engine, so it must agree with `build` on which checkout that is. No
-    # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
-    # own docstring).
-    sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
-    resolved_sdk_root = sdk_resolution.path
-    sdk_tier = sdk_resolution.tier
-    sdk_broken_pin = sdk_resolution.broken_project_pin
-    sdk_foreign_default = sdk_resolution.foreign_global_default_for
-    # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
-    # exact same reason: this line was a VERBATIM COPY of the one that carried
-    # the defect, so fixing only `build` would have left its twin here.
-    # `resolve_sdk_root_ladder` returns an explicit `--sdk-root` UNVALIDATED
-    # (I-31 terminal-for-REPORTING, matching the oracle's
-    # `resolve_sdk_tiered`), which is correct for a caller that only reports
-    # the tier and wrong for one that ACTS on the path: a bogus `--sdk-root`
-    # sailed through as `sdk.sourceTier: "sdkRootFlag"` and was then refused
-    # for the NEXT missing thing, telling the customer their project is broken
-    # when the flag they had just typed is what was wrong.
-    #
-    # Guarded HERE rather than inside the shared ladder because every other
-    # caller depends on it staying unvalidated -- the same placement
-    # `build_cmd`, `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk`
-    # already chose. An unresolvable explicit root is treated as no root at
-    # all, so the refusal downstream is the honest "no alp-sdk checkout found"
-    # and no `sdk` key is emitted, matching the oracle.
-    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
-        resolved_sdk_root = None
-    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
-    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
-    # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
-    # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
-    # pristine guard's stamp comparison, threaded through from `execute_slices`
-    # rather than self-discovered), and `run` reuses the same engine so it must
-    # resolve it the same way, not just `sdk_root` itself.
-    sdk_root_for_stamp = (
-        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
-    )
-    # tan-cli#236: `boardYaml` reported only when the file really exists -- an
-    # explicit `--board-yaml` skips the `is_file()` discovery guard above.
-    project_obj = Project.resolved(build_root, board_yaml)
-
+    # tan-cli#1482: the resolution prologue lives INSIDE the catch-all (as in
+    # `build_cmd.build`, tan-cli#488 defect 8) so a deleted cwd or a resolver
+    # raise becomes a `run.internal-failure` envelope, not a raw traceback.
+    project_obj = Project(root=None, board_yaml=None)
+    sdk: SdkInfo | None = None
+    sdk_tier = "none"
+    sdk_broken_pin: str | None = None
+    sdk_foreign_default: str | None = None
     try:
-        exit_code, data, issues, text_lines = _run(
-            build_root=build_root,
-            sdk_root=sdk_root,
-            sdk_root_for_stamp=sdk_root_for_stamp,
-            board_yaml=board_yaml,
-            flash=flash,
-            core=core,
-            confirm=confirm,
-            json_mode=json_mode,
+        # Same resolution `build_cmd.build` performs (`run` builds via the same
+        # engine, so it must anchor on the same project) -- see that function for
+        # the reasoning behind each step.
+        cwd = Path.cwd()
+        workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+        if board_yaml is not None and not os.path.isabs(board_yaml):
+            board_yaml = os.path.join(str(workspace_root), board_yaml)
+        if board_yaml is None and (workspace_root / "board.yaml").is_file():
+            board_yaml = str(workspace_root / "board.yaml")
+        build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
+        build_root = _abs_posix(build_root)
+        if board_yaml is not None:
+            board_yaml = _abs_posix(board_yaml)
+
+        # Same ladder `build_cmd.build` resolves -- `--sdk-root` > `.alp/sdk-path`
+        # project pin > the machine-global default (`~/.alp/sdk-default`) > the
+        # positional walk (`resolve_sdk_root_ladder`); `run` builds via the same
+        # engine, so it must agree with `build` on which checkout that is. No
+        # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
+        # own docstring).
+        sdk_resolution = resolve_sdk_root_ladder(sdk_root, workspace_root)
+        resolved_sdk_root = sdk_resolution.path
+        sdk_tier = sdk_resolution.tier
+        sdk_broken_pin = sdk_resolution.broken_project_pin
+        sdk_foreign_default = sdk_resolution.foreign_global_default_for
+        # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
+        # exact same reason: this line was a VERBATIM COPY of the one that carried
+        # the defect, so fixing only `build` would have left its twin here.
+        # `resolve_sdk_root_ladder` returns an explicit `--sdk-root` UNVALIDATED
+        # (I-31 terminal-for-REPORTING, matching the oracle's
+        # `resolve_sdk_tiered`), which is correct for a caller that only reports
+        # the tier and wrong for one that ACTS on the path: a bogus `--sdk-root`
+        # sailed through as `sdk.sourceTier: "sdkRootFlag"` and was then refused
+        # for the NEXT missing thing, telling the customer their project is broken
+        # when the flag they had just typed is what was wrong.
+        #
+        # Guarded HERE rather than inside the shared ladder because every other
+        # caller depends on it staying unvalidated -- the same placement
+        # `build_cmd`, `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk`
+        # already chose. An unresolvable explicit root is treated as no root at
+        # all, so the refusal downstream is the honest "no alp-sdk checkout found"
+        # and no `sdk` key is emitted, matching the oracle.
+        if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk_root):
+            resolved_sdk_root = None
+        # tan-cli#1463: an EXPLICIT `--sdk-root` that did not resolve is a coded
+        # refusal, not a silent "no root". Without it the typo fell through to the
+        # build engine and surfaced as an unrelated downstream failure. No
+        # `--sdk-root` + no checkout found keeps the engine's own behaviour (the
+        # engine owns that refusal), so only the explicit-flag case is new here.
+        sdk_refusal = None
+        if sdk_root and sdk_root.strip() and resolved_sdk_root is None:
+            refusal_msg = rejected_sdk_root_message(sdk_root, "Nothing was built or run.")
+            sdk_refusal = (
+                ExitCode.RUNTIME_FAILURE,
+                None,
+                [Issue("run.sdk-root-unresolved", "error", refusal_msg)],
+                [f"run: {refusal_msg}"],
+            )
+        sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+        sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+        # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
+        # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
+        # pristine guard's stamp comparison, threaded through from `execute_slices`
+        # rather than self-discovered), and `run` reuses the same engine so it must
+        # resolve it the same way, not just `sdk_root` itself.
+        sdk_root_for_stamp = (
+            str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
         )
+        # tan-cli#236: `boardYaml` reported only when the file really exists -- an
+        # explicit `--board-yaml` skips the `is_file()` discovery guard above.
+        project_obj = Project.resolved(build_root, board_yaml)
+
+        if sdk_refusal is not None:
+            exit_code, data, issues, text_lines = sdk_refusal
+        else:
+            exit_code, data, issues, text_lines = _run(
+                build_root=build_root,
+                sdk_root=sdk_root,
+                sdk_root_for_stamp=sdk_root_for_stamp,
+                board_yaml=board_yaml,
+                flash=flash,
+                core=core,
+                confirm=confirm,
+                atoc_unqueryable=atoc_unqueryable,
+                replace_atoc=replace_atoc,
+                json_mode=json_mode,
+            )
     except Exception as err:  # noqa: BLE001 -- see build_cmd.build's identical guard
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None

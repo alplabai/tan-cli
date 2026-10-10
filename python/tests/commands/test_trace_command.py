@@ -7,9 +7,11 @@ including the mixed-separator `outputPath`/command-line shape, which is a
 genuine byte-for-byte requirement, not a stylistic choice (see
 `trace_cmd`'s module docstring).
 
-`trace` is not yet registered in `tan.cli.app` (the orchestrator's to wire,
-per `deferred_cmd.py`'s module docstring), so these tests build a throwaway
-local Typer app around the ported command function directly.
+`trace` IS registered in the real `tan.cli.app` too (tan-cli#260 shipped it;
+`deferred_cmd.py`, the module that used to stub it, is gone as of
+tan-cli#427), but these tests still build a throwaway local Typer app around
+the ported command function directly, for isolation from the other 31
+commands' registration and startup side effects.
 """
 from __future__ import annotations
 
@@ -158,21 +160,18 @@ def test_sdk_root_unresolved_is_a_validation_failure(tmp_path, monkeypatch):
     assert doc["project"] == {"root": None, "boardYaml": None}
     assert "sdk" not in doc
     assert doc["data"]["decisions"] == []
-    assert doc["issues"] == [
-        {
-            "code": "trace.sdk-root-unresolved",
-            "severity": "error",
-            # tan-cli#381: was "pin one with `tan sdk switch <version|path>`",
-            # a subcommand this build refuses. Now the shared
-            # `sdk_cmd.NO_SDK_NEXT_STEPS` tail, same as generate/model/kconfig.
-            "message": (
-                "alp-sdk root is unresolved. Use --sdk-root, place the project near "
-                "an alp-sdk checkout, or get an alp-sdk checkout (`git clone "
-                "https://github.com/alplabai/alp-sdk`), then point tan at it with "
-                "`--sdk-root <path>`."
-            ),
-        }
-    ]
+    (issue,) = doc["issues"]
+    assert issue["code"] == "trace.sdk-root-unresolved"
+    assert issue["severity"] == "error"
+    # tan-cli#381: was "pin one with `tan sdk switch <version|path>`", a
+    # subcommand this build refuses. Now the shared `sdk_cmd.NO_SDK_NEXT_STEPS`
+    # tail, same as generate/model/kconfig; tan-cli#1463 appends where it looked.
+    assert issue["message"].startswith(
+        "alp-sdk root is unresolved. Use --sdk-root, place the project near "
+        "an alp-sdk checkout, or get an alp-sdk checkout (`git clone "
+        "https://github.com/alplabai/alp-sdk`), then point tan at it with "
+        "`--sdk-root <path>`. Neither `--sdk-root`"
+    )
 
 
 def test_missing_board_yaml_is_a_validation_failure_with_sdk_still_reported(

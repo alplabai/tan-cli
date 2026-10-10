@@ -44,7 +44,11 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
   - `python/pyproject.toml`'s `version` must be the **PEP 440 rendering** of it
     (`0.5.0-dev` → `0.5.0.dev0`). The two spellings are not string-equal, which
     is exactly why the check is a script and not a `grep`.
-  - `npm-shim/package.json`'s `version` must equal `TAN_VERSION` **exactly**
+  - (retired, tan-cli#1054) `npm-shim/package.json`'s `version` used to be a
+    third source reconciled here; the shim is gone with the npm channel, and
+    `test_version_check_still_reads_every_source_it_is_supposed_to` now pins
+    the reader set so a source cannot be dropped as quietly as this one nearly
+    was
     (npm ships SemVer, so nothing is translated here): `postinstall.js` derives
     its download tag as `` v${pkg.version} ``, so a stale shim fetches a tag
     that does not exist.
@@ -74,18 +78,27 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-`publish_crates` is deleted for every tag (the assets never came from the
+The crates.io job is deleted for every tag (the assets never came from the
 crates any more, and `crates/` itself is gone as of tan-cli#269, so publishing
-`alp-tan-cli` would ship a different program under the same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
+under that name would ship a different program). The npm shim is retired
+entirely as of tan-cli#1054 — PyPI is the sole standalone install channel now.
+`publish_pypi` is a **real job** and runs only on a FINAL tag — its
 own `if` is `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name,
 '-')`, so a pre-release skips it entirely, the same way it skips `make_latest`.
 Even on a final tag the publish itself is **opt-in and off**: the job reads
-`NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}` and, unless that
+`PYPI_PUBLISH_ENABLED: ${{ vars.TAN_PYPI_PUBLISH == 'true' }}` and, unless that
 repository *variable* is `true`, records `published=false` and says so in the
 run summary — a loud no-op rather than a silent skip. Arming it needs the
-variable AND a replacement `NPM_TOKEN`: the configured one is a classic token on
-a 2FA account, so `npm publish` answers `EOTP`. See
-[`npm-shim/README.md`](../npm-shim/README.md) for the operator's half.
+variable — and, before the first upload can succeed, a pending publisher
+configured on pypi.org (project `tan-cli`, owner `alplabai`, repository
+`tan-cli`, workflow `release.yml`, environment BLANK). That is a web-UI action
+no workflow can perform, which is why the job is gated OFF rather than left
+permanently red.
+
+Historical note, kept because it is why the channel moved at all: arming npm
+needed a replacement `NPM_TOKEN`, because the configured one is a classic token
+on a 2FA account, so `npm publish` answers `EOTP`. Trusted Publishing dissolves
+that class rather than re-provisioning it.
 
 This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
 and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
@@ -152,7 +165,7 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | Asset | Contents |
 | --- | --- |
 | `checksums.txt` | sha256 of every other asset. |
-| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and `doctor`'s `dataKeys` key-set entry (`contract/doctor-data-keys.json`, tan-cli#664 — `doctor`'s `data` values are host facts, so it cannot be a golden) — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and a `dataKeys` key-set entry for each family whose `data` VALUES are host facts and therefore cannot be a golden — `doctor` (`contract/doctor-data-keys.json`, tan-cli#664) and `sdk list` (`contract/sdk-list-data-keys.json`, tan-cli#887), both folded by `release.yml`'s bundler — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. A golden entry whose command reads the HOST rather than its own inputs also carries an **`env`** block, the case's `env.json` verbatim (tan-cli#253; `model-doctor-no-sdk`, `debug-config-preview-baremetal-mcu` and `monitor-no-port` carry one today -- the set `test_contract_envelopes.py::test_no_case_ships_an_env_json_it_does_not_need` asserts, which is what to re-read rather than this line): a `null` UNSETS the variable, a string SETS it, and `__WORKDIR__` expands to the directory the command is replayed from. Apply it before spawning `tan`, or the replay reports whichever vendor NPU compilers the replaying box happens to have installed and diffs against the `envelope` published beside it. See [`contract/README.md`](../contract/README.md). |
 
 ## Which shape a release publishes
 
@@ -260,12 +273,13 @@ The authority is the extension's own source:
 [`alp-sdk-vscode` `src/alpCli/service.ts`](https://github.com/alplabai/alp-sdk-vscode/blob/main/src/alpCli/service.ts).
 Read it there rather than here.
 
-Measured 2026-08-18 against that checkout, for orientation only -- if this
+Measured 2026-08-31 against that checkout, for orientation only -- if this
 paragraph and the file disagree, the file wins:
 
-* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0-rc1"` on
-  `origin/dev`. Neither pins a Rust release; the extension has fetched the
-  Python `tan` since 2026-08-01.
+* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0"` on
+  `origin/dev` (`v0.6.0-rc1` shipped stable as `v0.6.0` on 2026-08-24). Neither
+  pins a Rust release; the extension has fetched the Python `tan` since
+  2026-08-01.
 * `TARGETS` is keyed `platform/arch` (a slash, not a colon) and `linux/x64`
   maps to `x86_64-unknown-linux-gnu`, carrying the comment
   `// ── gnu, NOT musl. Do not "restore" -musl here (#444) ──`. It is a table
@@ -275,9 +289,10 @@ paragraph and the file disagree, the file wins:
 * The unpublished pair is `win32/arm64` and `linux/arm64` -- the extension
   tracks them per version in `HOSTS_WITHOUT_RELEASE_ASSET`, at
   `src/alpCli/service.ts:168` on `origin/main` (the branch the link above
-  points at) and `:211` on `origin/dev`. The entry
-  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists only on `dev`; main's
-  table still ends at `"0.5.1"`, matching its `SUPPORTED_CLI_VERSION` pin.
+  points at) and `:218` on `origin/dev`. The entry
+  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists on `dev` (no `"0.6.0"`
+  entry has been added there yet); main's table still ends at `"0.5.1"`,
+  matching its `SUPPORTED_CLI_VERSION` pin.
 
 `release.yml`'s header calls this document the thing the extension "MUST match
 exactly". That claim is only checkable if something fails when the two drift,
@@ -317,10 +332,80 @@ on `ubuntu:18.04` (2.27). **Do not repeat the "2.31 floor / `GLIBC_2.39` not
 found" wording** that `alp-sdk-vscode/src/alpCli/service.ts` carries — the
 phenomenon is real, both numbers in it are wrong (alp-sdk-vscode#370).
 
+## Dependency reproducibility (release lock)
+
+tan-cli#437. Through v0.6.x, `build`'s two `pip install` calls resolved
+`".[monitor]"` and `"pyinstaller>=6.10"` LIVE against PyPI on every run. That
+made the input set to a release build **not** a pure function of the tagged
+commit: re-running the exact same immutable tag on a later day could resolve
+a different typer/click/rich/pyyaml/jsonschema/truststore/certifi/pyinstaller
+release and ship different executable bytes under an identical version
+string. A checksum or build-provenance attestation (below) authenticates
+whichever bytes a given run happened to produce; neither proves the tag
+deterministically maps to those bytes.
+
+**Fixed by pinning the whole third-party input set.**
+`python/release-requirements.lock.txt` is a `uv pip compile --universal
+--generate-hashes` resolution of the runtime dependency set (`[project.
+dependencies]` + the `monitor` extra) plus the two build-time-only tools
+`pyproject.toml` deliberately does not declare (`pyinstaller`, `setuptools`
+— see `build_binary.sh`'s header for why they stay out of `dependencies`).
+Every entry is an exact version with every sha256 hash PyPI publishes for it,
+covering all four release platforms in one file (markers like `sys_platform
+== 'win32'` gate the Windows-only `pywin32-ctypes`/`pefile` entries). Both
+`release.yml`'s `build` job and `clean-host.yml`'s `freeze-and-smoke` job
+install it with `pip install --require-hashes -r
+release-requirements.lock.txt`, then the local `tan-cli` package separately
+with `--no-deps --no-build-isolation` (its deps are already satisfied by the
+lock; build isolation would otherwise re-resolve `setuptools` live). `pip`
+**refuses the entire install** on any hash mismatch or any unhashed
+requirement once `--require-hashes` is in effect for a file — there is no
+silent fallback to an unpinned resolution.
+
+The lock is regenerated by `python/scripts/generate_release_lock.py` (needs
+`uv`; `--check` verifies without touching the committed file) and is itself
+verified structurally, on every `python -m pytest tests -q` run, by
+`tests/gates/test_release_lock_covers_dependencies.py` — no network or `uv`
+needed for that check, it is a static comparison against `pyproject.toml`.
+
+Run with no flags, `generate_release_lock.py` reads the existing committed
+lock as a preference and keeps every already-valid pin exactly as it is —
+useful right after editing `dependencies = [...]`, but it does not move a
+pin to a newer release just because one shipped. Moving a pin needs
+`--upgrade` (every pin) or `--upgrade-package NAME` (one distribution,
+repeatable); `--check` never upgrades, matching whichever of those the last
+regenerate used. `.github/workflows/release-lock-update.yml`
+(`workflow_dispatch`) is the reviewed path for actually moving a pin: its
+`upgrade_package` input selects between the two (blank upgrades everything),
+it regenerates the lock and opens a PR against `dev`, which then exercises
+the new lock through `clean-host.yml`'s full four-platform
+freeze-and-conformance matrix before it ever reaches a tag.
+
+The Linux build container is pinned the same way, for the same reason: both
+workflows reference `python@sha256:<digest>` (with the human-readable
+`python:3.12-slim-bullseye` tag kept in a trailing comment), not the mutable
+tag alone, so a Docker Hub repoint of that tag cannot silently move the glibc
+floor the section above measures.
+
+**Byte-for-byte reproducibility is NOT claimed, and is not achievable with
+PyInstaller as-is** — a freeze embeds build-machine metadata (timestamps in
+the bootloader, absolute build paths in some `.pyc` headers) that varies
+run-to-run even from an identical locked input set on an identical runner
+image. What the lock + digest pin make deterministic is the **complete build
+INPUT set**: same tag, same source tree, same third-party dependency
+versions and hashes, same build container digest, every time. That is the
+property this issue asked for — a failed release is reproducible in the
+sense that matters (rebuild it and get functionally identical bytes with the
+identical dependency closure), not in the sense of an identical SHA256 on
+the archive, which PyInstaller does not offer.
+
 ## Build provenance
 
-Every release asset (all four `tan-*` archives plus `checksums.txt` and
-`envelope-contract.json` — the step's `subject-path` is `assets/*`) carries
+Every release asset (all four `tan-*` archives plus `checksums.txt`,
+`envelope-contract.json`, and `dependency-lock.txt` — a copy of
+`python/release-requirements.lock.txt` at the tagged commit, staged so an
+auditor does not need a separate checkout to see exactly what a downloaded
+binary was built from — the step's `subject-path` is `assets/*`) carries
 a GitHub **build-provenance attestation**, generated by
 `actions/attest-build-provenance` in the `release` job. Verify a downloaded
 asset with:
@@ -350,16 +435,71 @@ the v0.6.0 triage sweep, and the maintainer's 2026-08-09 decision on it was
 version floor in tan, no graceful degradation. This section is where that
 decision lives, because an issue is not a checklist.
 
-**The check.** For each `metadata/**` fact the planner has started requiring
-since the last tag, confirm the alp-sdk commit that introduced it is contained
-in a published alp-sdk **tag**:
+**The check.** Three kinds of change bind a tan tag to an alp-sdk release:
+
+1. **A requirement.** The planner has started requiring a `metadata/**` fact.
+   This is the tan-cli#591 class: a released `tan` refuses on a released
+   alp-sdk.
+2. **An emit difference.** tan now emits bytes that differ from the released
+   alp-sdk's own emitter: an added manifest key, a new `alp.conf` line. Nothing
+   refuses, so a check limited to the first kind lets it through.
+3. **The vendored scaffold point.** `python/tan/templates/vendored/MANIFEST.md`
+   names an alp-sdk commit that the released tag does not contain.
+
+**Tag containment is the check; the job is only a backstop.** For every such
+change since the last tag, confirm its alp-sdk commit is contained in the
+release a tag push is measured against, which is `releases/latest`.
+`git tag --contains` is not that test: it also lists pre-release tags, and
+`releases/latest` never returns one.
 
 ```
-git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
+T=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+git -C <alp-sdk> merge-base --is-ancestor <PINNED_SDK_COMMIT> "$T" && echo contained
+git -C <alp-sdk> merge-base --is-ancestor <commit> "$T" && echo contained   # per change
 ```
 
-**CLEARED on a STABLE floor as of 2026-08-23 — this gate no longer withholds
-a tan release carrying the AEN board emit:**
+The planner mirror and the vendored fixtures are pinned no later than
+`PINNED_SDK_COMMIT`. So when the first command says `contained`, every change
+taken from upstream is covered. It does not cover a tan-side forward-port that
+landed ahead of the pin; that still needs the job.
+
+**What the tag-time `release-sdk-parity` job (`parity.yml`) actually decides.**
+Its verdict is narrower than "any difference reds it":
+
+- `kconfig_fixture_parity.py`, `toolchain_lock_parity.py` and
+  `scaffold_byte_parity.py` each fail the job on a non-zero exit. Kind 3 reds
+  the job here, reliably.
+- The planner step runs pytest under `set +e` and does not act on its exit
+  status. Once the guard (`test_a_bound_sdk_root_still_ships_the_planner_oracle`)
+  PASSES, the only verdict is whether
+  `test_the_breadth_layer_still_covers_every_board` PASSED, meaning at least 90
+  boards and 2900 artefacts were compared. A SKIPPED guard is accepted only
+  when the released alp-sdk has retired `scripts/alp_orchestrate/` and the
+  frozen planner oracle is bound.
+- Only `GENERATE_MODES` and the board-tree comparison feed that counter. A
+  difference confined to a mode that appears only in `RENDER_MODES`
+  (`system-manifest`, `dts-reservations`, `dts-partitions`,
+  `storage-mounts-c`, `tfm-sysbuild-conf`) fails
+  `test_every_mode_is_byte_identical` and still leaves the job green. The
+  `memory[]` pane (tan-cli#1251) is exactly that case: on its own it does
+  **not** red the job. Kinds 1 and 2 red the job only when they drop enough
+  boards below the breadth floor.
+
+So "green" on a tag push means all of the following, not one test id:
+
+- all three `--sdk` scripts exit 0;
+- the guard PASSED;
+- the breadth node PASSED;
+- the pytest log shows no failures in `test_planner_emit_parity.py` or
+  `test_planner_axis_build_plan_parity.py`, because the step itself ignores
+  them.
+
+`test_every_mode_is_byte_identical`, taken on its own, once hid five of the six
+rows below.
+
+**CLEARED for tan `0.6.0` on a STABLE floor as of 2026-08-23. These two rows
+stopped withholding that tag; the next tag is withheld by the NOT CLEARED
+section below:**
 
 | Requirement | alp-sdk commit | In a tag? |
 |---|---|---|
@@ -383,16 +523,140 @@ prescribes, so the two now agree rather than trading off. The choice is
 recorded here as well as in the release PR, because a release PR is harder to
 find later than this file.
 
-**The trigger has fired and the table is current.** The other half
-is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
-a release that includes alp-sdk#1289"* (an issue number, not a version —
-replace it with the actual floor, which now exists). It lives upstream in
-alp-sdk `scripts/gen_zephyr_board.py:687`, so the string fix is an alp-sdk
-change re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**
-(open), which
-also carries the reason the ATOC message is not the one a user actually sees
-today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
-`7d58ef32`, so every checkout with the field already has the region.
+**For those two rows the trigger has fired.** The refusal this section used to
+quote (*"upgrade alp-sdk to a release that includes alp-sdk#1289"*) no longer
+exists in tan's `zephyr_board.py`. A checkout that predates either requirement
+now gets `SdkTooOldError` from `tan/planner/sdk_capability.py` (tan-cli#591).
+That error names the missing capability and its alp-sdk issue, and says
+*"upgrade alp-sdk, or pin tan to a release that predates the requirement"*. It
+still names an issue rather than a released version. **alp-sdk#1354** was
+closed on 2026-08-27 (alp-sdk#1732). The ATOC message is still not the one a
+user sees first: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an
+ancestor of `7d58ef32`, so every checkout with the field already has the
+region.
+
+**NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
+cleared separately; see "Pre-release cut" below. The planner mirror, the
+vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
+`v0.17.0-rc2` (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`). The release a tag push is measured
+against is the stable `v0.16.0`, which contains none of the six commits below.
+The pre-release `v0.17.0-rc1` (2026-10-08) contains the floor commit
+`b04bb0f7a0edf6af759053311ba66eda0158968b` (`compare/b04bb0f7a...v0.17.0-rc1`
+reports `status=ahead`), but `releases/latest` never returns a pre-release, so
+it does not clear the tag; it does not contain `a5a137c7b` either, which is
+fine, because the pin is not the floor (see the decision below).
+
+The six rows were measured on 2026-09-10 against a pin of `20fec7a7`, with the
+`release-sdk-parity` job replicated step by step on a `v0.16.0` SDK:
+`scaffold_byte_parity.py` exited 1 on 8 of 10 (template, SKU) pairs and the
+planner step's breadth node failed, while `kconfig_fixture_parity.py` and
+`toolchain_lock_parity.py` exited 0. Every row is an ancestor of the floor.
+Tracked in tan-cli#1258, with the full measurement.
+
+| Change | Kind | alp-sdk commit | On `dev` since | Effect against `v0.16.0` | In a tag? |
+|---|---|---|---|---|---|
+| Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | before #1251 | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`). This alone reds the job | **NO** |
+| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count. Against an alp-sdk that predates this commit (no `ALP_SDK_SOM_HW_REV` Kconfig symbol — true of every stable release through `v0.16.0`), the emitted `alp.conf` assignment is undefined, and `west build`'s own Kconfig configure step aborts on it (`error: Aborting due to Kconfig warnings`) for *every* Zephyr board, not only AEN/V2N/V2M — see the decision below and `CHANGELOG.md`'s floor entry | **NO** |
+| Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | before #1251 | The Boot-banner block is the first diff on all 98 failing `--emit zephyr-conf` renders, which is what drops those boards out of the breadth count. AEN `tan generate --target zephyr-board` also exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
+| **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | before #1251 | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
+| `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | #1251 | `--emit system-manifest` differs on 99 of 100 boards. `system-manifest` is in `RENDER_MODES` only, so on its own this does **not** red the job (see "The check.") | **NO** |
+| `e1m_i2c0` **required** in `on-module-links.yaml` — alp-sdk#2036 | requirement | `20fec7a7` | #1251 | Not reached against `v0.16.0`, because the file is missing first. Refuses on alp-sdk trees in [`eff266b6`, `20fec7a7`) | **NO** |
+
+Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
+Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
+because `--materialise` never runs `west build`, so Kconfig configure never
+sees the undefined symbol. (No `tan build` path invokes the zephyr-board
+emitter at all; only `tan generate --target zephyr-board` does.) A full
+(non-`--materialise`) `tan build` on *any* Zephyr board against an alp-sdk
+that predates `b3775381` (every stable release through `v0.16.0`) does reach
+`west build`'s Kconfig configure step and aborts there on the `b3775381`
+row's undefined symbol — see the decision below. The failure a customer running `tan generate --target zephyr-board`
+would see is the tan-cli#591 class this section exists for; AEN/V2N/V2M hit
+that exit-3 refusal earlier still, before Kconfig is ever reached.
+
+**Decision for the next tag (maintainer, 2026-09-10; current as of 2026-10-10).**
+The same option 3 as tan-cli#591: tan `0.7.0` waits for a STABLE alp-sdk
+release whose tag contains `b04bb0f7a0edf6af759053311ba66eda0158968b`.
+alp-sdk#2047 (milestone `v0.17.0`) tracks cutting it. No SDK-capability gate
+is added around `memory[]` or any other row.
+
+**Pre-release cut (maintainer, 2026-10-10).** That decision binds the stable
+`0.7.0` only. The maintainer approved a tan pre-release, `v0.7.0-rc1`, paired
+with an alp-sdk pre-release. For a hyphenated tan tag, `release-sdk-parity`
+now resolves alp-sdk's newest non-draft release, pre-releases included. A
+stable tan tag still uses `releases/latest`, so the stable gate above is
+unchanged. `v0.17.0-rc1` could not be the pair; measured against it on
+2026-10-10, the job's own steps gave:
+- `scaffold_byte_parity.py` exit 1, 2 of 10 pairs FAIL (`edge-ai/E1M-AEN801`
+  and `edge-ai/E1M-V2N101`, `src/cold_chain.c: content differs`);
+- the planner module 76 failed, every AEN `zephyr-board` emit exiting 3 with
+  `SdkTooOldError` (`aen.som_power_domains`, alp-sdk#2784, schema added in
+  `4b206c8a60d56af318741491a6fecdc499dfcd36`, which is not in rc1).
+
+So alp-sdk `v0.17.0-rc2` was cut from `dev` at
+`1d20103ba367668ab4ed9b139dc69c246198d2f1` (tag commit
+`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, 2026-10-10), tan's pins moved to
+the tag commit, and tan `v0.7.0-rc1` requires it. The planner mirror had nothing
+to port across that range (`planner_resync.py`: up to date); the planner oracle
+was recaptured, and the only change was `sdkVersion` on all 103 build-plan
+emits. Measured against the tag the same day:
+`kconfig_fixture_parity.py` and `toolchain_lock_parity.py` exit 0,
+`scaffold_byte_parity.py` exits 0 with 10/10 pairs after the link re-vendor,
+and the planner module has 1860 passed, 0 failed.
+
+- **The floor is not the pin.** Each planner re-sync (tan-cli#1268, #1275,
+  #1278, #1309, #1216, #1401, #1425, #1393) moved the pin along the same seven
+  sites; only #1268 -> #1275 -> #1278 -> #1309 -> #1216 moved the floor, through
+  `81a9d515`, `c81cb5db`, `34c11c9de` and `ac0e2a5e0` (each an ancestor of the
+  next) to `b04bb0f7a`, the one commit in the last range that adds a hard
+  requirement: `tan generate --target zephyr-board` for a V2N/V2M `m33_sm` core
+  reads the SoC spec's `openamp_carveout` block (alp-sdk#2685) and refuses an
+  SDK whose spec has none. `STRICT_LOADERS_PINNED_SDK_COMMIT` stays at
+  `34c11c9de`, since `scripts/strict_loaders.py` did not change after it.
+- **Newer planner features are not requirements.** Past the floor, the plan's
+  `alp.overlay` / `cmake-args.txt` / `alp_hw_info_build.h` / `alp-west-libs.yml`
+  artefacts (alp-sdk#2771, #2778) and the `pinctrl_som_power` group
+  (alp-sdk#2795) are rendered by tan's own in-process planner. Two behave
+  differently on an SDK older than the pin and are documented rather than
+  gated: the AEN `zephyr-board` emit renders `alp,som-power` from
+  `power_domains:` in `metadata/e1m_modules/aen/on-module-links.yaml`
+  (`on-module-links-v2`, alp-sdk#2784) and refuses an older checkout with
+  `SdkTooOldError` (`aen.som_power_domains`), and a board.yaml `cameras:` entry
+  selects its owner core's camera from the connector's `zephyr_shields:` /
+  `linux:` (alp-sdk#2791), so against an older checkout a project WITH
+  `cameras:` gets a `camera-select-failed` plan warning and no slice command
+  for the cores that could own the camera.
+- **E1M-NX9101 removal is a contract change (tan-cli#1425, PR #1427; the mirror-side removal came with the #1216 re-sync to `6159a7b1a`).**
+  alp-sdk dropped the module (alp-sdk#2781, #2782; it was never produced) and
+  tan removed every `E1M-NX9101` / i.MX 93 row it kept: the `E1M-NX9` family
+  in `_SOM_FAMILIES`, the buildability, scaffold, `pinmux` and model-zoo arms,
+  the `rpmsg-imx93` parity and planner-oracle fixtures, and the NX9101 leg of
+  `release-combination.yml`. A `board.yaml` or `--som` naming `E1M-NX9101` is
+  no longer planned or buildable, `tan explain --template` publishes
+  `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant` no longer
+  offers `u65`. This is one of the `BREAKING` entries in `CHANGELOG.md`'s
+  `## [0.7.0]` preamble; no NX9101 leg exists in the tag-time matrix any more.
+- **Renumbered `0.6.1` -> `0.7.0` (maintainer, 2026-09-19).** Pre-1.0 SemVer
+  puts a break in the minor: the floor breaks a v0.6.0 consumer's `tan build`
+  on *any* Zephyr board (Kconfig configure aborts on the undefined
+  `ALP_SDK_SOM_HW_REV` symbol; `b3775381`, alp-sdk#1862, is an ancestor of the
+  floor), not only AEN/V2N/V2M's `tan generate --target zephyr-board`. That is
+  one of several `BREAKING` entries; `CHANGELOG.md`'s `## [0.7.0]` preamble
+  names every one.
+
+Done when:
+
+- every row above reads **YES** and names a stable tag that contains
+  `b04bb0f7a` (so its `metadata/e1m_modules/*.yaml` presets are
+  `schema_version: 2` with `inference.auto_order`);
+- the **whole** `release-sdk-parity` job is green on the tag push, in the sense
+  defined under "The check.": all three `--sdk` scripts exit 0, the guard and
+  the breadth node PASSED, and the pytest log shows no parity failures (the
+  planner step does not act on them);
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
+  did for `v0.16.0`, naming the real tag in place of the `v0.17.0` (stable
+  release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0]`
+  preamble carries today (tan-cli#1258).
 
 ## Decisions
 
@@ -431,28 +695,37 @@ today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
   creation.
 - **The GitHub release needs no secrets** — archives, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
-  `GITHUB_TOKEN`. `CARGO_REGISTRY_TOKEN` is gone with its job; `NPM_TOKEN` is
-  read only by a channel that is off until someone arms it:
+  `GITHUB_TOKEN`. `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` are both gone with
+  their jobs, and the channel that replaced them **reads no secret at all**:
 
   | Job | State | Consequence |
   |---|---|---|
-  | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
-  | `publish · npm shim` | **live, opt-in** — final tags only, and then only when the repository variable `TAN_NPM_PUBLISH` is `true` | Unarmed, `npm i -g @alplabai/tan` does not resolve (`E404` at every version) and the job says so in the run summary. Armed, it publishes and `release_gate` fails the tag if it did not. |
+  | `publish · crates.io` | **deleted** | Do not advertise a `cargo install` path; the name on crates.io resolves only to a stale Rust program. |
+  | `publish · npm shim` | **deleted** (tan-cli#1054) | The shim was a downloader for four platform-specific assets and 404'd at install time on `win32/arm64` and `linux/arm64` (tan-cli#436). It was never published, so there is no installed base. |
+  | `publish · PyPI` | **live, opt-in** — final tags only, and then only when the repository variable `TAN_PYPI_PUBLISH` is `true` | Unarmed, the job still builds the sdist + wheel and records `published=false` in the run summary. Armed, it uploads and `release_gate` fails the tag if it did not. |
 
-  **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
-  and the job still failed — `npm error code EOTP`, because a classic/publish
-  token on a 2FA account makes `npm publish` demand an interactive one-time
-  password no CI run can answer. Only an npm **automation** token (or a granular
-  token) is exempt. The missing-secret refusal above cannot catch this: the token
-  is there, so the job proceeds and fails at the registry, after signing a
-  provenance statement into the public transparency log for a version that never
-  published (#233).
+  **PyPI uses Trusted Publishing (OIDC), not a token.** This is the whole
+  reason the channel moved. `NPM_TOKEN` was configured for v0.4.1 and the job
+  still failed — `npm error code EOTP`, because a classic/publish token on a
+  2FA account makes `npm publish` demand an interactive one-time password no
+  CI run can answer. Only an npm **automation** token was exempt. A
+  missing-secret refusal cannot catch that shape: the token is present, so the
+  job proceeds and fails at the registry, after signing a provenance statement
+  into the public transparency log for a version that never published (#233).
+  Trusted Publishing removes the whole credential class rather than
+  re-provisioning it — `publish_pypi` has `id-token: write` and no
+  `secrets.*` reference anywhere.
 
-  Both previously emitted a `::warning::` and exited **0**, so the run summary
-  read `publish · crates.io  success` while crates.io answered
-  `crate 'alp-tan-cli' does not exist` — what shipped for v0.4.0 (#151). The
-  lesson survives the deletion: a publish channel that cannot work must fail or
-  be switched off, never report success. Any doc that offers `cargo install
-  alp-tan-cli` or `npm i -g @alplabai/tan` as an install path is wrong until
-  crates.io comes back and `TAN_NPM_PUBLISH` has actually put a version on the
-  registry — a job existing is not a package existing.
+  There is a second reason not to reach for a token here: PyPI cannot scope an
+  API token to a project that does not exist, so any token minted before the
+  first publish is necessarily **account-scoped** — publish and yank rights on
+  every project under that account. The pending-publisher flow binds the
+  identity before the project exists and skips that window entirely.
+
+  Both retired jobs previously emitted a `::warning::` and exited **0**, so the
+  run summary read `publish · crates.io  success` while crates.io answered
+  `crate does not exist` — what shipped for v0.4.0 (#151). The lesson survives
+  both deletions: a publish channel that cannot work must fail or be switched
+  off, never report success. And a job existing is still not a package
+  existing — `TAN_PYPI_PUBLISH` being `true` is necessary, not sufficient; the
+  pending publisher has to be configured on pypi.org first.

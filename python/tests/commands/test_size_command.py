@@ -52,13 +52,36 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+#: Fully-permissive schemas (tan-cli#964 review, major 6): `fake_sdk` writes
+#: both so the many tests in this file that are not ABOUT schema behaviour do
+#: not each pick up a `size.metadata-schema-unchecked` info issue for a
+#: schema file they never meant to test. The dedicated schema tests below
+#: overwrite one or both (or delete one) to cover the invalid/absent halves
+#: specifically -- `write()` truncates, so a later per-test `write(...)` to
+#: the same path replaces these defaults cleanly.
+_PERMISSIVE_SOM_PRESET_SCHEMA = json.dumps(
+    {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
+)
+_PERMISSIVE_SOC_SPEC_SCHEMA = json.dumps(
+    {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
+)
+
+
 def fake_sdk(root: Path, sku: str, soc: str) -> None:
     write(root / "scripts" / "alp_project.py", "")
     write(
         root / "metadata" / "e1m_modules" / f"{sku}.yaml",
-        f"schema_version: 1\nsku: {sku}\nsilicon: test:fam:part\n",
+        f"schema_version: 2\nsku: {sku}\nsilicon: test:fam:part\n",
     )
     write(root / "metadata" / "socs" / "test" / "fam" / "part.json", soc)
+    write(
+        root / "metadata" / "schemas" / "som-preset-v2.schema.json",
+        _PERMISSIVE_SOM_PRESET_SCHEMA,
+    )
+    write(
+        root / "metadata" / "schemas" / "soc-spec-v1.schema.json",
+        _PERMISSIVE_SOC_SPEC_SCHEMA,
+    )
 
 
 def footprint_project(root: Path, sku: str, rom: int, ram: int, soc: str) -> None:
@@ -96,6 +119,186 @@ def test_measured_slice_reports_a_full_row(tmp_path):
     assert doc["issues"] == []
 
 
+def test_nested_manifest_without_build_dir_measures_under_build(tmp_path):
+    # tan-cli#1405 review: `--build-root br` with the manifest at br/build/ --
+    # the slice's `<core>-<os>` fallback dir is br/build/m55_hp-zephyr, not
+    # br/m55_hp-zephyr.
+    fake_sdk(tmp_path / "sdk", "E1M-TEST", SOC_5M5)
+    write(
+        tmp_path / "br" / "build" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
+        "- core_id: m55_hp\n  os: zephyr\n",
+    )
+    write(tmp_path / "br" / "build" / "m55_hp-zephyr" / "rom.json", '{"symbols":{"size":4096}}')
+    write(tmp_path / "br" / "build" / "m55_hp-zephyr" / "ram.json", '{"symbols":{"size":2048}}')
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    row = envelope(result)["data"]["slices"][0]
+    assert row["status"] == "ok"
+    assert row["flash"]["used"] == 4096
+
+
+#: `soc-spec-v1.schema.json`, narrowed to the one field the whole
+#: #957/#962/#964/#965/#969 crash family is about -- not a byte-for-byte
+#: mirror of the real schema, so this file's coverage does not depend on it
+#: never changing shape.
+_SOC_SPEC_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "cores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "type": {"type": "string"}},
+            },
+        }
+    },
+})
+
+
+def test_a_schema_invalid_soc_json_warns_but_still_measures(tmp_path):
+    """tan-cli#964, the WARN half of the decided rule, at `tan size`: a
+    schema-invalid `cores[].type` (a number, which `soc-spec-v1.schema.json`
+    forbids) does not change what gets measured -- the budget still resolves
+    from `soc_flash_mb`/`tcm_kb`, fields this reader never even looks at --
+    but the envelope now names the file, the JSON pointer, and what was
+    found, instead of the schema violation being invisible.
+
+    Mutation-proven: commenting out the `issues.extend(Issue("size.metadata
+    -schema-invalid", ...))` line in `size_cmd._run` (byte copy restored
+    after, never `git checkout`) turns this test's `issues` assertion RED
+    while leaving `row["flash"]`/`row["ram"]` unaffected -- proving the
+    warning is additive. Restoring turns it GREEN.
+    """
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": 7, "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    write(tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SPEC_SCHEMA)
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["flash"] == {"used": 4096, "total": 5_767_168, "pct": 0.1}
+    soc_path = "sdk/metadata/socs/test/fam/part.json"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-invalid",
+            "severity": "warning",
+            "message": f"{soc_path}: cores/0/type: 7 is not of type 'string'",
+        }
+    ]
+
+    text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
+    # tan-cli#964 review (minor 11): text mode now tags a schema violation
+    # explicitly, so it cannot be mistaken for any other warning.
+    assert (
+        f"warning: schema: {soc_path}: cores/0/type: 7 is not of type 'string'"
+        in text_result.stderr
+    )
+
+
+def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path):
+    """The control: the identical fixture with a schema-VALID `type` produces
+    no `size.metadata-schema-invalid` issue on either mode."""
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": "cortex-m55", "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    write(tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SPEC_SCHEMA)
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+
+    text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
+    assert "metadata-schema-invalid" not in text_result.stderr
+
+
+#: `som-preset-v2.schema.json`, narrowed to `silicon:` -- the field
+#: `_resolve_slice_budget`/`read_sdk_som_and_soc` immediately splits on
+#: (`silicon.split(":")`), same narrowing rationale as `_SOC_SPEC_SCHEMA`.
+_SOM_PRESET_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 2},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def test_a_schema_invalid_som_preset_warns_but_still_measures(tmp_path):
+    """tan-cli#964 review, minor 12: `size`'s SOM-preset validation (the
+    OTHER document `_resolve_slice_budget` reads, alongside the SoC JSON
+    `test_a_schema_invalid_soc_json_warns_but_still_measures` above already
+    covers) had no CLI-level test. A schema-invalid `silicon:` (a number,
+    which `som-preset-v2.schema.json` forbids) does not change the measured
+    row -- `read_sdk_som_and_soc` degrades to `budget: unknown` exactly as it
+    already did -- but the envelope now names the file and what was found.
+
+    Mutation-proven: reverting `_read_som_preset`'s `warnings.extend(...)`
+    call (byte copy restored after, never `git checkout`) turns this test's
+    `issues` assertion red; restoring turns it green.
+    """
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
+    write(
+        tmp_path / "sdk" / "metadata" / "schemas" / "som-preset-v2.schema.json",
+        _SOM_PRESET_SCHEMA,
+    )
+    write(
+        tmp_path / "sdk" / "metadata" / "e1m_modules" / "E1M-TEST.yaml",
+        "schema_version: 2\nsku: E1M-TEST\nsilicon: 7\n",
+    )
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["core_id"] == "m55_hp"
+    som_path = "sdk/metadata/e1m_modules/E1M-TEST.yaml"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-invalid",
+            "severity": "warning",
+            "message": f"{som_path}: silicon: 7 is not of type 'string'",
+        }
+    ]
+
+
+def test_a_missing_soc_spec_schema_discloses_the_skip_not_silence(tmp_path):
+    """tan-cli#964 review (major 6, 'skip-but-disclose'): the same fixture as
+    `test_a_schema_valid_soc_json_carries_no_metadata_schema_issue`, but with
+    `soc-spec-v1.schema.json` absent from the checkout entirely -- must not
+    go back to a silent `issues: []`; must disclose that nothing was
+    checked, at `info`, distinct from the `warning` a real violation gets.
+    """
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": "cortex-m55", "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    (tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json").unlink()
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["flash"] == {"used": 4096, "total": 5_767_168, "pct": 0.1}
+    soc_path = "sdk/metadata/socs/test/fam/part.json"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                f"{soc_path}: not validated -- no schema at "
+                "sdk/metadata/schemas/soc-spec-v1.schema.json in this checkout"
+            ),
+        }
+    ]
+
+
 def test_sdk_root_is_reported_forward_slashed_and_never_null(tmp_path):
     footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
     doc = envelope(
@@ -118,14 +321,16 @@ def test_sdk_key_is_absent_not_null_without_a_checkout(tmp_path):
 def test_sdk_key_is_absent_when_sdk_root_is_not_a_checkout(tmp_path):
     # `--sdk-root` is terminal (I-31): a bad path resolves to NOTHING rather than
     # falling through to some other checkout, and the envelope must not advertise
-    # a path no command could use.
+    # a path no command could use. tan-cli#1463: it is also now a coded refusal
+    # (`size.sdk-root-unresolved`) rather than a silent "no SDK metadata" size.
     (tmp_path / "notsdk").mkdir()
     footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
     doc = envelope(
         run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "notsdk")
     )
     assert "sdk" not in doc
-    assert doc["data"]["slices"][0]["budget_note"] == "no SoM preset for E1M-TEST"
+    assert doc["ok"] is False
+    assert [i["code"] for i in doc["issues"]] == ["size.sdk-root-unresolved"]
 
 
 def test_board_overrides_the_manifest_sku(tmp_path):
@@ -772,3 +977,41 @@ def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
     doc = json.loads(result.stdout)
     assert [i["code"] for i in doc["issues"]] == ["size.internal-failure"]
     assert "sdk" not in doc
+
+
+# ------------------------------------------- tan-cli#1278: pre-v2 SoM preset
+
+
+def test_a_pre_v2_som_preset_keeps_the_row_but_says_why_the_budget_is_unknown(tmp_path):
+    """Against an SDK that predates som-preset v2 (alp-sdk#2024) the preset is
+    refused and the row says `unreadable SoM preset` -- the oracle's words,
+    unchanged -- while `issues[]` now names the real cause instead of
+    nothing."""
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
+    write(
+        tmp_path / "sdk" / "metadata" / "e1m_modules" / "E1M-TEST.yaml",
+        "schema_version: 1\nsku: E1M-TEST\nsilicon: test:fam:part\n",
+    )
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+
+    assert result.returncode == 0
+    doc = envelope(result)
+    row = doc["data"]["slices"][0]
+    assert row["budget_note"] == "unreadable SoM preset for E1M-TEST"
+    # Forward slashes on every host, like `presets.som-schema-version-skipped`.
+    preset = "sdk/metadata/e1m_modules/E1M-TEST.yaml"
+    assert doc["issues"] == [
+        {
+            "code": "size.som-schema-version-skipped",
+            "severity": "warning",
+            "message": (
+                f"the SoM preset for E1M-TEST ({preset}) was not read, so its "
+                "FLASH/RAM budget is unknown: schema_version 1 (this tan reads "
+                "som-preset schema_version 2) -- the bound alp-sdk predates "
+                "som-preset v2 (alp-sdk#2024); point --sdk-root at an alp-sdk "
+                "whose metadata/schemas/ ships som-preset-v2.schema.json, or use "
+                "a tan release that matches this SDK."
+            ),
+        }
+    ]

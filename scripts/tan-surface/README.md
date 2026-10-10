@@ -4,7 +4,8 @@ Runs **every** `tan` command, in dependency order, against a **real project** �
 the way you would type them by hand. Built so that checking a build of `tan`
 does not require anyone to reconstruct the command list from memory.
 
-`tan flash` is never run and there is no flag to enable it.
+`tan flash` is never run and there is no flag to enable it; `reset` and the
+live half of `probe` (which contact a J-Link) are not driven either.
 
 **Requires:** bash + coreutils (`mktemp`, `grep -E`, `comm`, `awk`) and
 `python3` on `PATH`. Developed and run on Linux and macOS. On Windows there is
@@ -183,16 +184,12 @@ this one needs your real environment to mean anything.
 
 ## Known-defect ledger
 
-Expectations target the `dev` TREE at `4838652`, 2026-08-08 — not a release
-(see "Re-derived against dev" below; its "16 commits" is `8abfe0f..4838652`,
-measured). They used to say "tan 0.5.2", which is what the tree carried then
-(`0.5.2-rc1.dev0`) but never became a tag: the release that would have carried
-it was renumbered to `v0.6.0-rc1` (release commit `e2f5021`, because the
-milestone being closed was v0.6.0 and the section carried a Removed block).
-**A re-derivation against current `dev` is due — NOT against `v0.6.0-rc1`.**
-That tag predates tan-cli#848 and still registers `renode`, which this file has
-already dropped, so a run against it fails the command-surface-drift step below
-on the harness's own terms. The ledger is
+Expectations target the `dev` TREE at `949045a9`, 2026-10-10 — not a release
+(see "Re-derived against dev" below). The 2026-08-08 derivation named a
+`0.5.2` the tree carried but never tagged; the release that would have carried
+it became `v0.6.0-rc1`. Do NOT run this harness against `v0.6.0-rc1`: that tag
+predates tan-cli#848 and still registers `renode`, so it fails the
+command-surface-drift step below on the harness's own terms. The ledger is
 currently **empty**: the last entry was #448 (`renode` never reaches the app
 console), retired when `tan renode` was removed outright rather than fixed.
 
@@ -215,7 +212,6 @@ assertions in `cases.sh`, so the fixed behaviour is what gets defended:
 | [#457](https://github.com/alplabai/tan-cli/issues/457) | `generate --all` is re-runnable | second run exits 0 |
 | [#458](https://github.com/alplabai/tan-cli/issues/458) | `pinmux` prints its issues | the error line must appear |
 | [#469](https://github.com/alplabai/tan-cli/issues/469) | no stringified `None`; bootstraps in place | `--dry-run` exits 0 |
-| [#470](https://github.com/alplabai/tan-cli/issues/470) | `renode` honours `--project` | n/a — `tan renode` has since been removed |
 
 #469 and #470 were found *by writing this harness*, not by the manual pass that
 produced the rest.
@@ -239,6 +235,17 @@ first bootstrap) needs an un-bootstrapped checkout, which the harness will not
 manufacture; and
 [alp-sdk#1224](https://github.com/alplabai/alp-sdk/issues/1224) (an unknown chip
 token reaching `alp.conf`) is an SDK-side schema gap.
+
+### Re-derived against `dev` (2026-10-10)
+
+The command-surface list was re-walked against `tan --help` (33 commands) for
+tan-cli#1464: `probe` and `reset` were registered but missing from
+`KNOWN_COMMANDS`, so the drift step failed on them. New hardware-free cases:
+`sdk remove` (missing argument refuses; an absent version under a throwaway
+`--destination` is a no-op exit 0), the `model` subcommands (unknown
+subcommand exit 1; `run`/`ab`/`prep`/`add` without their argument exit 2;
+`zoo` and `list` exit 0), and `probe` argument validation (exit 2). `probe`
+itself, `reset`, and `flash` are never driven against a probe.
 
 ### Re-derived against `dev` (2026-08-08)
 

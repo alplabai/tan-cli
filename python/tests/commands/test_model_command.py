@@ -1,54 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan model build` -- board.yaml resolution, compile-option path resolution,
-and the driver-spawn contract, exercised end to end against a fake alp-sdk
-checkout carrying a stub `alp_model.build.build_model`.
+and the in-process `tan.model.build.build_model` call, exercised end to end.
 
 Port of `scripts/alp_cli/model.py`'s own shape; no committed Rust `model.rs`
 exists (the retired forwarder in `crates/tan-cli/src/commands/sdk_cli.rs` is
 the oracle for the outer envelope contract, not the model-building logic,
 which stays alp-sdk's own).
 
-The driver-spawn tests are real subprocesses against the *system* `python` on
-PATH (this port's `_planner_python()` never uses `sys.executable`, matching
-the Rust `resolve_python_binary` it mirrors) -- they are the only way to prove
-the `PYTHONPATH`-prepend + stdin/stdout JSON contract with the SDK's own
-`alp_model` package actually round-trips, not just that the surrounding
-envelope code compiles. The skip guard below probes that SAME interpreter
-(`_planner_python()`), not `sys.executable` -- on a host where the running
-interpreter works but PATH has no `python`/`python3` (the frozen-`tan` case
-this repo plans for), the spawn tests must skip, not fail for an environment
-reason.
+ADR-0028 relocated the compiler-adapter engine into `tan.model` and collapsed
+the `python -c` driver subprocess that used to run it under a resolved SDK
+checkout's own interpreter into a direct in-process call. The tests below
+that need to observe what `build_model` was *called with*, or force it to
+fail, monkeypatch `model_cmd.build_model` (the name `model_cmd` imported it
+under) rather than spawning anything -- there is no subprocess boundary left
+to spawn across.
 """
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from pathlib import Path
 
-import pytest
 import typer
 from typer.testing import CliRunner
 
 from tan.commands import model_cmd
 from tan.commands.model_cmd import model
+from tan.model._gen_fixture import build_fixture_bytes
 
 app = typer.Typer(add_completion=False)
 app.command("model")(model)
 
 runner = CliRunner()
 
-# The bare-PATH-name fallback `_planner_python` returns when no west-capable
-# workspace `.venv` resolves for the args a given test actually passes --
-# `str(tmp_path)` / a from-scratch fake SDK, per test, never `os.getcwd()` /
-# `None`. Gating on `_planner_python(os.getcwd(), None)` at import time
-# probes DIFFERENT args than the command under test ever receives: the two
-# can each resolve a different `.venv` (or none), so the gate could
-# green-light a run whose real interpreter is absent, or skip a run whose
-# real interpreter is fine. `shutil.which` makes the gate what it was written
-# for -- whether the bare PATH fallback name is reachable at all -- without
-# guessing at a `_find_workspace_venv` walk this module doesn't control.
-_HAS_PYTHON = shutil.which("python" if os.name == "nt" else "python3") is not None
+#: What every `_fake_build_model` below writes. A REAL, well-formed
+#: `.alpmodel` container (the committed `minimal` fixture) rather than the
+#: `b"x"` / `b"stub-package"` placeholders these fakes used to drop on disk:
+#: `_run_build` now reads each written package's manifest back to report the
+#: compiler caveats it ships with (`model_cmd._shipped_caveat_issues`), so a
+#: fake standing in for `build_model` has to produce something `build_model`
+#: could actually have produced. It carries NO caveats, which is what keeps
+#: these tests' `issues` lists about the thing each one is testing.
+_REAL_PACKAGE_BYTES = build_fixture_bytes()
 
 
 def envelope(result):
@@ -66,34 +58,6 @@ def make_sdk(root: Path) -> Path:
     return root
 
 
-STUB_BUILD_OK = '''
-from pathlib import Path
-
-def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{name}.alpmodel"
-    out.write_bytes(b"stub-package")
-    return out
-'''
-
-STUB_BUILD_FAILS_ONE = '''
-from pathlib import Path
-
-def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None):
-    if name == "bad":
-        raise ValueError(f"no blob compiled for model '{name}'")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{name}.alpmodel"
-    out.write_bytes(b"stub-package")
-    return out
-'''
-
-
-def stub_alp_model(sdk_root: Path, body: str) -> None:
-    write(sdk_root / "scripts" / "alp_model" / "__init__.py", "")
-    write(sdk_root / "scripts" / "alp_model" / "build.py", body)
-
-
 def board_yaml(root: Path, models: str = "") -> Path:
     path = root / "board.yaml"
     write(path, f"som:\n  sku: E1M-TEST\n{models}")
@@ -101,7 +65,7 @@ def board_yaml(root: Path, models: str = "") -> Path:
 
 
 # --------------------------------------------------------------------------
-# argument-shape / resolution refusals -- no subprocess spawned
+# argument-shape / resolution refusals -- build_model is never reached
 # --------------------------------------------------------------------------
 
 
@@ -206,65 +170,40 @@ def test_missing_sku_refuses(tmp_path):
     assert doc["issues"][0]["code"] == "model.board-yaml-invalid"
 
 
-def test_run_driver_treats_empty_stdout_as_an_internal_failure_not_an_empty_ok(
-    tmp_path, monkeypatch
-):
-    """A driver that exits 0 having printed NOTHING must not be coerced to
-    `{}` (which would read as a legitimate empty result and let the caller's
-    `result.get("results", [])` silently become `[]`) -- it must fall into
-    the same unparsable-output failure a malformed document already does."""
-
-    class _Completed:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    monkeypatch.setattr(
-        model_cmd.subprocess, "run", lambda *a, **k: _Completed()
-    )
-    try:
-        model_cmd._run_driver("python", tmp_path, {"models": []})
-        raised = False
-    except model_cmd.ModelError as err:
-        raised = True
-        assert err.code == "model.internal-failure"
-        assert "unparsable output" in err.message
-    assert raised
+# --------------------------------------------------------------------------
+# ADR-0028: the in-process `build_model` call, not a subprocess
+# --------------------------------------------------------------------------
 
 
-def test_run_driver_parses_the_last_line_ignoring_stray_earlier_output(
-    tmp_path, monkeypatch
-):
-    """Mirrors `_python_too_old`'s own defence one screen up in this file: a
-    future adapter `print()`, or a vendor tool that inherits stdout, must not
-    turn every `tan model build` into `model.internal-failure`."""
+def test_build_calls_the_in_process_engine_not_a_subprocess(tmp_path, monkeypatch):
+    """ADR-0028: the engine is tan's own package. No `python -c` driver, no
+    PYTHONPATH=<sdk>/scripts, no subprocess on the build path."""
+    import subprocess
 
-    class _Completed:
-        returncode = 0
-        stdout = 'a vendor tool printed this first\n{"results": []}\n'
-        stderr = ""
+    def _boom(*a, **k):
+        raise AssertionError("model build must not spawn a subprocess")
 
-    monkeypatch.setattr(
-        model_cmd.subprocess, "run", lambda *a, **k: _Completed()
-    )
-    assert model_cmd._run_driver("python", tmp_path, {"models": []}) == {"results": []}
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
 
-
-def test_a_driver_that_reports_fewer_results_than_requested_is_an_internal_failure(
-    tmp_path, monkeypatch
-):
-    """A driver that exits 0 but reports no result for a declared model must
-    not read the same as the legitimate no-models no-op above -- both would
-    otherwise report `ok: true` with `built: []`. No real spawn needed: the
-    driver call itself is stubbed."""
     sdk = make_sdk(tmp_path / "sdk")
     write(tmp_path / "source.tflite", "x")
     board_yaml(
         tmp_path,
         "models:\n  - name: mymodel\n    source: source.tflite\n",
     )
-    monkeypatch.setattr(model_cmd, "_python_too_old", lambda python, floor: None)
-    monkeypatch.setattr(model_cmd, "_run_driver", lambda *a, **k: {"results": []})
+
+    calls = []
+
+    def _fake_build_model(**kw):
+        calls.append(kw)
+        out = tmp_path / "build" / "models" / "mymodel.alpmodel"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
     result = runner.invoke(
         app,
         [
@@ -274,27 +213,112 @@ def test_a_driver_that_reports_fewer_results_than_requested_is_an_internal_failu
             "--format", "json",
         ],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 0, result.stdout
+    assert len(calls) == 1
+    assert calls[0]["sku"] == "E1M-TEST"
+    assert calls[0]["name"] == "mymodel"
+    assert calls[0]["source"] == (tmp_path / "source.tflite").resolve()
+    assert calls[0]["out_dir"] == tmp_path / "build" / "models"
+    assert calls[0]["metadata_root"] == sdk / "metadata"
+    assert calls[0]["compile_opts"] is None
+
+
+def test_build_failure_is_a_coded_issue_not_a_traceback(tmp_path, monkeypatch):
+    """Deliberate divergence 1 from the oracle is PRESERVED: a per-model
+    failure resolves to `model.build-failed` and the batch continues."""
+
+    def _fail(**kw):
+        raise RuntimeError("no blob compiled for model")
+
+    monkeypatch.setattr(model_cmd, "build_model", _fail)
+
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "one.tflite", "x")
+    write(tmp_path / "two.tflite", "x")
+    board_yaml(
+        tmp_path,
+        "models:\n"
+        "  - name: one\n    source: one.tflite\n"
+        "  - name: two\n    source: two.tflite\n",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 3  # WriteFailure -- every model failed
     doc = envelope(result)
     assert doc["ok"] is False
-    assert doc["issues"][0]["code"] == "model.internal-failure"
-    assert "mymodel" in doc["issues"][0]["message"]
+    codes = [i["code"] for i in doc["issues"]]
+    names = [i["message"] for i in doc["issues"]]
+    assert codes == ["model.build-failed", "model.build-failed"]
+    assert any("'one'" in m for m in names)
+    assert any("'two'" in m for m in names)
+    assert all("no blob compiled" in m for m in names)
+    assert doc["data"]["built"] == []
 
 
-# --------------------------------------------------------------------------
-# real driver spawn -- against a stub alp_model on PATH's python
-# --------------------------------------------------------------------------
+def test_a_certain_sram_no_fit_refuses_with_its_own_code_and_exit_code(tmp_path, monkeypatch):
+    """tan-cli#1288's binding decision: a certain arena/SRAM0 no-fit under
+    `Sram_Only` gets its OWN issue code (`model.sram-no-fit`, never the
+    generic `model.build-failed`) and its OWN exit code
+    (`ExitCode.VALIDATION_FAILURE` == 2, never `WRITE_FAILURE` == 3) -- and,
+    like every `build_model()` failure, no `.alpmodel` is written.
+    `model_cmd.build_model` is monkeypatched wholesale (this file's own
+    established pattern, `test_build_failure_is_a_coded_issue_not_a_
+    traceback` above), so this proves the model_cmd.py PLUMBING that catches
+    `SramNoFitRefused` ahead of the generic except-clause -- the fit
+    arithmetic itself is `tests/model/test_sram_fit.py`'s job."""
+    from tan.model.build import SramNoFitRefused
 
+    def _refuse(**kw):
+        raise SramNoFitRefused("ethos-u85-256: SRAM0 needs 5072 KiB, only 4096 KiB available")
 
-@pytest.mark.skipif(not _HAS_PYTHON, reason="no python interpreter available to spawn")
-def test_a_built_model_reports_its_output_path(tmp_path):
+    monkeypatch.setattr(model_cmd, "build_model", _refuse)
+
     sdk = make_sdk(tmp_path / "sdk")
-    stub_alp_model(sdk, STUB_BUILD_OK)
+    write(tmp_path / "one.tflite", "x")
+    board_yaml(tmp_path, "models:\n  - name: one\n    source: one.tflite\n")
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2  # ValidationFailure, not WriteFailure
+    doc = envelope(result)
+    assert doc["ok"] is False
+    assert doc["issues"][0]["code"] == "model.sram-no-fit"
+    assert doc["issues"][0]["severity"] == "error"
+    assert "'one'" in doc["issues"][0]["message"]
+    assert "SRAM0 needs 5072 KiB" in doc["issues"][0]["message"]
+    assert doc["data"]["built"] == []
+    assert not list((tmp_path / "build").rglob("*.alpmodel"))
+
+
+def test_a_built_model_reports_its_output_path(tmp_path, monkeypatch):
+    sdk = make_sdk(tmp_path / "sdk")
     write(tmp_path / "source.tflite", "fake-tflite-bytes")
     board_yaml(
         tmp_path,
         "models:\n  - name: mymodel\n    source: source.tflite\n",
     )
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
     result = runner.invoke(
         app,
         [
@@ -314,10 +338,10 @@ def test_a_built_model_reports_its_output_path(tmp_path):
     assert (tmp_path / "build" / "models" / "mymodel.alpmodel").is_file()
 
 
-@pytest.mark.skipif(not _HAS_PYTHON, reason="no python interpreter available to spawn")
-def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(tmp_path):
+def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(
+    tmp_path, monkeypatch
+):
     sdk = make_sdk(tmp_path / "sdk")
-    stub_alp_model(sdk, STUB_BUILD_FAILS_ONE)
     write(tmp_path / "good.tflite", "x")
     write(tmp_path / "bad.tflite", "x")
     board_yaml(
@@ -326,6 +350,17 @@ def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(tmp_
         "  - name: good\n    source: good.tflite\n"
         "  - name: bad\n    source: bad.tflite\n",
     )
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        if name == "bad":
+            raise ValueError(f"no blob compiled for model '{name}'")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
     result = runner.invoke(
         app,
         [
@@ -345,36 +380,136 @@ def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(tmp_
     assert "no blob compiled" in doc["issues"][0]["message"]
 
 
-@pytest.mark.skipif(not _HAS_PYTHON, reason="no python interpreter available to spawn")
-def test_compile_opts_paths_are_resolved_absolute_relative_to_board_dir(tmp_path):
-    """Port of `model.py::_resolve_compile`: string opt values become absolute
-    paths relative to board.yaml's own directory. Also covers the two other
-    values `build_model` uses to choose which silicon to compile for -- `sku`
-    and `metadata_root` -- untested before: get either wrong and the driver
-    silently compiles blobs for the wrong part."""
-    sdk = make_sdk(tmp_path / "sdk")
-    write(
-        tmp_path / "sdk" / "scripts" / "alp_model" / "__init__.py", ""
-    )
-    write(
-        tmp_path / "sdk" / "scripts" / "alp_model" / "build.py",
-        '''
-from pathlib import Path
-import json, os
+def test_a_missing_dxcom_toolchain_is_a_coded_issue_not_a_traceback_and_the_batch_continues(
+    tmp_path, monkeypatch
+):
+    """tan-cli#253 gap (b): the DEEPX host compiler `dxcom` (not `dx_com`) is
+    license-gated and, on any machine that hasn't installed it, simply
+    absent from PATH. `tan.model.adapters.deepx` resolves it with
+    `shutil.which("dxcom")` and raises when it can't find it -- that raise
+    reaches `_run_build`'s per-model `except Exception` (module doc,
+    `model_cmd.py:404-407`) exactly the same as any other `build_model()`
+    failure: there is no dedicated "toolchain not found" branch, so a
+    missing `dxcom` is the SAME case as `test_a_failed_model_is_an_issue_
+    not_a_traceback_and_the_batch_continues` above, not a different one --
+    it resolves to the same coded `model.build-failed` issue, and the batch
+    still continues to the next model rather than aborting."""
 
-def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Record what this run actually received, so the test can assert on it.
-    (out_dir / "opts.json").write_text(json.dumps({
-        "sku": sku,
-        "metadataRoot": str(metadata_root),
-        "compileOpts": compile_opts,
-    }))
-    out = out_dir / f"{name}.alpmodel"
-    out.write_bytes(b"x")
-    return out
-''',
+    def _fake_build_model(*, out_dir, name, **kw):
+        if name == "needs_dxcom":
+            raise FileNotFoundError("dxcom: command not found")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "good.onnx", "x")
+    write(tmp_path / "deepx.onnx", "x")
+    board_yaml(
+        tmp_path,
+        "models:\n"
+        "  - name: good\n    source: good.onnx\n"
+        "  - name: needs_dxcom\n    source: deepx.onnx\n",
     )
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 3  # WriteFailure -- the dxcom-needing model failed
+    doc = envelope(result)
+    assert doc["ok"] is False
+    built = doc["data"]["built"]
+    assert len(built) == 1 and built[0].endswith("good.alpmodel")  # batch continued
+    assert len(doc["issues"]) == 1
+    failed = doc["issues"][0]
+    assert failed["code"] == "model.build-failed"
+    assert failed["severity"] == "error"
+    assert "needs_dxcom" in failed["message"]
+    assert "dxcom" in failed["message"]
+    assert "FileNotFoundError" in failed["message"]
+
+
+# --------------------------------------------------------------------------
+# `_resolve_compile` -- the `models[].compile.<backend>` path resolver, unit
+# --------------------------------------------------------------------------
+#
+# Pins alp-sdk#1271: only `config`/`calibration`/`images`/`spec` name paths.
+# `_resolve_compile` used to resolve EVERY string value in a compile block to
+# an absolute filesystem path, so DRP-AI's `input_shape` ("1,3,224,224"),
+# `input_name` ("images") and `product` ("V2N") -- opaque strings the adapter
+# must receive unchanged -- were corrupted into filesystem paths before ever
+# reaching the adapter, which then made the adapter's own shape check
+# misfire. alp-sdk fixed this as issue #1271; tan's hand-ported copy never
+# received it until tan-cli#776.
+
+
+def test_resolve_compile_leaves_non_path_options_unchanged(tmp_path):
+    """alp-sdk#1271: only `config`/`calibration`/`images`/`spec` name paths.
+    Resolving a shape string turned "1,3,224,224" into a filesystem path and
+    made the DRP-AI adapter's own shape check misfire."""
+    out = model_cmd._resolve_compile(
+        {"drpai": {"input_shape": "1,3,224,224", "input_name": "images",
+                   "product": "V2N", "config": "cfg.json"}},
+        tmp_path,
+    )
+    assert out["drpai"]["input_shape"] == "1,3,224,224"
+    assert out["drpai"]["input_name"] == "images"
+    assert out["drpai"]["product"] == "V2N"
+    # the one genuine path key IS resolved, absolute, against board.yaml's dir
+    assert out["drpai"]["config"] == str((tmp_path / "cfg.json").resolve())
+
+
+def test_resolve_compile_leaves_non_string_path_valued_options_unchanged(tmp_path):
+    """A path-valued key (`images`) can still carry a non-string value in a
+    plausible `board.yaml` spelling -- a YAML flow-sequence
+    (`images: [a.png, b.png]`) or a stray int (`calibration: 100`). Those must
+    pass through unchanged rather than reaching `Path.__truediv__`, which
+    raises `TypeError: unsupported operand type(s) for /: 'PosixPath' and
+    'list'` for a non-str/PathLike operand -- caught by `model()`'s outer
+    catch-all and turned into `model.internal-failure` / exit
+    `INTERNAL_FAILURE` instead of a build.
+    Guards the `isinstance(v, str)` half of `_resolve_compile`'s guard, not
+    just the `k in _PATH_OPT_KEYS` half that the test above pins."""
+    out = model_cmd._resolve_compile({"drpai": {"images": ["a", "b"]}}, tmp_path)
+    assert out["drpai"]["images"] == ["a", "b"]
+
+
+def test_resolve_compile_passes_through_none_and_empty():
+    """An absent `compile:` block and an empty one both fall through the
+    `if not block:` guard to `None` -- true of both the pre-fix tan code and
+    the upstream alp-sdk#1271 fix (`if not block: return None`, unchanged by
+    that fix); this is pre-existing, unrelated behaviour, not part of the
+    path-key drift this section otherwise pins."""
+    assert model_cmd._resolve_compile(None, Path(".")) is None
+    assert model_cmd._resolve_compile({}, Path(".")) is None
+
+
+def test_compile_opts_paths_are_resolved_absolute_relative_to_board_dir(
+    tmp_path, monkeypatch
+):
+    """Port of `model.py::_resolve_compile`: only PATH-VALUED opt keys
+    (`config`/`calibration`/`images`/`spec`) become absolute paths relative to
+    board.yaml's own directory -- every other compile option (DRP-AI's
+    `input_shape`/`input_name`/`product` among them, alp-sdk#1271) must
+    survive verbatim. Also covers the two other values `build_model` uses to
+    choose which silicon to compile for -- `sku` and `metadata_root` --
+    untested before: get either wrong and the driver silently compiles blobs
+    for the wrong part.
+
+    ADR-0028: this used to read `opts.json` back out of a stub SDK package a
+    spawned driver wrote to disk. There is no subprocess boundary any more --
+    `build_model` is called in-process, so what it actually received is
+    asserted directly off the captured kwargs."""
+    sdk = make_sdk(tmp_path / "sdk")
     write(tmp_path / "source.tflite", "x")
     write(tmp_path / "vela.ini", "x")
     board_yaml(
@@ -384,8 +519,24 @@ def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None)
         "    source: source.tflite\n"
         "    compile:\n"
         "      ethos_u:\n"
-        "        config: vela.ini\n",
+        "        config: vela.ini\n"
+        "      drpai:\n"
+        "        input_shape: \"1,3,224,224\"\n"
+        "        input_name: images\n"
+        "        product: V2N\n",
     )
+
+    calls = []
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        calls.append(kw)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
     result = runner.invoke(
         app,
         [
@@ -396,16 +547,26 @@ def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None)
         ],
     )
     assert result.exit_code == 0, result.stdout
-    opts = json.loads((tmp_path / "build" / "models" / "opts.json").read_text())
-    assert opts["sku"] == "E1M-TEST"
-    assert opts["metadataRoot"] == str(sdk / "metadata")
-    assert opts["compileOpts"]["ethos_u"]["config"] == str((tmp_path / "vela.ini").resolve())
+    assert len(calls) == 1
+    received = calls[0]
+    assert received["sku"] == "E1M-TEST"
+    assert received["metadata_root"] == sdk / "metadata"
+    assert received["compile_opts"]["ethos_u"]["config"] == str(
+        (tmp_path / "vela.ini").resolve()
+    )
+    # alp-sdk#1271 / tan-cli#776: these three DRP-AI opts are opaque strings,
+    # not path keys -- they must survive the round trip through
+    # `_resolve_compile` byte-for-byte, not get mangled into filesystem paths.
+    drpai = received["compile_opts"]["drpai"]
+    assert drpai["input_shape"] == "1,3,224,224"
+    assert drpai["input_name"] == "images"
+    assert drpai["product"] == "V2N"
 
 
 # --------------------------------------------------------------------------
 # tan-cli#398 -- `--board-yaml` is the spelling `build`/`run`/`kconfig`/
 # `validate`/`generate`/`inspect` all use for the board file, and the vscode
-# extension's own CLI contract (`docs/CLI.md`, "Common flags") lists it among
+# extension's own CLI contract (alp-sdk-vscode's `docs/CLI.md`, "Common flags") lists it among
 # the flags "All commands should support". `model` declared only `--board` and
 # took `--board-yaml` as one of `accept_global_flags`' INJECTED options, which
 # are accepted and then dropped -- harmless for an arity-0 `--verbose`, a
@@ -693,3 +854,130 @@ def test_the_no_flag_refusal_still_offers_the_flag(tmp_path):
         "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
         "alp-sdk checkout, or "
     )
+
+
+# --------------------------------------------------------------------------
+# tan-cli#789 (f) -- a shipped blob's compiler caveat reaches the operator who
+# ran `tan model build`, not just `tan model check --exact`.
+# --------------------------------------------------------------------------
+
+_CAVEAT = ('vela used its BUILT-IN default profile (system-config '
+           'Ethos_U55_High_End_Embedded, memory-mode Shared_Sram), not one authored '
+           'for this module -- vela\'s own warning for that is "Compilation may be '
+           'invalid or non-optimal". The arena/SRAM figures and the compiled command '
+           "stream describe that default memory model, not this module's.")
+
+
+def _caveated_package_bytes() -> bytes:
+    """A real container whose ethos_u target ships with the verbatim vela
+    default-profile caveat. (The COMPILE that produces this exact string is
+    pinned against real vela 5.1.0 by `tests/model/test_build.py`'s
+    `test_a_refused_target_does_not_take_the_rest_of_the_package_with_it` --
+    the both-flags-defaulted shape, which since alp-sdk #1470 means a SoC spec
+    carrying no `npu_toolchain.vela`. This file is about what the command does
+    with a caveat that already exists, so which shape it is does not matter
+    here.)"""
+    from tan.model.manifest import Manifest, Target
+    from tan.model.package import write_package
+
+    return write_package(
+        Manifest(
+            name="mymodel", src_sha=bytes(32),
+            targets=[
+                Target("ethos_u", "alif:ensemble:e8", "vela_tflite", "ethos-u55-128",
+                       32, {"sram_kib": 1, "op_features": []}, 0,
+                       compiler_version="vela 5.1.0", caveats=[_CAVEAT]),
+                Target("cpu", "*", "tflite", "", 0,
+                       {"sram_kib": 0, "op_features": []}, 1,
+                       compiler_version="passthrough"),
+            ],
+        ),
+        [b"VELA-BLOB", b"TFLITE-BLOB"],
+    )
+
+
+def _build_one_model(tmp_path, monkeypatch, package_bytes, *, args=("--format", "json")):
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "source.tflite", "x")
+    board_yaml(tmp_path, "models:\n  - name: mymodel\n    source: source.tflite\n")
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(package_bytes)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+    return runner.invoke(
+        app,
+        ["build", "--project", str(tmp_path), "--sdk-root", str(sdk), *args],
+    )
+
+
+def test_a_shipped_caveat_is_reported_as_a_warning_not_swallowed(tmp_path, monkeypatch):
+    """`build` writes the bytes that reach a board. A blob compiled against
+    vela's BUILT-IN default memory model carries an `arena`/`sram_kib` pair
+    describing THAT model, and those are the figures alp-sdk's on-device
+    selector gates on (`src/backends/inference/alp_model_select.c`) -- so the
+    operator has to be told, verbatim, at the moment the package is produced.
+
+    Fails against the previous behaviour: `issues` was `[]`."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes())
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert [i["code"] for i in doc["issues"]] == ["model.target-caveat"]
+    issue = doc["issues"][0]
+    assert issue["severity"] == "warning"
+    assert issue["message"].startswith(
+        "model 'mymodel': the ethos_u ethos-u55-128 target in mymodel.alpmodel "
+        "ships with a compiler caveat -- "
+    )
+    assert issue["message"].endswith(_CAVEAT)      # verbatim, not summarised
+    # ...and the package is still reported as built. A caveat is a caveat.
+    assert len(doc["data"]["built"]) == 1
+
+
+def test_a_shipped_caveat_does_not_turn_a_successful_build_into_a_failure(
+    tmp_path, monkeypatch
+):
+    """`_run_build`'s exit code keys on ERROR issues, not on `issues` being
+    non-empty. Without that, adding a warning here would have reported every
+    caveated build as `WriteFailure` (exit 3) with the package sitting on disk
+    perfectly intact."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes())
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["data"]["built"], "the package WAS written"
+
+
+def test_a_shipped_caveat_reaches_text_mode_too(tmp_path, monkeypatch):
+    """The default (non-JSON) mode. Warnings LEAD, so the caveat is readable
+    above the `built ...` line rather than buried under it."""
+    result = _build_one_model(tmp_path, monkeypatch, _caveated_package_bytes(), args=())
+    assert result.exit_code == 0, result.stderr
+    lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert lines[0].startswith("warning: model 'mymodel': the ethos_u ethos-u55-128 target")
+    assert "Compilation may be invalid or non-optimal" in lines[0]
+    assert any(ln.startswith("built ") for ln in lines[1:])
+
+
+def test_a_package_with_no_caveats_reports_none(tmp_path, monkeypatch):
+    """The negative control: an uncaveated package must leave `issues` empty,
+    or a caveat line would mean nothing."""
+    result = _build_one_model(tmp_path, monkeypatch, _REAL_PACKAGE_BYTES)
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["issues"] == []
+
+
+def test_an_unreadable_package_is_a_warning_not_a_silent_pass(tmp_path, monkeypatch):
+    """`build_model` returned a path this reader cannot decode. The package is
+    written, so this is not a build failure -- but staying silent would be
+    indistinguishable from "this package has no caveats", which is the exact
+    confusion the field exists to end."""
+    result = _build_one_model(tmp_path, monkeypatch, b"not-an-alpmodel-container")
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert [i["code"] for i in doc["issues"]] == ["model.caveat-readback-failed"]
+    assert doc["issues"][0]["severity"] == "warning"
+    assert "could not read its manifest back" in doc["issues"][0]["message"]
+    assert len(doc["data"]["built"]) == 1

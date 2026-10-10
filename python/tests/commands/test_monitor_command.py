@@ -20,7 +20,7 @@ needs a bench with a device on it.
 
 **pyserial may or may not be genuinely installed, and this file does not need
 to know which (tan-cli#255).** `ci.yml` installs `-e ./python` with NO extras
-on purpose -- that is the shape a customer's `pip install alp-tan` gives, and
+on purpose -- that is the shape a customer's `pip install tan-cli` gives, and
 the only one in which `tests/gates/test_declared_dependencies.py` can catch an
 extras-only import escaping to a top-level-module import -- while `python-binaries.yml` and
 `parity.yml` install `[monitor]`. The six cases below that exercise
@@ -38,7 +38,7 @@ that assert the pyserial-ABSENT behaviour still force the real `ImportError`
 themselves (`_block_pyserial`), since producing that failure honestly is the
 whole point of them. Installing the extra in `ci.yml` instead was considered
 and rejected: it would blind `test_declared_dependencies.py` to the shape a
-bare `pip install alp-tan` actually produces.
+bare `pip install tan-cli` actually produces.
 """
 from __future__ import annotations
 
@@ -155,7 +155,10 @@ def test_a_present_port_spawns_miniterm_and_reports_success(monkeypatch):
     assert doc["ok"] is True
     assert doc["data"] == {"schemaVersion": "1", "port": "COM7", "baud": 9600}
     assert captured["argv"][-2:] == ["COM7", "9600"]
-    assert "serial.tools.miniterm" in captured["argv"]
+    # The spawned console is `python -c <bootstrap>`: tan's `colors` filter is
+    # registered in miniterm's table, then miniterm's own main() runs.
+    assert captured["argv"][1] == "-c" and "serial" in captured["argv"][2]
+    assert captured["argv"][3:5] == ["--filter", "colors"]
     # The interpreter this test runs under is not frozen, so the spawn must
     # use `sys.executable` -- never a bare re-derivation, and never empty.
     assert captured["argv"][0] == sys.executable
@@ -346,7 +349,13 @@ def test_frozen_build_without_the_extra_reports_pyserial_missing_not_a_tan_bug(m
     assert codes == ["monitor.pyserial-missing"], envelope
     assert "monitor.internal-failure" not in codes
     assert result.exit_code == 1, f"expected RUNTIME_FAILURE, got {result.exit_code}"
-    assert 'alp-tan[monitor]' in envelope["issues"][0]["message"]
+    assert './python[monitor]' in envelope["issues"][0]["message"]
+    # tan-cli#1213: `contract/envelopes/monitor-no-port` is PUBLISHED, pairing
+    # `["monitor", "--format", "json"]` with a `data.availablePorts` -- and this
+    # is that same argv answering without the extra. The ABSENCE of that key
+    # here is the caveat `contract/issue-codes.json`'s `monitor.no-port` entry
+    # states to consumers, so it is pinned rather than left to prose.
+    assert envelope["data"] == {"schemaVersion": "1"}, envelope
 
 
 def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
@@ -361,6 +370,69 @@ def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
     envelope = json.loads(result.stdout)
     assert [i["code"] for i in envelope["issues"]] == ["monitor.pyserial-missing"], envelope
     assert result.exit_code == 1
+    # The `data` payload must not diverge either (tan-cli#1213): a consumer
+    # replaying the published `monitor-no-port` args on a `pip install tan-cli`
+    # gets THIS envelope, and it carries no `availablePorts` at all.
+    assert envelope["data"] == {"schemaVersion": "1"}, envelope
+
+
+def test_test_ports_env_replaces_pyserial_enumeration_even_when_pyserial_is_blocked(
+    monkeypatch,
+):
+    """tan-cli#1165: `contract/envelopes/monitor-no-port` needs a deterministic,
+    non-empty `data.availablePorts` on any box, regardless of whether pyserial
+    happens to be installed there -- so `_TEST_PORTS_ENV` must bypass BOTH the
+    real `list_ports.comports()` call and `_run_monitor`'s own "pyserial is
+    importable" precheck. Blocking pyserial outright and still getting
+    `monitor.no-port` (not `monitor.pyserial-missing`) is the proof: if either
+    bypass regressed, this would report the pyserial-missing refusal instead.
+    """
+    _block_pyserial(monkeypatch)
+    monkeypatch.setenv(
+        monitor_cmd._TEST_PORTS_ENV,
+        json.dumps([["COM7", "USB Serial"], ["COM8", "n/a"]]),
+    )
+
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert doc["data"]["availablePorts"] == [
+        {"device": "COM7", "description": "USB Serial"},
+        {"device": "COM8", "description": "n/a"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "fake_value",
+    [
+        "not json",
+        # A JSON *object* iterates its keys ("COM7"), and unpacking a 8-char
+        # string into (device, description) raises ValueError -- covered by
+        # the same `except (ValueError, TypeError)`, not a separate branch.
+        json.dumps({"long-key": "USB Serial"}),
+        # A 3-element inner list is "too many values to unpack" -- ValueError.
+        json.dumps([["COM7", "USB Serial", "extra"]]),
+    ],
+)
+def test_a_malformed_test_ports_env_falls_through_instead_of_becoming_internal_failure(
+    monkeypatch, fake_value
+):
+    """A fixture typo in `TAN_MONITOR_TEST_PORTS_JSON` -- bad JSON, or valid
+    JSON in the wrong shape -- is a harness bug, not a customer-facing one, so
+    it must not surface as `monitor.internal-failure` the way an unguarded
+    `json.loads`/unpacking exception would (`_available_ports` docstring): it
+    falls through to the real enumeration instead, which either answers a list
+    or raises the pre-existing `monitor.pyserial-missing` refusal -- never a
+    bare `ValueError`/`TypeError` escaping this function.
+    """
+    monkeypatch.setenv(monitor_cmd._TEST_PORTS_ENV, fake_value)
+    try:
+        result = monitor_cmd._available_ports()
+    except monitor_cmd.MonitorError as err:
+        assert err.code == "monitor.pyserial-missing"
+    else:
+        assert isinstance(result, list)
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,17 @@ as "differs somehow".
 * ``HOME``/``USERPROFILE`` point at a second fresh directory so a developer's
   real ``~/.alp/sdk-default`` cannot change what ``sdk current`` reports, and
   ``SOURCE_DATE_EPOCH=0`` pins any timestamped output.
+* A case that answers from the HOST rather than from its own inputs may pin the
+  host facts it reads in an optional ``env.json`` (:func:`case_env`). Only
+  ``model-doctor-no-sdk`` needs one today: ``model doctor``'s whole payload is
+  "is this vendor NPU compiler installed", read via ``shutil.which('vela')`` /
+  ``shutil.which('dxcom')`` and the ``ALP_DRPAI_TVM_HOME`` / ``ALP_DEEPX_SDK_HOME``
+  / ``ALP_VELA_CONFIG`` environment variables, so a golden recorded on a
+  toolchain-less box would go RED on a developer who ran the repo's own
+  documented ``pip install tan-cli[model-compile]`` -- which installs ``vela``.
+  Pinning the environment is what makes that golden mean the same thing on every
+  box; normalising the rows instead would erase the only fields the case exists
+  to gate.
 * Fixture inputs are copied into the scratch dir RECURSIVELY (that is what lets
   a case ship a synthetic ``sdk/`` checkout and pass ``--sdk-root ./sdk``); only
   the harness metadata files (``CASE_METADATA``) are skipped, and only at the
@@ -64,13 +75,17 @@ CONTRACT = Path(__file__).resolve().parents[3] / "contract" / "envelopes"
 FIXTURES = sorted(p for p in CONTRACT.iterdir() if p.is_dir()) if CONTRACT.is_dir() else []
 
 #: Envelope fields that carry a filesystem path and so need separator
-#: normalisation. Verbatim from ``PATH_KEYS`` in ``crates/tan-cli/tests/contract.rs``.
+#: normalisation. Originally verbatim from ``PATH_KEYS`` in the now-deleted
+#: ``crates/tan-cli/tests/contract.rs`` (tan-cli#269); ``path`` was added for
+#: ``sdk remove`` (tan-cli#790), whose ``data.path`` is the resolved,
+#: absolute removal target.
 PATH_KEYS = frozenset(
     {
         "root",
         "boardYaml",
         "boardYamlPath",
         "destination",
+        "path",
         "relativePath",
         "sdkPath",
         "sdkPinned",
@@ -91,7 +106,31 @@ WORK_DIR_TOKEN = "__WORKDIR__"
 #: input any case's command reads, so skipping it cannot produce a false diff.
 #: (The retired Rust harness's own metadata list predated it and copied it into
 #: the scratch directory instead, harmlessly, for the same reason.)
-CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt"})
+CASE_METADATA = frozenset(
+    {"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt", "env.json"}
+)
+
+#: Optional per-case environment pin -- a JSON object of ``NAME -> value``,
+#: where ``null`` UNSETS the variable and a string SETS it, applied on top of
+#: the harness's own isolation vars. ``__WORKDIR__`` inside a value expands to
+#: the case's scratch directory, the same token the goldens spell it with, so a
+#: case can point a host-searched variable at a directory that provably holds
+#: nothing (``{"PATH": "__WORKDIR__"}``) rather than at the empty string --
+#: ``PATH=""`` would also make ``shutil.which`` answer ``None`` everywhere, but
+#: it strips the launcher's own search path from a Windows runner too, and a
+#: harness that cannot spawn the child reports a contract failure it never
+#: measured.
+#:
+#: Opt-in and absent for 24 of the 27 cases: every one of those answers from its
+#: OWN copied inputs, and pinning host state they never read would only hide a
+#: real regression in how they read it.
+CASE_ENV = "env.json"
+
+#: The isolation vars the harness itself owns. A case may not re-pin them from
+#: ``env.json``: they are what makes every case hermetic and what makes ``python
+#: -m tan`` resolvable at all, so a case that could override them could quietly
+#: opt itself out of the isolation every other case is held to.
+HARNESS_OWNED_ENV = frozenset({"SOURCE_DATE_EPOCH", "HOME", "USERPROFILE", "PYTHONPATH"})
 
 #: Fixtures whose COMMAND the Python port has not landed yet. The MVP's scope is
 #: ``build``; nothing in the committed golden set exercises ``build`` (see
@@ -192,6 +231,52 @@ def normalise(value, key, work_dir_marker):
     return value
 
 
+def scrub_message_paths(value, replacements, key=None):
+    """tan-cli#1463: `normalise` rewrites path-KEYED fields only, deliberately
+    leaving `message` alone. A refusal that names where the SDK ladder looked
+    (`sdk_search_summary`) embeds the per-run scratch and home directories in its
+    `message`, so those -- and only those exact absolute prefixes -- are swapped
+    for stable tokens before the compare. `replacements` holds `/`-separated
+    needles; they are applied longest first."""
+    if isinstance(value, str):
+        if key != "message":
+            return value
+        # Longest needle first, so a directory nested inside another (a HOME
+        # under the work dir) still maps to its own token.
+        ordered = sorted(replacements, key=lambda pair: len(pair[0]), reverse=True)
+        text = value.replace("\\", "/")
+        # Only a message that actually embeds one of the scratch prefixes is
+        # touched; any other keeps its backslashes, so a real slash regression
+        # in an unrelated message is not masked.
+        if not any(needle in text for needle, _ in ordered):
+            return value
+        for needle, token in ordered:
+            text = text.replace(needle, token)
+        return text
+    if isinstance(value, list):
+        return [scrub_message_paths(item, replacements, key) for item in value]
+    if isinstance(value, dict):
+        return {k: scrub_message_paths(v, replacements, k) for k, v in value.items()}
+    return value
+
+
+def message_scrub_replacements(work_dir, home_dir):
+    """The `(needle, token)` pairs for `scrub_message_paths`: each scratch
+    directory in BOTH its lexical and its symlink-resolved spelling (macOS
+    `$TMPDIR` is `/var/folders/...`, reported by the child as
+    `/private/var/folders/...`), deduplicated, both spellings mapped to the same
+    token. Order is irrelevant here; the scrubber applies longest first."""
+    pairs = {}
+    for path, token in (
+        (work_dir, WORK_DIR_TOKEN),
+        (home_dir, "__HOME__"),
+        (work_dir.parent, "__WORKPARENT__"),
+    ):
+        for spelling in (path, Path(os.path.realpath(path)), path.resolve()):
+            pairs[spelling.as_posix()] = token
+    return list(pairs.items())
+
+
 def fresh_dir(tag):
     """``<temp>/tan-contract-<tag>-<pid>/root`` -- an empty scratch directory
     under an empty parent nothing else can plausibly populate."""
@@ -200,6 +285,56 @@ def fresh_dir(tag):
     work = parent / "root"
     work.mkdir(parents=True)
     return work
+
+
+def case_env(case_dir, work_dir, home_dir):
+    """The child's environment: the harness's own isolation vars, then the
+    case's optional ``env.json`` overrides (:data:`CASE_ENV`).
+
+    Factored out of the test body so the RECORDING procedure
+    (``contract/README.md``, "Regenerating a golden") can import and call this
+    exact function: a golden must be recorded under the same environment it is
+    later compared under, and a recorder that assembles its own env is how a
+    fixture ends up pinning the recording box instead of the contract.
+    """
+    env = {
+        **os.environ,
+        "SOURCE_DATE_EPOCH": "0",
+        "HOME": str(home_dir),
+        "USERPROFILE": str(home_dir),
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    }
+    overrides_file = case_dir / CASE_ENV
+    if not overrides_file.is_file():
+        return env
+    overrides = json.loads(overrides_file.read_text(encoding="utf-8"))
+    owned = sorted(HARNESS_OWNED_ENV.intersection(overrides))
+    if owned:
+        raise AssertionError(
+            f"{case_dir.name}/{CASE_ENV} re-pins harness-owned variable(s) {owned}; "
+            "the harness owns the isolation vars, a case owns only the host facts "
+            "its command reads"
+        )
+    for name, value in overrides.items():
+        if value is None:
+            env.pop(name, None)
+            continue
+        # `str(value)` instead would quietly accept every other JSON scalar and
+        # render it Python-side: `{"FOO": true}` becomes `FOO=True`, `{"FOO": 1}`
+        # becomes `FOO=1`, and `{"FOO": []}` becomes `FOO=[]` -- none of which is
+        # what the author meant, and all of which would be spelled that way in a
+        # golden nobody would think to question. A pin nobody can misread by
+        # accident is the whole point of this file.
+        if not isinstance(value, str):
+            raise AssertionError(
+                f"{case_dir.name}/{CASE_ENV}: {name!r} is {type(value).__name__}, not a "
+                "string or null -- an environment variable is text; write the value you "
+                "mean (`\"1\"`, `\"true\"`) or `null` to unset"
+            )
+        env[name] = value.replace(WORK_DIR_TOKEN, str(work_dir))
+    return env
 
 
 def copy_fixture_inputs(case_dir, work_dir):
@@ -258,15 +393,10 @@ def test_envelope_matches_expected(fixture):
     home_dir = fresh_dir(f"{case}-home")
     copy_fixture_inputs(fixture, work_dir)
 
-    env = {
-        **os.environ,
-        "SOURCE_DATE_EPOCH": "0",
-        "HOME": str(home_dir),
-        "USERPROFILE": str(home_dir),
-        "PYTHONPATH": os.pathsep.join(
-            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
-        ),
-    }
+    env = case_env(fixture, work_dir, home_dir)
+    # Computed while the directories still exist: the child may report the
+    # symlink-resolved spelling (macOS `/var` -> `/private/var`).
+    scrub_replacements = message_scrub_replacements(work_dir, home_dir)
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "tan", *argv],
@@ -294,6 +424,7 @@ def test_envelope_matches_expected(fixture):
     actual = json.loads(proc.stdout.strip())
     marker = f"tan-contract-{case}-{os.getpid()}/root"
     actual = normalise(actual, None, marker)
+    actual = scrub_message_paths(actual, scrub_replacements)
 
     assert actual == expected, (
         f"{case}: envelope drifted from the committed golden -- if this is a "
@@ -301,4 +432,88 @@ def test_envelope_matches_expected(fixture):
         "CLI and write its PROVENANCE.txt (see contract/README.md, "
         "'Regenerating a golden'), don't just fix the assertion and don't "
         "declare it in DELIBERATE_DIVERGENCE -- that pins only 'differs somehow'"
+    )
+
+
+def test_case_env_sets_unsets_and_expands_workdir(tmp_path, monkeypatch):
+    """`env.json` is the only thing standing between `model-doctor-no-sdk` and a
+    golden that pins the recording box, so the mechanism itself needs a gate: an
+    `env.json` that silently stopped being read would leave that case passing on
+    a toolchain-less CI runner and failing on a developer who installed `vela`.
+    """
+    monkeypatch.setenv("ALP_VELA_CONFIG", "/somewhere/vendor.ini")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(
+        json.dumps({"PATH": WORK_DIR_TOKEN, "ALP_VELA_CONFIG": None}), encoding="utf-8"
+    )
+    work_dir = tmp_path / "work"
+    env = case_env(case_dir, work_dir, tmp_path / "home")
+
+    assert env["PATH"] == str(work_dir), "__WORKDIR__ must expand to the case's scratch dir"
+    assert "ALP_VELA_CONFIG" not in env, "a null value UNSETS, it does not set the empty string"
+    # The harness's own isolation vars survive the overlay untouched.
+    assert env["SOURCE_DATE_EPOCH"] == "0"
+    assert env["HOME"] == str(tmp_path / "home")
+    assert str(PACKAGE_ROOT) in env["PYTHONPATH"]
+
+
+def test_case_env_refuses_a_case_that_re_pins_a_harness_owned_variable(tmp_path):
+    """A case that could set its own `HOME`/`PYTHONPATH` could opt itself out of
+    the isolation every other case is held to -- and the failure would look like
+    a passing fixture, not a broken one."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(
+        json.dumps({"HOME": "/tmp/mine", "PATH": WORK_DIR_TOKEN}), encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match=r"re-pins harness-owned variable\(s\) \['HOME'\]"):
+        case_env(case_dir, tmp_path / "work", tmp_path / "home")
+
+
+def test_case_env_refuses_a_non_string_value(tmp_path):
+    """`str(value)` would have rendered `true` as the literal `True` and `1` as
+    `1`, so a typo'd pin would silently become a real (wrong) variable rather
+    than a failure -- and would then be spelled that way in a committed golden
+    nobody would think to question."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(json.dumps({"ALP_VELA_CONFIG": True}), encoding="utf-8")
+    with pytest.raises(AssertionError, match="is bool, not a string or null"):
+        case_env(case_dir, tmp_path / "work", tmp_path / "home")
+
+
+def test_no_case_ships_an_env_json_it_does_not_need():
+    """`env.json` is a LAST RESORT, the same way `DELIBERATE_DIVERGENCE` is: a
+    case that pins host state it never reads has quietly narrowed what it gates.
+    Two cases need one today, and a third must be argued for in its own
+    PROVENANCE.txt rather than added silently.
+
+    `debug-config-preview-baremetal-mcu` is the second (tan-cli#1179). Its
+    `data.notes` now carries the OpenOCD-without-host-tools note, whose whole
+    point is that it fires only when no `openocd` resolves on `PATH` -- so this
+    case reads the host exactly the way `model-doctor-no-sdk` does, and a
+    re-record on a box with `/usr/bin/openocd` would bless a note-less golden
+    that then fails everywhere else. Leaving it unpinned would have made the
+    golden depend on `tests/conftest.py`'s session-scoped PROBE_TOOLS scrub, a
+    fixture in a different tree that the documented recording procedure
+    (`contract/README.md`, which calls `case_env` but runs no session fixture)
+    never applies.
+
+    `monitor-no-port` is the third (tan-cli#1165). `_available_ports()`'s real
+    source, pyserial's `comports()`, enumerates whatever serial hardware is
+    physically attached to the host running it -- a fact about the RECORDING
+    MACHINE, not the contract -- so its `env.json` arms `_TEST_PORTS_ENV`
+    (`monitor_cmd.py`) to replace that enumeration with a fixed, two-entry list
+    instead."""
+    carrying = sorted(f.name for f in FIXTURES if (f / CASE_ENV).is_file())
+    assert carrying == [
+        "debug-config-preview-baremetal-mcu",
+        "model-doctor-no-sdk",
+        "monitor-no-port",
+    ], (
+        "a new env.json appeared -- justify it in that case's PROVENANCE.txt and "
+        "under 'Pinning host state a case reads' in contract/README.md, then add "
+        "it here; pinning host state a case does not read only hides regressions"
     )

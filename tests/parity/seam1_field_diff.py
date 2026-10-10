@@ -13,8 +13,9 @@ in `.github/workflows/parity.yml`.
 tan-cli#320 addendum: a live `--emit build-plan` can legitimately REFUSE a
 board the frozen oracle captured as buildable -- alp-sdk#1025 taught the
 loader to refuse an `hw_rev` that exists but is `status: reserved`/
-`status: tbd`/status-less, and `multicore_rpmsg-imx93`'s only `hw_rev`
-(imx93 r1, `status: tbd`) is exactly that case. A live-emit failure used to
+`status: tbd`/status-less (the retired `multicore_rpmsg-imx93` case, whose
+only `hw_rev` was `status: tbd`; the board and its fixture are gone, and no
+oracle case exercises this path today). A live-emit failure used to
 be an unconditional `ComparatorError` -> FAIL, which could never tell "the
 SDK started correctly refusing this board" apart from "the SDK is broken".
 `_tan_reconciled_refusal` closes that gap FOR TAN-CLI'S OWN COPY ONLY: on a
@@ -77,7 +78,7 @@ time). The frozen 97ad481b oracle predates that and stays absolute --
 `normalize_plan` reconciles the two shapes onto the same normalized form;
 see its docstring for the mapping.
 
-Three hand-reviewed deltas are allowed to pass without failing the gate.
+Four hand-reviewed deltas are allowed to pass without failing the gate.
 
 The first is ``slices[*].debug.probe`` going from ``"openocd"`` (the oracle,
 at 97ad481b)
@@ -105,6 +106,21 @@ slice's ``command`` runs with cwd=``buildDir`` and no ``-d``, so west
 appends its own default ``build`` level. Allowed ONLY for the six named
 fields and ONLY for that exact one-segment insertion -- see
 ``_NESTED_ARTIFACT_TAILS``.
+
+The fourth is a slice's ``configArtefacts`` list gaining the plan's rendered
+reference artefacts AFTER the oracle's own entries -- ``alp.overlay``,
+``cmake-args.txt``, ``alp_hw_info_build.h`` and ``alp-west-libs.yml``, in that
+order (alp-sdk #2771/#2777, tan-cli #1216/#1394). The oracle predates them.
+Allowed ONLY when the live list is the oracle's list unchanged followed by
+exactly one of four tails, matched by basename -- see ``_RENDERED_TAILS``:
+the full ``[alp.overlay, cmake-args.txt, alp_hw_info_build.h,
+alp-west-libs.yml]``, the same without ``alp.overlay`` (a board with no
+header, which also warns), the same without ``alp_hw_info_build.h`` (a SKU
+outside the production families, which also warns), or without both.
+``cmake-args.txt`` and ``alp-west-libs.yml`` are unconditional. Any change to
+the oracle's own entries, any other extra entry, any partial tail that never
+occurs, and a different order of these still FAIL. The ``diagnostics.link: itcm`` halves are NOT in the
+allowance (no oracle board uses itcm).
 
 Any OTHER diff -- a changed command, a changed env value, a changed slice
 count, a probe change to anything other than that exact openocd->null
@@ -267,28 +283,51 @@ def _project_relpath(plan: dict) -> str:
 # This is a COMMAND-SHAPE delta (an arg present/absent), not a content delta,
 # so it stays even after content dropped out of scope below.
 #
-# Scoped to NON-sysbuild slices ONLY, detected the same way the emitter
-# itself decides (`orchestrator.py::_slice_command`): a sysbuild slice's
-# `command.args` carries the literal `--sysbuild` flag. Sysbuild slices
-# deliberately do NOT carry `-DEXTRA_CONF_FILE` (Option A, #871: a bare
-# -DEXTRA_CONF_FILE lands on the sysbuild image not the app, silently
-# dropping the per-core alp.conf on boot:/OTA projects -- ADR-0020 Amendment
-# item 4) -- stripping the arg unconditionally from EVERY slice, sysbuild
-# included, would silently hide exactly that regression (a sysbuild slice
-# wrongly gaining the arg) from the comparator instead of catching it.
+# Detected the same way the emitter itself decides
+# (`orchestrator.py::_slice_command`): a sysbuild slice's `command.args`
+# carries the literal `--sysbuild` flag. A NON-sysbuild slice carries the
+# bare `-DEXTRA_CONF_FILE=`; a sysbuild slice carries the image-scoped
+# `-D<image>_EXTRA_CONF_FILE=` instead (#866), where <image> is the basename
+# of the slice's west app-dir arg. A bare arg on a sysbuild slice (lands on
+# the sysbuild image, not the app) or a prefix naming another image (e.g.
+# mcuboot) is a regression and must still fail, so each form is stripped
+# only on the slice kind -- and, for sysbuild, the image -- it belongs to.
 # KEEP IN LOCKSTEP with tan-cli's vendored copy of this comparator.
+def _is_image_scoped_extra_conf(arg, image):
+    """`-D<image>_EXTRA_CONF_FILE=...` for exactly the app image `image`."""
+    return arg.split("=", 1)[0] == f"-D{image}_EXTRA_CONF_FILE"
+
+
+def _west_app_dir_basename(args):
+    """Basename of the `west build` app-dir arg (first non-option arg after
+    `build`), or None. Tokened paths use `/`."""
+    try:
+        i = args.index("build") + 1
+    except ValueError:
+        return None
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in ("-b", "-d", "-p") else 1
+    if i >= len(args):
+        return None
+    return args[i].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
 def _strip_863_extra_conf_file_arg(plan):
-    """Remove the intended #863/#871 `-DEXTRA_CONF_FILE=` command arg from
-    every NON-sysbuild slice's command in a (normalized) plan dict."""
+    """Remove the intended #863/#866/#871 per-core EXTRA_CONF_FILE command
+    arg from every slice: bare on non-sysbuild, `-D<app image>_` on sysbuild."""
     for slice_ in plan.get("slices", []) or []:
         cmd = slice_.get("command")
         if not (isinstance(cmd, dict) and isinstance(cmd.get("args"), list)):
             continue
-        if "--sysbuild" in cmd["args"]:
-            continue
+        # A sysbuild slice carries the image-scoped form
+        # `-D<image>_EXTRA_CONF_FILE=` (#866); a bare `-DEXTRA_CONF_FILE=`
+        # there is the Option-A regression and must still fail.
+        sysbuild = "--sysbuild" in cmd["args"]
+        image = _west_app_dir_basename(cmd["args"]) if sysbuild else None
         cmd["args"] = [a for a in cmd["args"]
-                       if not (isinstance(a, str)
-                               and a.startswith("-DEXTRA_CONF_FILE="))]
+                       if not (isinstance(a, str) and (
+                           _is_image_scoped_extra_conf(a, image) if sysbuild
+                           else a.startswith("-DEXTRA_CONF_FILE=")))]
     return plan
 
 
@@ -363,7 +402,37 @@ def normalize_plan(plan: dict) -> dict:
     # #863/#871 command-arg addition above) -- drop it rather than diff it;
     # the token-vs-absolute SHAPE it flags is already reconciled above.
     normalized.pop("planPathMode", None)
+    # `deferredPlaceholders` (alp-sdk#2696) is another addition the oracle
+    # predates. It is derived purely from config-artefact CONTENTS, which this
+    # comparator deliberately no longer diffs (`_drop_artefact_contents`
+    # above; the emit-snapshot goldens pin them), so drop it too -- mirror of
+    # alp-sdk's own comparator fix in alp-sdk#2705 (tan-cli#1307).
+    normalized.pop("deferredPlaceholders", None)
     return normalized
+
+
+#: Basename sequences a slice's ``configArtefacts`` may GAIN, after the oracle's
+#: own entries (tan-cli #1216/#1394, alp-sdk #2771/#2777). Exact and ordered; the
+#: itcm halves are deliberately absent.
+_RENDERED_TAILS = (
+    ("alp.overlay", "cmake-args.txt", "alp_hw_info_build.h", "alp-west-libs.yml"),
+    ("cmake-args.txt", "alp_hw_info_build.h", "alp-west-libs.yml"),
+    ("alp.overlay", "cmake-args.txt", "alp-west-libs.yml"),
+    ("cmake-args.txt", "alp-west-libs.yml"),
+)
+
+#: Synthetic path suffix `_walk_diff` yields for an allowed rendered tail.
+_RENDERED_SUFFIX = "[+rendered]"
+
+
+def _is_rendered_append(path: str, old: list, new: list) -> bool:
+    """True when `new` is `old` unchanged plus one `_RENDERED_TAILS` entry."""
+    if not path.endswith(".configArtefacts") or len(new) <= len(old):
+        return False
+    if new[:len(old)] != old:
+        return False
+    tail = tuple(str(a.get("path", "")).rsplit("/", 1)[-1] for a in new[len(old):])
+    return tail in _RENDERED_TAILS
 
 
 def _walk_diff(path: str, old: Any, new: Any) -> Iterator[tuple[str, Any, Any]]:
@@ -381,6 +450,10 @@ def _walk_diff(path: str, old: Any, new: Any) -> Iterator[tuple[str, Any, Any]]:
         return
     if isinstance(old, list) and isinstance(new, list):
         if len(old) != len(new):
+            if _is_rendered_append(path, old, new):
+                yield (path + _RENDERED_SUFFIX, [],
+                       [a["path"].rsplit("/", 1)[-1] for a in new[len(old):]])
+                return
             yield (f"{path}[len]", len(old), len(new))
             return
         for i, (old_item, new_item) in enumerate(zip(old, new)):
@@ -445,6 +518,8 @@ def diff_plans(oracle: dict, live: dict) -> tuple[list[tuple[str, Any, Any]], li
             allowed.append((path, old, new))
         elif _is_allowed_west_nesting(path, old, new):
             allowed.append((path, old, new))
+        elif path.endswith(_RENDERED_SUFFIX):
+            allowed.append((path, old, new))
         else:
             failing.append((path, old, new))
     return allowed, failing
@@ -503,7 +578,7 @@ def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str]
     # `<another tan-cli worktree>/python/tan`, whose planner answered without
     # refusing, and the comparator reported
     #
-    #   FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+    #   FAIL <board>: alp-sdk refuses but tan does not
     #
     # -- a FALSE parity divergence, for a `status: tbd` hw_rev the tan under
     # test refuses correctly in every emit mode. With `python/` on the path

@@ -3,10 +3,14 @@
 """System-manifest emitter -- assembles system-manifest.yaml from the model.
 
 `emit_system_manifest` renders the spec-§5.2 manifest (slices, carve-outs,
-storage, helper-MCU block) off the parsed BoardProject + the resolved carve-outs
-/ partitions; `_helper_mcus` builds the manifest's `helper_mcus[]` block (shared
-with the Orchestrator's materialise path, which back-imports it). Extracted as
-the #285 manifest emit seam.
+storage, memory regions, helper-MCU block) off the parsed BoardProject + the
+resolved carve-outs / partitions / memory regions; `_helper_mcus` builds the
+manifest's `helper_mcus[]` block (shared with the Orchestrator's materialise
+path, which back-imports it). Extracted as the #285 manifest emit seam.
+
+`memory[]` is the region table the other two panes refer INTO by name
+(#1365 item 3) -- `memory.resolve_memory_regions` shapes it, and it is
+OMITTED rather than emitted empty when a SoM resolves no regions.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from typing import Any, Optional
 import yaml
 
 from .carveout import resolve_carve_outs
+from .memory import resolve_memory_regions
 from .models import BoardProject, Slice, SystemManifest
 from .partition import resolve_storage_partitions
 
@@ -34,6 +39,7 @@ def emit_system_manifest(
     """
     carve_outs = resolve_carve_outs(project)
     partitions = resolve_storage_partitions(project)
+    memory_regions = resolve_memory_regions(project)
     effective_slices = list(slices) if slices is not None else list(project.cores.values())
 
     boot_order = list(project.som_preset.get("boot_order") or [])
@@ -45,6 +51,7 @@ def emit_system_manifest(
         partitions=partitions,
         boot_order=boot_order,
         helper_mcus=_helper_mcus(project),
+        memory_regions=memory_regions,
     )
 
     out = manifest.to_dict()
@@ -65,13 +72,14 @@ def _helper_mcus(project: BoardProject) -> list[dict[str, Any]]:
     written locally (flash_method + flash_args), how it is updated in the
     field (update_channel), and who may invoke the flash method
     (flash_policy) are three separate axes, and a helper may declare any
-    combination.  The GD32 bridge declares all three: an
-    `alp_ota_spi_bridge` channel for normal field updates AND a
-    `recovery_only` swd_probe method for a bricked board.  Dropping the
-    flash keys because a channel exists would DELETE that recovery path
-    from the manifest rather than let `tan flash` decline it, so this
-    function must never make one key's presence suppress another's
-    (alp-sdk #1357).  `firmware_path` is entirely ABSENT from the row when
+    combination.  The GD32 bridge declares two: an `alp_ota_spi_bridge`
+    channel for normal field updates, and (until tan-cli#732 removed its
+    local write path, `swd_probe`) a `recovery_only` local flash method for
+    a bricked board.  Dropping the flash keys because a channel exists would
+    DELETE that recovery path from the manifest rather than let `tan flash`
+    decline it, so this function must never make one key's presence
+    suppress another's (alp-sdk #1357).  `firmware_path` is entirely ABSENT
+    from the row when
     the preset doesn't declare one (e.g. GD32 bridge SKUs pending a
     released binary, alp-sdk #852/#936) -- it is never emitted as `null`,
     because `system-manifest-v1.schema.json` types it `string` when present

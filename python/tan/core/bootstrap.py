@@ -31,15 +31,19 @@ message is `" ".join(lines)`.
 """
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import json
 import os
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from tan.core import artifact_provenance
+from tan.core.artifact_provenance import ArtifactProvenance
 from tan.core.timestamp import generated_at_iso
 
 # ---------------------------------------------------------------------------
@@ -293,7 +297,9 @@ def resolve_zephyr_pin(west_yml: str | None, facts_version: str) -> str:
     """The ONE Zephyr pin the workspace-reuse test compares against.
 
     `west.yml` leads because `build`'s preflight `zephyrVersion` check reads
-    exactly that file, and `build`'s auto-bootstrap fires ON its warning. With
+    exactly that file, and the operator re-runs `tan bootstrap` ON its warning
+    (`tan build` does not do it for them -- tan-cli#427 settled that this port
+    has no implicit bootstrap and is not getting one). With
     two pin sources an SDK bump made bootstrap ADOPT a workspace preflight
     simultaneously called stale -- a loop that never converges. Full
     `MAJOR.MINOR.PATCH`, never a `MAJOR.MINOR` truncation: that truncation is
@@ -389,6 +395,14 @@ class BootstrapFacts:
     #: `normalize_linux_install`/`_fallback_install_commands`). Use
     #: `install_for_host`, never this field directly.
     install: dict[str, dict[str, str] | dict[str, dict[str, str]]]
+    #: `artifactProvenance`, tool -> tier/licence/upstream page/size, already
+    #: normalised (tan-cli#1066, alp-sdk#1574). TOP-LEVEL in the manifest, not
+    #: under `prerequisites`, even though its keys are the prerequisite tool
+    #: vocabulary. EMPTY for an SDK predating alp-sdk v0.16.0, and empty for a
+    #: malformed block -- never an error: this is advisory metadata for a
+    #: consumer's consent screen, and refusing to bootstrap over it would trade
+    #: a working host for a display fact. See `tan.core.artifact_provenance`.
+    artifact_provenance: dict[str, ArtifactProvenance]
     west_pip_spec: str
     west_init_args: tuple[str, ...]
     west_update_args: tuple[str, ...]
@@ -396,6 +410,9 @@ class BootstrapFacts:
     west_extension_guard: str
     pip_bootstrap_upgrade: tuple[str, ...]
     pip_sdk_extras: tuple[str, ...]
+    #: `pip install -e` target: alp-sdk's own `alp_cli`/`alp_mcp` tooling (the
+    #: `alp-mcp` console script). Not a planner install -- tan plans in-process
+    #: (tan-cli#270).
     pip_editable_install: str
     #: `env`, ordered, still tokened. A list of pairs because ORDER is what
     #: makes the rendered `export`/`$env:` lines come out in the manifest's
@@ -409,8 +426,8 @@ class BootstrapFacts:
     #: `posix` key at all (tan-cli#495 defect 6). Optional on the wire, unlike
     #: `windows`: every SDK before alp-sdk v0.14.0 declares `windows` alone,
     #: and requiring it here would turn each of those into a hard
-    #: `BootstrapManifestError` that `tan build` inherits through
-    #: auto-bootstrap -- the same trap `prerequisites.install` and
+    #: `BootstrapManifestError` for everyone who runs `tan bootstrap` against
+    #: an older SDK -- the same trap `prerequisites.install` and
     #: `prerequisites.windows` above already document. Empty renders nothing,
     #: which is exactly what those SDKs did before the field existed.
     manual_install_posix: tuple[str, ...]
@@ -539,7 +556,16 @@ def is_plain_relative(raw: str) -> bool:
 def ntpath_isabs(raw: str) -> bool:
     """Windows-shaped absoluteness (`C:\\x`, `\\\\server\\share`, `\\x`),
     checked on EVERY host: the manifest is authored once and consumed on all
-    three, so a POSIX `os.path.isabs` alone would wave `C:\\Windows` through."""
+    three, so a POSIX `os.path.isabs` alone would wave `C:\\Windows` through.
+
+    NOT version-stable, and deliberately left that way (tan-cli#1139): its
+    answer for a rooted-but-driveless path flips at CPython 3.13, and both
+    sides are supported. Its only two callers absorb that -- `is_plain_relative`
+    above is indifferent (its component scan rejects every divergent input
+    anyway), and `resolve_workspace_target` decides the shape up front in
+    `_is_rooted_no_drive`, which owns the measurement and the reasoning. A
+    THIRD caller would have to do the same: do not read a version-stable
+    answer out of this."""
     import ntpath  # noqa: PLC0415 -- one call site
 
     return ntpath.isabs(raw) or bool(re.match(r"^[A-Za-z]:", raw))
@@ -646,7 +672,7 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         prerequisites_posix=_str_list(prerequisites.get("posix"), "prerequisites.posix"),
         # OPTIONAL on the wire: absent means "use `posix`", which is every SDK
         # before v0.14.0. Required here, it would turn each of those into a hard
-        # ValidationFailure that `tan build` inherits through auto-bootstrap.
+        # ValidationFailure for every `tan bootstrap` run against such an SDK.
         prerequisites_macos=_str_list(prerequisites.get("macos", []), "prerequisites.macos"),
         prerequisites_windows=_str_list(
             prerequisites.get("windows"), "prerequisites.windows"
@@ -654,6 +680,11 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         python_min_version=python_min_version,
         zephyr_python_min_version=zephyr_python_min_version,
         install=_resolve_install_commands(prerequisites.get("install")),
+        # Read off `doc`, not `prerequisites`: alp-sdk#1574 put the block at
+        # the manifest's TOP level. Never `_require`d -- see the field comment.
+        artifact_provenance=artifact_provenance.parse_table(
+            doc.get(artifact_provenance.BLOCK_KEY)
+        ),
         west_pip_spec=_require(west, "pipSpec", str, "west"),
         west_init_args=_str_list(_require(west, "initArgs", list, "west"), "west.initArgs"),
         west_update_args=_str_list(
@@ -848,8 +879,10 @@ def _resolve_install_commands(
     schema requires its keys to equal `prerequisites.<os>`).
 
     Degrade, do not refuse: every shape handled here is out of contract today,
-    and a `ValidationFailure` on a manifest field reaches `tan build` and
-    `tan run` through auto-bootstrap.
+    and a `ValidationFailure` on a manifest field fails the whole
+    `tan bootstrap` run -- which is the step a customer has to get through
+    before `tan build` or `tan run` can work at all, since neither of those
+    bootstraps implicitly (tan-cli#427).
 
     `LINUX` is handled separately (tan-cli#760's second half):
     `normalize_linux_install` reconciles both shapes `install.linux` has ever
@@ -905,6 +938,11 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
         # not be conflated here either.
         zephyr_python_min_version=(3, 12),
         install=_fallback_install_commands(),
+        # No fallback provenance, deliberately: an SDK with no manifest at all
+        # publishes no licensing claim, and transcribing one here would be tan
+        # ASSERTING a licence nobody handed it -- the one thing the `null`
+        # spelling exists to avoid (tan-cli#1066).
+        artifact_provenance={},
         west_pip_spec=WEST_REQUIREMENT,
         west_init_args=("init", "-l"),
         west_update_args=("update", "--narrow", "-o=--depth=1"),
@@ -1035,13 +1073,34 @@ class MissingPrerequisite:
     command for: a consumer renders this field as something it can RUN, and
     prose in a runnable-command field is a button that fails. The generic advice
     belongs in the printed line (`hint_line`) only.
+
+    `provenance` (tan-cli#1066) is the same manifest's `artifactProvenance`
+    entry for this tool: the tier, licence, upstream page and size alp-sdk
+    v0.16.0 publishes (alplabai/alp-sdk#1574). It rides on the ENTRY rather
+    than as a sibling map on `data` because the join is by `tool`, an identity
+    the entry already carries -- a consumer must not have to re-join two
+    arrays, and a consumer that resolved its own SDK checkout must not join
+    tan's commands against a DIFFERENT checkout's provenance (a real risk:
+    `tan bootstrap` relocates the alp-sdk checkout to
+    `<parent>/alp-workspace/<name>`). Defaults to `UNKNOWN` -- all four fields
+    `null` -- for every caller with no table to hand, which is exactly what a
+    tool with no entry reports; see `tan.core.artifact_provenance`.
     """
 
     tool: str
     command: str | None
+    provenance: ArtifactProvenance = artifact_provenance.UNKNOWN
 
-    def as_dict(self) -> dict[str, str | None]:
-        return {"tool": self.tool, "command": self.command}
+    def as_dict(self) -> dict[str, str | int | None]:
+        """`{tool, command}` plus provenance's four keys, ALWAYS all six: the
+        provenance keys are never omitted and never defaulted, so
+        `contract/doctor-data-keys.json` can declare one item shape for every
+        SDK (an older one simply reports `null`s)."""
+        return {
+            "tool": self.tool,
+            "command": self.command,
+            **self.provenance.as_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -1201,16 +1260,37 @@ def confirm_missing(
     out: list[MissingPrerequisite] = []
     for m in missing:
         if m.command is not None and not _confirmed(m.command, available):
-            out.append(MissingPrerequisite(m.tool, None))
+            # `replace`, not `MissingPrerequisite(m.tool, None)`: this guard
+            # nulls the COMMAND and nothing else. Rebuilding the entry from two
+            # of its fields silently dropped the third the moment `provenance`
+            # existed (tan-cli#1066) -- so an unconfirmable installer would
+            # have cost the customer the licence/tier the consent screen needs
+            # to render, on exactly the hosts (a Fedora box reading alp-sdk's
+            # apt table) where this guard fires.
+            out.append(replace(m, command=None))
         else:
             out.append(m)
     return tuple(out)
 
 
 def _structured_missing(
-    missing: list[str], install: dict[str, str]
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
 ) -> tuple[MissingPrerequisite, ...]:
-    return tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
+    """The `{tool, command, <provenance>}` entries for a refusal.
+
+    `provenance` defaults to `None` -- "no table", indistinguishable
+    downstream from "no entry for this tool" (`artifact_provenance.for_tool`)
+    -- so a caller that has not resolved a manifest (and every pre-tan-cli#1066
+    unit test of the refusal builders) keeps reporting the same `null`s an SDK
+    predating `artifactProvenance` yields."""
+    return tuple(
+        MissingPrerequisite(
+            tool, install.get(tool), artifact_provenance.for_tool(provenance, tool)
+        )
+        for tool in missing
+    )
 
 
 def hint_line(tool: str, install: dict[str, str]) -> str:
@@ -1303,9 +1383,18 @@ def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
     )
 
 
-def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
+def windows_refusal(
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
+) -> PrereqFailure:
     """`bootstrap.ps1`'s `$Prereqs` loop: header, one `hint_line` each, the
-    reopen-PowerShell tail."""
+    reopen-PowerShell tail.
+
+    `provenance` reaches only the STRUCTURED half (`missingPrerequisites[]`),
+    never the printed lines -- tan-cli#1066 carries a licensing fact for a
+    consumer's consent screen; it does not re-word a refusal the oracle's
+    wording is pinned against."""
     lines = ["Missing required tools:"]
     lines.extend(hint_line(tool, install) for tool in missing)
     lines.append("Install the tools above (then reopen PowerShell) and re-run.")
@@ -1317,11 +1406,17 @@ def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailur
     # is alp-sdk's to change and this reads what it actually says.
     lines.append(_doctor_fix_hint(missing, install))
     return PrereqFailure(
-        "prerequisites-missing", tuple(lines), _structured_missing(missing, install)
+        "prerequisites-missing",
+        tuple(lines),
+        _structured_missing(missing, install, provenance),
     )
 
 
-def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
+def posix_refusal(
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
+) -> PrereqFailure:
     """`bootstrap.sh`'s one line: the tool names and nothing else -- TWO spaces
     before "Install". The oracle prints no per-tool commands and neither may
     this; alp-sdk#959 changed what the STRUCTURED half carries, not what a POSIX
@@ -1347,14 +1442,15 @@ def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
 
     The per-tool commands themselves still stay OUT of the prose -- that half of
     the original constraint holds, and they remain where alp-sdk#959 put them,
-    in the structured payload's `{tool, command}` pairs."""
+    in the structured payload's `{tool, command}` pairs -- which is also where
+    tan-cli#1066's `provenance` goes, and only there (see `windows_refusal`)."""
     return PrereqFailure(
         "prerequisites-missing",
         (
             f"Missing required tools: {' '.join(missing)}.  Install them and re-run.",
             _doctor_fix_hint(missing, install),
         ),
-        _structured_missing(missing, install),
+        _structured_missing(missing, install, provenance),
     )
 
 
@@ -1664,7 +1760,7 @@ def posix_venv_unusable() -> PrereqFailure:
 
 def reported_missing(
     missing: tuple[MissingPrerequisite, ...],
-) -> list[dict[str, str | None]] | None:
+) -> list[dict[str, str | int | None]] | None:
     """The envelope form: `None` when the refusal names no tool.
 
     `[]` is NEVER a value here. The Python-floor refusals reach this empty, and
@@ -1700,8 +1796,6 @@ def in_play_runtimes(
     `topology` empty means the SoM metadata could not be read; an empty RESULT
     means "unresolvable", which every caller must treat as "proceed".
     """
-    from tan.commands.presets_cmd import infer_runtime_for_core_id  # noqa: PLC0415
-
     def from_topology(core_id: str) -> str:
         return topology.get(core_id) or infer_runtime_for_core_id(core_id)
 
@@ -1842,13 +1936,22 @@ def resolve_workspace_target(raw: str, cwd: str) -> str:
         raise ValueError("--workspace requires a non-empty path")
     if _is_drive_relative(trimmed):
         raise ValueError(_drive_relative(trimmed))
+    # Rooted-but-driveless is decided BEFORE absoluteness, not inside it: the
+    # two `isabs` oracles below disagree about this exact shape either side of
+    # CPython 3.13, and the old ordering rode on that (tan-cli#1139 --
+    # `_is_rooted_no_drive`).
+    if _is_rooted_no_drive(trimmed):
+        raise ValueError(_rooted_no_drive(trimmed))
     if os.path.isabs(trimmed) or ntpath_isabs(trimmed):
-        # `\x` on Windows has a root but no drive: rooted-but-driveless is
-        # rejected just below, so only a fully absolute path passes here.
-        if os.name == "nt" and not re.match(r"^([A-Za-z]:|[\\/]{2})", trimmed):
-            raise ValueError(_rooted_no_drive(trimmed))
         return os.path.normpath(trimmed)
     if trimmed.startswith(("/", "\\")):
+        # Not reachable through any input measured on 3.12.3/3.13.15/3.14.7: a
+        # single leading separator is refused above on Windows and for any
+        # `\`-led input, and is POSIX-absolute on the LINE ABOVE otherwise
+        # (`/proj/x` is never refused on POSIX); a doubled one is
+        # `ntpath_isabs`-absolute on all three. Kept so "a rooted path is NEVER
+        # silently joined onto `cwd`" is total rather than contingent on what a
+        # future `ntpath.isabs` says (tan-cli#1139).
         raise ValueError(_rooted_no_drive(trimmed))
     return os.path.normpath(os.path.join(cwd, trimmed))
 
@@ -1868,8 +1971,55 @@ def _is_drive_relative(raw: str) -> bool:
     reject `C:ws` as a manifest-supplied directory name, which is exactly what
     the regex buys it. Narrowing the predicate would have let `C:ws` through
     there as a "plain relative" name to be joined onto the workspace.
+
+    CONFIRMED post-3.13 (tan-cli#1139), which is not a given: `ntpath.isabs`
+    changed in that release, but not for `"C:ws"` -- `False` on 3.12.3,
+    3.13.15 and 3.14.7 alike -- so the paragraph above still describes the
+    live code. It does NOT cover the second, distinct divergence, which is
+    also fixed at a call site but for a different reason; see
+    `_is_rooted_no_drive`.
     """
     return bool(re.match(r"^[A-Za-z]:(?![\\/])", raw))
+
+
+def _is_rooted_no_drive(raw: str) -> bool:
+    """`\\proj\\ws` -- a SINGLE leading separator, so a root but no drive
+    (tan-cli#1139; the fourth measured `pathlib`/`ntpath` difference across
+    this repo's supported range, after tan-cli#1126's three). THE canonical
+    site for that measurement -- `ntpath_isabs`, `_is_drive_relative` and
+    `resolve_workspace_target`'s tail comment point here, not restate it.
+
+    Asked as a REGEX over the string rather than as an `isabs` question, and
+    ahead of `resolve_workspace_target`'s absoluteness branch, because
+    `ntpath.isabs` answers this shape differently either side of CPython 3.13
+    while `PureWindowsPath.is_absolute()` has said `False` throughout --
+    measured, not assumed:
+
+        interpreter   ntpath.isabs(r"\\proj\\x")   PureWindowsPath(...).is_absolute()
+        3.12.3        True                      False
+        3.13.15       False                     False
+        3.14.7        False                     False
+
+    The regex is not merely SUFFICIENT for the shapes someone thought to
+    probe, it is EQUIVALENT to the divergence: over a 40-input corpus, on all
+    three interpreters, `ntpath.isabs` differs across the boundary iff the
+    string matches `^[\\/](?![\\/])` -- zero mismatches in either direction.
+    So this covers the whole class, tripled and mixed separators included.
+
+    `requires-python = ">=3.12"`, so both answers are live. Nested inside the
+    absoluteness branch the guard inherited the split and was DEAD off Windows
+    on 3.12: `--workspace \\proj\\ws` fell through to `normpath` and relocated a
+    checkout into a literal `\\proj\\ws` directory instead of raising.
+
+    Host-aware, because the two separators are not the same fact: a leading
+    `/` IS a genuine absolute path on POSIX and must keep resolving there,
+    while a leading `\\` names no drive on any host and `/` names none on
+    Windows. TWO leading separators are excluded -- a UNC root or a device
+    path (`\\\\srv\\share`, `\\\\?\\C:\\ws`), absolute on all three.
+    """
+    if not re.match(r"^[\\/](?![\\/])", raw):
+        return False
+    return os.name == "nt" or raw[0] == "\\"
 
 
 def _drive_relative(trimmed: str) -> str:
@@ -2277,9 +2427,10 @@ def next_steps_block(
         lines.extend(
             [
                 "  # Or jump straight into building an example for real silicon",
-                "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --",
-                "  #  the `tan doctor` above reports it, and names the exact install "
-                "command):",
+                "  # (needs the Zephyr SDK toolchain -- bootstrap just tried to acquire it",
+                "  #  automatically (ADR 0021 Lane 1 P1); `tan doctor` above confirms "
+                "whether it",
+                "  #  landed, and names the exact install command if it did not):",
                 "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `",
                 f"      examples\\peripheral-io\\uart-echo -- "
                 f"-DEXTRA_ZEPHYR_MODULES={repo_root}",
@@ -2302,9 +2453,10 @@ def next_steps_block(
                 "  bash scripts/test-all.sh",
                 "",
                 "  # Or jump straight into building an example for real silicon",
-                "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --",
-                "  #  the `tan doctor` above reports it, and names the exact install "
-                "command):",
+                "  # (needs the Zephyr SDK toolchain -- bootstrap just tried to acquire it",
+                "  #  automatically (ADR 0021 Lane 1 P1); `tan doctor` above confirms "
+                "whether it",
+                "  #  landed, and names the exact install command if it did not):",
                 f'  tan build --sdk-root "{tokens.sdk_root}" \\',
                 f'      --project "{tokens.sdk_root}/examples/peripheral-io/uart-echo"',
                 "",
@@ -2316,6 +2468,18 @@ def next_steps_block(
             ]
         )
     return lines
+
+
+#: Blocking codes that are not an install, with the clause that fits them.
+#: Every other member reads "<code> did not install".
+_NOT_AN_INSTALL = {"west-patches-failed": "zephyr/patches.yml was not applied"}
+
+
+def _blocking_clause(blocking: list[str]) -> str:
+    installs = [code for code in blocking if code not in _NOT_AN_INSTALL]
+    clauses = [f"{', '.join(installs)} did not install"] if installs else []
+    clauses += [_NOT_AN_INSTALL[code] for code in blocking if code in _NOT_AN_INSTALL]
+    return "; ".join(clauses)
 
 
 def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[str], bool]:
@@ -2348,19 +2512,18 @@ def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[s
     """
     if not blocking:
         return ["bootstrap: complete."], True
-    named = ", ".join(blocking)
+    named = _blocking_clause(blocking)
     if allow_partial:
         return (
             [
                 "bootstrap: complete.",
-                f"  (--allow-partial: {named} did not install; commands that need "
-                f"them will fail.)",
+                f"  (--allow-partial: {named}; commands that need them will fail.)",
             ],
             True,
         )
     return (
         [
-            f"bootstrap: INCOMPLETE -- {named} did not install, so this workspace "
+            f"bootstrap: INCOMPLETE -- {named}, so this workspace "
             f"cannot build yet.",
             "  The messages above name the remedy for each. Fix them and re-run `tan "
             "bootstrap`, or pass --allow-partial to accept this workspace as-is (the "
@@ -2371,18 +2534,27 @@ def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[s
     )
 
 
-def capture_tail(stdout: bytes | str, stderr: bytes | str) -> str:
+def capture_tail(stdout: bytes | str, stderr: bytes | str, lines: int = 4) -> str:
     """The last few non-empty lines of a failed step's captured output. Prefers
     stderr, falling back to stdout when stderr is empty; `""` when there is
     nothing usable.
 
     Without this the JSON envelope carried no failure reason at all -- a pip
     traceback, a "no such file" -- because only the exit status was read.
+
+    `lines` defaults to 4 -- unchanged for every existing caller. `west sdk
+    install`'s failure path (`bootstrap_cmd._acquire_toolchain`) passes a
+    wider window (tan-cli#990 review): a real CI run's `tar --xz` extraction
+    failure produced a message naming NO cause at all, because the actual
+    subprocess error line sat above the closing frames of `west`'s own
+    Python traceback and the 4-line default discarded it along with
+    everything else -- a diagnostic gap that cannot be recovered after the
+    fact, since the untruncated child output is never written anywhere else.
     """
     text = _as_text(stderr)
     if not text.strip():
         text = _as_text(stdout)
-    tail = [line for line in text.splitlines() if line.strip()][-4:]
+    tail = [line for line in text.splitlines() if line.strip()][-lines:]
     return " | ".join(tail)
 
 

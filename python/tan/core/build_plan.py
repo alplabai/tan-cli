@@ -5,6 +5,7 @@ Strict producer / tolerant consumer: the required keys are enforced, the
 optional-but-always-emitted ones default cleanly, and an unsupported
 schemaVersion is REFUSED rather than silently hand-ported around."""
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,38 @@ class BuildPlan:
     sdk_commit: str | None = None
     plan_path_mode: str | None = None
     execution_policy: ExecutionPolicy | None = None
+    #: Top-level `deferredPlaceholders` (alp-sdk#2696): bare names of `${NAME}`
+    #: values the planner left unresolved on purpose. `None` means the plan
+    #: carries NO such key (older planner); a tuple (possibly empty) means it
+    #: does, and is then authoritative. A malformed value parses as `()` with
+    #: the reason in `deferred_placeholders_problem` -- never a licence to
+    #: exempt anything.
+    deferred_placeholders: tuple[str, ...] | None = None
+    deferred_placeholders_problem: str | None = None
+
+
+#: A deferred-placeholder name, as alp-sdk#2696 spells it.
+DEFERRED_PLACEHOLDER_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def _deferred_placeholders(raw: dict[str, Any]) -> tuple[tuple[str, ...] | None, str | None]:
+    """Parse the optional `deferredPlaceholders` list. Absent or `null` -> `(None, None)`.
+    Present but malformed -> `((), reason)`: the key IS there, so the plan is
+    authoritative and lists nothing, which exempts nothing."""
+    # `null` is ABSENT, like `sdkVersion`/`sdkCommit`: a tolerant consumer.
+    if raw.get("deferredPlaceholders") is None:
+        return None, None
+    value = raw["deferredPlaceholders"]
+    if not isinstance(value, list):
+        return (), "`deferredPlaceholders` must be a list of placeholder names"
+    for i, name in enumerate(value):
+        if not isinstance(name, str) or not DEFERRED_PLACEHOLDER_NAME.fullmatch(name):
+            return (), (
+                f"`deferredPlaceholders[{i}]` must be a string matching "
+                f"`^[A-Z][A-Z0-9_]*$`"
+            )
+    # The schema says unique; a duplicate is harmless, so it is folded, not refused.
+    return tuple(dict.fromkeys(value)), None
 
 
 def _require_strings(
@@ -274,9 +307,10 @@ def _reject_nul(value: str, context: str) -> None:
 
     **That surface is `--plan-from`, NOT `--plan`.** An earlier version of
     this note named `tan build --plan --plan-from <nul-plan>` as the diverging
-    invocation; measured, `--plan` on `tan build` is a deferred stub in this
-    port and answers `exit 1 cli.command-deferred` for EVERY plan, valid or
-    not (tan-cli#427), so nothing about a NUL is observable through it.
+    invocation; measured, `--plan` on `tan build` is now a RETIRED flag in
+    this port and answers `exit 2 build.flag-retired` for EVERY invocation,
+    valid or not (tan-cli#427), so nothing about a NUL is observable through
+    it.
 
     The trade is taken deliberately, for the same reason and in the same shape
     as the `=`/empty env names above, which already diverge from the oracle in
@@ -577,6 +611,8 @@ def parse_build_plan(text: str) -> BuildPlan:
     # warning first before this change, and still does.
     warnings = _warnings(raw["warnings"])
 
+    deferred, deferred_problem = _deferred_placeholders(raw)
+
     return BuildPlan(
         schema_version=version, generated_by=raw["generatedBy"], board_yaml=raw["boardYaml"],
         sku=raw["sku"], build_root=raw["buildRoot"],
@@ -585,4 +621,5 @@ def parse_build_plan(text: str) -> BuildPlan:
         warnings=warnings,
         sdk_version=raw.get("sdkVersion"), sdk_commit=raw.get("sdkCommit"),
         plan_path_mode=raw.get("planPathMode"), execution_policy=_policy(raw.get("executionPolicy")),
+        deferred_placeholders=deferred, deferred_placeholders_problem=deferred_problem,
     )

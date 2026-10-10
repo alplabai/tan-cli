@@ -62,7 +62,12 @@ _PACKAGE = Path(__file__).resolve().parents[2] / "tan"
 #: `test_every_check_call_site_declares_a_literal_scope`, which keys on nothing.
 _PINNED_SCOPES = {
     # doctor_cmd -- host: the verdict is about this machine.
+    # `devicetreeLint` (tan-cli#1192) is host: its subject is this machine's
+    # tooling -- a Zephyr SDK `hosttools/` copy of `dtc` or one on PATH -- and
+    # the answer is identical for every project built here.
+    "devicetreeLint": "host",
     "homePath": "host",
+    "tanInstall": "host",
     "hostPrerequisites": "host",
     "hostPython": "host",
     "jlink": "host",
@@ -80,11 +85,17 @@ _PINNED_SCOPES = {
     "pythonFloor": "project",
     "sdk": "project",
     "sdkProvenance": "project",
+    # issue #474 (ADR 0021 Lane 1 P1): needs `sdk_root` to read
+    # `metadata/toolchains.json`'s pin -- cannot answer without a resolved
+    # project, unlike `zephyrSdk` above (a bare host fact).
+    "toolchain": "project",
     "venvProvenance": "project",
     "westResolved": "project",
     "workspace": "project",
     "zephyrVersion": "project",
     "zephyrWorkspace": "project",
+    "workspacePatches": "project",
+    "zephyrBase": "project",
     # support_bundle_cmd's own debug report, built from the same class.
     "gdb": "host",
     "lldb": "host",

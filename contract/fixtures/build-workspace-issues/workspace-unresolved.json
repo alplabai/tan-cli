@@ -1,0 +1,5 @@
+{
+  "code": "build.workspace-unresolved",
+  "severity": "error",
+  "message": "slice `c1` refused before build: no west workspace resolves for this build -- `west build` would run from `__WORKDIR__/scratch/app`, which has no `.west` on any ancestor; ZEPHYR_BASE is unset; and neither `__WORKDIR__/home/.cache` nor `__WORKDIR__/home/.cache/zephyrproject` (next to the SDK root `__WORKDIR__/home/.cache/sdk-dev`) holds a `.west`. west would stop with `unknown command \"build\"`. Run `tan bootstrap --sdk-root __WORKDIR__/home/.cache/sdk-dev` to create a workspace for this checkout, or set ZEPHYR_BASE to an existing workspace's `zephyr/` -- that builds against that workspace's Zephyr revision and patches, which need not match this checkout's `west.yml`."
+}

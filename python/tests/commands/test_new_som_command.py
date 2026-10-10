@@ -7,7 +7,7 @@ parallel), so these tests mount the command on a throwaway `typer.Typer()`,
 matching how it will actually be invoked once registered:
 `app.command("new-som")(new_som)`.
 
-Most tests here need REAL `metadata/schemas/som-preset-v1.schema.json` /
+Most tests here need REAL `metadata/schemas/som-preset-v2.schema.json` /
 `soc-spec-v1.schema.json` / `metadata/boards/*.yaml` to validate against, so
 they point `--sdk-root` at an alp-sdk checkout named by **`ALP_SDK_ROOT`** and
 carry `@needs_oracle_sdk`, which skips (never fails) when that variable is
@@ -88,6 +88,23 @@ needs_oracle_sdk = pytest.mark.skipif(
     reason=(
         "set ALP_SDK_ROOT to an alp-sdk checkout that still ships "
         "scripts/alp_cli/new_som.py to run the new-som oracle-parity tests"
+    ),
+)
+
+#: `needs_oracle_sdk` requires the RETIRED `scripts/alp_cli/new_som.py` to
+#: still exist. tan-cli#1220's `ospi_memories:`/`hyperram:` scaffold has no
+#: oracle to diff against at all -- alp-sdk#1944 declined to add one, and this
+#: port is the native destination -- so gating it behind `needs_oracle_sdk`
+#: would skip on every current alp-sdk checkout (`210e9fedc` retired the whole
+#: `scripts/alp_cli/` surface) and prove nothing. It needs only the real
+#: `som-preset-v2.schema.json` / `metadata/boards/*.yaml` a bound
+#: `ALP_SDK_ROOT` provides, so it gets its own, lighter skip condition.
+needs_sdk_schemas = pytest.mark.skipif(
+    _SDK_ROOT is None
+    or not (_SDK_ROOT / "metadata" / "schemas" / "som-preset-v2.schema.json").is_file(),
+    reason=(
+        "set ALP_SDK_ROOT to an alp-sdk checkout carrying "
+        "metadata/schemas/som-preset-v2.schema.json"
     ),
 )
 
@@ -499,7 +516,7 @@ def test_dry_run_writes_nothing_and_reports_the_plan(tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Preset skeleton validates against som-preset-v1" in result.output
+    assert "Preset skeleton validates against som-preset-v2" in result.output
     assert "SoC spec skeleton validates against soc-spec-v1" in result.output
     assert "Would create" in result.output
     assert "Dry run -- validated OK, nothing was written." in result.output
@@ -537,7 +554,7 @@ def test_write_then_refuses_without_force_then_force_overwrites(tmp_path):
     assert third.exit_code == 0, third.output
 
 
-@needs_oracle_sdk
+@needs_sdk_schemas
 def test_written_preset_and_soc_content_are_correct(tmp_path):
     """Real (non-dry-run) content assertions over the generated preset YAML
     and SoC JSON skeleton -- these files are the command's actual product;
@@ -569,9 +586,24 @@ def test_written_preset_and_soc_content_are_correct(tmp_path):
     preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-XTST4.yaml").read_text(
         encoding="utf-8"
     )
-    assert "preferred_backend:    tbd" in preset_text
+    assert "auto_order:           [tbd]" in preset_text
     assert "silicon_variant: TBD" in preset_text
     assert "{ id: 0, reserved_for: alp_default_rpmsg }" in preset_text
+    # som-preset v2 (alp-sdk#2024): schema_version is const 2, the
+    # memory_map: guidance names the REQUIRED write_authority: field and its
+    # six schema values, and the removed npu_population is never scaffolded.
+    assert preset_text.splitlines().count("schema_version: 2") == 1
+    assert "`write_authority:` (REQUIRED since som-preset v2" in preset_text
+    for value in (
+        "customer_image",
+        "vendor_image",
+        "customer_runtime",
+        "secure_enclave",
+        "none",
+        "composite",
+    ):
+        assert value in preset_text
+    assert "npu_population" not in preset_text
 
     soc_doc = json.loads(
         (tmp_path / "metadata" / "socs" / "test" / "testfam" / "testpart4.json").read_text(
@@ -579,6 +611,100 @@ def test_written_preset_and_soc_content_are_correct(tmp_path):
         )
     )
     assert soc_doc["notes"], "SoC skeleton notes[] must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# ospi_memories:/hyperram: scaffold for alif:ensemble parts (tan-cli#1220)
+# ---------------------------------------------------------------------------
+
+
+@needs_sdk_schemas
+def test_alif_ensemble_scaffolds_ospi_memories_and_hyperram(tmp_path):
+    """tan-cli#1220: `ospi_memories:` is a MAPPING keyed by OSPI controller
+    instance (`ospi0`, `ospi1`, ...), per `som-preset-v2.schema.json`
+    `on_module.ospi_memories.propertyNames.pattern == "^ospi[0-9]+$"` -- NOT
+    the flat list the issue's own wording implied. Written (not dry-run) so
+    the assertions read the real generated file; exit 0 already proves the
+    block validates against the real schema self-check (`_internal_error`
+    exits 1 and never reaches `Created` otherwise)."""
+    import yaml
+
+    result = runner.invoke(
+        app,
+        [
+            "--sdk-root",
+            str(_SDK_ROOT),
+            "--output-root",
+            str(tmp_path),
+            "--sku",
+            "E1M-AEN302",
+            "--soc-ref",
+            "alif:ensemble:e9",
+            "--family",
+            "alif-ensemble",
+            "--default-board",
+            "E1M-EVK",
+            "--default-hw-rev",
+            "r1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "validates against som-preset-v2" in result.output
+
+    preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-AEN302.yaml").read_text(
+        encoding="utf-8"
+    )
+    doc = yaml.safe_load(preset_text)
+    ospi = doc["on_module"]["ospi_memories"]
+    assert set(ospi) == {"ospi0"}, "keyed by OSPI controller instance, not a flat list"
+    assert ospi["ospi0"] == {
+        "chip": "TBD",
+        "capacity_mbit": "TBD",
+        "chip_select": 0,
+        "role": "tbd",
+    }
+    hyperram = doc["on_module"]["hyperram"]
+    assert hyperram == {
+        "chip": "TBD",
+        "capacity_mbit": "TBD",
+        "interface": "ospi0",
+        "chip_select": 1,
+    }
+
+
+@needs_sdk_schemas
+def test_ospi_memories_and_hyperram_are_not_scaffolded_outside_alif_ensemble(tmp_path):
+    """Negative control for tan-cli#1220's gate: a non-`alif:ensemble` part
+    gets neither block -- `ospi_memories:`'s own schema description scopes
+    the field to the AEN family, and this must stay a `soc_ref`-vendor/family
+    check, not a blanket render."""
+    import yaml
+
+    result = runner.invoke(
+        app,
+        [
+            "--sdk-root",
+            str(_SDK_ROOT),
+            "--output-root",
+            str(tmp_path),
+            "--sku",
+            "E1M-XTST9",
+            "--soc-ref",
+            "test:testfam:testpart9",
+            "--family",
+            "test-fam",
+            "--default-board",
+            "E1M-EVK",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-XTST9.yaml").read_text(
+        encoding="utf-8"
+    )
+    doc = yaml.safe_load(preset_text)
+    assert "ospi_memories" not in doc["on_module"]
+    assert "hyperram" not in doc["on_module"]
 
 
 @needs_oracle_sdk
@@ -635,7 +761,7 @@ def test_new_vendor_onboards_through_metadata_alone_with_no_tan_release(tmp_path
        against one concrete, never-before-seen vendor rather than the fixed
        patterns that gate already knows to look for.)
     2. The scaffold this genuinely-new vendor produces validates against the
-       REAL `som-preset-v1`/`soc-spec-v1` schemas end to end (dry-run AND a
+       REAL `som-preset-v2`/`soc-spec-v1` schemas end to end (dry-run AND a
        real write), the same as every other SKU in this file -- proving the
        whole `new-som` -> schema-validate -> `pr-metadata-validate` pipeline
        needs nothing vendor-specific to accept it.
@@ -663,7 +789,7 @@ def test_new_vendor_onboards_through_metadata_alone_with_no_tan_release(tmp_path
 
     dry = runner.invoke(app, ["--dry-run", "--output-root", str(tmp_path / "dry"), *common])
     assert dry.exit_code == 0, dry.output
-    assert "Preset skeleton validates against som-preset-v1" in dry.output
+    assert "Preset skeleton validates against som-preset-v2" in dry.output
     assert "SoC spec skeleton validates against soc-spec-v1" in dry.output
 
     written = runner.invoke(app, ["--output-root", str(tmp_path / "written"), *common])
@@ -809,6 +935,51 @@ def test_format_json_failure_emits_a_new_som_code_not_cli_parse_error(tmp_path):
     assert "alp-sdk root is unresolved" in env["issues"][0]["message"]
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_path):
+    """tan-cli#926 -- the `new-som` instance of the tan-cli#900 class
+    (`clean`/`presets` already had this; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` are the sixth and seventh).
+
+    `new_som`'s `--sdk-root`/`--project` preflight used to call `resolve_
+    sdk_tiered`, check `active.path is None`, and `fail(...)` right there --
+    BEFORE `pin_issue`/`foreign_issue` were computed a few lines further
+    down. So a workspace whose `.alp/sdk-path` names a checkout that no
+    longer exists, with nothing else on the ladder resolving either,
+    reported `new-som.failed` alone: the customer was told no SoM scaffold
+    was written but never that their own broken project pin was the reason
+    -- `presets`/`clean` disclose it from the identical ladder.
+
+    Fails against dev: `[i["code"] for i in env["issues"]]` there is
+    `["new-som.failed"]` alone, with no leading `sdk.project-pin-unresolved`
+    and `"gone-checkout"` nowhere in the envelope."""
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--dry-run",
+            "--format", "json",
+            "--project", str(proj),
+            "--sku", "E1M-ZZ9999",
+            "--soc-ref", "nxp:imx9:imx95",
+            "--family", "nxp-imx9",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+
+    env = json.loads(result.output)
+    assert env["command"] == "new-som", env
+    assert env["ok"] is False and env["exitCode"] == 2
+    assert [i["code"] for i in env["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "new-som.failed",
+    ], env
+    assert "gone-checkout" in env["issues"][0]["message"]
+
+
 def test_the_success_and_failure_paths_agree_on_whether_stdout_is_json(tmp_path):
     """The exact disagreement #399 reports: one path parseable, the other not,
     on the same command with the same flag. Asserted as a PAIR so a fix to
@@ -937,7 +1108,7 @@ def test_inference_backends_and_ethos_u_variants_match_the_oracle():
     reorder or typo here would desync every `--inference-backend`/
     `--ethos-u-variant` choice list from the oracle's."""
     assert INFERENCE_BACKENDS == ("ethos_u", "drpai", "deepx_dxm1", "tbd")
-    assert ETHOS_U_VARIANTS == ("u55", "u65", "u85")
+    assert ETHOS_U_VARIANTS == ("u55", "u85")
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +1143,7 @@ def _marker_sdk(root: Path) -> Path:
     (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
     schemas = root / "metadata" / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
-    (schemas / "som-preset-v1.schema.json").write_text(
+    (schemas / "som-preset-v2.schema.json").write_text(
         json.dumps({"type": "object", "properties": {"sku": {"pattern": "^E1M-[A-Z0-9-]+$"}}}),
         encoding="utf-8",
     )
@@ -998,7 +1169,7 @@ def _marker_sdk_no_boards(root: Path) -> Path:
     (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
     schemas = root / "metadata" / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
-    (schemas / "som-preset-v1.schema.json").write_text(
+    (schemas / "som-preset-v2.schema.json").write_text(
         json.dumps({"type": "object", "properties": {"sku": {"pattern": "^E1M-[A-Z0-9-]+$"}}}),
         encoding="utf-8",
     )
@@ -1515,7 +1686,7 @@ def test_text_mode_output_is_untouched_by_the_envelope_work(tmp_path):
     out = tmp_path / "out"
     result = runner.invoke(app, _dry_run_argv(sdk, out))
     assert result.exit_code == 0, result.output
-    assert result.stdout.startswith("Preset skeleton validates against som-preset-v1")
+    assert result.stdout.startswith("Preset skeleton validates against som-preset-v2")
     assert "Dry run -- validated OK, nothing was written." in result.stdout
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)

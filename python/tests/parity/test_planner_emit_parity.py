@@ -1,6 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Byte-parity: the relocated planner vs alp-sdk's `alp_orchestrate`.
 
+THE RENDER AXIS (ADR-0026 §D), not the planner axis. This module used to carry
+both under one shared file/skip-mark/fixture/mode-tuple; tan-cli#1215 split
+them so ADR-0026 §G step 6 ("delete the planner axis, keep the render gate")
+is a one-file deletion rather than a hand-edit of this one. The planner axis --
+`--emit build-plan` alone, the one mode ADR-0026's own Decision makes tan's
+rather than alp-sdk's canonical render -- now lives entirely in
+`test_planner_axis_build_plan_parity.py`, which imports `SDK`, `HAS_UPSTREAM`,
+`planners`, `_boards` and `_first_diff` from HERE (the established
+import-a-fixture-for-its-side-effect idiom `tests/planner/_bound_sdk_fixture.py`
+already uses) rather than redefining them, so nothing here has to change when
+that file is deleted.
+
 The relocation of `scripts/alp_orchestrate/` into `tan/planner/` is a MOVE, not
 a rewrite -- so the only acceptable result is byte-identical emit. This module
 proves it the only way that means anything: it imports BOTH planners into one
@@ -37,7 +49,7 @@ produces the same file:
   as proof of the in-process one. `zephyr-board` joins that layer as the one
   target writing a DIRECTORY -- plumbing (`write_tree`, and an `--output` that
   IS the directory) nothing else exercises.
-* the breadth layer, driving both sides in-process so all 99 boards x every
+* the breadth layer, driving both sides in-process so every board x every
   relocated mode x every `--core` form is affordable. Its oracle is
   `alp_project.py`'s OWN dispatch functions -- `--emit zephyr-conf` is not
   `_slice_alp_conf`, it is that slice inside a per-core wrapper, and `--emit
@@ -57,12 +69,13 @@ produces the same file:
   emit passed while the dependency the port exists to remove was fully intact.
   `test_the_in_process_path_loads_none_of_the_sdks_python` measures it PER MODE
   across all twelve, so a single target regressing names itself.
-* and `tan build`'s own reach, measured the same way.  `build` acquired its plan
-  in-process but kept a SILENT `python -m alp_orchestrate` fallback; that is
-  retired, and `test_tan_build_reaches_no_sdk_python` proves the plan-acquire
-  path neither imports NOR SPAWNS anything under `<sdk>/scripts`. Spawns are
-  measured with an audit hook, because a subprocess is invisible to
-  `sys.modules` -- which is how the last edge stayed hidden.
+
+`tan build`'s own reach -- the plan-acquire path's import/spawn closure, and the
+retired silent `python -m alp_orchestrate` fallback -- is measured the same way
+but lives in the sibling `test_planner_axis_build_plan_parity.py` now, alongside
+the rest of the planner axis: `build` is the one command whose plan is
+`build-plan`, and every probe of it belongs with that mode, not with the
+eighteen renderers this file owns.
 
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skipped, loudly, without one -- a green run that compared nothing would be worse
@@ -71,6 +84,7 @@ than a red one.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -80,18 +94,33 @@ from pathlib import Path
 
 import pytest
 
+from tan import planner_emit
 from tests.conftest import sdk_root
+from tests.parity import _xdist_breadth_floor
 
-# The project-scoped emit modes `tan.planner` owns. `kconfig` is excluded (see
-# the module docstring); the other seven need nothing but `metadata/**`.
-MODES = (
-    "build-plan",
+# The project-SCOPED (not per-core) emit modes `tan.planner` owns, compared as
+# libraries below. `kconfig` is excluded (see the module docstring); `build-plan`
+# is excluded too -- it moved to `test_planner_axis_build_plan_parity.py`
+# (tan-cli#1215, ADR-0026 §D/§G) as its own axis, since it is the one mode §G
+# step 6 deletes once `tan build` plans with no alp-sdk counterpart at all. The
+# other six need nothing but `metadata/**` and are this file's whole subject.
+#
+# `linux-ownership-dts` (alp-sdk#2674) is a seventh, compared at the LIBRARY
+# level only: `tan/planner/linux_ownership.py` is a byte-identical mirror of
+# upstream's renderer, so this measures it on every board, but no `tan` command
+# emits it yet -- upstream serves it from `alp_project.py` for inspection and
+# `check_amp_pad_claims --project`, and its product consumer (the
+# linux-renesas bbappend) renders the same fragment from the system-manifest's
+# `ownership:` block, which `tan` already emits. Exposing it as a
+# `tan generate` target is a separate, user-visible decision.
+RENDER_MODES = (
     "system-manifest",
     "ipc-contract-h",
     "dts-reservations",
     "dts-partitions",
     "storage-mounts-c",
     "tfm-sysbuild-conf",
+    "linux-ownership-dts",
 )
 
 
@@ -109,19 +138,215 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def planners():
-    """Both planners, in one process, bound to the same SDK checkout."""
+    """Both planners, in one process, bound to the same SDK checkout.
+
+    Module-scoped, so teardown runs once, after every test in this module
+    that requested it -- everything importing through `<sdk>/scripts` during
+    the module's run must keep resolving normally. What must NOT survive past
+    that teardown is the `sys.path` entry and whatever it pulled into
+    `sys.modules`: left in place, `<sdk>/scripts` can shadow a *different*
+    SDK checkout's same-named modules for the rest of the process, the exact
+    hazard `tests/core/test_planner_root.py`'s
+    `test_rebinding_before_import_swaps_the_root_and_leaves_no_first_root_route`
+    warns about (tan-cli#948). Only remove what THIS fixture added -- mirrors
+    the `added = ... not in sys.path` discipline the oracle loaders in
+    `tests/core/test_faultdecode.py`, `tests/commands/test_new_som_command.py`
+    and `tests/commands/test_faultdecode_command.py` already use.
+    """
     assert SDK is not None
     scripts = str(SDK / "scripts")
-    if scripts not in sys.path:
+    scripts_dir = (SDK / "scripts").resolve()
+    added_to_path = scripts not in sys.path
+    # Snapshot BEFORE this fixture imports anything, so teardown can purge
+    # exactly what it added -- not gated on `added_to_path`, because that flag
+    # only says whether WE inserted the path entry, not whether we're the
+    # ones who populated `sys.modules` off it. If `<sdk>/scripts` were
+    # already on `sys.path` when this fixture started (nothing does that
+    # today, but a future caller might), the modules we import here would
+    # still need undoing, or the purge below would silently become a no-op
+    # with nothing red.
+    modules_before = set(sys.modules)
+    if added_to_path:
         sys.path.insert(0, scripts)
-    import alp_orchestrate  # noqa: F401  -- upstream, off <sdk>/scripts
+    try:
+        import alp_orchestrate  # noqa: F401  -- upstream, off <sdk>/scripts
 
-    from tan.planner_root import bind_sdk_root
-    bind_sdk_root(SDK)
-    import tan.planner  # noqa: F401
+        from tan.planner_root import bind_sdk_root
+        bind_sdk_root(SDK)
+        import tan.planner  # noqa: F401
 
-    from alp_orchestrate.cli import main as _upstream_main  # noqa: F401
-    return alp_orchestrate, tan.planner
+        from alp_orchestrate.cli import main as _upstream_main  # noqa: F401
+        yield alp_orchestrate, tan.planner
+    finally:
+        # Purge every module THIS fixture caused to load off `<sdk>/scripts`
+        # -- not just `alp_orchestrate` by name, since tests in this module
+        # also reach `alp_project` and friends (`_oracle_emit`) once the path
+        # entry is live, and not just modules with a `__file__`, since
+        # `<sdk>/scripts` exposes implicit namespace packages (`bench`, `ci`,
+        # `kconfig`) that carry only `__path__`. Restricted to
+        # `modules_before`'s complement so a module some OTHER already-loaded
+        # fixture legitimately left cached under this same directory before
+        # we ran is never touched -- "only remove what THIS fixture added"
+        # literally, matching this docstring. Filtered by resolving under
+        # `scripts_dir`, the same technique
+        # `test_the_in_process_path_loads_none_of_the_sdks_python`'s
+        # child-interpreter probe already uses to MEASURE this closure, here
+        # used to UNDO it.
+        for name in list(sys.modules):
+            if name in modules_before:
+                continue
+            module = sys.modules.get(name)
+            origin = getattr(module, "__file__", None)
+            if not origin:
+                path = getattr(module, "__path__", None)
+                origin = next(iter(path), None) if path else None
+            if not origin:
+                continue
+            try:
+                Path(origin).resolve().relative_to(scripts_dir)
+            except ValueError:
+                continue
+            del sys.modules[name]
+        if added_to_path:
+            try:
+                sys.path.remove(scripts)
+            except ValueError:
+                pass
+
+
+#: Drives the `planners` fixture's OWN generator directly, outside pytest's
+#: fixture cache, from inside a fresh child interpreter -- for the same reason
+#: the import-closure probe near the bottom of this file runs in a child: this
+#: module's other tests keep the fixture's module-scoped instance alive for
+#: the whole file, so measuring "what does sys.path/sys.modules look like once
+#: this fixture is done" in-process would either see the shared instance's
+#: leftovers (if it already ran) or race the first test that creates it. A
+#: clean interpreter has neither problem, and its short life makes a leak that
+#: outlives the fixture visible as a diff against its OWN starting state
+#: rather than needing a second checkout to shadow.
+_FIXTURE_LIFECYCLE_PROBE = '''
+import inspect
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import tests.parity.test_planner_emit_parity as mod
+
+SCRIPTS_DIR = (mod.SDK / "scripts").resolve()
+
+
+def _from_sdk_scripts(name):
+    """True iff `sys.modules[name]`'s own `__file__` (or, for a namespace
+    package, `__path__`) resolves under `<sdk>/scripts` -- the actual leak
+    surface tan-cli#948 reports, not "any module gained since we started"
+    (importing `tan.planner` legitimately pulls in
+    `jsonschema`/`attrs`/`referencing`/etc, and those are SUPPOSED to stay
+    imported; flagging them would make this assertion fire on a correct
+    fixture and teach the test to be ignored)."""
+    module = sys.modules.get(name)
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        path = getattr(module, "__path__", None)
+        origin = next(iter(path), None) if path else None
+    if not origin:
+        return False
+    try:
+        Path(origin).resolve().relative_to(SCRIPTS_DIR)
+    except ValueError:
+        return False
+    return True
+
+
+path_before = list(sys.path)
+modules_before = set(sys.modules)
+
+raw = mod.planners.__wrapped__()
+if not inspect.isgenerator(raw):
+    # A `return`-based fixture (the pre-#948 defect) answers `__wrapped__()`
+    # with its return value, not a generator -- `next()` on that would raise
+    # `TypeError: '...' object is not an iterator` and the failure would
+    # surface as "lifecycle probe crashed", pointing a future reader at this
+    # probe instead of at the real defect. Name it directly instead.
+    print(json.dumps({"not_a_generator": True, "type": type(raw).__name__}))
+    sys.exit(0)
+
+gen = raw
+upstream, relocated = next(gen)
+live_path_entry = str(mod.SDK / "scripts") in sys.path
+live_has_module = "alp_orchestrate" in sys.modules
+
+try:
+    next(gen)
+    finished_cleanly = False
+except StopIteration:
+    finished_cleanly = True
+
+leaked = [n for n in (set(sys.modules) - modules_before) if _from_sdk_scripts(n)]
+
+print(json.dumps({
+    "not_a_generator": False,
+    "live_path_entry": live_path_entry,
+    "live_has_module": live_has_module,
+    "finished_cleanly": finished_cleanly,
+    "path_restored": sys.path == path_before,
+    "leaked_path_entries": [p for p in sys.path if p not in path_before],
+    "leaked_modules": sorted(leaked),
+}))
+'''
+
+
+def test_the_planners_fixture_restores_sys_path_and_sys_modules_on_teardown():
+    """Mutation-proof for tan-cli#948: once the fixture's generator has run its
+    teardown, `sys.path` must be byte-for-byte what it was before the fixture
+    started -- not merely the same LENGTH (a leaked entry paired with an
+    unrelated entry vanishing would pass a length check while still shadowing
+    a checkout) -- and every `sys.modules` entry this fixture caused to load
+    off `<sdk>/scripts` (identified the same way the fix itself identifies
+    them: by `__file__` resolving under that directory, not by checking for
+    the one name -- `alp_orchestrate` -- we happen to remember importing;
+    `alp_orchestrate.cli` and every other transitively-pulled submodule counts
+    too) must be gone. Modules the fixture legitimately leaves behind --
+    `tan.planner` itself, its real dependencies like `jsonschema` -- are
+    excluded on purpose: a bare `set(sys.modules) - modules_before` diff would
+    flag those too and make this assertion fire on a CORRECT fixture, which
+    teaches everyone to ignore the test the next time it reds for a real leak.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _FIXTURE_LIFECYCLE_PROBE],
+        cwd=Path(__file__).resolve().parents[2],  # .../python
+        env={**os.environ, "ALP_SDK_ROOT": str(SDK)},
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"lifecycle probe crashed (rc={proc.returncode}):\n{proc.stderr}")
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    if result.get("not_a_generator"):
+        pytest.fail(
+            "the planners fixture is not a generator (no `yield`) -- "
+            f"`__wrapped__()` returned a {result['type']!r} instead, so "
+            "teardown never runs and sys.path/sys.modules leak by "
+            "construction (tan-cli#948's original defect)")
+
+    # The fixture must have actually done its job while live, or the rest of
+    # this test would be vacuously true of a no-op fixture.
+    assert result["live_path_entry"], (
+        "fixture never put <sdk>/scripts on sys.path while its consumers held it")
+    assert result["live_has_module"], (
+        "fixture never imported alp_orchestrate while its consumers held it")
+    assert result["finished_cleanly"], (
+        "the fixture generator raised instead of a clean StopIteration on teardown")
+
+    assert result["path_restored"], (
+        f"sys.path was not restored -- leaked entries: {result['leaked_path_entries']}")
+    assert not result["leaked_modules"], (
+        f"sys.modules leaked after teardown: {result['leaked_modules']}")
+
+
+#: Modes served by `buildplan._shared_artefact` (tan-cli#1216).
+_SHARED_ARTEFACT_MODES = (
+    "ipc-contract-h", "dts-reservations", "dts-partitions", "tfm-sysbuild-conf")
 
 
 def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
@@ -136,6 +361,12 @@ def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
     except Exception as err:  # noqa: BLE001 -- comparing failures on purpose
         return (f"load:{type(err).__name__}", str(err))
     try:
+        if pkg.__name__.startswith("tan.") and mode in _SHARED_ARTEFACT_MODES:
+            # tan's own front door for these modes (tan-cli#1216): measure the
+            # dispatch `tan generate` runs, not the emitters beside it.
+            from tan.planner.cli import emit_artefact  # noqa: PLC0415
+
+            return ("ok", emit_artefact(project, mode, board_yaml=board))
         if mode == "system-manifest":
             return ("ok", pkg.emit_system_manifest(project))
         if mode == "ipc-contract-h":
@@ -148,9 +379,11 @@ def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
             return ("ok", pkg.emit_storage_mounts_c(project))
         if mode == "tfm-sysbuild-conf":
             return ("ok", pkg.emit_tfm_sysbuild_conf(project))
-        if mode == "build-plan":
-            return ("ok", pkg.emit_build_plan(project, board_yaml=board,
-                                              build_root=Path("build")))
+        if mode == "linux-ownership-dts":
+            # Not re-exported from either package's `__init__` (upstream's
+            # own `alp_project.py` imports the submodule directly).
+            module = importlib.import_module(f"{pkg.__name__}.linux_ownership")
+            return ("ok", module.emit_linux_ownership_dts(project))
     except Exception as err:  # noqa: BLE001
         return (f"emit:{type(err).__name__}", str(err))
     raise AssertionError(f"unhandled mode {mode!r}")
@@ -209,7 +442,7 @@ def _first_diff(a: str, b: str) -> str:
 @pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
 def test_every_mode_is_byte_identical(planners, board):
     upstream, relocated = planners
-    for mode in MODES:
+    for mode in RENDER_MODES:
         want_kind, want = _render(upstream, board, mode)
         got_kind, got = _render(relocated, board, mode)
         assert got_kind == want_kind, (
@@ -226,7 +459,7 @@ def test_every_mode_is_byte_identical(planners, board):
 #: Renderers that MOVED but whose `--emit` front door stayed in alp-sdk
 #: (`alp_project.py` owns 15 of the 20 registry modes). The emit-snapshot
 #: goldens reach them as `proj-*.zephyr-conf` / `proj-*.os-topology` over three
-#: boards; comparing the functions directly covers all 99.
+#: boards; comparing the functions directly covers every board.
 _SLICE_RENDERERS = ("_slice_alp_conf", "_slice_local_conf", "_slice_cmake_args")
 
 
@@ -239,6 +472,12 @@ def test_the_relocated_renderers_behind_alp_project_agree(planners, board):
         pytest.skip("board does not load; parity of the failure is asserted elsewhere")
     got_project = relocated.load_board_yaml(board)
 
+    # tan-cli#938: relocated `_allowed_os_for_core` diverges from upstream on
+    # an unresolved core type ([] vs upstream's ["baremetal", "off"]) --
+    # deliberate, see `tan/planner/topology.py::_allowed_os_for_core`'s
+    # docstring. THIS is the assertion that reds if a shipped board ever
+    # resolves a core with `core_type == ""` -- do not "fix" it by resyncing
+    # toward upstream's value.
     assert (relocated.emit_os_topology(got_project)
             == upstream.emit_os_topology(want_project))
     assert (relocated.core_os_topology(got_project)
@@ -253,32 +492,6 @@ def test_the_relocated_renderers_behind_alp_project_agree(planners, board):
             assert (getattr(relocated, name)(got_project, got_slice)
                     == getattr(upstream, name)(want_project, want_slice)), (
                 f"{board} {core_id} {name} differs")
-
-
-def test_the_subprocess_entry_points_agree_too():
-    """One end-to-end pair through argv, not just the library surface.
-
-    In-process comparison shares interpreter state; this is the shape a customer
-    actually runs. One board is enough -- this checks the entry point, and
-    `test_every_mode_is_byte_identical` checks the emit.
-    """
-    assert SDK is not None
-    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
-    if not board.is_file():
-        pytest.skip(f"{board} not in this checkout")
-    common = ["--input", str(board), "--emit", "build-plan"]
-
-    up = subprocess.run(
-        [sys.executable, "-m", "alp_orchestrate", *common],
-        capture_output=True, text=True, encoding="utf-8", check=True,
-        env={**os.environ, "PYTHONPATH": str(SDK / "scripts")},
-    )
-    mine = subprocess.run(
-        [sys.executable, "-m", "tan.planner_cli", "--sdk-root", str(SDK), *common],
-        capture_output=True, text=True, encoding="utf-8", check=True,
-        cwd=str(Path(__file__).resolve().parents[2]),
-    )
-    assert mine.stdout == up.stdout, _first_diff(up.stdout, mine.stdout)
 
 
 #: Every mode alp-sdk's `scripts/check_emit_snapshots.py` reaches through
@@ -714,7 +927,15 @@ def _tan_generate_tree(args: list[str], destination: Path,
     return {p.name: p.read_bytes() for p in destination.iterdir()}
 
 
-def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_path):
+@pytest.mark.parametrize(
+    "board_rel,core",
+    [
+        ("multicore/rpmsg-aen", "m55_he"),
+        ("multicore/rpmsg-v2n", "m33_sm"),
+    ],
+    ids=["aen", "v2n"],
+)
+def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_path, board_rel, core):
     """`--emit zephyr-board` end to end, both engines, through the real CLI.
 
     The one target whose `--output` is a DIRECTORY, so it is the only one
@@ -723,14 +944,23 @@ def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_pat
     beside the board directory instead of inside it. `west build --board-root
     build/boards` is what consumes the result, so a stray level of nesting makes
     the board undiscoverable rather than wrong.
+
+    Parametrised over BOTH families the hand-ported `eff266b6` re-sync taught
+    `zephyr_board.py` to emit (tan-cli#1156): the pre-existing AEN branch
+    (`m55_he`) and the new V2N/V2M pinctrl.dtsi/`_defconfig` branch (`m33_sm`,
+    `_v2n_pinctrl_dtsi`/`_v2n_defconfig`). Before this, the V2N/V2M half --
+    ~230 new emitted lines -- had zero coverage in this automated parity
+    layer; a silent regression there is a wrong pin in a generated `.dtsi`.
     """
     upstream, _ = planners
     assert SDK is not None
-    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    board = SDK / "examples" / board_rel / "board.yaml"
     if not board.is_file():
         pytest.skip(f"{board} not in this checkout")
-    core = _first_core_with_os(upstream.load_board_yaml(board), "zephyr")
-    assert core is not None
+    resolved_core = _first_core_with_os(upstream.load_board_yaml(board), "zephyr")
+    assert resolved_core == core, (
+        f"{board}: expected zephyr core {core!r}, board.yaml resolves to "
+        f"{resolved_core!r} -- update the parametrize table above")
 
     args = ["--target", "zephyr-board", "--core", core, "--board-yaml", str(board)]
     spawned = _tan_generate_tree(args, tmp_path / "sub", "subprocess")
@@ -769,7 +999,7 @@ def test_an_emit_reaching_disk_through_tan_stays_lf(planners, tmp_path):
 #
 # The `tan generate --output` tests above spawn a real process per case, so they
 # can only afford a couple of modes. This block is the breadth layer: it drives
-# BOTH sides in-process, so all 99 boards x every relocated mode x both `--core`
+# BOTH sides in-process, so every board x every relocated mode x both `--core`
 # forms costs seconds rather than an hour.
 #
 # The oracle is `scripts/alp_project.py`'s OWN dispatch functions, called
@@ -817,12 +1047,91 @@ GENERATE_MODES = (
 )
 
 
+def _registry_modes() -> set[str]:
+    """The full `--emit` mode set alp-sdk's `metadata/emit-registry-v1.json`
+    declares, read off the bound checkout -- never hand-copied, so a mode the
+    SDK adds or removes changes this set the next run, not the next person to
+    remember to update a literal here."""
+    assert SDK is not None
+    registry = json.loads(
+        (SDK / "metadata" / "emit-registry-v1.json").read_text(encoding="utf-8"))
+    return {entry["mode"] for entry in registry["modes"]}
+
+
+#: The registry modes this render-parity axis does NOT cover, each with the
+#: reason it is legitimately absent -- ADR-0026 §D's three named exemptions,
+#: no more. Anything else absent from `rendered` below is unmeasured, and
+#: `test_the_render_axis_mode_set_is_fully_accounted_for` treats that as a
+#: failure rather than a silent gap.
+_NAMED_EXEMPTIONS = {
+    "build-plan": "the planner axis, now its own file "
+                  "(test_planner_axis_build_plan_parity.py); ADR-0026 §G "
+                  "step 6 deletes that file once `tan build` plans with no "
+                  "alp-sdk counterpart at all",
+    "kconfig": "non-hermetic -- shells `west build`; covered by "
+               "tests/core/test_kconfig_symbols.py and alp-sdk's "
+               "check_emit_kconfig_contract.py in the pr-twister CI job",
+    "scaffold": "vendored into `tan init` (I-32); its own byte-parity gate "
+                "is tests/parity/scaffold_byte_parity.py",
+}
+
+
+def test_the_render_axis_mode_set_is_fully_accounted_for():
+    """ADR-0026 §D's mode-set pin, mechanical rather than hand-maintained.
+
+    Every mode `metadata/emit-registry-v1.json` declares is in exactly one of
+    three states: RENDERED (covered by `RENDER_MODES`, `GENERATE_MODES` or
+    `planner_emit.TREE_MODES` -- the three sets this module's own byte-parity
+    tests already iterate), a NAMED EXEMPTION (`_NAMED_EXEMPTIONS`, each with
+    its reason), or -- if neither -- an unmeasured gap, which is a failure
+    naming the mode. Before this test existed, a mode falling out of
+    `GENERATE_MODES` (say) stayed invisible: every per-board assertion still
+    passed, and `test_the_breadth_layer_still_covers_every_board`'s `>= 2900`
+    floor has enough slack to absorb one mode's ~100 artefacts and stay green.
+
+    This is also what makes ADR-0026 §G step 6 ("delete the planner axis,
+    keep the render gate") executable: deleting a tan renderer drops its mode
+    out of `rendered` by construction, so it must simultaneously gain a
+    `_NAMED_EXEMPTIONS` entry (a reviewed, deliberate decision) or this test
+    reds naming it. §F's envelope-conformance gate does not exist yet, so no
+    mode is "consumed" today -- when one is, its check moves out of this
+    module into §F's gate and out of `rendered` here in the same change; if
+    that ever happens out of order, this test reds for that mode, which is the
+    correct pressure.
+    """
+    registry = _registry_modes()
+    rendered = (
+        set(RENDER_MODES)
+        | {mode for mode, _ in GENERATE_MODES}
+        | set(planner_emit.TREE_MODES)
+    )
+
+    phantom = rendered - registry
+    assert not phantom, (
+        "a set above names a mode the SDK's emit registry does not declare: "
+        f"{sorted(phantom)}")
+
+    exempted = registry - rendered
+    assert exempted == set(_NAMED_EXEMPTIONS), (
+        "registry mode(s) with no renderer and no named exemption -- "
+        f"unmeasured: {sorted(exempted - set(_NAMED_EXEMPTIONS))}; "
+        "exemption(s) no longer needed (now rendered somewhere above): "
+        f"{sorted(set(_NAMED_EXEMPTIONS) - exempted)}")
+
+
 #: `{board dir name: artefacts compared byte for byte}`, filled in by the breadth
 #: test below. A per-board assertion cannot notice the LAYER shrinking -- drop a
 #: mode from `GENERATE_MODES` and every remaining board still passes -- so the
 #: total is checked once, at the end, by
 #: `test_the_breadth_layer_still_covers_every_board`.
 _ARTEFACTS_COMPARED: dict[str, int] = {}
+
+#: The breadth floors, read by both the in-test assertion and
+#: `tests/parity/_xdist_breadth_floor.py`'s merged xdist check (tan-cli#1256),
+#: so the two can never disagree. See the breadth test for how they were
+#: measured.
+_BREADTH_MIN_BOARDS = 90
+_BREADTH_MIN_ARTEFACTS = 2900
 
 
 def _first_rejected_core(project, allowed: tuple[str, ...]) -> str | None:
@@ -942,6 +1251,320 @@ def test_the_in_process_engine_matches_alp_project_for_every_mode(
         _ARTEFACTS_COMPARED.get(board.parent.name, 0) + compared)
 
 
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_zephyr_conf_matches_the_build_plans_own_config_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): the ONE renderer-re-implementation
+    retirement this slice makes. `configArtefacts[].contents` is documented
+    (`metadata/schemas/build-plan-v1.schema.json`) as "byte-identical to what
+    a consumer's own materialise step writes to buildDir" -- this test is
+    that promise, checked, rather than merely written down.
+
+    `tan generate --target zephyr-conf --core <id>` now renders through the
+    SAME `buildplan._slice_config_artefact` call `emit_build_plan` uses to
+    fill a slice's `configArtefacts[].contents` (see `planner_emit.
+    _render_per_core`), so a mutation to either call site -- or a revert back
+    to the old two-dispatch-tables shape -- reds here even though
+    `test_the_in_process_engine_matches_alp_project_for_every_mode` alone
+    would not notice: that test only proves tan agrees with alp-sdk's
+    independent copy, not that tan's own two internal consumers of zephyr-conf
+    bytes are pinned to one call site rather than two that happen to agree.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan_text = relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build"))
+    plan = json.loads(plan_text)
+    artefacts_by_core = {sl["coreId"]: sl["configArtefacts"] for sl in plan["slices"]}
+
+    from tan import planner_emit
+
+    compared = 0
+    for core_id in sorted(project.cores):
+        alp_conf = next(
+            (a for a in artefacts_by_core.get(core_id, [])
+             if a["path"].rsplit("/", 1)[-1] == "alp.conf"),
+            None,
+        )
+        if alp_conf is None:
+            continue  # not a zephyr slice; --emit zephyr-conf --core <id> would refuse it too
+        got = planner_emit.render(
+            "zephyr-conf", sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == alp_conf["contents"], (
+            f"{board} --core {core_id}: `tan generate --target zephyr-conf` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(alp_conf["contents"], got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no zephyr slice to compare")
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_yocto_conf_matches_the_build_plans_own_config_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): `yocto-conf`'s same-call-site agreement,
+    the sibling of the zephyr-conf test above. `tan generate --target
+    yocto-conf --core <id>` renders through the SAME
+    `buildplan._slice_config_artefact` call `emit_build_plan` uses for a yocto
+    slice's `configArtefacts[].contents` (`local.conf`), so a revert to a
+    second `getattr` dispatch -- or a divergence between the two -- reds here
+    even though the alp-sdk-copy parity test alone would not notice.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan_text = relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build"))
+    plan = json.loads(plan_text)
+    artefacts_by_core = {sl["coreId"]: sl["configArtefacts"] for sl in plan["slices"]}
+
+    from tan import planner_emit
+
+    compared = 0
+    for core_id in sorted(project.cores):
+        local_conf = next(
+            (a for a in artefacts_by_core.get(core_id, [])
+             if a["path"].rsplit("/", 1)[-1] == "local.conf"),
+            None,
+        )
+        if local_conf is None:
+            continue  # not a yocto slice; --emit zephyr-conf --core <id> would refuse it too
+        got = planner_emit.render(
+            "yocto-conf", sdk_root=SDK, board_yaml=board, core=core_id)
+        # Unlike zephyr-conf's verbatim per-core form, `--emit yocto-conf` keeps
+        # alp_project's `# --- core: <id> (<os>) ---` section marker (pinned by
+        # the alp-sdk parity test); everything AFTER it is the plan's bytes.
+        marker = f"# --- core: {core_id} (yocto) ---\n"
+        assert got.startswith(marker), f"{board} --core {core_id}: section marker lost"
+        got = got[len(marker):]
+        assert got == local_conf["contents"], (
+            f"{board} --core {core_id}: `tan generate --target yocto-conf` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(local_conf["contents"], got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no yocto slice to compare")
+
+
+def _plan_artefacts_by_core(relocated, board: Path, project) -> dict[str, dict[str, str]]:
+    """`{coreId: {file name: contents}}` from the plan `emit_build_plan` emits."""
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    return {
+        sl["coreId"]: {a["path"].rsplit("/", 1)[-1]: a["contents"]
+                       for a in sl["configArtefacts"]}
+        for sl in plan["slices"]
+    }
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_dts_overlay_matches_the_build_plans_own_config_artefact(planners, board):
+    """tan-cli#1216 (ADR-0026 §D): `tan generate --target dts-overlay --core
+    <id>` and the plan's `alp.overlay` `configArtefacts[]` entry are one
+    function (`buildplan._slice_dts_overlay`), so the bytes cannot diverge.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get("alp.overlay")
+        if want is None:
+            continue  # yocto/off slice, or a board with no header to render from
+        got = planner_emit.render(
+            "dts-overlay", sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target dts-overlay` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries an alp.overlay to compare")
+
+
+def test_a_missing_board_header_downgrades_the_overlay_to_a_warning(
+    planners, monkeypatch, tmp_path
+):
+    """tan-cli#1216: the ONE overlay failure the plan downgrades -- mirrors
+    alp-sdk#2771's test. `alp.overlay` is absent, a `dts-overlay-unavailable`
+    warning names each carrier core, `cmake-args.txt` still rides, and the
+    plan is still a valid build-plan-v1."""
+    import jsonschema
+
+    _, relocated = planners
+    import tan.planner.project_emit.dts as dts
+
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    monkeypatch.setattr(dts, "_board_header_path",
+                        lambda name, root: tmp_path / "no-such-header.h")
+    monkeypatch.setattr(dts, "REPO", tmp_path)
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    schema = json.loads((SDK / "metadata" / "schemas"
+                         / "build-plan-v1.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(plan)
+
+    carriers = {sl["coreId"] for sl in plan["slices"]
+                if sl["backend"] in ("zephyr", "baremetal")}
+    warned = {w["coreId"] for w in plan["warnings"]
+              if w["code"] == "dts-overlay-unavailable"}
+    assert carriers and warned == carriers
+    for sl in plan["slices"]:
+        names = {a["path"].rsplit("/", 1)[-1] for a in sl["configArtefacts"]}
+        assert "alp.overlay" not in names
+        if sl["coreId"] in carriers:
+            assert "cmake-args.txt" in names
+
+
+def test_any_other_overlay_failure_still_fails_the_plan(planners, monkeypatch):
+    _, relocated = planners
+    import tan.planner.buildplan as bp
+    from tan.planner.models import OrchestratorError
+
+    def broken(project, core_id):
+        raise OrchestratorError("M33 ownership defect")
+
+    monkeypatch.setattr(bp, "project_m33_overlay", broken)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(OrchestratorError, match="M33 ownership defect"):
+        relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build"))
+
+
+def test_an_unrecognised_sku_downgrades_hw_info_to_a_warning(planners, monkeypatch):
+    """tan-cli#1216 / alp-sdk#2778: a SKU outside the production families has
+    no family for `ALP_HW_BUILD_SOM_FAMILY`, so the plan warns
+    (`hw-info-unavailable`) and omits `alp_hw_info_build.h`; the west fragment
+    is unaffected and the plan is still a valid build-plan-v1."""
+    import jsonschema
+
+    _, relocated = planners
+    import tan.planner.som_metadata as som_metadata
+
+    def no_family(sku):
+        raise ValueError(f"unrecognised SoM SKU pattern: {sku}")
+
+    monkeypatch.setattr(som_metadata, "_sku_family", no_family)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    schema = json.loads((SDK / "metadata" / "schemas"
+                         / "build-plan-v1.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(plan)
+
+    carriers = {sl["coreId"] for sl in plan["slices"]
+                if sl["backend"] in ("zephyr", "baremetal")}
+    warned = {w["coreId"] for w in plan["warnings"]
+              if w["code"] == "hw-info-unavailable"}
+    assert carriers and warned == carriers
+    for sl in plan["slices"]:
+        names = {a["path"].rsplit("/", 1)[-1] for a in sl["configArtefacts"]}
+        assert "alp_hw_info_build.h" not in names
+        if sl["coreId"] in carriers:
+            assert "alp-west-libs.yml" in names
+
+
+def test_a_non_sku_value_error_in_hw_info_still_fails_the_plan(planners, monkeypatch):
+    """Only the SKU->family lookup is downgraded. A ValueError from anywhere
+    else in the render (a damaged hw-revisions table, say) must fail the plan,
+    not silently drop the artefact. Patched at the emitter, not at
+    `load_family_table`: alp.conf reads the same table and would fail the plan
+    first, hiding whether hw-info downgrades it."""
+    _, relocated = planners
+    import tan.planner.project_emit.hw_info as hw_info
+
+    def damaged(*args, **kwargs):
+        raise ValueError("hw-revisions.yaml is damaged")
+
+    monkeypatch.setattr(hw_info, "_emit_hw_info_h", damaged)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(ValueError, match="hw-revisions.yaml is damaged"):
+        relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build"))
+
+
+@pytest.mark.parametrize("mode,artefact", [
+    ("hw-info-h", "alp_hw_info_build.h"),
+    ("west-libraries", "alp-west-libs.yml"),
+])
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_hw_info_and_west_libs_match_the_build_plans_own_config_artefact(
+        planners, board, mode, artefact):
+    """tan-cli#1216 / alp-sdk#2778 (ADR-0026 §D): `tan generate --target
+    hw-info-h|west-libraries --core <id>` and the plan's matching
+    `configArtefacts[]` entry are one function, so the bytes cannot diverge."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get(artefact)
+        if want is None:
+            continue  # yocto/off slice
+        got = planner_emit.render(
+            mode, sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target {mode}` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries an {artefact} to compare")
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_cmake_args_matches_the_build_plans_own_config_artefact(planners, board):
+    """tan-cli#1216 (ADR-0026 §D): `tan generate --target cmake-args --core
+    <id>` renders through the SAME helper that fills the plan's
+    `cmake-args.txt` entry; only the `# --- core ---` marker line differs.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get("cmake-args.txt")
+        if want is None:
+            continue
+        got = planner_emit.render(
+            "cmake-args", sdk_root=SDK, board_yaml=board, core=core_id)
+        marker, _, got = got.partition("\n")
+        assert marker.startswith(f"# --- core: {core_id} ("), (
+            f"{board} --core {core_id}: section marker lost")
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target cmake-args` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries a cmake-args.txt to compare")
+
+
 def _oracle_board_tree(board: Path, core: str, destination: Path) -> tuple[int, dict]:
     """`alp_project.py --emit zephyr-board --output <dir>`, in-process.
 
@@ -1035,7 +1658,7 @@ def test_the_in_process_engine_matches_alp_project_for_every_board_tree(
             _ARTEFACTS_COMPARED.get(board.parent.name, 0) + compared)
 
 
-def test_the_breadth_layer_still_covers_every_board():
+def test_the_breadth_layer_still_covers_every_board(pytestconfig):
     """The layer's own size, so it cannot quietly stop measuring.
 
     Every board that LOADS must have contributed at least the two `--core`-less
@@ -1046,20 +1669,47 @@ def test_the_breadth_layer_still_covers_every_board():
     Two tests feed this counter -- the stream modes and the board trees -- so the
     floor covers both. Selecting only one of them with `-k` trips the floor; that
     is what a size check is for, and `-k` that excludes this test skips it.
+
+    Under `pytest-xdist` each worker is its own process with its own
+    `_ARTEFACTS_COMPARED`, so whichever worker collects this test item only
+    ever sees the boards *that worker* happened to run -- a partial share
+    with nothing to do with the SDK's real breadth (tan-cli#1256).
+    `tests.parity._xdist_breadth_floor` (registered from `python/conftest.py`
+    so the CONTROLLER always loads it, unlike a `tests/parity/conftest.py`
+    would -- see that module's docstring) merges every worker's share and
+    enforces this exact floor against the total, from the controller's own
+    `pytest_sessionfinish`, once every worker is down.
+
+    This assertion trusts that merge enough to skip ONLY when a HANDSHAKE
+    proves it is actually active for this session -- `pytestconfig.
+    workerinput[HANDSHAKE_KEY]`, stamped by that module's
+    `pytest_configure_node` before this worker ever started. Any session
+    where that stamp is missing (the module not registered, somehow) falls
+    straight through to asserting on this worker's own possibly-partial
+    share -- loud and potentially wrong about WHY, but never silently
+    skipped with nothing enforcing the floor anywhere.
     """
+    workerinput = getattr(pytestconfig, "workerinput", None)
+    if workerinput is not None and workerinput.get(_xdist_breadth_floor.HANDSHAKE_KEY):
+        pytest.skip(
+            "pytest-xdist worker: tests.parity._xdist_breadth_floor merges "
+            "every worker's share and enforces this floor itself, against "
+            "the total -- this worker only ever sees its own partial share, "
+            "so it does not judge it (tan-cli#1256)")
     if not _ARTEFACTS_COMPARED:
         pytest.skip("the breadth test did not run in this session (-k selection)")
     thin = {name: n for name, n in _ARTEFACTS_COMPARED.items() if n < 2}
     assert not thin, f"boards that compared almost nothing: {thin}"
     total = sum(_ARTEFACTS_COMPARED.values())
-    assert len(_ARTEFACTS_COMPARED) >= 90, (
+    assert len(_ARTEFACTS_COMPARED) >= _BREADTH_MIN_BOARDS, (
         f"only {len(_ARTEFACTS_COMPARED)} boards were measured")
     # 100 boards / 3245 artefacts as measured with `composed-route-table`
     # counted in `GENERATE_MODES` (3109 before it was added). The floor keeps
     # room for boards coming and going while still tripping if a whole mode
     # leaves `GENERATE_MODES` -- the cheapest mode there is worth ~100
     # artefacts, and the board-tree layer ~450.
-    assert total >= 2900, f"only {total} artefacts were compared byte for byte"
+    assert total >= _BREADTH_MIN_ARTEFACTS, (
+        f"only {total} artefacts were compared byte for byte")
 
 
 # ==========================================================================
@@ -1695,187 +2345,202 @@ def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
         f"to become a `tan` module or the SDK's Python cannot be deleted: {nonzero}")
 
 
-# ==========================================================================
-# `tan build`'s own reach -- loads AND spawns
-#
-# `build` planned in-process already, but kept a `python -m alp_orchestrate`
-# fallback that fired on an ImportError and reported NOTHING when it did. That is
-# retired, so `build` has no path to alp-sdk's Python at all -- and this is where
-# that is measured rather than asserted.
-#
-# SPAWNS are measured too, with `sys.addaudithook`. `sys.modules` cannot see a
-# subprocess, and a subprocess is precisely how the last two edges survived
-# every previous "the closure is zero" measurement.
-#
-# Scope, stated honestly: this covers acquiring, substituting and materialising a
-# plan -- everything `tan` itself does. DISPATCH runs the customer's toolchain,
-# and `west build` spawns whatever Zephyr's own `EXTRA_KCONFIG_TARGET` hook is
-# pointed at -- but that is no longer an alp-sdk file: `--emit kconfig` renders
-# its own dumper (`tan.planner.kconfig_symbols._DUMPER_SOURCE`) into the run's
-# own scratch tree and points the hook at that instead (see
-# tests/core/test_kconfig_symbols.py).
-# ==========================================================================
-
-_BUILD_REACH_PROBE = '''
-import json, os, sys, tempfile
-from pathlib import Path
-
-SDK = Path(os.environ["ALP_SDK_ROOT"]).resolve()
-# Forward-slashed + lowercased, and so is every recorded argv: the audit hook
-# sees whatever spelling the caller used, and comparing a backslash path against
-# a forward-slash one is how a filter silently matches nothing.
-NEEDLE = str(SDK / "scripts").replace("\\\\", "/").lower()
-BOARD = Path(sys.argv[1])
-
-spawns = []
-
-
-def _flatten(event_args):
-    """One argv as a flat list of strings.
-
-    `subprocess.Popen`'s audit event carries `(executable, args, cwd, env)`, and
-    `args` is a LIST on some platforms and a single command STRING on others.
-    Iterating a string yields characters, which turns the `<sdk>/scripts` filter
-    below into a test that can never fail -- so normalise first.
-    """
-    exe, argv = event_args[0], event_args[1]
-    if isinstance(argv, (list, tuple)):
-        parts = [str(a) for a in argv]
-    elif argv is None:
-        parts = []
-    else:
-        parts = [str(argv)]
-    return [str(exe), *parts]
-
-
-def _hook(event, args):
-    if event == "subprocess.Popen":
-        spawns.append(_flatten(args))
-
-
-sys.addaudithook(_hook)
-
-from tan.commands.build_cmd import _acquire_plan
-from tan.commands.build.materialise import materialise_plan
-from tan.commands.build.token_substitution import apply_plan_token_substitution
-
-# The board.yaml is COPIED into a scratch project: a tokened plan refuses when
-# ${PROJECT_ROOT} (the board.yaml's directory) and the exec base diverge, and
-# materialising into the SDK's own examples/ tree would be a side effect on a
-# read-only checkout.
-project_root = Path(tempfile.mkdtemp()) / "project"
-project_root.mkdir()
-board = project_root / "board.yaml"
-board.write_text(BOARD.read_text(encoding="utf-8"), encoding="utf-8")
-
-# `_acquire_plan` returns `(source text, parsed plan)` -- the text comes back so
-# `--plan` can echo it verbatim rather than re-serialising a `BuildPlan`, which
-# would silently drop the forward-compat keys a newer SDK adds. This probe wants
-# only the parsed plan.
-_plan_text, plan = _acquire_plan(None, str(SDK), str(board))
-plan, _demotions = apply_plan_token_substitution(
-    plan, board_yaml_path=str(board), exec_base=str(project_root),
-    sdk_root=str(SDK), python="python3", toolchain_root=None)
-materialise_plan(plan, project_root)
-
-loaded = []
-for name, mod in list(sys.modules.items()):
-    f = getattr(mod, "__file__", None)
-    if not f:
-        continue
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_tfm_sysbuild_conf_matches_the_build_plans_own_shared_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): `--emit tfm-sysbuild-conf` renders through
+    `buildplan._shared_artefacts` -- the call that fills the plan's
+    `sharedArtefacts[].contents` -- so the two cannot drift apart. A board
+    with no TF-M conf has no plan entry and the standalone emit is empty."""
+    _, relocated = planners
     try:
-        Path(f).resolve().relative_to(SDK / "scripts")
-    except ValueError:
-        continue
-    loaded.append(name)
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith("/sysbuild/tfm/tfm.conf")]
+    from tan.planner.cli import emit_artefact
+
+    got = emit_artefact(project, "tfm-sysbuild-conf", board_yaml=board)
+    assert got == (shared[0] if shared else ""), (
+        f"{board}: --emit tfm-sysbuild-conf diverges from the build-plan's "
+        "sharedArtefacts tfm.conf")
 
 
-def _touches_sdk_scripts(argv):
-    return NEEDLE in " ".join(argv).replace("\\\\", "/").lower()
+@pytest.mark.parametrize("mode,suffix", [
+    ("ipc-contract-h", "/generated/alp/system_ipc.h"),
+    ("dts-reservations", "/generated/dts-reservations.dtsi"),
+    ("dts-partitions", "/generated/dts-partitions.dtsi"),
+])
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_shared_headers_match_the_build_plans_own_shared_artefact(
+    planners, board, mode, suffix
+):
+    """tan-cli#1216 (ADR-0026 §D): `ipc-contract-h`, `dts-reservations` and
+    `dts-partitions` render through `buildplan._shared_artefact`, the same
+    `_shared_artefacts` call that fills the plan's `sharedArtefacts[].contents`.
+    Silicon-relevant (IPC contract, carve-outs, flash partitions): any byte
+    difference is a failure."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith(suffix)]
+    assert len(shared) == 1, f"{board}: plan carries {len(shared)} {suffix}"
+    from tan.planner.cli import emit_artefact
+
+    got = emit_artefact(project, mode, board_yaml=board)
+    assert got == shared[0], (
+        f"{board}: --emit {mode} diverges from the build-plan's sharedArtefacts "
+        + _first_diff(shared[0], got))
 
 
-print(json.dumps({
-    "loaded": sorted(loaded),
-    "spawns": [s for s in spawns if _touches_sdk_scripts(s)],
-    "allSpawns": spawns,
-    "slices": len(plan.slices),
-    # Proof the filter can match at all. An empty `spawns` means nothing if the
-    # predicate is broken -- and it silently was, when a string argv got iterated
-    # character by character. The test asserts BOTH of these.
-    "filterMatchesAPositive": _touches_sdk_scripts(
-        ["python", str(SDK / "scripts" / "alp_project.py"), "--emit", "zephyr-conf"]),
-    "filterRejectsANegative": _touches_sdk_scripts(["git", "rev-parse", "HEAD"]),
-}))
-'''
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_storage_mounts_c_matches_the_build_plans_own_shared_artefact(
+    planners, board
+):
+    """tan-cli#1216 (alp-sdk#2820): when the plan carries
+    `generated/storage_mount_table.c` (a mountable `storage:` partition),
+    `--emit storage-mounts-c` returns those exact bytes, which are also what
+    `emit_storage_mounts_c` prints.  When it does not, the standalone emit
+    keeps printing the empty table it always did."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith("/generated/storage_mount_table.c")]
+    from tan.planner.cli import emit_artefact
+    from tan.planner.headers import emit_storage_mounts_c, has_storage_mounts
+
+    got = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+    assert got == emit_storage_mounts_c(project)
+    if has_storage_mounts(project):
+        assert len(shared) == 1, f"{board}: plan carries {len(shared)} tables"
+        assert got == shared[0], (
+            f"{board}: --emit storage-mounts-c diverges from the build-plan's "
+            "sharedArtefacts " + _first_diff(shared[0], got))
+    else:
+        assert shared == [], f"{board}: plan carries a table with no mounts"
 
 
-def test_tan_build_reaches_no_sdk_python(tmp_path):
-    """Acquiring, substituting and materialising a plan touches no `<sdk>/scripts`.
+def test_storage_mounts_c_with_no_mounts_is_the_empty_table(planners):
+    """No mountable partition: the plan omits the table and the standalone
+    emit is the same empty table as before the plan carried one."""
+    from tan.planner.cli import emit_artefact
+    from tan.planner.headers import emit_storage_mounts_c, has_storage_mounts
 
-    Both halves matter and neither implies the other: nothing under
-    `<sdk>/scripts` is IMPORTED (the fallback is gone, so there is no import to
-    fail over), and nothing under `<sdk>/scripts` is SPAWNED (which is what the
-    retired fallback did, and what `sys.modules` could never have shown).
-
-    `slices` is reported so a plan that resolved to nothing cannot pass this as a
-    vacuous zero.
-    """
-    assert SDK is not None
-    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
-    if not board.is_file():
-        pytest.skip(f"{board} not in this checkout")
-    probe = tmp_path / "build_reach_probe.py"
-    probe.write_text(_BUILD_REACH_PROBE, encoding="utf-8")
-
-    proc = subprocess.run(
-        [sys.executable, str(probe), str(board)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(PYTHON_ROOT),
-        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
-             "ALP_SDK_ROOT": str(SDK)},
-        check=False,
-    )
-    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
-    result = json.loads(proc.stdout.strip())
-
-    assert result["slices"] > 0, "an empty plan proves nothing"
-    # The predicate first: an empty `spawns` list is worthless if the filter
-    # cannot match, which is exactly what happened when a string argv was
-    # iterated character by character.
-    assert result["filterMatchesAPositive"] is True, (
-        "the <sdk>/scripts spawn filter cannot match even a literal "
-        "`python <sdk>/scripts/alp_project.py` -- the measurement below is vacuous")
-    assert result["filterRejectsANegative"] is False, (
-        "the <sdk>/scripts spawn filter matches everything -- it is not measuring "
-        "what it claims")
-    assert result["loaded"] == [], (
-        "`tan build` still IMPORTS alp-sdk Python to get its plan: "
-        f"{result['loaded']}")
-    assert result["spawns"] == [], (
-        "`tan build` still SPAWNS something under <sdk>/scripts to get its plan: "
-        f"{result['spawns']}")
-    # Everything it DOES spawn, for the record: `git -C <sdk> rev-parse --short
-    # HEAD`, which stamps the plan's `sdkCommit`. `git` is not alp-sdk's Python.
-    assert all("git" in argv[0].lower() or "git" in " ".join(argv).lower()
-               for argv in result["allSpawns"]), (
-        f"an unexpected spawn on the plan path: {result['allSpawns']}")
+    _, relocated = planners
+    for board in _boards():
+        try:
+            project = relocated.load_board_yaml(board)
+        except Exception:  # noqa: BLE001
+            continue
+        if has_storage_mounts(project):
+            continue
+        plan = json.loads(relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build")))
+        assert not any(a["path"].endswith("storage_mount_table.c")
+                       for a in plan["sharedArtefacts"])
+        out = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+        assert out == emit_storage_mounts_c(project) and out.strip()
+        return
+    pytest.skip("every example board mounts storage")
 
 
-def test_the_build_plan_fallback_is_gone_not_merely_unused():
-    """The retired fallback must not be reachable code sitting one branch away.
+#: Two littlefs partitions with `mount:` on E1M-AEN301's ospi0 NOR: no example
+#: board has a `status: ok` mountable partition, so the carried branch of the
+#: agreement test needs a synthetic one.
+_MOUNTED_STORAGE = """\
+name: test-aen-storage
+som:
+  sku: E1M-AEN301
+  hw_rev: r1
 
-    Asserted on the module rather than by behaviour, because a fallback that
-    exists and is never taken is exactly what this port has already been burned
-    by: it read as absent for as long as nothing happened to take it.
-    """
-    from tan.commands import build_cmd
+cores:
+  m55_hp:
+    os: zephyr
+    app: ./m55_hp
 
-    assert not hasattr(build_cmd, "_emit_plan_subprocess"), (
-        "`_emit_plan_subprocess` is back -- planning must have exactly one path")
-    source = Path(build_cmd.__file__).read_text(encoding="utf-8")
-    # `subprocess` is not imported at all any more: `build` spawns slice
-    # commands through `tan.commands.build.execute`, never from this module.
-    assert "\nimport subprocess" not in source, (
-        "build_cmd imports subprocess again -- planning spawns nothing")
-    assert "alp_orchestrate\"" not in source and "alp_orchestrate'" not in source, (
-        "build_cmd names `alp_orchestrate` in code again")
+storage:
+  - { name: settings,        size_kib: 64,  fs: littlefs, flash_device: ospi0, mount: /lfs/settings }
+  - { name: app_data,        size_kib: 128, fs: littlefs, flash_device: ospi0, mount: /lfs/app }
+  - { name: mcuboot_scratch, size_kib: 32,  fs: raw,      flash_device: ospi0 }
+"""
+
+
+def test_storage_mounts_c_is_carried_when_a_partition_mounts(planners, tmp_path):
+    """The plan carries exactly one `generated/storage_mount_table.c` and
+    `--emit storage-mounts-c` returns those bytes (the table lists the
+    mounts)."""
+    from tan.planner.cli import emit_artefact
+
+    _, relocated = planners
+    board = tmp_path / "board.yaml"
+    board.write_text(_MOUNTED_STORAGE, encoding="utf-8")
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"] == "build/generated/storage_mount_table.c"]
+    assert len(shared) == 1
+    got = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+    assert got == shared[0]
+    assert "/lfs/settings" in got and "/lfs/app" in got
+
+
+#: A `boot:` block that loads but `emit_sysbuild_conf` refuses: an explicit
+#: two-slot swap on E1M-AEN801's single-slot `memory_map:`.  (rsa3072 is
+#: refused at load on this family, so it cannot reach the emitters.)
+_REFUSED_BOOT = (
+    "boot:\n  method: mcuboot\n  swap_algorithm: scratch\n  signing:\n"
+    "    algorithm: ecdsa_p256\n    key_file: keys/mcuboot_shared_dev_ecdsa_p256.pem\n",
+)
+
+
+@pytest.mark.parametrize("boot_block", _REFUSED_BOOT, ids=["scratch-swap"])
+def test_a_refused_boot_block_does_not_leak_into_the_other_shared_modes(
+    planners, tmp_path, boot_block
+):
+    """tan-cli#1216: `emit_sysbuild_conf` raising must not break
+    `ipc-contract-h` / `dts-reservations` / `dts-partitions` /
+    `tfm-sysbuild-conf` -- each runs only its own emitter. Matches upstream
+    (`alp_orchestrate`) result and error kind for every mode."""
+    import shutil
+
+    upstream, relocated = planners
+    src = SDK / "examples" / "connectivity" / "iot-fleet-ota"
+    if not (src / "board.yaml").is_file():
+        pytest.skip("iot-fleet-ota example not present in this SDK checkout")
+    dst = tmp_path / "iot-fleet-ota"
+    shutil.copytree(src, dst)
+    text = (dst / "board.yaml").read_text(encoding="utf-8")
+    head, _, tail = text.partition("\nboot:\n")
+    assert tail, "fixture board.yaml has no boot: block to replace"
+    rest = tail.split("\n\n", 1)[1] if "\n\n" in tail else ""
+    board = dst / "board.yaml"
+    board.write_text(head + "\n" + boot_block + "\n" + rest, encoding="utf-8")
+
+    # The premise: the sysbuild emitter really does refuse this board.
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(relocated.OrchestratorError):
+        relocated.emit_sysbuild_conf(project)
+
+    for mode in _SHARED_ARTEFACT_MODES:
+        want = _render(upstream, board, mode)
+        got = _render(relocated, board, mode)
+        assert got == want, f"{mode}: tan {got[0]} vs upstream {want[0]}"
+        assert got[0] == "ok", f"{mode} must render despite the refused boot: {got}"

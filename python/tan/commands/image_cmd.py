@@ -29,7 +29,7 @@ Rust and re-verified against the binary:
 
 A relative `firmware_path` resolves against **build_root, then sdk_root**
 (`tan.core.image_bundle.helper_firmware_candidates`) -- alp-sdk#330: the SDK's
-`som-preset-v1.schema.json` defines it repository-relative, i.e. relative to the
+`som-preset-v2.schema.json` defines it repository-relative, i.e. relative to the
 SDK checkout, not to this project's `build/`, so build-root-only resolution
 (the pre-#330 behaviour) rejected every helper an SDK actually ships. build_root
 still goes first, matching the precedence `flash_plan.resolve_artefact_path`
@@ -54,13 +54,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tarfile
 from dataclasses import dataclass
 from typing import Any
 
 import typer
 
+from tan.core.dir_removal import is_link
+from tan.core.sdk_discovery import with_sdk_search
 from tan.core.shapes import is_dir as _is_dir, is_file as _is_file
+from tan.core.system_manifest import effective_build_root
 from tan.commands.build_output import (
     ManifestInvalid,
     ManifestUnavailable,
@@ -70,7 +74,6 @@ from tan.commands.build_output import (
     resolve_build_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.image_bundle import (
     BUNDLE_DIR,
@@ -87,6 +90,7 @@ from tan.core.image_bundle import (
     slice_entry,
     slice_should_bundle,
 )
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.system_manifest import (
     SystemManifest,
     raw_passthrough,
@@ -210,7 +214,7 @@ def _bundle_slice(
     return slice_entry(core_id, os_name, artefact, sha256, size)
 
 
-def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
+def _unresolved_sdk_clause(sdk_root_arg: str | None, workspace_root: str | None = None) -> str:
     """The trailing "why was there no sdk_root" clause of an
     `image.helper-missing` message.
 
@@ -235,7 +239,10 @@ def _unresolved_sdk_clause(sdk_root_arg: str | None) -> str:
     `test_an_absent_sdk_root_flag_still_says_so`, so a reword lands there too.
     """
     if sdk_root_arg is None:
-        return "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+        clause = "sdk root not resolved (no --sdk-root and no discoverable checkout)"
+        # tan-cli#1463: name where the ladder looked, like every other
+        # SDK-root refusal.
+        return with_sdk_search(clause, workspace_root) if workspace_root else clause
     return (
         f'sdk root not resolved (--sdk-root "{sdk_root_arg}" is not an alp-sdk '
         f"checkout)"
@@ -249,6 +256,7 @@ def _bundle_helper(
     helpers_dir: str,
     used_names: set[str],
     sdk_root_arg: str | None = None,
+    workspace_root: str | None = None,
 ) -> dict[str, Any] | _Notice | None:
     """Copy one helper's firmware, or a notice, or `None` for an absent one.
 
@@ -282,7 +290,7 @@ def _bundle_helper(
     if firmware is None:
         tried = "; ".join(f"{label} {path}" for label, path in candidates)
         if sdk_root is None and not os.path.isabs(raw):
-            tried += f"; {_unresolved_sdk_clause(sdk_root_arg)}"
+            tried += f"; {_unresolved_sdk_clause(sdk_root_arg, workspace_root)}"
         return _Notice(
             "image.helper-missing",
             "error",
@@ -326,12 +334,31 @@ def _copy_file(src: str, dst: str) -> None:
             writer.write(chunk)
 
 
+def _prune_dir_contents(directory: str) -> None:
+    """Remove every entry directly inside `directory` (links unlinked, never
+    followed), leaving the directory itself."""
+    try:
+        entries = os.listdir(directory)
+    except OSError as err:
+        raise BundleWriteError(f"list {directory}: {err}") from err
+    for name in entries:
+        entry = os.path.join(directory, name)
+        try:
+            if os.path.isdir(entry) and not os.path.islink(entry):
+                shutil.rmtree(entry)
+            else:
+                os.remove(entry)
+        except OSError as err:
+            raise BundleWriteError(f"remove stale {entry}: {err}") from err
+
+
 def _assemble_bundle(
     build_root: str,
     sdk_root: str | None,
     manifest: SystemManifest,
     yaml_text: str,
     sdk_root_arg: str | None = None,
+    workspace_root: str | None = None,
 ) -> tuple[list[_Notice], dict[str, Any], str]:
     """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
     present helper firmware, write `bundle-manifest.json`."""
@@ -339,10 +366,27 @@ def _assemble_bundle(
     slices_dir = os.path.join(bundle_dir, SLICES_DIR)
     helpers_dir = os.path.join(bundle_dir, HELPERS_DIR)
     for directory in (bundle_dir, slices_dir, helpers_dir):
+        # `makedirs(exist_ok=True)` accepts a symlink to a directory, and the
+        # prune below would then empty its out-of-tree target. Unlink the link
+        # and recreate a real directory.
+        if directory != bundle_dir and is_link(directory):
+            try:
+                os.unlink(directory)
+            except OSError:
+                try:
+                    os.rmdir(directory)
+                except OSError as err:
+                    raise BundleWriteError(f"unlink {directory}: {err}") from err
         try:
             os.makedirs(directory, exist_ok=True)
         except OSError as err:
             raise BundleWriteError(f"mkdir {directory}: {err}") from err
+    # tan-cli#1482: this run's bundle is what the directory holds -- archives and
+    # helper firmware left by an EARLIER run (a slice that has since failed or
+    # been skipped, a helper dropped from the manifest) are pruned so a consumer
+    # that ships the directory never gets firmware this build did not produce.
+    for directory in (slices_dir, helpers_dir):
+        _prune_dir_contents(directory)
 
     notices: list[_Notice] = []
     slice_entries: list[dict[str, Any]] = []
@@ -398,7 +442,7 @@ def _assemble_bundle(
     used_names: set[str] = set()
     for helper in manifest.helper_mcus:
         result = _bundle_helper(
-            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg
+            helper, build_root, sdk_root, helpers_dir, used_names, sdk_root_arg, workspace_root
         )
         if result is None:
             continue
@@ -525,6 +569,7 @@ def _run(
     app_base = resolve_app_base(app_path, context.workspace_root)
     build_root = resolve_build_root(build_root_arg, app_base)
 
+    build_root = effective_build_root(build_root)
     try:
         yaml_text, manifest = load_manifest(build_root)
     except ManifestUnavailable as err:
@@ -550,7 +595,7 @@ def _run(
     sdk_root = context.sdk.root if context.sdk is not None else None
     try:
         notices, bundle, bundle_dir = _assemble_bundle(
-            build_root, sdk_root, manifest, yaml_text, sdk_root_arg
+            build_root, sdk_root, manifest, yaml_text, sdk_root_arg, str(context.workspace_root)
         )
     except BundleWriteError as err:
         return _error_outcome(

@@ -29,3 +29,9 @@ fixture was re-vendored whole from alp-sdk's own copy at `PINNED_SDK_TAG`
 byte diff against alp-sdk's copy is empty. These two fields are the only ones
 touched by this correction; every other value in this fixture, and every
 other oracle fixture, is untouched, still frozen at 97ad481b.
+
+Note (tan-cli#1216, then alp-sdk#2781): the `multicore_rpmsg-imx93` fixture
+described above left this directory when alp-sdk removed E1M-NX9101 and the
+rpmsg-imx93 example (alp-sdk#2782). It briefly survived as a consumer-only
+fixture and was deleted with the rest of the i.MX 93 support; the audit notes
+above are kept as the record of the corrections it carried.

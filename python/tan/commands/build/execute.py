@@ -3,10 +3,12 @@
 skip-vs-fail dispositions, resolve `west` from the workspace venv, spawn the
 tool, stream its output, and report a per-slice outcome -- never an escaping
 exception. Mirrors the dispatch loop in `tan-cli/src/commands/build/execute/
-mod.rs`, trimmed to this port's current scope: no `tan build --pristine`
-manual override (`force_pristine` in the Rust oracle -- this port's `build`
-command has no `--pristine` flag yet, so the automatic stamp comparison is
-the only path that can ever fire).
+mod.rs`. `force_pristine` (`tan build --pristine`, tan-cli#427) is the manual
+counterpart to the automatic stamp comparison below: it forces the SAME
+[SdkStampAction.PRISTINE] decision the stamp comparison would make on its
+own, inside the identical two structural safety guards, and reports
+`build.pristine-skipped` (never silent) when one of those guards -- or a
+build dir that was never configured at all -- declines the wipe.
 What IS ported: the unknown-backend / null-command / unsafe-cwd / missing-tool
 skip-vs-fail policy and dispatch order, the build-dir-must-exist-before-the-
 tool-runs precondition, the `tool == "west"` rewrite to the workspace venv's
@@ -91,10 +93,12 @@ import queue
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.user_defines_wipe import reconcile_user_defines, stamp_user_defines
+from tan.core.user_defines import insert_after_dashdash
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
@@ -111,6 +115,7 @@ from tan.commands.build.manifest import (
     zephyr_boilerplate_loaded,
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
+from tan.commands.build.toolchain import host_scan_has_toolchain, verified_store_dir
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     ExecutionPolicy,
@@ -119,15 +124,20 @@ from tan.core.plan_exec import (
     assemble_slice_env,
     cross_drive_source_refusal,
     missing_tool_message,
+    pristine_suppression,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
 )
+from tan.core.plain_zephyr_plan import plain_route_target
+from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SliceRunResult
 from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
+from tan.core.west_workspace_refusal import workspace_unresolved_refusal
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
+from tan.commands.build.link_stale import insert_after_separator, stale_itcm_overlay_reset
 
 if os.name != "nt":
     import signal
@@ -434,6 +444,7 @@ def _terminate(proc: subprocess.Popen) -> None:
             subprocess.run(
                 [taskkill, "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
+                env=spawn_env(),
                 check=False,
             )
     else:
@@ -526,7 +537,13 @@ def _spawn_step(
         with subprocess.Popen(
             [program, *args],
             cwd=str(cwd),
-            env=env,
+            # tan-cli#992: re-applied at the literal spawn, not trusted from
+            # the caller alone -- `spawn_env(base=env)` is idempotent when
+            # `env` already went through it (as `execute_slices`'s does), so
+            # this is defense-in-depth, not a behaviour change, for the one
+            # caller that already gets it right, and a real fix for any
+            # future caller that doesn't.
+            env=spawn_env(base=env),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -543,16 +560,30 @@ def _spawn_step(
         return _StepResult(launch_error=str(err))
 
 
-def _cwd_under_build_root(raw_cwd: str | None) -> bool:
-    """`Path::new(&cmd.cwd).components().next() == CONSUMER_BUILD_ROOT` (Rust
-    oracle): checked against the slice's PLAN-supplied relative `cwd` string,
-    not the resolved absolute path -- a plan cwd of `src/` (still a legal
-    relative path) must not let the wipe target land at
-    `<project>/src/build`, which may hold files the build never created."""
+def _cwd_under_build_root(raw_cwd: str | None, cwd: Path, project_root: Path) -> bool:
+    """Whether the sdk-switch-pristine wipe may touch this slice's `cwd`.
+
+    Starts from the Rust oracle's `Path::new(&cmd.cwd).components().next() ==
+    CONSUMER_BUILD_ROOT`: a plan cwd of `src/` (still a legal relative path)
+    must not let the wipe target land at `<project>/src/build`, which may
+    hold files the build never created. That first-component check alone let
+    `build/../src/c1` through, and so did a `build/c1` symlink into `src/`
+    (tan-cli#1388): `confine_to_build_root` only keeps a cwd inside the
+    PROJECT, not inside `build/`. So also refuse any `..` in the plan string,
+    and require the RESOLVED cwd to sit at or under `<project>/build` --
+    with `<project>/build` itself resolving to exactly that path, so a
+    symlinked build root cannot carry the wipe elsewhere."""
     if not raw_cwd:
         return False
     parts = Path(raw_cwd).parts
-    return bool(parts) and parts[0] == _CONSUMER_BUILD_ROOT
+    if not parts or parts[0] != _CONSUMER_BUILD_ROOT or ".." in parts:
+        return False
+    project = project_root.resolve()
+    build_root = (project / _CONSUMER_BUILD_ROOT).resolve()
+    if build_root != project / _CONSUMER_BUILD_ROOT:
+        return False
+    resolved = cwd.resolve()
+    return resolved == build_root or build_root in resolved.parents
 
 
 def _maybe_pristine_stale_sdk_build_dir(
@@ -562,6 +593,9 @@ def _maybe_pristine_stale_sdk_build_dir(
     cmd_args: Sequence[str],
     sdk_stamp_key_str: str | None,
     on_output: Callable[[str], None],
+    *,
+    project_root: Path,
+    force_pristine: bool = False,
 ) -> list[Issue]:
     """Sdk-switch-pristine guard (issue #52): a build dir west configured
     against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one ("please
@@ -573,6 +607,18 @@ def _maybe_pristine_stale_sdk_build_dir(
     mid-configure failure still stamped correctly, since the dir really was
     configured against it regardless of whether the build finishes).
 
+    `force_pristine` is `tan build --pristine` (tan-cli#163, wired tan-cli#427):
+    unconditionally treats the sdk-switch-pristine decision as
+    [`SdkStampAction.PRISTINE`] instead of consulting the stamp, for the
+    manual case the automatic stamp comparison doesn't (or can't yet) cover.
+    It is NOT a second wipe path -- it forces the SAME decision the automatic
+    check already makes, still inside the same two structural safety guards
+    below, so it still never touches a build dir tan cannot vouch for. Every
+    suppression (either guard, or a build dir that was never configured at
+    all) is reported as `build.pristine-skipped` rather than silently doing
+    nothing (tan-cli#183) -- "pristine" must never silently mean
+    "incremental".
+
     Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to trust a
     build dir it cannot resolve) gate the whole function -- detection, wipe,
     AND the stamp write -- so a `-d`/`--build-dir` override or a cwd outside
@@ -583,25 +629,47 @@ def _maybe_pristine_stale_sdk_build_dir(
     (~line 505) plus `manifest.rs::write_sdk_stamp`'s call site.
 
     Returns the coded `build.sdk-switch-pristine`/`build.sdk-switch-pristine-
-    failed` [`Issue`]s for this slice (verbatim `execute/mod.rs`'s
-    `sdk_switch_issues.push`, at `warning` severity like the oracle's) --
-    empty when nothing was wiped. `on_output` still gets the same "note: ..."
-    text regardless (this port's stderr stream is always-on, unlike the
-    oracle's text-mode-only `eprintln!`); the caller folds the returned
-    issues into the JSON envelope so the wipe is not stderr-only there."""
+    failed`/`build.pristine-skipped` [`Issue`]s for this slice (verbatim
+    `execute/mod.rs`'s `sdk_switch_issues.push`, at `warning` severity like
+    the oracle's) -- empty when nothing was wiped and no `--pristine` was
+    asked for. `on_output` still gets the same "note: ..." text regardless
+    (this port's stderr stream is always-on, unlike the oracle's
+    text-mode-only `eprintln!`); the caller folds the returned issues into
+    the JSON envelope so the wipe -- or its suppression -- is not
+    stderr-only there."""
     overridden = build_dir_overridden(cmd_args)
-    under_build_root = _cwd_under_build_root(raw_cwd)
-    if overridden or not under_build_root:
-        return []
-
+    under_build_root = _cwd_under_build_root(raw_cwd, cwd, project_root)
     issues: list[Issue] = []
+
+    # Probed only when `--pristine` was actually passed, so the non-pristine
+    # path keeps its existing IO exactly (one `cmake_cache_configured` call
+    # below, not two) -- mirrors the oracle's own `pristine_cache_configured`
+    # split.
+    cache_configured = cmake_cache_configured(cwd) if force_pristine else False
+    skipped = pristine_suppression(force_pristine, overridden, under_build_root, cache_configured)
+    if skipped is not None:
+        message = f"{core_id}: --pristine did NOT wipe the build dir — {skipped.reason()}"
+        on_output(f"note: {message}")
+        issues.append(Issue("build.pristine-skipped", "warning", message))
+
+    if overridden or not under_build_root:
+        return issues
+
     cached = read_sdk_stamp(cwd)
-    action = sdk_stamp_action(
-        cached, sdk_stamp_key_str, cmake_cache_configured(cwd), overridden, under_build_root
-    )
+    if force_pristine:
+        # Reached only when the dir WAS configured -- a never-configured one
+        # was already reported by `pristine_suppression` above, so this arm
+        # needs no message of its own for that case.
+        action = SdkStampAction.PRISTINE if cache_configured else SdkStampAction.KEEP
+    else:
+        action = sdk_stamp_action(
+            cached, sdk_stamp_key_str, cmake_cache_configured(cwd), overridden, under_build_root
+        )
     if action is SdkStampAction.PRISTINE:
         new_root = sdk_stamp_key_str or "?"
-        if cached is not None:
+        if force_pristine:
+            message = f"{core_id}: --pristine passed; wiping build dir before dispatch"
+        elif cached is not None:
             message = (
                 f"{core_id}: build dir was configured against SDK root `{cached}`; "
                 f"active SDK is `{new_root}` — running pristine"
@@ -676,9 +744,14 @@ def _maybe_reset_stale_configure_cache(
 
     The reset is `-UDTC_OVERLAY_FILE -UCONF_FILE` on the configure that
     follows a set change -- deliberately NOT `-UEXTRA_DTC_OVERLAY_FILE`/
-    `-UEXTRA_CONF_FILE`: those two are re-resolved via `zephyr_get(...
-    MERGE REVERSE)` on every configure regardless of the cache (no `NOT
-    DEFINED` guard gates them), and this slice's own command already ends
+    `-UEXTRA_CONF_FILE` here. CORRECTION (tan-cli#1350): the old premise that
+    those two are re-resolved on every configure regardless of the cache is
+    only true of `EXTRA_CONF_FILE`, which every plan re-passes with `-D`.
+    `EXTRA_DTC_OVERLAY_FILE` is read with `zephyr_get(... CACHE ...)`, so a
+    value passed once survives in `CMakeCache.txt` after the plan stops passing
+    it -- see `link_stale.stale_itcm_overlay_reset`, which unsets it for the
+    one overlay tan itself ever passes that way. This slice's own command
+    already ends
     with `-DEXTRA_CONF_FILE=<build_dir>/alp.conf` (`_slice_command`'s
     per-core Kconfig wiring) -- appending `-UEXTRA_CONF_FILE` AFTER that in
     the same argv would UNSET it instead (measured: `-D`/`-U` on the same
@@ -1061,9 +1134,17 @@ def execute_slices(
     sdk_root: str | None = None,
     sdk_root_for_stamp: str | None = None,
     held_outcomes: Sequence[SliceOutcome] = (),
+    force_pristine: bool = False,
+    slice_refusals: Mapping[str, str] | None = None,
+    user_defines: Mapping[str, Sequence[str]] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
+
+    `force_pristine` is `tan build --pristine` (tan-cli#427): threaded
+    straight through to [`_maybe_pristine_stale_sdk_build_dir`] per slice --
+    see that function's own docstring for the wipe/suppression decision it
+    makes.
 
     `sdk_root_for_stamp` -- the identity the sdk-switch-pristine guard keys
     its stamp comparison on, when it differs from `sdk_root` (the value the
@@ -1078,6 +1159,9 @@ def execute_slices(
     sdk switch` already pinned for the identical checkout (tan-cli#163),
     but must NOT change what `${SDK_ROOT}` substitutes to or what the
     manifest emit resolves.
+
+    `slice_refusals` -- `core_id -> message` for slices that must FAIL once
+    they are otherwise about to run (tan-cli#1317); see the use site.
 
     `held_outcomes` -- outcomes for slices the CALLER already decided not to
     dispatch (`tan.commands.build_cmd._dispatch` holds back a
@@ -1117,6 +1201,35 @@ def execute_slices(
     zephyr_base = workspace_dir / "zephyr" if workspace_dir is not None else None
     if zephyr_base is not None and not zephyr_base.is_dir():
         zephyr_base = None
+    # tan-cli#1209: resolved ONCE for the whole run, same reasoning as
+    # `zephyr_base` just above -- it depends only on `sdk_root` (this run's
+    # checkout), never on a per-slice plan field, so recomputing it inside
+    # the loop below would just repeat the same read+stamp-check on every
+    # slice for no different answer. `None` when `sdk_root` is unresolved,
+    # the manifest is missing/malformed, or the stamped store does not
+    # match this checkout's pin -- [`zephyr_env_overrides`] then fills
+    # nothing, matching today's behaviour exactly.
+    #
+    # tan-cli#1209 review MINOR: also `None` when `host_scan_has_toolchain
+    # (sdk_root)` -- a USABLE `zephyr-sdk*` install (a real cross compiler
+    # inside it, not just a name match) CMake's own prefix scan (or the
+    # user package registry) can already find on this host, independent of
+    # tan's store. tan's own store is `-t arm-zephyr-eabi` ONLY; forcing it
+    # ahead of a fuller, scan-visible host SDK could fail a non-ARM slice
+    # that configured fine unaided, and would make `tan build` trust a
+    # different toolchain than `tan doctor` reports
+    # (`doctor_cmd._zephyr_sdk_scan_roots` ranks that same store LAST, never
+    # first). Checked here, not inside `verified_store_dir` itself: that
+    # function answers "is the pin satisfied", a fact independent of what
+    # else is on the host.
+    #
+    # tan-cli#1209 review MAJOR: `host_scan_has_toolchain` requires an
+    # actual compiler inside the candidate, not merely a directory whose
+    # name STARTS WITH `zephyr-sdk` -- an empty `~/zephyr-sdk-leftover/`
+    # must not silently disable tan's own verified store below.
+    verified_store = (
+        verified_store_dir(sdk_root) if not host_scan_has_toolchain(sdk_root) else None
+    )
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:
@@ -1233,7 +1346,12 @@ def execute_slices(
         slice_gap_fillers = [
             *gap_fillers,
             *zephyr_env_overrides(
-                zephyr_base, sdk_root_path, sl.env, sl.env_append_path, env_lookup
+                zephyr_base,
+                sdk_root_path,
+                sl.env,
+                sl.env_append_path,
+                env_lookup,
+                toolchain_store=verified_store,
             ),
         ]
         # Bound to a name rather than inlined into the `update` call: the
@@ -1245,7 +1363,12 @@ def execute_slices(
         slice_env = dict(
             assemble_slice_env(sl.env, sl.env_append_path, env_lookup, slice_gap_fillers)
         )
-        env = dict(os.environ)
+        # tan-cli#992: `spawn_env()` restores tan's own bundled
+        # `LD_LIBRARY_PATH` override before this slice's own `env`/
+        # `envAppendPath` overlay -- a build slice spawns `west`/`cmake`/the
+        # toolchain, all system programs, and this is the build path (a
+        # `--flash` runs straight out of a build that just took this env).
+        env = spawn_env()
         env.update(slice_env)
         # tan-cli#289/#106: the venv `west` spawns nested `west`/`bitbake`
         # (via `alp_orchestrate`) that resolve purely via PATH -- without
@@ -1281,6 +1404,33 @@ def execute_slices(
             )
             continue
         resolved_tool = resolution.resolved
+        # tan-cli#1317: a per-slice refusal the CALLER decided (no usable host
+        # Python for a `${PYTHON}` slice), applied only HERE -- after the
+        # `null_command` and `missing_tool` skips above, so a slice that would
+        # never have run is still skipped per `executionPolicy` -- and before
+        # the destructive pristine wipe below.
+        refusal = (slice_refusals or {}).get(sl.core_id)
+        if refusal is not None:
+            outcomes.append(SliceOutcome(sl.core_id, "failed", None, refusal))
+            continue
+        # tan-cli#1429: same placement and reasoning as the #1317 refusal just
+        # above. `cwd` is the spawn cwd here: `_pin_west_workspace` only moves
+        # it when `workspace_dir` resolved, and this refusal needs it not to.
+        if is_west:
+            no_workspace = workspace_unresolved_refusal(
+                workspace_dir, list(sl.command.args), cwd, env.get("ZEPHYR_BASE"), sdk_root_path
+            )
+            if no_workspace is not None:
+                outcomes.append(
+                    SliceOutcome(
+                        sl.core_id,
+                        "failed",
+                        None,
+                        f"slice `{sl.core_id}` refused before build: {no_workspace.message}",
+                        manifest_message=no_workspace.manifest_message,
+                    )
+                )
+                continue
         # MAJOR 1 of the tan-cli#510 review: `None` (never surfaced) whenever
         # resolution landed on the exact string the plan already named --
         # see [`SliceOutcome.resolved_tool`]'s own docstring.
@@ -1292,11 +1442,39 @@ def execute_slices(
         # be rebuilt" and "this slice is about to be skipped" -- running the
         # wipe first would delete the last good `zephyr.elf` for a rebuild
         # that then never happens on a host missing `west`.
+        # tan-cli#1382: a changed user `-D` set wipes this slice's build dir
+        # (see `user_defines_wipe`). Before the sdk-switch/--pristine guard so
+        # that guard sees the post-wipe dir; the stamp is written after it,
+        # BEFORE the spawn, because it records what this configure is given.
+        ud_now = list(user_defines.get(sl.core_id, ())) if user_defines else []
+        ud_stampable = False
+        if sl.backend == "zephyr":
+            ud_issues, ud_stampable = reconcile_user_defines(
+                sl.core_id,
+                cwd,
+                ud_now,
+                build_root=build_root,
+                guards_ok=not build_dir_overridden(sl.command.args)
+                and _cwd_under_build_root(sl.command.cwd, cwd, build_root),
+                on_output=on_output,
+            )
+            configure_cache_issues.extend(ud_issues)
+
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
-                sl.core_id, cwd, sl.command.cwd, sl.command.args, sdk_stamp_key_str, on_output
+                sl.core_id,
+                cwd,
+                sl.command.cwd,
+                sl.command.args,
+                sdk_stamp_key_str,
+                on_output,
+                project_root=build_root,
+                force_pristine=force_pristine,
             )
         )
+
+        if ud_stampable:
+            stamp_user_defines(cwd, ud_now)
 
         # tan-cli#655: AFTER the sdk-switch-pristine guard, not before -- a
         # wipe there removes `cwd/build` wholesale (this stamp lives inside
@@ -1310,6 +1488,12 @@ def execute_slices(
             )
         )
         configure_cache_issues.extend(new_configure_cache_issues)
+        # tan-cli#1350: `link: itcm` -> `auto` must not keep the ITCM overlay.
+        stale_overlay_args: list[str] = []
+        if sl.backend == "zephyr":
+            stale_overlay_args, stale_overlay_issues = stale_itcm_overlay_reset(
+                cwd, sl.command.args)
+            configure_cache_issues.extend(stale_overlay_issues)
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
@@ -1367,15 +1551,20 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
-        # Appended to the SPAWN argv only -- `sl.command.args` (read again
+        # Added to the SPAWN argv only -- `sl.command.args` (read again
         # below by `resolve_zephyr_artefact`/`build_dir_overridden`) stays
         # exactly what the plan named, so those checks never see a flag tan
-        # itself injected. Order matters: this must land AFTER the plan's
-        # own `-DEXTRA_CONF_FILE=...` (already inside `spawn_args`), never
-        # before -- see `_maybe_reset_stale_configure_cache`'s docstring for
-        # why an `-U`/`-D` pair on the same key is order-sensitive and why
-        # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
-        spawn_args = spawn_args + configure_cache_reset_args
+        # itself injected. Order matters, and it is the REVERSE of what this
+        # said before user `-D` existed (tan-cli#1382): cmake applies `-U`/`-D`
+        # in argv order, so a `-U<key>` AFTER a `-D<key>=...` silently unsets
+        # it (`-D CONF_FILE=prod.conf` on a cache-reset build). Every reset
+        # goes right after `--`, BEFORE all plan and user `-D`, so a `-D` of
+        # the same key always wins.
+        spawn_args = insert_after_dashdash(spawn_args, configure_cache_reset_args)
+        # tan-cli#1350: the stale-ITCM `-U` goes right after `--`, BEFORE every
+        # `-D`, so a later `-DEXTRA_DTC_OVERLAY_FILE` (the plan's own, or a
+        # user's) is applied after the unset and can never be erased by it.
+        spawn_args = insert_after_separator(spawn_args, stale_overlay_args)
 
         # tan-cli#336: watch the slice's own stdout for west's literal
         # "could not find a workspace" message so a failure carrying it can
@@ -1636,6 +1825,7 @@ def _write_manifest_after_dispatch(
         base=str(build_root),
         plan_build_root=plan.build_root,
         results=results,
+        plain_route=plain_route_target(plan),
     )
     global _last_manifest_write
     _last_manifest_write = _ManifestWriteSignal(

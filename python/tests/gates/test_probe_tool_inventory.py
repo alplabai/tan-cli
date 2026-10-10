@@ -108,7 +108,7 @@ def test_no_probe_tool_resolves_from_the_inherited_path(tool):
 
 
 def test_a_spawned_child_sees_the_same_absent_inventory():
-    """Covers the OTHER way a probe reaches the host: 26 test modules spawn
+    """Covers the OTHER way a probe reaches the host: 31 test modules spawn
     `[sys.executable, "-m", "tan", ...]`, and a child resolves through its
     own inherited `PATH`, not through anything patched in this process. A
     fix applied only in-process would leave every one of those spawns

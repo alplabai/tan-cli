@@ -31,8 +31,8 @@ both exist because a scaffold has to name a core before any SDK is reachable --
 `tan validate` re-checks the guess once one is. They now read ONE table
 (`_SOM_FAMILIES`), which is what makes "the two derivations can never disagree"
 true rather than aspirational: tan-cli#579 is exactly the bug where they did,
-`app_core_for_sku` having grown an `E1M-NX9` arm that `_family_bucket` never
-got, so an NXP `--som` silently rendered the ALIF tree's content. A family the
+`app_core_for_sku` having grown an arm that `_family_bucket` never got, so a
+`--som` of that family silently rendered the ALIF tree's content. A family the
 table knows has no vendored tree is now REFUSED (`UnsupportedSomError` ->
 `init.som-unsupported`), never rendered against another vendor's. Do not grow
 this: no SKU list, no addresses, no pin names. Note what is NOT here as a result: the
@@ -43,12 +43,17 @@ because the app source this scaffold writes is Zephyr source, and a scaffolded
 
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.scaffold_selftest_identity import retarget_example_build_target_comment
+from tan.core.scaffold_selftest_identity import retarget_selftest_soc_identity
+from tan.core.scaffold_selftest_identity import retarget_selftest_som_identity
 from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
 
@@ -61,6 +66,7 @@ TEMPLATE_IDS = (
     "iot-starter",
     "edge-ai-starter",
     "board-diagnostics",
+    "multicore-mailbox",
 )
 
 #: The template a non-interactive `tan init` with no `--template` gets.
@@ -89,35 +95,80 @@ _VENDORED_TEMPLATE_DIR = {
     "iot-starter": "iot",
     "edge-ai-starter": "edge-ai",
     "board-diagnostics": "diagnostics",
+    # The only id that matches its SDK catalog id verbatim (tan-cli#864).
+    "multicore-mailbox": "multicore-mailbox",
 }
+
+
+def is_family_gated(template_id: str) -> bool:
+    """Whether `template_id` renders a family-specific vendored tree at all --
+    `False` for `minimal-app` ALONE, tan's one hand-generated, vendor-neutral
+    template (`plan_template_files`'s `template_id == "minimal-app"` early
+    return; it never reaches `_vendored_family`/`UnsupportedSomError`, so no
+    SoM family can ever refuse it). A public read of `_VENDORED_TEMPLATE_DIR`
+    rather than a second copy of its key set -- `explain_cmd` uses this to
+    decide whether `UNSUPPORTED_SOM_FAMILY_PREFIXES` applies to a given
+    template's `data.som` (tan-cli#866)."""
+    return template_id in _VENDORED_TEMPLATE_DIR
+
 
 #: The SKU assumed when `--som` is absent (`tan_core::DEFAULT_SOM_SKU`).
 DEFAULT_SOM_SKU = "E1M-AEN801"
 
-#: `iot-starter`'s only supported SKU. Its Wi-Fi transport is the CC3501E
-#: bridge, silicon-validated on this SKU alone, so the SDK catalog's `iot`
-#: entry gates `supported.som_skus` to exactly this one-item set and only ONE
-#: family tree was vendored. Any other `--som` is refused up front rather than
-#: silently rendered against it.
-IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
+#: Templates whose SDK catalog entry gates `supported.som_skus` to fewer SKUs
+#: than tan vendors family trees for. Consulted BEFORE anything is planned, so
+#: an unsupported `--som` is refused rather than quietly rendered against the
+#: wrong tree.
+#:
+#: Was a single `IOT_STARTER_SUPPORTED_SKU` constant plus one hard-coded `if`
+#: in `init_cmd`. tan-cli#864 added a second such template and measured both
+#: ways the one-off failed to generalise: `--som E1M-AEN301` rendered the
+#: AEN801 tree at `exitCode 0` (`_family_bucket` maps every unrecognised AEN
+#: prefix onto the default family), and `--som E1M-V2N101` surfaced as
+#: `init.template-unreadable` exit 5 -- "your tan installation is broken" for
+#: a user whose `--som` was simply wrong.
+#:
+#: `iot-starter`: the CC3501E Wi-Fi transport is silicon-validated on this SKU
+#: alone. `multicore-mailbox`: the SDK refuses to emit it for anything else --
+#: `alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+#: (supported: ['E1M-AEN801'])`, rc=1.
+TEMPLATE_SUPPORTED_SKUS: dict[str, tuple[str, ...]] = {
+    "iot-starter": ("E1M-AEN801",),
+    "multicore-mailbox": ("E1M-AEN801",),
+}
 
 #: Vendored directory name per SoM family, `(alif_ensemble, renesas_v2n)` --
 #: the two representative SKUs the SDK catalog declares.
 _FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
 
 #: SoM family table: `(SKU prefix, app-core id, vendored tree)`, consulted in
-#: order. A `None` tree means tan vendors NO scaffold for that family.
+#: order. A `None` tree means tan vendors NO scaffold for that family (no row
+#: is `None` today).
 #:
 #: ONE table, read by BOTH `app_core_for_sku` and `_family_bucket`, which is
 #: what makes this module's docstring claim -- "the two derivations can never
 #: disagree" -- true by construction instead of by two hand-synced prefix
-#: tests. tan-cli#579: they DID disagree. `app_core_for_sku` grew an
-#: `E1M-NX9` -> `m33` arm and `_family_bucket` did not, so every NXP SKU took
-#: the latter's `else` arm onto the Alif tree.
+#: tests. tan-cli#579: they DID disagree. `app_core_for_sku` grew an arm
+#: `_family_bucket` did not, so every SKU of that family took the latter's
+#: `else` arm onto the Alif tree.
 _SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
     ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
     ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
-    ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
+)
+
+#: SKU prefixes `_SOM_FAMILIES` declares NO vendored tree for -- the exact
+#: fact `_family_bucket`/`UnsupportedSomError`/`init.som-unsupported` gate a
+#: `--som` on, DERIVED from that table rather than retyped, so a family added
+#: to (or removed from) `_SOM_FAMILIES` updates this automatically instead of
+#: needing a second hand-edit. tan-cli#866: `explain_cmd` reads this to
+#: publish the SAME family-level refusal `tan init` already enforces as
+#: structured `data.som` on `tan explain --template`, instead of the
+#: hand-written "(E1M-AEN801 only)" prose that gave #866 its name -- the
+#: exact drift `_SOM_FAMILIES` vs. `app_core_for_sku` risked before tan-cli#579
+#: unified them into one table, now risked again between this table and any
+#: description string that repeats a fact it already states.
+UNSUPPORTED_SOM_FAMILY_PREFIXES: tuple[str, ...] = tuple(
+    prefix for prefix, _core, tree in _SOM_FAMILIES if tree is None
 )
 
 #: `(app core, tree)` for E1M-AEN* AND for any prefix `_SOM_FAMILIES` does not
@@ -206,11 +257,11 @@ class UnsupportedSomError(Exception):
     entry for that family. `init_cmd` reports it as `init.som-unsupported`.
 
     Refusing is the whole point, and it is a DELIBERATE divergence from the
-    frozen v0.4.1 oracle -- measured, `target/debug/tan init --som E1M-NX9101
-    --template sensor-starter` exits 0 with `issues: []` and writes the Alif
-    tree. The two alternatives were weighed and rejected:
+    frozen v0.4.1 oracle, which exits 0 with `issues: []` and writes the Alif
+    tree for a family it has no tree for. The two alternatives were weighed and
+    rejected:
 
-    * **Vendor an NXP tree.** Not tan's to write. `templates/vendored/` is a
+    * **Vendor a tree for it.** Not tan's to write. `templates/vendored/` is a
       byte-for-byte capture of alp-sdk's `--emit scaffold` output (see its
       `MANIFEST.md`), and `tests/parity/scaffold_byte_parity.py` re-runs the
       live emit against a reachable checkout and fails on drift. A tree
@@ -244,6 +295,142 @@ class UnsupportedSomError(Exception):
         )
         self.template_id = template_id
         self.sku = sku
+
+
+class SomBlockUnsupportedError(Exception):
+    """Base for every reason `vendored_som`/`retarget_board_yaml_som` REFUSE
+    a `som:` block instead of silently discarding `--som` -- catch THIS at
+    every call site (`init_cmd.py`), not either leaf below, so a THIRD leaf
+    added for the next spelling needs no call site touched outside this
+    module.
+
+    tan-cli#1041 review: this class did not exist until the amendment
+    widened tan-cli#1041 from three spellings to six and two of them turned
+    out to need a message that was not about flow style at all
+    (`UnreadableSomBlockError`, below) -- `FlowStyleSomError` alone was
+    already the exact shape `init_cmd.py`'s three `except` clauses wanted,
+    so splitting the raise from the catch (a common base, not a rename) was
+    the smaller, safer change.
+    """
+
+
+class FlowStyleSomError(SomBlockUnsupportedError):
+    """The board.yaml's top-level `som:` line opens a YAML FLOW mapping
+    (`som: {sku: ..., hw_rev: ...}`, valid YAML but on one physical line)
+    rather than the BLOCK style (`som:` alone, `sku:`/`hw_rev:` indented
+    beneath it) `vendored_som`/`retarget_board_yaml_som` understand.
+
+    tan-cli#1029, `Refs #1008`. This module is deliberately NOT a YAML
+    parser (see its own module docstring): it scans line-by-line and edits
+    in place, which is what lets a hand-authored comment, a wrapped comment
+    block, or column alignment survive a `--som` retarget byte-for-byte.
+    Extending that scan to also parse a flow mapping correctly -- telling a
+    comma inside a quoted value apart from one separating two keys, an
+    escaped brace from a real one, a `{`/`}` that itself appears inside a
+    quoted string -- needs a real YAML parser, not a seventh line-oriented
+    special case bolted onto tan-cli#1008's own six-round history of exactly
+    that kind of case. Refusing loudly is the deliberate choice over
+    supporting it: the alternative was `vendored_som` silently reporting
+    `(None, None)` and `retarget_board_yaml_som` silently returning its
+    input byte-for-byte unchanged, so `--som` was discarded with `issues:
+    []` and exit 0 -- indistinguishable from success.
+
+    Raised from `vendored_som` (the reader) the moment it sees this shape;
+    `retarget_board_yaml_som` (the writer) inherits the same raise for free,
+    since it calls `vendored_som` first -- one rule, in one place, so the
+    two cannot diverge on which `som:` lines this module refuses, the same
+    shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key` already
+    hold for tan-cli#1008.
+
+    Only covers the SAME-LINE flow shape (`som: {...}`, `som: &s {...}`,
+    `som: !!map {...}`); a flow mapping whose `{` opens on the NEXT physical
+    line is `UnreadableSomBlockError`'s job (tan-cli#1041) -- this class's
+    own detector (`_som_flow_style_body`) only ever inspects the `som:`
+    line itself, by design (see that function's docstring).
+
+    Reachability (tan-cli#1029): 0 of the SDK's 100 tracked `board.yaml`
+    files and 0 vendored templates use a flow-style `som:` mapping --
+    hand-authored only, same as the spaced/quoted shapes tan-cli#1008 rounds
+    5-6 fixed.
+    """
+
+    def __init__(self, flow_body: str) -> None:
+        super().__init__(
+            f"This board.yaml's `som:` block is written in YAML flow style "
+            f"(`som: {flow_body}`), which tan's board.yaml scaffolder does "
+            f"not parse. Rewrite the `som:` block in block style (`sku:`/"
+            f"`hw_rev:` each on their own indented line beneath `som:`) and "
+            f"try again -- keep any `&anchor`/`!tag` the `som:` key itself "
+            f"carries where it is: dropping it would silently break a `*alias` "
+            f"referring to it elsewhere in the file."
+        )
+        self.flow_body = flow_body
+
+
+class UnreadableSomBlockError(SomBlockUnsupportedError):
+    """`vendored_som` recognized a top-level `som:` entry -- either the
+    line-oriented scan matched a literal `som:`/`"som":` line
+    (`_is_som_key_line`), or a real YAML parse resolved one that no literal
+    `som:` text exists for at all -- but found no LITERAL `sku:` line
+    nested beneath it to read or rewrite.
+
+    tan-cli#1041 (the amendment). Three of the amendment's six named
+    spellings land here, all sharing the identical root cause -- a `som:`
+    (or an effective one, produced by a document-root merge) whose `sku:`
+    is not a plain indented line this scanner can find -- rather than three
+    separate detectors for three separate reasons:
+
+    - a YAML ALIAS (`som: *base`): the whole value is a reference to a
+      mapping defined elsewhere; no child lines follow the `som:` line at
+      all.
+    - a MERGE key (`<<: *base`) inside the `som:` block with no explicit
+      `sku:` override alongside it: the real `sku:` value lives in
+      whatever `base` points at, not in this block. (A merge key WITH an
+      explicit override retargets correctly, same as any other block-style
+      `som:` -- the override line is a literal `sku:` this scan already
+      finds, so it never reaches this class at all.)
+    - a MERGE key at the DOCUMENT ROOT (`<<: *base`, sibling to `som:`
+      rather than nested under it) whose target itself defines `som:`: no
+      `som:` text exists anywhere in the file for the line scan to find, so
+      `vendored_som`'s own scan reports nothing at all -- this is the one
+      shape a real `yaml.safe_load` backstop is needed for (see
+      `vendored_som`'s docstring), not the line scan.
+    - a FLOW mapping split across MORE than one physical line (`som:\\n
+      {sku: ..., hw_rev: ...}`, with or without a leading comment or
+      `&anchor` on the `som:` line itself): `FlowStyleSomError`'s own
+      detector only ever looks at the `som:` line, by design, so this shape
+      falls straight through it and is caught here instead, by the same
+      "a `sku:` line was never found" signal every other shape in this list
+      trips.
+
+    Deliberately ONE generic message rather than a shape-specific one per
+    bullet above: naming "alias" vs "merge key" vs "multi-line flow"
+    correctly would need to re-derive which one this actually is -- the
+    exact per-spelling special-casing tan-cli#1008 (six rounds) and
+    tan-cli#1035 (three rounds) already show costs more than it is worth.
+    What every shape above has in common -- a `som:` this module can see
+    exists, paired with no `sku:` line it can find inside it -- is exactly
+    what the message says, and is enough to tell a customer what to fix.
+
+    Raised from `vendored_som`; `retarget_board_yaml_som` inherits it the
+    same way it already inherits `FlowStyleSomError`, by calling
+    `vendored_som` first.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This board.yaml's `som:` block could not be read: tan found a "
+            "`som:` key but no literal `sku:` line indented directly "
+            "beneath it. A YAML `*alias`, a `<<:` merge key with no "
+            "explicit `sku:` override (whether inside the `som:` block or "
+            "at the top of the file), and a flow mapping split across more "
+            "than one line all look like this to tan's board.yaml "
+            "scaffolder, which edits `som:` blocks line-by-line rather "
+            "than as a parsed document. Rewrite the `som:` block in block "
+            "style, with `sku:` (and `hw_rev:`, if set) each written as "
+            "their own literal line indented beneath `som:`, and try "
+            "again."
+        )
 
 
 class ExampleReadError(Exception):
@@ -345,8 +532,8 @@ def _family_bucket(sku: str) -> str | None:
 
     tan-cli#579: this used to be
     `_FAMILY_TREES[1] if sku.startswith(("E1M-V2N","E1M-V2M")) else
-    _FAMILY_TREES[0]`, so E1M-NX9* -- a family `app_core_for_sku` right above
-    already knows -- fell down the `else` arm and got the ALIF tree's content,
+    _FAMILY_TREES[0]`, so a family `app_core_for_sku` right above
+    already knew (with no tree) fell down the `else` arm and got the ALIF tree's content,
     at `ok: true` / exit 0 / `issues: []`. An unrecognised prefix still takes
     the Alif default, in both derivations at once (see `_DEFAULT_FAMILY`);
     only a family tan positively knows it has no tree for is refused."""
@@ -372,13 +559,16 @@ def _split_cr(line: str) -> tuple[str, str]:
     return (line[:-1], "\r") if line.endswith("\r") else (line, "")
 
 
-def _retargeted_sku_line(indent: str, trimmed: str, sku: str) -> tuple[str, bool]:
-    """Rewrite one `sku:` line body onto `sku`. Returns the new body (no line
-    terminator -- see [`_split_cr`]) and whether a trailing COMMENT was dropped,
-    which is what tells the caller a wrapped comment block has been opened and
-    its continuation lines must go too.
+def _retargeted_sku_line(indent: str, after_key: str, sku: str) -> tuple[str, bool]:
+    """Rewrite one `sku:` line body onto `sku`, given `after_key` -- everything
+    after the child key's colon, as returned by [`_split_child_key`] (so a
+    space before the colon in the SOURCE line, `sku : x`, is already handled
+    by the caller; this function only ever emits a normalized `sku:`, no
+    space, regardless of how the source was spaced). Returns the new body (no
+    line terminator -- see [`_split_cr`]) and whether a trailing COMMENT was
+    dropped, which is what tells the caller a wrapped comment block has been
+    opened and its continuation lines must go too.
     """
-    after_key = trimmed[len("sku:") :]
     stripped = after_key.lstrip(" \t")
     leading_ws = after_key[: len(after_key) - len(stripped)]
     if not stripped or stripped.startswith("#"):
@@ -411,18 +601,248 @@ def _is_wrapped_comment_line(body: str, sku_indent: str) -> bool:
     return len(body) - len(stripped) > len(sku_indent)
 
 
+def top_level_key_name(text: str) -> str:
+    """Everything in `text` before its first `:`, whitespace-trimmed -- the
+    key name of a `<key>:` mapping line, tolerating a space (or more) before
+    the colon (`som :` is valid YAML: `yaml.safe_load("som :\n  sku: x\n")`
+    -> `{"som": {"sku": "x"}}`). Returns the whole (trimmed) `text` when
+    there is no `:` at all, matching `str.split(":", 1)[0]`'s own behaviour
+    on a colon-less string.
+
+    tan-cli#1008 review round 5: this repo now has THREE independent readers
+    of "what is this line's top-level key" --
+    `generate_cmd._scan_som_sku` (`stripped.split(":", 1)[0].strip() ==
+    "som"`), `bootstrap_cmd._scan_board_slice` (`key =
+    stripped.partition(":")[0].strip()`), and this file's own
+    `_is_som_key_line` (round 4's fix, which used a STRICTER
+    `startswith(f"{key}:")` that rejected `som :`). That divergence is
+    exactly how round 4's own bug happened one level up (`_is_som_key_line`
+    vs `vendored_som`'s pre-round-4 exact-match). One rule, in one place;
+    `generate_cmd`/`bootstrap_cmd` import and call THIS instead of keeping
+    their own copies.
+
+    tan-cli#1041: also strips a single layer of matching `'`/`"` quotes
+    around the key, so a QUOTED top-level key (`"som":`, `'som':`) resolves
+    to the same name as its bare spelling -- `yaml.safe_load` already treats
+    them identically (`{"som": ...}` either way), and this was the one
+    spelling of the six tan-cli#1041 named where the fix belongs HERE
+    (widening the one shared rule) rather than in a refusal: nothing about a
+    quoted key stops the line-oriented writer beneath it from working, so
+    unlike its five siblings this shape should retarget correctly, not just
+    refuse loudly. Only fires when the closing quote is immediately followed
+    by (optional whitespace then) a `:` -- i.e. this really is `"key":`, not
+    some other quoted scalar that merely starts the text -- so a colon-less
+    string's contract above (return the whole trimmed text) still holds for
+    everything else, quoted or not. No escape handling: `som`/`sku`/`hw_rev`,
+    the only keys any caller of this function ever tests against, contain no
+    character that would ever need one.
+    """
+    stripped = text.strip()
+    quote = stripped[:1]
+    if quote in ("'", '"'):
+        end = stripped.find(quote, 1)
+        if end != -1 and stripped[end + 1 :].lstrip(" \t")[:1] == ":":
+            return stripped[1:end]
+    return text.split(":", 1)[0].strip()
+
+
+def _is_som_key_line(body: str) -> bool:
+    """Whether `body` is the top-level `som:` line -- unindented, with
+    `som` as [`top_level_key_name`]'s answer for it (so `som :`, a trailing
+    comment, and trailing whitespace all still match -- only indentation and
+    the key name itself are checked).
+
+    tan-cli#1008 review round 4: `retarget_board_yaml_som`'s scan and
+    `vendored_som`'s reader used to apply DIFFERENT rules for this -- the
+    scan matched `trimmed.startswith("som:")` (tolerant of a trailing
+    comment/whitespace), the reader matched an exact `body == "som:"`
+    (strict) -- so a `som:` line carrying a trailing comment or trailing
+    whitespace was recognized by the scan (which retargeted `sku:` inside
+    it) but not by the reader (which then reported `existing_sku` as
+    `None`, so the sibling `hw_rev:`-drop this file exists for silently
+    stood down). One predicate, used by both callers, so a third caller
+    cannot diverge from either again.
+    """
+    return bool(body) and body[0] not in " \t" and top_level_key_name(body) == "som"
+
+
+def _split_child_key(trimmed: str) -> tuple[str, str] | None:
+    """Split an already-indent-stripped CHILD mapping line (one nested under
+    a top-level block, e.g. a `som:` block's `sku:`/`hw_rev:`) into
+    `(key, after_colon)`. `key` is literally [`top_level_key_name`]'s answer
+    for `trimmed` -- not a second implementation of its rule -- so a space
+    before the colon (`sku :`, `hw_rev :`) AND a quoted key (`"sku":`,
+    `'hw_rev':`) are both tolerated here exactly as they are at the
+    top-level `som:` line, because both call sites now run the same code.
+    `None` when `trimmed` has no `:` at all (not a mapping line).
+
+    tan-cli#1008 review round 6: `vendored_som` (the reader) and
+    `retarget_board_yaml_som` (the writer) applied DIFFERENT rules for "is
+    this line a `sku:`/`hw_rev:` child" -- the reader used a tolerant
+    `trimmed.partition(":")`, the writer an exact
+    `trimmed.startswith("hw_rev:")`/`startswith("sku:")`. Round 5 already
+    fixed this exact class of divergence one level up for the top-level
+    `som:` line (`_is_som_key_line`); it did not carry the fix down to the
+    child keys underneath it. Concretely: on `hw_rev : r2` the reader saw
+    the key (arming the cross-family `drop_hw_rev` logic) while the writer's
+    `startswith` did not match the line at all, so a hand-authored spaced
+    `hw_rev :`/`sku :` line was either left un-dropped (major 1) or -- worse
+    -- had its `hw_rev:` deleted by the drop logic while its own `sku :`
+    line went unretargeted, since the writer's `sku:` `startswith` check
+    also failed to match (major 2, a silent `--som` no-op). One rule, in one
+    place, used by both the reader and the writer, so they cannot diverge
+    again.
+
+    tan-cli#1060 review: this docstring used to CLAIM the top-level rule
+    applied here while the body stayed a bare `trimmed.partition(":")` that
+    never unquoted anything -- true the day round 6 landed, false the moment
+    tan-cli#1041 taught `top_level_key_name` to strip a quoted key's `'`/`"`
+    pair and this function did not follow. Consequence: `"som":` (a
+    top-level quoted key) retargeted correctly, but the exact same quoting
+    one level down (`som:` with a `"sku":`/`'hw_rev':` child) did not --
+    `found_sku_key` never set, `entered_som and not found_sku_key` firing
+    `UnreadableSomBlockError` for a shape that has a perfectly literal
+    `sku:` line to rewrite, precisely the top-level-vs-child divergence round
+    6 exists to prevent, reopened one call site later. Calling
+    `top_level_key_name` here rather than re-inlining its rule is what makes
+    that divergence structurally impossible rather than merely undocumented:
+    a future change to the quoting rule only has one function to change.
+    """
+    if ":" not in trimmed:
+        return None
+    _key, _colon, rest = trimmed.partition(":")
+    return top_level_key_name(trimmed), rest
+
+
+#: A single leading YAML node-property token: an anchor (`&name`) or a tag
+#: (`!tag`, `!!type`, or a verbatim `!<...>` URI) -- whatever character
+#: sequence starts at `&`/`!` and runs to the next whitespace. Doesn't
+#: validate the anchor name or tag URI; that is not this scanner's job, only
+#: recognizing that a property token, rather than the value, sits here.
+_NODE_PROPERTY_RE = re.compile(r"^[&!]\S+")
+
+
+def _strip_yaml_node_properties(text: str) -> str:
+    """Strip zero or more leading YAML node-property tokens (an anchor
+    `&name`, a tag `!tag`/`!!type`, or both together, in EITHER order,
+    separated by whitespace) from `text`, returning whatever remains after
+    the last one (with any following whitespace also stripped).
+
+    tan-cli#1035 review round 2 major: separates "what decorations precede
+    the value" from "is the value a flow mapping" -- the two concerns
+    `_som_flow_style_body` conflated when it tested `stripped.startswith("{")`
+    against text that could still carry an anchor/tag prefix. YAML allows an
+    anchor and a tag together, in either order (`&s !!map {...}` and
+    `!!map &s {...}` are both valid), and either alone; this strips as many
+    property tokens as are present, so `_som_flow_style_body`'s own `{` test
+    runs against the actual value, never against a property token that
+    happens to not start with `{`.
+    """
+    remainder = text
+    while True:
+        match = _NODE_PROPERTY_RE.match(remainder)
+        if not match:
+            return remainder
+        remainder = remainder[match.end() :].lstrip(" \t")
+
+
+def _som_flow_style_body(body: str) -> str | None:
+    """When `body` is the top-level `som:` line ([`_is_som_key_line`]) AND
+    what follows its colon -- past any anchor/tag prefix
+    ([`_strip_yaml_node_properties`]) -- opens a YAML FLOW mapping (`som:
+    {sku: ..., hw_rev: ...}`, `som: &s {sku: ...}`, `som: !!map {sku: ...}`)
+    -- i.e. the first non-blank character there is `{` -- return the ORIGINAL
+    trailing text (properties included) verbatim, for the error message.
+    `None` for an ordinary block-style `som:` line: nothing, only a trailing
+    comment, or a bare anchor/tag (`som: &s`, `som: !!map`, `som: &s !!map`)
+    with nothing flow-shaped after it, all of which are valid YAML that still
+    opens a BLOCK mapping on the lines beneath it, not a non-`som:` line.
+
+    tan-cli#1029: the one signal both `vendored_som` and
+    `retarget_board_yaml_som` need to refuse a shape neither actually reads
+    (see [`FlowStyleSomError`]) -- called from `vendored_som` alone; the
+    writer inherits the same refusal by calling the reader first, so the
+    two share this one rule rather than each guessing independently, the
+    same shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key`
+    already hold for tan-cli#1008.
+
+    tan-cli#1035 review round 2 major 1: an earlier version of this function
+    treated ANY non-comment content after the colon as flow style, which
+    also caught `som: &s` (an anchor) and `som: !!map` (a tag) -- both valid
+    BLOCK-style `som:` lines -- so it was narrowed to `stripped.startswith
+    ("{")`. That narrowing over-corrected: it tested the RAW text after the
+    colon, so `som: &s {sku: ...}` and `som: !!map {sku: ...}` -- genuine
+    flow mappings carrying an anchor/tag prefix -- no longer started with
+    `{` and escaped the detector entirely, reopening tan-cli#1029's own
+    silent-`--som`-discard symptom on exactly the shape this function exists
+    to refuse. Stripping the anchor/tag prefix FIRST, then testing the
+    remainder, is what lets both prior fixes stay true at once: a bare
+    anchor/tag still falls through to the block path (nothing left to test
+    after stripping), and an anchor/tag ahead of a real `{` is still caught
+    (something starting with `{` left after stripping).
+    """
+    if not _is_som_key_line(body):
+        return None
+    _key, _colon, rest = body.partition(":")
+    stripped = rest.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    remainder = _strip_yaml_node_properties(stripped)
+    if not remainder or remainder.startswith("#"):
+        return None
+    if not remainder.startswith("{"):
+        return None
+    return stripped
+
+
+#: Mirrors `scripts/alp_project_loader._SKU_FAMILY` -- deliberately
+#: duplicated rather than imported: this file plans
+#: board.yaml content with no SDK checkout to consult (it is SDK-free by
+#: design -- see `test_init_command.py`'s "`tan init` is SDK-free and
+#: cannot tell a ..." precedent), so this needs only the family CODE
+#: encoded in the SKU string itself, never a metadata lookup.
+_SKU_FAMILY_PREFIX = re.compile(r"^E1M-(AEN|V2N|V2M)")
+
+
+def _same_som_family(a: str, b: str) -> bool:
+    """Whether two SKUs share the SoM family a `hw_rev:` value is scoped to.
+
+    tan-cli#1008 review round 4 minor: an INTRA-family retarget (e.g.
+    `E1M-AEN801` -> `E1M-AEN301`, both `aen`) shares ONE family
+    `hw-revisions.yaml` table, so an explicit `hw_rev:` valid for the source
+    SKU is still a real, declared revision for the target one -- dropping it
+    there (as an unconditional cross-SKU drop would) silently substitutes
+    the new SKU's own `default_hw_rev:`, which can be a DIFFERENT declared
+    revision with different `pad_route_overrides` -- a silent change of
+    which hardware variant gets built, with `tan validate` clean and `tan
+    init` reporting no issue, since both revisions are legitimately known
+    and buildable. That is strictly worse than tan-cli#743's original bug: a
+    loud refusal became a silent substitution. A CROSS-family retarget (the
+    tan-cli#743/#1008 round-3 case: `E1M-AEN801` -> `E1M-V2N101`) still
+    drops it -- the value is from a table that has nothing to do with the
+    new SKU at all, not merely a different declared revision of the same
+    hardware family. Returns `False` (the conservative, already-shipped
+    round-3 behaviour: drop) whenever either SKU does not match the known
+    family pattern -- a shape this function cannot judge safely.
+    """
+    match_a = _SKU_FAMILY_PREFIX.match(a)
+    match_b = _SKU_FAMILY_PREFIX.match(b)
+    return match_a is not None and match_b is not None and match_a.group(1) == match_b.group(1)
+
+
 def retarget_board_yaml_som(content: str, sku: str) -> str:
     """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
-    that line byte-for-byte alone -- UNLESS the value is actually changing and
-    a trailing comment is present, in which case the comment is dropped, all of
-    it, however many physical lines it spans.
+    that line byte-for-byte alone -- UNLESS the value is actually changing, in
+    which case a trailing comment on that line is dropped (all of it, however
+    many physical lines it spans) and a sibling `hw_rev:` line inside the same
+    `som:` block, if one is present, is dropped outright.
 
     `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
     before a trailing comment is preserved, so a column-aligned inline comment
     (the vendored `iot` scaffold's `sku:` line has one) survives, and passing a
     tree its OWN vendored SKU is a byte-exact no-op (`--template
     iot-starter` always does: its `--som` is validated equal to
-    `IOT_STARTER_SUPPORTED_SKU` before this ever runs). Reconstructing the tail
+    `TEMPLATE_SUPPORTED_SKUS` before this ever runs). Reconstructing the tail
     as a fixed two-space gap silently collapsed that alignment even in the
     no-op case.
 
@@ -445,12 +865,68 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     Deliberately anchored to THAT comment, not to any comment near a changed
     `sku:` -- a `sku:` line with no comment of its own opens no block, so a
     comment documenting the next key is never swallowed.
+
+    tan-cli#1008 review round 3: the identical "dropping it is honest,
+    inventing a new one is not this function's job" reasoning applies to an
+    explicit `hw_rev:` sibling. This function previously only ever rewrote
+    `sku:`, so a retarget onto a DIFFERENT SKU used to leave the ORIGINAL
+    example's `hw_rev:` in place verbatim -- a value from a different
+    family's table (or, worse, one that happens to collide with an unrelated
+    revision key in the new family's table), producing a `sku:`/`hw_rev:`
+    pair no family table actually declares. `tan validate` refuses that with
+    "not a known hardware revision", while `tan init` -- before this fix --
+    said nothing at all, or (an earlier round of this same fix) named the
+    WRONG revision: both are the tan-cli#743 contradiction this whole check
+    exists to close, just reached via a stale cross-retarget value instead
+    of an absent one. Dropping the sibling `hw_rev:` on a CROSS-family
+    retarget lets the scaffold fall back to the NEW SoM's own
+    `default_hw_rev:` -- the same resolution rule a board.yaml with no
+    explicit `hw_rev:` at all already follows, and the one `tan validate`
+    resolves against.
+
+    tan-cli#1008 review round 4 minor: an INTRA-family retarget keeps the
+    sibling `hw_rev:` instead -- see `_same_som_family`'s own docstring for
+    the full reasoning (short version: within one family the value is still
+    a real, deliberately-chosen revision, and dropping it there would
+    silently substitute a DIFFERENT declared revision -- possibly with
+    different `pad_route_overrides` -- with no warning at all, which is
+    worse than the bug this fix closes). Also round 4: `retarget_board_yaml_
+    som`'s own scan and `vendored_som`'s reader (used below to learn
+    `existing_sku`) now share ONE `som:`-block-entry predicate
+    (`_is_som_key_line`) -- they used to disagree on a `som:` line carrying
+    a trailing comment or trailing whitespace, which silently reintroduced
+    this same stale-`hw_rev:` defect on exactly that shape of file.
+
+    tan-cli#1029: raises [`FlowStyleSomError`] on a flow-style `som:` block
+    (`som: {sku: ..., hw_rev: ...}`) instead of silently returning `content`
+    byte-for-byte unchanged -- inherited for free from the `vendored_som`
+    call immediately below, which raises first.
+
+    tan-cli#1041: the same inheritance now also covers
+    [`UnreadableSomBlockError`] -- a `som:` block this line-oriented scan
+    (the one below, not `vendored_som`'s) would otherwise silently leave
+    untouched because it never finds a literal `sku:` line to rewrite (a
+    `*alias`, an un-overridden `<<:` merge key inside OR outside the `som:`
+    block, or a flow mapping split across more than one line). A QUOTED
+    `som:`/`"som":` key is NOT one of these: it retargets correctly, same
+    as the bare spelling, because [`top_level_key_name`] (tan-cli#1041)
+    unquotes it before the shared `_is_som_key_line`/`_split_child_key`
+    checks below ever see it -- nothing about a quoted KEY stops the scan
+    from finding a perfectly ordinary literal `sku:` line beneath it.
     """
+    existing_sku, _existing_hw_rev = vendored_som(content)
+    changing_sku = existing_sku is not None and existing_sku != sku
+    drop_hw_rev = changing_sku and not _same_som_family(existing_sku, sku)
+
     out: list[str] = []
     in_som = False
-    rewritten = False
-    # The `sku:` line's own indent while a dropped comment's continuation lines
-    # are still being consumed; `None` at every other point.
+    sku_rewritten = False
+    hw_rev_dropped = not drop_hw_rev  # nothing to drop for a no-op or intra-family retarget
+    # The indent of whichever dropped construct's wrapped-comment
+    # continuation lines are still being consumed; `None` at every other
+    # point. Shared by the `sku:` comment drop and the `hw_rev:` line drop
+    # below -- they never overlap, since each anchors a distinct physical
+    # line.
     consuming: str | None = None
     for line in content.split("\n"):
         body, cr = _split_cr(line)
@@ -458,18 +934,26 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
             if _is_wrapped_comment_line(body, consuming):
                 continue
             consuming = None
-        if not rewritten:
-            trimmed = body.lstrip(" \t")
-            if body and body[0] not in " \t":
-                # A new top-level key: entering `som:`, or leaving it.
-                in_som = trimmed.startswith("som:")
-            elif in_som and trimmed.startswith("sku:"):
-                indent = body[: len(body) - len(trimmed)]
-                new_body, comment_dropped = _retargeted_sku_line(indent, trimmed, sku)
-                out.append(new_body + cr)
-                rewritten = True
-                consuming = indent if comment_dropped else None
-                continue
+        trimmed = body.lstrip(" \t")
+        if body and body[0] not in " \t":
+            # A new top-level key: entering `som:`, or leaving it.
+            in_som = _is_som_key_line(body)
+            out.append(line)
+            continue
+        child = _split_child_key(trimmed) if in_som else None
+        child_key, child_rest = child if child is not None else (None, "")
+        if in_som and not hw_rev_dropped and child_key == "hw_rev":
+            indent = body[: len(body) - len(trimmed)]
+            hw_rev_dropped = True
+            consuming = indent  # also drop any wrapped comment it opened
+            continue
+        elif in_som and not sku_rewritten and child_key == "sku":
+            indent = body[: len(body) - len(trimmed)]
+            new_body, comment_dropped = _retargeted_sku_line(indent, child_rest, sku)
+            out.append(new_body + cr)
+            sku_rewritten = True
+            consuming = indent if comment_dropped else None
+            continue
         out.append(line)
     return "\n".join(out)
 
@@ -503,9 +987,8 @@ def retarget_board_yaml_cores(content: str, sku: str, source_sku: str) -> str:
     core ids verbatim. `tan init --template edge-ai-starter --som E1M-AEN301`
     wrote `cores: a32_cluster:` for an Ensemble E3, which has no Cortex-A32 --
     reported `ok:true` / `exitCode 0` / `issues:[]`, and `tan validate` then
-    hard-errored (exit 2) on the very next command. `--som E1M-NX9101` landed
-    on the Alif tree and got `m55_hp` against a topology of
-    `a55_cluster`/`m33`, contradicting this same module's `app_core_for_sku`.
+    hard-errored (exit 2) on the very next command. An unvendored family landed
+    on the Alif tree and got `m55_hp`, contradicting this same module's `app_core_for_sku`.
 
     Two edits, both of which can only REMOVE wrong facts, never invent new
     ones -- `tan init` is SDK-free and has no SoM topology to consult:
@@ -516,7 +999,7 @@ def retarget_board_yaml_cores(content: str, sku: str, source_sku: str) -> str:
       real catalogue;
     * every OTHER entry is DROPPED. Those are the `os: "off"` secondary
       cluster declarations (`a32_cluster` on the E8, `a55_cluster` on the
-      V2N/i.MX 93) which exist only on the tree's own representative SKU. A
+      V2N) which exist only on the tree's own representative SKU. A
       core absent from `cores:` is simply not built, so dropping is always
       sound; keeping a made-up id, or guessing the target's cluster id from a
       table tan cannot verify, is not.
@@ -594,23 +1077,6 @@ class CoresError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
-
-
-def infer_runtime_for_core_id(core_id: str) -> str:
-    """Best-effort runtime for a `--cores` entry with no `:os` given: an
-    `a<digit>` at a word start (e.g. `a55_cluster`) runs `yocto`; everything
-    else defaults to `zephyr`. Mirrors
-    `tan_core::wizard::infer_runtime_for_core_id` -- KEEP IN SYNC with
-    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
-    test; the one intentional difference is the fallback, since a CLI must
-    pick a concrete runtime where the IDE can offer "unknown")."""
-    lower = core_id.lower()
-    word_start = True
-    for i, ch in enumerate(lower):
-        if word_start and ch == "a" and i + 1 < len(lower) and lower[i + 1].isdigit():
-            return "yocto"
-        word_start = ch in ("_", "-")
-    return "zephyr"
 
 
 def _is_valid_core_id(core_id: str) -> bool:
@@ -722,6 +1188,161 @@ def vendored_core_ids(board_yaml: str) -> list[tuple[str, str]]:
     return [(core_id, os_value) for core_id, os_value in ids]
 
 
+def _yaml_scalar_value(after_colon: str) -> str | None:
+    """The bare scalar value from the text AFTER a mapping key's `:` --
+    stripped of leading whitespace, a trailing comment, and any surrounding
+    quote characters (`'`/`"`) -- mirroring
+    `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice`'s own
+    `.strip().strip("'\"")` rule for this identical scalar.
+
+    tan-cli#1008 review round 5: this function used to keep the quotes,
+    which silently evaded the checks reading its result. A quoted
+    `sku: "E1M-AEN801"` made `_SKU_FAMILY.match('"E1M-AEN801"')` fail, so the
+    family check saw nothing to judge, reachable through an unstripped
+    quote. A quoted `hw_rev: "r1"` was worse: `changing_sku` (a bare string compare)
+    read `'"E1M-AEN801"' != "E1M-AEN801"` as TRUE even for a byte-for-byte
+    intra-SKU no-op, so both round three's no-op guard and round four's
+    intra-family guard were defeated at once -- a real `hw_rev:` silently
+    dropped and replaced by the SoM's own `default_hw_rev:`, possibly a
+    DIFFERENT declared revision with different `pad_route_overrides`, with
+    `tan validate` clean and `tan init` reporting no issue.
+
+    `None` for nothing after the colon, or only a comment.
+    """
+    stripped = after_colon.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = re.search(r"[ \t]", stripped)
+    token = stripped[: match.start()] if match else stripped
+    return token.strip("'\"") or None
+
+
+def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
+    """The `som:` block's `sku:`/`hw_rev:` scalar values, read the same
+    line-oriented way `vendored_app_core_key`/`vendored_core_ids` read the
+    `cores:` block -- `None` for either key that is absent or carries no
+    value. Tolerates a space before the child key's colon (`sku : x`,
+    round 5, via the shared [`_split_child_key`] -- round 6: this reader and
+    `retarget_board_yaml_som`'s writer now both call it, rather than each
+    keeping its own copy of the rule) and strips surrounding quote
+    characters from the value (round 5, `_yaml_scalar_value`).
+
+    tan-cli#743 majors 1+2: this is what reads the SoM/hw_rev pair a scaffolded board.yaml ACTUALLY
+    carries, rather than `--som` (silently absent on a bare
+    `--from-example`/`--topology`, even though the copied board.yaml already
+    names a SKU on disk) or an assumed-absent `hw_rev:` (`retarget_board_yaml_som`
+    drops a sibling `hw_rev:` only on a CROSS-family retarget -- tan-cli#1008
+    review rounds 3+4 -- and otherwise leaves it exactly as the source
+    example wrote it, whether that is the ORIGINAL SKU's own value or one
+    surviving a same-family retarget, so it must be read, not presumed
+    absent).
+
+    Raises [`FlowStyleSomError`] (tan-cli#1029) the moment the top-level
+    `som:` line turns out to be flow-style rather than block-style --
+    `retarget_board_yaml_som` calls this function first and so inherits the
+    identical refusal, rather than each guessing independently whether a
+    line it cannot read is safe to treat as "no som: block at all".
+
+    Also raises [`UnreadableSomBlockError`] (tan-cli#1041) when a `som:`
+    entry is present -- literally, or (see below) only once the document is
+    actually parsed -- but no LITERAL `sku:` line was found nested beneath
+    it: see that class's own docstring for the four spellings this covers.
+    Two different signals feed it, because only one of them can see a
+    `som:` this scan never finds text for at all:
+
+    - `entered_som`: this scan's OWN `_is_som_key_line` matched a literal
+      `som:`/`"som":` line, so a real block was entered, but the loop below
+      never set `sku`. Covers an alias and an in-block merge key with no
+      override, and -- since `FlowStyleSomError`'s own detector only ever
+      looks at the `som:` line itself -- a flow mapping split across more
+      than one physical line, which this loop's per-line `_split_child_key`
+      also never recognises as a `sku:` child (its first `:` splits on the
+      wrong token, e.g. `{sku` from `  {sku: ..., hw_rev: ...}`).
+    - the `yaml.safe_load` backstop below, run ONLY when `entered_som` is
+      still `False` at the end of the scan (i.e. this scan is about to
+      report "no som: block at all"): a document-root merge key (`<<:
+      *base`, a SIBLING of `som:`, not nested under it) can produce an
+      effective `som:` mapping with no `som:` TEXT anywhere in the file for
+      any line scan to ever find. Deferred, function-local `import yaml` --
+      `tests/gates/test_cli_import_is_lean.py` (tan-cli#810) pins that a
+      bare `tan --version` loads no YAML machinery at all, and this module
+      is reached from `init_cmd`, which `tan/cli.py` static-imports on
+      every invocation -- so the import must stay inside the one branch
+      that is actually reached only from a real `tan init`/`generate` call,
+      never at import time. Swallows a genuine YAML syntax error the same
+      way the rest of this function already tolerates one (as "nothing
+      found"): a document this broken was never going to scan cleanly
+      either, and this backstop's whole job is narrower than "validate the
+      file" -- it only asks "did a merge manufacture a `som:` this scan is
+      blind to".
+
+    tan-cli#1041 asked, verbatim, that reading the `som:` block with a real
+    YAML parse be considered, and that a rejection say why in the code. Here
+    is why: a real parse would tell `retarget_board_yaml_som` (the writer
+    that calls this reader first) THAT a `sku:` exists and what its parsed
+    value is, but not WHICH BYTES on WHICH LINE to rewrite -- a `yaml.Node`
+    carries no reliable back-reference to source position/formatting, and
+    `retarget_board_yaml_som` must reproduce everything this scan does not
+    touch byte-for-byte: a hand-authored comment, a wrapped comment block
+    (`_is_wrapped_comment_line`), inline alignment, the file's own CRLF-vs-LF
+    terminator (`_split_cr`, tan-cli#404). A parse-then-reserialize writer
+    would lose all of that -- exactly the class of regression the module
+    docstring's own "Deliberately NOT reimplemented here" paragraph already
+    refuses for the CMakeLists rewrite, for the identical reason. So the
+    line-oriented scan stays the reader for every shape it CAN see text for,
+    and `yaml.safe_load` is used only as a narrow, read-only DETECTOR for
+    the one shape it cannot -- a document-root merge key -- never as a
+    second source of the `sku`/`hw_rev` values this function returns; those
+    two are always `_yaml_scalar_value` of a literal line, so a value the
+    scan found and one a full parse would find never have a chance to
+    disagree.
+    """
+    in_som = False
+    entered_som = False
+    found_sku_key = False
+    sku: str | None = None
+    hw_rev: str | None = None
+    for line in _rust_lines(board_yaml):
+        body, _cr = _split_cr(line)
+        if not in_som:
+            flow_body = _som_flow_style_body(body)
+            if flow_body is not None:
+                raise FlowStyleSomError(flow_body)
+            in_som = _is_som_key_line(body)
+            entered_som = entered_som or in_som
+            continue
+        if body and not body[0].isspace():
+            break  # The next top-level key ends the som: block.
+        trimmed = body.lstrip(" \t")
+        child = _split_child_key(trimmed)
+        if child is None:
+            continue
+        child_key, child_rest = child
+        if child_key == "sku":
+            found_sku_key = True
+            sku = _yaml_scalar_value(child_rest)
+        elif child_key == "hw_rev":
+            hw_rev = _yaml_scalar_value(child_rest)
+    # `found_sku_key`, not `sku is None` -- a bare `sku:`/`sku:  # tbd` (no
+    # value token at all) is a LITERAL `sku:` line this scan found and
+    # `retarget_board_yaml_som` already knows how to fill in
+    # (`_retargeted_sku_line`'s own "nothing after the colon" branch); it
+    # must not be confused with the six tan-cli#1041 shapes where no `sku:`
+    # line exists for the scan to find in the first place.
+    if entered_som and not found_sku_key:
+        raise UnreadableSomBlockError()
+    if not entered_som:
+        import yaml  # noqa: PLC0415  (declared base dep; deferred -- see docstring)
+
+        try:
+            doc = yaml.safe_load(board_yaml)
+        except yaml.YAMLError:
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("som"), dict):
+            raise UnreadableSomBlockError()
+    return sku, hw_rev
+
+
 def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str:
     """Splice `--cores` companions (and a default RPMsg channel to the first
     ACTIVE one, `os != "off"`) into `board_yaml`, after the sole app-core
@@ -784,13 +1405,20 @@ def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str
             ),
             None,
         )
-        if companion is not None:
+        # tan-cli#925: never append over a board that already declares
+        # `ipc:`. PyYAML accepts a duplicate top-level key and keeps the
+        # LAST, so an unconditional append does not fail -- it silently
+        # discards the project's own channel. alp-sdk's multicore-mailbox
+        # scaffold declares `alp_shmem0`, and both its `src/main.c` and
+        # `peer/main.c` `#define SHMEM_REGION_NAME "alp_shmem0"`.
+        declares_ipc = any(line.startswith("ipc:") for line in _rust_lines(board_yaml))
+        if companion is not None and not declares_ipc:
             result += (
                 "\nipc:\n"
                 "  - kind: rpmsg\n"
                 "    name: alp_default_rpmsg\n"
                 f"    endpoints: [{app_core}, {companion}]\n"
-                "    carve_out_kb: 512\n"
+                "    carve_out_kb: 256\n"
             )
     return result
 
@@ -828,7 +1456,8 @@ def _vendored_family(template_id: str, sku: str) -> str:
     """
     # `iot` has exactly one vendored tree, no family split (its caller rejects
     # any other SKU first); every other template has two.
-    family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
+    restricted = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    family = restricted[0] if restricted else _family_bucket(sku)
     if family is None:
         raise UnsupportedSomError(template_id, sku)
     return family
@@ -842,15 +1471,21 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     `vendored_tree!` macro lists them in, so `data.fileChanges[]` matches the
     shipped binary's without a hand-kept list here to drift out of step with
     it. `iot` is the one tree where the two LISTS differ, not just their order:
-    it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
-    declared in `test_scaffold_content_oracle_parity.py`'s
-    `FILE_SET_DIVERGENCE` until tan-cli#269 deleted it with the oracle axis;
-    `tests/core/test_template_integrity.py` pins the FILE now, not the diff),
-    so `tan init --template iot-starter --format json` returns one
-    `fileChanges[]` entry more than the oracle did. Sorting is
-    what keeps every file the two trees DO share in the same relative order.
-
-    Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
+    the frozen Rust tree never got `src/cc3501e_bridge.{c,h}` (tan-cli#1275,
+    alp-sdk#2112 -- vendored as `NON_ENVELOPE_EXTRAS` in
+    `tests/parity/scaffold_byte_parity.py` because alp-sdk's own scaffold
+    catalog omits them from the envelope, alplabai/alp-sdk#2241;
+    `test_scaffold_content_oracle_parity.py`'s `FILE_SET_DIVERGENCE` records
+    the count divergence until tan-cli#269 deleted the oracle axis;
+    `tests/core/test_template_integrity.py` pins the FILE SET now, not the
+    diff), so `tan init --template iot-starter --format json` returns two
+    `fileChanges[]` entries more than the oracle did. (`native_sim.conf`,
+    this tree's earlier and now-retired divergence source, was removed
+    entirely at tan-cli#1275 -- alp-sdk#2173 fixed the mbedtls PSA-crypto
+    break it existed to work around, so `mqtt-telemetry` no longer ships
+    one.) Sorting is what keeps every file the two trees DO share in the
+    same relative order. Sorted on
+    that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before
     `CMakeLists.txt` there and after it on Linux -- the same command emitting a
     different `fileChanges[]` order per platform.
@@ -871,11 +1506,11 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
             relative = path.relative_to(root).as_posix()
             content = _read_verbatim(path)
             if relative == "board.yaml":
-                content = retarget_board_yaml_som(content, sku)
-                # tan-cli#494 defect 2: the SoM line was the ONLY thing
-                # retargeted, so a `--som` outside the tree's own SKU kept its
-                # core ids. No-op when `sku == family` (see the function).
+                content = retarget_board_yaml_som(content, sku)  # tan-cli#494 defect 2
                 content = retarget_board_yaml_cores(content, sku, family)
+            content = retarget_selftest_som_identity(content, sku, family)
+            content = retarget_selftest_soc_identity(content, sku, family)
+            content = retarget_example_build_target_comment(content, sku, family)
             files.append(PlannedFile(relative, content))
         _require_complete_tree(template_id, root, files)
     except OSError as err:
@@ -1385,15 +2020,71 @@ def read_example_tree(source_dir: Path) -> list[PlannedFile]:
     `ExampleReadError` instead of being copied corrupt. All shipped examples are
     text today -- and with build output pruned, that is true of a built-in-place
     checkout too.
+
+    tan-cli#1116 round 2: NOT an `is_dir()` pre-flight -- a first pass here
+    guarded `source_dir.is_dir()` with `except OSError`, reasoning that
+    `Path.is_dir()` swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`
+    (`pathlib`'s own `_IGNORED_ERRNOS`), not `EACCES`. That RAISING
+    BEHAVIOUR held on 3.12.3 AND 3.13.15 (`is_dir()` on a permission-denied
+    ancestor still raises `PermissionError`, `errno=13`, on both) and
+    stopped holding only in 3.14.7, where `is_dir()` swallows EVERY
+    `OSError` -- `EACCES` included -- and returns `False`; the
+    `_IGNORED_ERRNOS` CONSTANT the reasoning named is a release earlier
+    than that (gone from `pathlib` since 3.13, `AttributeError` probing for
+    it there), so a guard keyed on either "the constant still exists" or
+    "I measured the raise on the interpreters I have" is wrong on some
+    supported interpreter -- the boundary is behavioural, on 3.14 alone,
+    and does not track the constant's own removal a release earlier. So the
+    guarded pre-flight was version-dependent and silently dead only on
+    3.14.7 (measured: seam1's CI leg runs CPython 3.14.7 exactly). On that
+    interpreter a permission-denied parent fell through to
+    `is_source_dir is False`, which this function itself raises as
+    `not_found=True` -- the "user's typo" arm -- the exact wrong answer
+    this docstring's own words rule out two paragraphs up. The ELOOP shape
+    is a release EARLIER still: `is_dir()` on a symlink loop already
+    returns `False` (never raises) on 3.12.3 and 3.13.15 alike, so
+    `not_found` was wrong for THAT shape on every interpreter this function
+    ships on, not merely on 3.14 -- the version-independent rewrite below
+    fixes it everywhere at once rather than chasing a second boundary.
+
+    The fix: no stat call at all. `_example_source_files`'s `os.walk(...,
+    onerror=_raise)` already re-raises whatever `os.scandir` cannot get past
+    -- `FileNotFoundError` for a genuinely absent path, `NotADirectoryError`
+    for `source_dir` itself (or an ancestor) being a plain file,
+    `PermissionError`/other `OSError` (ELOOP included) for everything else
+    -- so calling it directly and classifying by the REAL exception is
+    version-independent by construction, the same shape `validate_document`
+    (`metadata_schema.py`) and `_resolve_hw_rev` (`perf_apply.py`) now use.
+    `FileNotFoundError`/`NotADirectoryError` keep the ORIGINAL "not a
+    directory" wording and `not_found=True` -- both are "this is not a real
+    example directory," a typo-shaped answer, exactly what the pre-existing
+    `is_dir() is False` branch covered for those two causes. Every other
+    failure (a permission-denied ancestor, an ELOOP symlink loop, a
+    non-UTF-8 file once inside a directory that DID open) is `not_found=
+    False`: a directory this cannot even read is a runtime failure, never
+    the customer's typo.
     """
-    if not source_dir.is_dir():
-        raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
     files: list[PlannedFile] = []
     try:
         for path in _example_source_files(source_dir):
             files.append(
                 PlannedFile(path.relative_to(source_dir).as_posix(), _read_verbatim(path))
             )
+    except (FileNotFoundError, NotADirectoryError) as err:
+        # tan-cli#1116 review round 3: str(err), not a hardcoded
+        # f"'{source_dir}' is not a directory." -- this handler catches
+        # whatever `os.walk`'s `onerror=_raise` re-raises from ANYWHERE in
+        # the tree it is walking, not only from `source_dir` itself. A
+        # NESTED directory that changes shape between being listed (as a
+        # directory, into `dirnames`) and being descended into (a genuine
+        # TOCTOU window `os.walk` does not close) raises this exact pair of
+        # exceptions from THAT path, not `source_dir` -- a hardcoded
+        # message blaming `source_dir` would misattribute the failure to
+        # the wrong directory. `str(err)` uses Python's own message, which
+        # names the REAL path that failed (`FileNotFoundError`'s and
+        # `NotADirectoryError`'s own `__str__` already include it), so this
+        # is accurate whichever path in the tree actually broke.
+        raise ExampleReadError(str(err), not_found=True) from err
     except (OSError, UnicodeDecodeError) as err:
         # UnicodeDecodeError is a ValueError, not an OSError -- catching only
         # OSError would let a binary file in an example escape as a traceback.

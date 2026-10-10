@@ -96,8 +96,9 @@ three tables below are NOT one thing:
     does not move HAND_PORT_PINNED_SDK_COMMIT, so this test stays red until a
     human ports it. That is the intended state, not a bug in the automation.
   * STRICT_LOADERS_PINNED_SDK_COMMIT is checked and NEVER moved automatically
-    -- see that block below for why (it names the introducing commit, and it is
-    where a known open gap is written down).
+    -- it pins a hand-port, so a human ports `scripts/strict_loaders.py` and
+    moves it with STRICT_LOADERS_HASH (see that block below; the open gap it
+    once recorded was closed by tan-cli#582).
 
 The automation does not weaken any of this. It proposes; it never merges, and
 a re-sync it could only partly apply opens a PR that says so and fails its own
@@ -513,35 +514,971 @@ from tests.conftest import sdk_root
 #: `v0.15.0-88-g88318e75`; `git tag --contains` lists both `v0.16.0-rc1` and
 #: `v0.16.0`). Corrected below to say what the commit actually is; the pin
 #: value itself is unchanged.
-PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.0 -- see above
+#:
+#: SECOND, INDEPENDENT REASON THIS PIN MUST MOVE AGAIN (tan-cli#791). None of
+#: the three bumps above carry ADR-0028's artefacts -- they moved this pin for
+#: reasons unrelated to the model-engine relocation, so `eb96112b` still
+#: predates every artefact ADR-0028 publishes on the alp-sdk side, all of
+#: which arrive together in alplabai/alp-sdk#1470
+#: (`feat/model-edge-ai-foundation` -> `dev`, still OPEN):
+#:
+#:   - `fff41087` -- `npu_toolchain.vela` on all six Alif Ensemble parts and
+#:     on i.MX 93, the per-part `--memory-mode` `tan.model.targets` resolves.
+#:   - `93f2e8f8`/`ab6968e2` -- `metadata/npu_ops/**`, the committed
+#:     op-support tables `tan.model.analyze` resolves by SKU.
+#:   - `ab6968e2` -- deletes `scripts/alp_model/` and regenerates alp-sdk's
+#:     three committed C fixtures through the relocated generator, moving
+#:     their banner to `python -m tan.model._gen_fixture`.
+#:   - `4fd5fab5` -- `tests/fixtures/models/person_detect_int8.tflite`, the
+#:     public real-model fixture the Vela proof compiles.
+#:
+#: Until this pin (and the other three sites named above) moves onto an
+#: alp-sdk commit carrying `npu_toolchain.vela`, twelve tests under
+#: `python/tests/model/` SKIP rather than fail, each naming the one artefact
+#: it is missing -- see `tests/conftest.py`'s capability predicates. Moving
+#: the pin is what makes them run again, and it must happen in the SAME merge
+#: window as alp-sdk#1470: an alp-sdk that has merged #1470 while tan still
+#: pins `eb96112b` leaves the whole relocated model-engine surface unmeasured
+#: in CI. Do NOT move it before then -- #1470 is unmerged, so there is no
+#: post-merge SHA to move it to.
+#: `eb96112b` -> `722320a1` (tan-cli#996, auditing `auto/planner-resync`'s
+#: machine-proposed re-sync; the placeholder that used to sit here made no
+#: claim about behaviour and is replaced below). ONE file in `PINNED_HASHES`
+#: moved: `scripts/alp_orchestrate/buildplan.py`, by alp-sdk#964 (the 3-way
+#: merge `planner_resync.py` already applied cleanly). COSMETIC, not
+#: behavioural: the entire upstream diff is `_slice_toolchain`'s own
+#: docstring gaining one clause ("...the SoM preset's `topology.<core>.
+#: toolchain` default, or a project's `cores.<core>.toolchain` override
+#: (issue #964)...") -- no code changed. The feature the docstring now
+#: names was already load-bearing in `tan/planner/` before this bump:
+#: `loader._resolve_topology_for_core` already merges a project's
+#: `cores.<id>` block (which can carry its own `toolchain:`) over the SoM
+#: preset's `topology.<id>` ("Per spec section 4.5: project's `cores.<id>`
+#: overrides the SoM preset's `topology.<id>`"), so `Slice.toolchain` was
+#: already resolving a per-project override the same way upstream's fix
+#: describes -- the docstring is catching up to behaviour `tan/planner/`
+#: already had, the same shape the `522ea320`/#1482 paragraph documents
+#: for `gen_zephyr_board.py` below. The other twenty `PINNED_HASHES`
+#: entries are unchanged in this range (only `buildplan.py` appears in
+#: `git diff --stat eb96112b..722320a1 -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `722320a1` -> `f1b1c9df`
+#: (tan-cli#1026, auditing `auto/planner-resync`'s machine proposal against a
+#: real `f1b1c9df` checkout). Two upstream commits touch this table's files in
+#: the range, both from `alp-sdk` on 2026-08-30/31:
+#:
+#:   - `ec8be8b9` feat(dts): give the E8 low-power bank, DMA2 event router and
+#:     BOD a devicetree presence (#1858) -- touches `partition.py` ONLY, and
+#:     only a devicetree-line citation inside `_has_real_dt_label`'s own
+#:     docstring: `ensemble_e8_peripherals.dtsi:503` -> `:688`, because that
+#:     commit inserted lines ahead of it in the dtsi. INERT: no code changed.
+#:   - `b3775381` fix(hw_info): warn at boot when the compiled SoM revision
+#:     disagrees with the module's EEPROM (#1862) -- touches `kconfig.py`
+#:     ONLY, and IS behavioural: `_emit_som_caps` now appends
+#:     `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"` to EVERY board's generated
+#:     `alp.conf`, unconditionally -- not scoped to boards with an EEPROM
+#:     wired, so E1M-NX9101 (no `on_module.eeprom` today) gets the symbol
+#:     too, on the "harmless now, not silently dropped later" rationale the
+#:     upstream commit message states. The Kconfig symbol is declared by
+#:     this SAME commit (`zephyr/kconfigs/core.kconfig:84`), so every
+#:     alp-sdk checkout new enough to resolve the `PINNED_SDK_COMMIT` pin
+#:     above also declares the symbol -- no undefined-Kconfig-symbol risk.
+#:     `tan/planner/kconfig.py`'s merged hunk is byte-identical to the
+#:     upstream diff.
+#:
+#: MEASURED, not assumed: this line moves emitted bytes, on every board.
+#: `python/tests/parity/test_planner_emit_parity.py`, serial, bound to the
+#: NEW pin `f1b1c9df`: 761 passed / 8 skipped / 0 failed -- tan's planner is
+#: byte-equal to upstream's new output. The SAME suite bound to the OLD pin
+#: `722320a1` (tan's already-ported new line vs. upstream's pre-move output):
+#: 393 failed / 368 passed / 8 skipped, every failure the same one inserted
+#: `CONFIG_ALP_SDK_SOM_HW_REV` line. The frozen oracle fixture
+#: (`python/tests/fixtures/planner_oracle/`) was re-captured against
+#: `f1b1c9df` in this same change for the identical reason -- see
+#: `PROVENANCE.txt` there and `PINNED_PLANNER_ORACLE_SDK_REF` below.
+#:
+#: The other twenty `PINNED_HASHES` entries are unchanged in this range (only
+#: `kconfig.py` and `partition.py` appear in
+#: `git diff --stat 722320a1..f1b1c9df -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged (behavioural -- see above)
+#:   scripts/alp_orchestrate/partition.py: merged (inert -- citation only)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - b3775381 fix(hw_info): warn at boot when the compiled SoM revision disagrees with the module's EEPROM (#1862)
+#:   - ec8be8b9 feat(dts): give the E8 low-power bank, DMA2 event router and BOD a devicetree presence (#1858)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `f1b1c9df` -> `0914da38`
+#: (tan-cli#1103, auditing `auto/planner-resync`'s machine proposal, PR #1103,
+#: against a real `0914da38` checkout). Three upstream commits touch this
+#: table's files in the range:
+#:
+#:   - `1d695037` fix(orchestrate): refuse an app-less baremetal core at
+#:     validate, not at build (#1897) -- touches `validate.py` ONLY, and IS
+#:     behavioural: `_enforce_loader_rules`'s `os: baremetal` arm now refuses
+#:     a slice whose (inherited or explicit) `app:` is one of the two stock
+#:     tokens (`alp-stock-shim`/`alp-image-edge`) instead of letting it
+#:     reach the executor as a real, wrong-target build command. Applied
+#:     cleanly on the tan side too (+48/-0, same shape); the extracted
+#:     `_enforce_baremetal_app_rule` sibling (split for the 50-line
+#:     function-count budget, tan-cli#1103) and
+#:     `tests/planner/test_baremetal_plan_emit_coverage.py`'s new
+#:     `test_a_baremetal_core_carrying_a_stock_token_is_refused_not_built`
+#:     port the upstream `tests/scripts/test_orchestrate_baremetal_slice.py`
+#:     coverage this commit shipped alongside itself.
+#:   - `f5c7ff5b` fix(orchestrate): an unresolved cores[].type yields
+#:     unresolved, not a crash and not a guess (#1852) (#1888) -- touches
+#:     `kconfig.py` + `topology.py`. This is alp-sdk BACK-PORTING tan's own
+#:     fix: the diff's own comments cite `tan-cli#914`/`#957`/`#962` by
+#:     name. Confirmed, not assumed -- all five upstream `isinstance`-guard
+#:     sites already have a behaviourally-equivalent guard on the tan side,
+#:     just relocated by tan-cli#870's `tan.core.os_class` extraction:
+#:
+#:       * `topology.py::_default_os_from_core_type` <->
+#:         `tan.core.os_class.default_os_from_core_type` -- same
+#:         `t = core_type.lower() if isinstance(core_type, str) else ""`.
+#:       * `topology.py::_runtime_class` <->
+#:         `tan.planner.topology._runtime_class` -- same idiom.
+#:       * `topology.py::_allowed_os_for_core` <->
+#:         `tan.core.os_class.allowed_os_for_core` -- same
+#:         `if not isinstance(core_type, str) or not core_type: return []`.
+#:       * `topology.py::core_os_topology`'s `soc_types` dict comprehension
+#:         <-> `tan.planner.topology.core_os_topology`'s `soc_types` -- same
+#:         `c["type"] if isinstance(c.get("type"), str) else ""`.
+#:       * `kconfig.py::_emit_inference`'s `vec`/`ctype` <->
+#:         `tan.planner.kconfig._emit_inference`'s `raw_vec`/`raw_type`
+#:         locals -- same `isinstance` guard.
+#:
+#:     So this half of the diff is a 3-way MERGE CONFLICT, not a judgement
+#:     call: `planner_resync.py` correctly refused to write either file
+#:     (the lines upstream edited no longer live where upstream edits them,
+#:     because tan refactored them out under #870), and nothing on the tan
+#:     side needed to change -- the equivalence above IS the audit.
+#:
+#: MEASURED, not assumed: `python scripts/capture_planner_oracle.py --sdk
+#: <checkout> --sdk-ref 0914da38ebbecac3c1546064dd506f7fafe0bfa7` produces a
+#: ZERO-file diff against the existing `tests/fixtures/planner_oracle/`
+#: fixture (99 boards, 693 emits, 1,129,537 bytes, unchanged) -- confirmed
+#: by scanning every `examples/**/board.yaml` at both `f1b1c9df` and
+#: `0914da38` for `os: baremetal`: zero hits at either ref, so #1897's new
+#: refusal has nothing in the corpus to fire on, and #1888's guards change
+#: no valid-input output. Only `PROVENANCE.txt`'s own `alp-sdk ref` line
+#: moved.
+#:
+#: The other eighteen `PINNED_HASHES` entries are unchanged in this range
+#: (only `kconfig.py`, `topology.py` and `validate.py` appear in
+#: `git diff --stat f1b1c9df..0914da38 -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: 3-way conflict, resolved -- see above (inert for tan)
+#:   scripts/alp_orchestrate/topology.py: 3-way conflict, resolved -- see above (inert for tan)
+#:   scripts/alp_orchestrate/validate.py: merged (behavioural -- see above)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 1d695037 fix(orchestrate): refuse an app-less baremetal core at validate, not at build (#1897)
+#:   - f5c7ff5b fix(orchestrate): an unresolved cores[].type yields unresolved, not a crash and not a guess (#1852) (#1888)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0914da38` -> `ff27f179`
+#: (tan-cli#1118, auditing `auto/planner-resync`'s machine proposal, which
+#: opened as an ISSUE rather than a PR because its computed diff against
+#: `python/` was EMPTY and its verdict was still `partial`).
+#:
+#: NOTHING IN THIS TABLE'S SURFACE MOVED, and that is verified rather than
+#: taken from the tracker's summary line. Two independent measurements:
+#:
+#:   - `gh api repos/alplabai/alp-sdk/compare/0914da38...ff27f179`'s FULL
+#:     changed-file list (79 paths across 12 commits) contains no path under
+#:     `scripts/alp_orchestrate/` at all.
+#:   - `test_relocated_planner_modules_match_the_pinned_sdk_audit` PASSES
+#:     with `ALP_SDK_ROOT` bound to a real `ff27f179` checkout, against the
+#:     UNCHANGED `PINNED_HASHES` literals below -- so all 21 entries re-hash
+#:     identically at the new ref, and the module SET is unchanged too (that
+#:     test pins the set as well as the contents). No literal in
+#:     `PINNED_HASHES` is touched by this change.
+#:
+#: This pin therefore moves on the same "in lockstep, so a later diff shows
+#: it staying current rather than falling behind for no stated reason" rule
+#: `HAND_PORT_PINNED_SDK_COMMIT` records for its own no-op ranges below. The
+#: ONE thing that did move in this range is a hand-port source
+#: (`scripts/alp_template.py`) -- audited at that pin, not this one.
+#:
+#: ALL FIVE REFS MOVE IN THIS ONE CHANGE, which is what the repo's only
+#: worked precedent for this situation does. `parity.yml`'s
+#: `PINNED_SDK_TAG` and `PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
+#: `sdk_parity` checkout `ref:`, and this file's two pins all land at
+#: `ff27f179` together, alongside the re-vendored
+#: `python/tan/templates/vendored/` tree.
+#:
+#: A first cut of this change moved only the two pins here and filed the
+#: other three as a follow-up. That was wrong, and MEASURED wrong rather
+#: than argued wrong: `tests/parity/test_planner_emit_parity.py::
+#: test_the_scaffold_mode_agrees_on_stdout_through_argv` byte-compares
+#: tan's `--emit scaffold` stdout against the BOUND SDK's own, and
+#: `parity.yml`'s `python-tests-shard` binds `ALP_SDK_ROOT` to
+#: `PINNED_SDK_TAG` on every leg. With the port landed and the tag left at
+#: `0914da38` that node was `3 failed, 1 passed` (`peripheral`, `sensor`,
+#: `edge-ai` -- tan correctly AHEAD of the tag), which reddened all three
+#: `python -- pytest across python/` required contexts. The follow-up PR
+#: would have been equally red on its own (`dev`'s `template.py` against an
+#: `ff27f179` root fails the same three), and `dev`'s merge-queue ruleset is
+#: `max_entries_to_build: 1`, so the two could never have been evaluated
+#: together. Split here means deadlock; the rule is simply that a
+#: BEHAVIOURAL planner port moves the parity tag with it.
+#:
+#: The precedent, corrected: an earlier revision of this comment cited
+#: "#996/#1001" as a comparable two-PR split. It is not. tan-cli#996 was
+#: CLOSED UNMERGED ("Superseded by #1001") and tan-cli#1001 landed the port,
+#: BOTH audit pins, `PINNED_SDK_TAG`, `PINNED_PLANNER_ORACLE_SDK_REF`,
+#: `ci.yml`'s `ref:`, `PROVENANCE.txt` and 21 vendored files in ONE PR.
+#: Verified from `gh pr diff 1001`, not from the issue titles.
+#:
+#: What the tag move cost here, measured:
+#:   - Scaffold re-vendor: 9 files across 6 of the 10 (template, sku) pairs,
+#:     one upstream cause (alp-sdk#1855). 17 of `scaffold_byte_parity.py`'s
+#:     62 `DELIBERATE_EDITS` retired -- they exist only to qualify the bare
+#:     referents the emit now rewrites itself, so upstream took over their
+#:     job rather than merely rewording around them.
+#:     `multicore-mailbox`'s `peer_build_path` is the proof: tan's own
+#:     hand-fix (tan-cli#1009) and alp-sdk#1855 produce BYTE-IDENTICAL
+#:     output (`./peer`), so that file needed no re-vendor, only the
+#:     redundant entry dropped. `scaffold_byte_parity.py --sdk <ff27f179>`
+#:     is now 10/10 PASS.
+#:   - TWO entries were NOT retired despite being flagged, and that
+#:     distinction had to be read per entry rather than batched:
+#:     `sensor`'s `historical_note_boards_pointer` (both SKUs) sits in the
+#:     same re-flowed paragraph as a retired sibling, so a `--theirs` merge
+#:     dropped it silently -- but it qualifies bare
+#:     `metadata/boards/*.yaml` mentions, and alp-sdk#1855 deliberately
+#:     leaves `metadata/` and `scripts/` alone. Re-applied, not retired.
+#:   - Frozen planner oracle: ZERO-file diff, as predicted. `python
+#:     scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#:     ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2` reproduced 693 emits over
+#:     99 boards (7 error-contract), 1,129,537 B -- byte-for-byte the
+#:     `0914da38` numbers. Only `PROVENANCE.txt`'s `alp-sdk ref` line moved.
+#:     That fixture freezes the per-board planner emits, which alp-sdk#1855
+#:     does not touch.
+#:   - kconfig-fixture and toolchain-lock: unchanged in range; neither
+#:     `metadata/toolchains.json` nor the kconfig golden appears in the
+#:     compare's 79-path file list.
+#:
+#:   no mirrored module moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `ff27f179` -> `eff266b6`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:   scripts/alp_orchestrate/sdk_compat.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `eff266b6` -> `15b2f32c`
+#: (tan-cli#1239/#1223, auditing `auto/planner-resync`'s machine proposal at
+#: `e52bec2a`). Four upstream commits touch `scripts/alp_orchestrate/` in
+#: this range, all four BEHAVIOURAL:
+#:
+#:   - `2fd045411` (alp-sdk#1365 split B, #1983): `aperture.py`, `carveout.py`,
+#:     `memregion.py`, `partition.py` gain the derived flash-class /
+#:     write-authority IPC-eligibility split (P1/P2). Already present in
+#:     `tan/planner/` AHEAD of this pin -- measured, not assumed: diffed all
+#:     four tan-side files against their 15b2f32c counterparts line-by-line;
+#:     every difference is a known relocation shape (`alp-sdk#1365` vs bare
+#:     `#1365` in a same-repo comment, `.som_metadata`/`alp_project` import
+#:     paths, the inlined TBD-string check vs the shared `sentinels.is_tbd`
+#:     upstream factored out), none behavioural. `aperture.py` itself was
+#:     the one entry in `EXEMPT_FROM_RELOCATION_TRACKING` -- that entry's own
+#:     comment named "the same day `PINNED_SDK_COMMIT` advances past split
+#:     B's merge" as when to retire it into this table instead; this is
+#:     that day.
+#:   - `8ac9b3707` (alp-sdk#1961/#1987, #2005): `loader.py`/`orchestrator.py`
+#:     (`_load_yaml`, `_resolve_app_path`, `_zephyr_app_dir`) wrap
+#:     `.resolve()`/`.is_file()` so a symlink-loop or otherwise-unresolvable
+#:     `app:`/`profile:` path raises a clean `OrchestratorError` instead of
+#:     an unhandled `OSError`/`RuntimeError` escaping the loader. Ported
+#:     verbatim by `auto/planner-resync`'s 3-way merge (the +19 `loader.py` /
+#:     part of the +172 `orchestrator.py` in `e52bec2a`); tan-cli#1237's
+#:     CPython-version split already covers the one platform difference
+#:     (`RuntimeError` on POSIX ELOOP vs a plain Windows `OSError`) in the
+#:     test suite.
+#:   - `3211dc850` (alp-sdk#1967, #2006) -- the commit tan-cli#1223 was filed
+#:     for: `YOCTO_MACHINE_UNBUILDABLE` + `UnbuildableYoctoMachineError` in
+#:     `orchestrator.py`, consulted by `_slice_command` before considering
+#:     `image`/`app`/`recipe` for a yocto slice (five AEN A32-cluster
+#:     MACHINEs, three distinct failure shapes -- see the dict's own
+#:     comment); `buildplan.py` catches it and emits `command: null` plus a
+#:     `yocto-machine-unbuildable` warning, the same "carry the slice, never
+#:     emit a broken command" shape `no-command` already used. Ported
+#:     verbatim by the same merge (the rest of the +172/+16).
+#:   - `f133da463` (alp-sdk#1980, #2008): `slugs.py`'s
+#:     `_slugs_from_on_module` stops auto-enabling a chip named by a
+#:     top-level scalar field (e.g. `secure_element:`) when the SAME chip's
+#:     `i2c_devices[].assembled` is `false` (hard DNP) or `optional` --
+#:     E1M-AEN801's Optiga (DNP, footprint shared with E1M-AEN803) was
+#:     reaching `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y` before this. Ported
+#:     verbatim (the +38 `slugs.py`).
+#:
+#: MEASURED, not assumed: re-captured the full 100-board oracle
+#: (`python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#: 15b2f32ce82b0ff088b850723e10f1d38f8060b4`) -- 700 emits (7 error-contract),
+#: 1,220,703 B (was 1,205,650). 87 of 700 files move; every one is explained
+#: by the three behavioural commits above and none by anything else: every
+#: AEN801-based board's `a32_cluster` yocto slice gains `command: null` plus
+#: the `yocto-machine-unbuildable` warning (#1967); every AEN801-based
+#: zephyr slice's `alp.conf` drops `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y`
+#: (#1980); `multicore/rpmsg-aen` and `multicore/mproc-mailbox`'s
+#: IPC-blocked reason text is reworded from "hasn't been HW-mapped yet" to
+#: naming the derived flash class / write authority (#1365 split B, already-
+#: ported `carveout.py`). alp-sdk's OWN much smaller
+#: `tests/parity/oracle/{audio_i2s-tone,multicore_rpmsg-aen}.build-plan.json`
+#: -- tan-cli#1223's own prediction, a DIFFERENT, alp-sdk-repo-internal
+#: fixture pair tan-cli has no file at that path for -- show the identical
+#: two-part diff (`command: null` + the warning): confirms #1223's
+#: prediction was correct, just not yet landed at the time of that issue's
+#: own last comment ("zero commits touch those two files", measured against
+#: a pre-`3211dc850` tree).
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to `15b2f32c` in this SAME change --
+#: see that pin's own comment for the two-commit audit
+#: (`scripts/alp_project_loader.py` INERT, `scripts/gen_zephyr_board.py`
+#: NOT: the rtc_alarm.risk dict crash and the missing V2N/V2M `.dts`
+#: generator, both found only once `PINNED_SDK_TAG` moved and
+#: `test_planner_emit_parity.py`'s live comparison actually exercised
+#: them). A first pass at this re-sync left it behind, reasoning the two
+#: audits were independent -- they are not: `test_planner_emit_parity.py`
+#: binds `ALP_SDK_ROOT` to `PINNED_SDK_TAG` and calls
+#: `emit_zephyr_board()`, the SAME hand-ported code
+#: `HAND_PORT_PINNED_SDK_COMMIT` audits, for every board. Moving
+#: `PINNED_SDK_TAG`/`PINNED_SDK_COMMIT` without also auditing and porting
+#: `gen_zephyr_board.py`'s own delta reds that comparison regardless of
+#: which freshness pin is left behind -- there is no shape in which the
+#: mirror moves and the hand-port audit can safely wait.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 2fd045411 feat(build): derive a memory region's flash class and split the two eligibility predicates (#1365 split B) (#1983)
+#:   - 3211dc850 fix(aen): make the A32 Yocto path honest about not building (#1967) (#2006)
+#:   - 8ac9b3707 fix(alp_orchestrate): make three user-supplied paths fail cleanly instead of crashing (#1961, #1987) (#2005)
+#:   - f133da463 fix(metadata): gen_board_header.py honours i2c_devices assembled: false (#1980) (#2008)
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `15b2f32c` -> `20fec7a7`
+#: (tan-cli#1248, auditing `auto/planner-resync`'s machine proposal at
+#: `7a8e619d`, tan-cli#1249, which exited "needs a human"). Three upstream
+#: commits touch `scripts/alp_orchestrate/` in this range:
+#:
+#:   - `96a382929` (alp-sdk#2030, #1365 item 3): NEW module `memory.py`
+#:     (`resolve_memory_regions`), plus the `__init__.py` re-export, the
+#:     `manifest.py` call and `models.py`'s `SystemManifest.memory_regions`
+#:     field -- `system-manifest.yaml` gains a `memory[]` pane, OMITTED
+#:     rather than emitted empty. BEHAVIOURAL. The bot 3-way-merged the three
+#:     existing files faithfully (measured: each file's upstream-vs-tan
+#:     relocation delta is line-for-line the same before and after its
+#:     merge) but, correctly, would not invent `memory.py` -- so its branch
+#:     imported a module that did not exist, and `import tan.planner` raised
+#:     `ImportError` there. Merging that proposal unread would have broken
+#:     every in-process plan render. `memory.py` is relocated by hand:
+#:     `from alp_project import resolve_memory_map` becomes
+#:     `from .som_metadata import resolve_memory_map` (the `carveout.py`
+#:     precedent); its code is AST-identical to upstream's.
+#:   - `23e265203` (alp-sdk#2010/#2022, pinning the mutants a post-merge
+#:     review of split B found): `memregion.py`'s `_region_size_bytes` flips
+#:     to `size_mib`-FIRST and records why kib-first misread the module's own
+#:     history; `aperture.py` gains a docstring note that the move from
+#:     `check_atoc_reservation.py` also hardened a `bool` guard; `carveout.py`
+#:     gains a reachability comment on its `ram` leg. The bot flagged
+#:     `memregion.py` and `aperture.py` as conflicts. Only `memregion.py` is
+#:     BEHAVIOURAL, and only for a region authoring BOTH `size_mib` and
+#:     `size_kib` as integers -- no preset under `metadata/e1m_modules/` does,
+#:     so no emitted byte moves -- and it is taken verbatim because this
+#:     table is a mirror and upstream's own `system-manifest-v1` schema now
+#:     documents `size_bytes` as "from `size_mib` (preferred)". tan's
+#:     previous kib-first docstring called that order "the alp-sdk#1365
+#:     split B fix"; #2022 is upstream saying otherwise. `aperture.py` needs
+#:     NO tan-side change: tan's code was already AST-identical to upstream's
+#:     at both pins (the guard predates `15b2f32c`; #2022 only documents it),
+#:     and the paragraph upstream rewrote was never in tan's relocated
+#:     docstring.
+#:   - `55fa73f04` (alp-sdk#2009/#2018): `carveout.py`'s IPC-blocked message
+#:     stops implying `write_authority: customer_runtime` rescues a region
+#:     CONTAINED in the aperture. Text-only, but emitted: it reaches
+#:     `ipc-contract-h`, `dts-reservations`, their embedded copies in
+#:     `build-plan.json`, and `system-manifest.yaml`'s `ipc[].reason`. Merged
+#:     cleanly by the bot.
+#:
+#: MEASURED, not assumed: re-captured the 100-board oracle at
+#: `20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0` -- 700 emits (7 error-contract,
+#: all `multicore/rpmsg-imx93`, none of them moved), 1,220,703 -> 1,343,563 B.
+#: 105 emit files move, and a script attributed every changed byte to one of
+#: three causes with zero left unexplained: `memory[]` added to all 99
+#: `system-manifest.yaml` goldens (#2030; 74 carry 7 rows, 25 carry 3);
+#: `hw_info.board_hw_rev: r1 -> r2` on 74 of them, which is not a planner
+#: change at all -- #2036 moves `metadata/boards/e1m-evk.yaml`'s
+#: `default_hw_rev` to the E1M-EVK-2626-R2 bench revision, and tan reads that
+#: data late; and #2018's rewording in 8 goldens across
+#: `multicore/rpmsg-aen` and `multicore/mproc-mailbox` (6 moved for it alone;
+#: the other two are those boards' `system-manifest.yaml` `ipc[].reason`,
+#: already counted in the 99).
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to `20fec7a7` in this SAME change, for
+#: the reason the `eff266b6 -> 15b2f32c` paragraph above already measured:
+#: `scripts/gen_zephyr_board.py` changed in range (#2036), and
+#: `test_planner_emit_parity.py` exercises that hand-port for every board once
+#: `PINNED_SDK_TAG` moves -- see that pin's own comment.
+#:
+#: `20fec7a7` -> `81a9d515` (tan-cli#1265). MEASURED, not assumed: re-captured
+#: the 100-board oracle at `81a9d515` and NOTHING MOVED -- 700 emits (7
+#: error-contract), 1,343,563 B, byte-for-byte the previous capture, with
+#: `git status` over `tests/fixtures/planner_oracle/` showing only
+#: `PROVENANCE.txt` itself modified. Zero changed bytes to attribute, and that
+#: is the expected result rather than a skipped step: the only
+#: `scripts/alp_orchestrate/` changes in range are `aperture.py`'s
+#: behaviour-neutral swap to the shared `is_whole_device_alias()` predicate and
+#: a `kconfig.py` docstring, while every emitted-byte change in the range lives
+#: in `scripts/gen_zephyr_board.py`, whose `zephyr-board` output this fixture
+#: does not capture (its modes are build-plan, system-manifest, ipc-contract-h,
+#: dts-reservations, dts-partitions, storage-mounts-c, tfm-sysbuild-conf).
+#: The board-tree side is covered instead by `test_planner_emit_parity.py`,
+#: which compares tan's in-process engine against the bound checkout
+#: byte-for-byte and is green at this pin -- it was 72 boards RED before the
+#: hand-port landed, which is what the port had to clear.
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to `81a9d515` in this SAME change, for
+#: the same reason as every prior move: `scripts/gen_zephyr_board.py` changed
+#: in range -- five times here (#2073, #2062/#2065, #2075, #2043, #2046) --
+#: and `test_planner_emit_parity.py` exercises that hand-port for every board
+#: once `PINNED_SDK_TAG` moves.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 81a9d515 fix(gen): give the AEN memory-map overlap check the whole-device-alias exception aperture.py has (#2073) (#2089)
+#:       `aperture.py`: `classify_region()` and `is_partition_inside_aperture()`
+#:       drop their inline `lo == full_lo and hi == full_hi` for the shared
+#:       `is_whole_device_alias()`. Upstream keeps that predicate in a FLAT,
+#:       package-free `scripts/whole_device_alias.py` so `gen_zephyr_board.py`
+#:       -- which lives OUTSIDE the `alp_orchestrate` package -- can import it
+#:       without dragging in the orchestrator or creating a package-to-generator
+#:       import loop. Neither hazard exists here: both tan callers are inside
+#:       `tan.planner`, so it is relocated as the ordinary sibling module
+#:       `tan/planner/whole_device_alias.py` and tracked in HAND_PORT_HASHES
+#:       below, NOT in this table -- its upstream source is not under
+#:       `scripts/alp_orchestrate/`. Behaviour is identical on both sides: the
+#:       same both-edge comparison, still evaluated BEFORE the subset check.
+#:   - 80614020 fix(aen): correct the OSPI0 NOR and E1M-EVK encoder part identities (#2062, #2065) (#2087)
+#:       `kconfig.py`: docstring only. `_emit_soc_summary`'s prose stops saying
+#:       E1M-AEN801 carries "256 Mbit HyperRAM only, NOR left DNI/optional" and
+#:       says it populates neither. No emitted byte moves; carried verbatim by
+#:       `auto/planner-resync`'s own 3-way merge (tan-cli#1265).
+#:
+#: `81a9d515` -> `c81cb5db` (tan-cli#1269 proposed the mechanical half at
+#: `0fe9958d`; this pin move + the four conflicts below are the human half,
+#: tan-cli#1269's own successor PR). FOUR upstream commits touch this
+#: table's files; `auto/planner-resync` merged one cleanly and flagged four
+#: hunks (across three files) as conflicts because they land inside a
+#: paragraph tan had already reworded on relocation -- read one by one:
+#:
+#:   - `6e5101c0` (#2053, resolve `mram_main.base` to `0x80000000` on all
+#:     seven AEN presets) -- DOCSTRING ONLY on the tan side, in every file
+#:     it touches. `aperture.py`'s `is_partition_inside_aperture` and
+#:     `carveout.py`'s `_region_ipc_eligibility` both stop describing
+#:     `mram_main`'s `base` as presently `"TBD"` and instead say #2053
+#:     resolved it, `carveout.py` additionally naming the closed-both-sides
+#:     reasoning (flash-class once resolved; already disqualified via
+#:     `write_authority: composite` before). No emitted byte moves: neither
+#:     function's CODE changed upstream, only the prose describing a branch
+#:     `is_whole_device_alias()`/`classify_region()` already took correctly
+#:     on both sides of the resolution. `partition.py` already carries the
+#:     equivalent update (`#2053 resolved its base to 0x80000000`,
+#:     `partition.py:189`), landed by the bot's clean merge alongside #2088
+#:     below -- confirmed present, not re-added.
+#:   - `f6b93a65` + `fe4c3563` (#2197, the IMPLICIT-ENCODING drain) --
+#:     BEHAVIOURAL, `buildplan.py` and `kconfig_symbols.py`.
+#:     `buildplan.py::_sdk_commit` adds `encoding="utf-8"` to the `git
+#:     rev-parse --short HEAD` spawn that already had `text=True` (tan's own
+#:     `env=spawn_env()` divergence, tan-cli#797, is unaffected and kept).
+#:     `kconfig_symbols.py::_load_board_symbols` adds `encoding="utf-8",
+#:     errors="replace"` plus `PYTHONIOENCODING=utf-8` (folded into tan's
+#:     own `spawn_env()` overrides rather than `os.environ.copy()`, since
+#:     tan already restores `LD_LIBRARY_PATH` there) to BOTH `west build`
+#:     spawns. Real fix, not cosmetic: without an explicit encoding,
+#:     `text=True` decodes the child's stdout/stderr with
+#:     `locale.getpreferredencoding()`, which is not UTF-8 on every
+#:     supported host (e.g. Windows' legacy code pages); a `west build`
+#:     failure whose Kconfig/CMake diagnostic contains a non-ASCII path or
+#:     quote character could raise `UnicodeDecodeError` INSIDE
+#:     `subprocess.run` itself before `_load_board_symbols` ever sees a
+#:     `returncode`, turning a normal build failure into an unhandled crash
+#:     instead of the `OrchestratorError` this function means to raise.
+#:     `errors="replace"` keeps that decode from ever raising again.
+#:   - `ad9ce6bd` (#2088, composite alias) -- BEHAVIOURAL, `partition.py`
+#:     only, already landed by the bot's clean 3-way merge and RE-VERIFIED
+#:     here, not re-applied: `_RUNTIME_WRITABLE_AUTHORITY` /
+#:     `_DEFERRING_ALIAS_AUTHORITY` / `_composite_alias_coverage_gap` are
+#:     present verbatim (`partition.py:45,62,273`), and `_resolve_flash_device`
+#:     refuses a runtime mount on a region whose `write_authority` is
+#:     neither `customer_runtime` nor a `composite` alias that verifiably
+#:     tiles its own window. Confirms `HAND_PORT_HASHES`'s `whole_device_alias.py`
+#:     hash below is unaffected (it is a SEPARATE upstream source, `scripts/
+#:     whole_device_alias.py`, byte-identical between `81a9d515` and
+#:     `c81cb5db` -- re-hashed, not assumed).
+#:
+#: RE-MEASURED against the 100-board planner oracle, not assumed inert:
+#: `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF` (`.github/workflows/
+#: parity.yml`) and `ci.yml`'s `sdk_parity` checkout `ref:` move to this
+#: SAME commit, in lockstep, per this repo's own precedent (tan-cli#1268/
+#: `3344475e`'s identical six-site move) -- an earlier draft of this PR
+#: left them behind, reasoning that neither #2053 nor #2197 changes
+#: `--emit` bytes; that reasoning covered only 2 of the 4 commits and
+#: missed that #2088 (`ad9ce6bd`) is ALSO in this range. It IS
+#: behavioural (see `partition.py`'s own docstring/`_composite_alias_
+#: coverage_gap` above), so its inertness on THIS oracle capture had to be
+#: measured, not assumed, before either pin could move.
+#: `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#: c81cb5db9945c8f448a7bb952d374f874e2f42c0` re-captured the fixture: 100
+#: boards, 700 emits (7 error-contract) -- unchanged counts -- but a REAL
+#: 80-of-700-file diff, 1,343,563 -> 1,323,853 B. Every changed byte
+#: attributes to #2053 alone: `mram_main`'s `memory[]` pane entry flips
+#: `kind: unresolved`/`status: unresolved`+`reason:` to `kind: flash`/
+#: `status: ok`/`base: 2147483648` on all 74 AEN-preset
+#: `system-manifest.yaml` goldens, and the `mram_main` clause of the
+#: IPC-blocked message rewords (still blocked, clearer reason) in the 6
+#: goldens across `multicore/mproc-mailbox` and `multicore/rpmsg-aen`
+#: that also carry copies of that string in `build-plan.json` /
+#: `dts-reservations.dtsi` / `ipc-contract-h.h` (74 + 6 = 80). #2053 alone
+#: flips `classify_region`'s verdict on `mram_main` (its extent now equals
+#: the aperture exactly, the whole-device alias, once resolved); #2088's
+#: composite-alias verification runs against every one of those same
+#: boards but contributes NO byte delta of its own: `connectivity/production-
+#: deployment` is the only one of the 100 boards whose `board.yaml`
+#: targets a `storage[].flash_device:` at a `composite` alias
+#: (`flash_device: mram_main`, five entries), and its `storage-mounts-
+#: c.c` / `build-plan.json` bytes are IDENTICAL either side of this pin
+#: move -- the coverage-gap verification passes cleanly against that
+#: board's `memory_map:` both before and after, so the accepted case does
+#: not move; only the newly-resolved classification's own prose does.
+#: Re-measured, not assumed: bound to `c81cb5db`,
+#: `tests/parity/test_planner_emit_parity.py` +
+#: `tests/parity/test_planner_axis_build_plan_parity.py` +
+#: `python/tests/planner/test_storage_region_bounds.py` +
+#: `python/tests/planner/test_storage_dt_label_verification.py` together
+#: report 977 passed, 10 skipped, 0 failed (measured twice: once citing
+#: the reviewing pass's own number, once independently re-run for this
+#: change -- both agree). `python/tests/planner/test_storage_write_
+#: authority.py` (new, this change) hand-ports alp-sdk's
+#: `tests/scripts/test_orchestrate_storage_write_authority.py` (`ad9ce6bd`)
+#: directly against `_resolve_flash_device()` / `_composite_alias_
+#: coverage_gap()`: 15 passed. alp-sdk's own edits to `tests/scripts/
+#: test_orchestrate_storage_region_bounds.py` and `test_orchestrate_
+#: storage_dt_label_unverified.py` in the same commit touch test
+#: functions (`test_a_named_alternative_with_a_real_dt_label_round_trips`,
+#: `test_mram_main_isolated_repro`,
+#: `test_remedy_names_a_verified_alternative_when_one_exists`) that have
+#: NO tan-side counterpart to edit -- `test_storage_region_bounds.py`'s
+#: own module docstring already scopes it to exactly two P1/P4 gaps
+#: (alp-sdk#2010) and defers the rest of that upstream file "a separate
+#: unit of work"; `test_storage_dt_label_verification.py` hand-ports a
+#: DIFFERENT pair of defects (alp-sdk#1484/#1556) -- its similarly-spelled
+#: upstream source, `test_orchestrate_storage_dt_label_UNVERIFIED.py`, is
+#: a distinct file this test does NOT mirror -- and is hermetic by
+#: design, never reading a bound checkout's `memory_map:` at all. A
+#: no-op port with evidence, the same shape as `alp_template.py::
+#: validate()` above.
+#:
+#: `c81cb5db` -> `79c834e65` (this change, auditing alp-sdk#2322/#2321 --
+#: mirrors alp-sdk#2311/#2312 respectively; CORRECTED per review, replacing an
+#: earlier revision of this paragraph that misattributed the kconfig.py
+#: docstring move and wrongly claimed `0767baacb` touches nothing tracked --
+#: both claims below are re-derived from `git log`/`git show` output actually
+#: run against the bound checkout, not assumed from commit subjects). TWO
+#: upstream commits touch `scripts/alp_orchestrate/` in the range
+#: (`git log c81cb5db..79c834e65 -- scripts/alp_orchestrate/`: exactly these
+#: two hits):
+#:
+#:   - `0767baacb` (#1470, ADR-0028 proposed) BEHAVIOURAL ON NEITHER FILE IT
+#:     TOUCHES, confirmed by reading its actual diff rather than its subject
+#:     line (a `feat(metadata)` squash-merge that also happens to touch this
+#:     tree): `kconfig.py` gets the `_emit_inference` docstring reword
+#:     ("the E8 U85 on the shared HG subsystem" -> "the E8 U85, a shared
+#:     SoC-level NPU -- Alif block name NPU_HG") -- THIS is the commit that
+#:     introduces that line, not `79c834e65` as an earlier revision of this
+#:     paragraph said. `partition.py` gets a "KNOWN HAZARD, deliberately not
+#:     fixed here (#915 follow-up)" COMMENT ONLY, inserted ahead of
+#:     `_resolve_flash_device`'s `on_module.ospi_memories` branch, documenting
+#:     the exact gap #2311 later closes with real code -- no code changed by
+#:     this commit, and the comment itself is gone (superseded, not merely
+#:     edited) once `79c834e65` lands the actual guard.
+#:   - `79c834e65` (#2311/#2322) BEHAVIOURAL, and already ported ahead of this
+#:     pin bump: `loader.py`'s `storage[].flash_device` cross-field check and
+#:     `security.psa.{its,ps}_storage` cross-check, plus `partition.py`'s
+#:     `_is_ospi_key_unassembled` + its `_known_flash_devices()`/
+#:     `_resolve_flash_device()` call sites (replacing `0767baacb`'s hazard
+#:     comment above with the real fix), all landed on
+#:     `fix/alp-sdk-2311-partition-unassembled-flash` ahead of this bump
+#:     (commits `4c9d4650`, `08f59a82`, `36e71bc4`). Re-diffed line-for-line
+#:     against the upstream blob at this pin: identical bodies, same call
+#:     sites, same docstrings cross-referencing "#2311" on both sides.
+#:
+#: `kconfig.py`'s one changed line is COSMETIC (docstring wording only, no
+#: emitted byte moves -- the emitting code already used this vocabulary) --
+#: `tan/planner/kconfig.py` already carried this exact wording before this
+#: audit (verified: an earlier port already matched it), so this bump
+#: re-freezes no unaudited behavioural delta on that file either.
+#:
+#: TWO further upstream commits in the same range touch HAND_PORT_HASHES
+#: sources, not this table -- see `HAND_PORT_PINNED_SDK_COMMIT`'s own
+#: paragraph below for both:
+#:
+#:   - `bf602754a` (#2312/#2321) touches ONLY `scripts/alp_project_loader.py`
+#:     (confirmed: `git show --stat bf602754a -- scripts/alp_orchestrate/
+#:     scripts/gen_zephyr_board.py scripts/alp_project_loader.py` shows one
+#:     file, `+45/-2`). NO TAN-SIDE PORT NEEDED -- see below.
+#:   - `b1b89a659` (#2288) touches ONLY `scripts/gen_zephyr_board.py`
+#:     (confirmed the same way: one file, `+24/-13`). PORTED -- see below.
+#:
+#: Verified via `python/scripts/planner_resync.py --sdk-root <79c834e65
+#: checkout> --to 79c834e65`: reports `kconfig.py` merges cleanly (cosmetic,
+#: confirmed already present verbatim in tan's copy) and `loader.py`/
+#: `partition.py` as 3-way-merge "conflicts" -- which is the tool's
+#: "upstream's hunk already landed on tan's copy, so there is no clean
+#: context to merge onto" signal, not unported drift: read line-for-line
+#: above, both files' bodies match upstream byte-for-byte at the changed
+#: regions.
+#:
+#: The frozen planner-oracle fixture (`python/tests/fixtures/planner_oracle/`)
+#: and `.github/workflows/parity.yml`'s `PINNED_SDK_TAG` /
+#: `PINNED_PLANNER_ORACLE_SDK_REF`, plus `ci.yml`'s `sdk_parity` checkout
+#: `ref:`, all move to `79c834e65` in the SAME change as this pin -- per this
+#: repo's own precedent (tan-cli#1275/#1239: a behavioural planner port moves
+#: every lockstep site together, never a subset). Re-captured: 100 boards,
+#: 700 emits (692 unchanged + 1 new `connectivity/camera-mjpeg-stream` board +
+#: 7 error-contract; `v2n/v2n-rtc-multi-alarm` retired upstream in this same
+#: range), a REAL diff attributable to three things and nothing else: (1)
+#: `production-deployment`'s `ps_storage: ospi0` -> `mram_main` -- alp-sdk's
+#: OWN example board.yaml was fixed to stop tripping the #2311 guard it now
+#: enforces; (2) `v2n-brd-i2c-bringup`/`v2n-secure-element-sign`/
+#: `v2n-temp-sensor`'s `a55_cluster`/`m33_sm` slice shapes, from #2288's
+#: BRD_I2C-to-CA55 move (the A55 core gains a real app, `m33_sm` becomes
+#: `alp-stock-shim`); (3) `audio-noise-suppression`/
+#: `ai-object-detection-realtime`'s dropped `CONFIG_ALP_TFLM_DRP_AI` library
+#: line -- metadata-driven (`metadata/npu_ops/**`/#1470), not a `tan/planner/`
+#: code change, since `kconfig.py`'s only code-adjacent delta in this range is
+#: the docstring reword audited above.
+#:
+#: `79c834e65` -> `34c11c9de` (tan-cli#1278 re-sync, carrying tan-cli#1295 and
+#: #1297). EIGHT of the 23 tracked modules changed (`git diff --stat
+#: 79c834e6..34c11c9d -- scripts/alp_orchestrate/`; the other fifteen hashes
+#: re-measured unchanged, and the module SET is unchanged -- no new or deleted
+#: `scripts/alp_orchestrate/*.py`). SEVEN upstream commits touch this tree;
+#: classified by reading each diff, not its subject line:
+#:
+#:   - `da6c08db4` (#2469) BEHAVIOURAL, `kconfig.py::_soc_cpu_complement`:
+#:     every core entry in `CONFIG_ALP_SDK_SOC_CPUS` gains a `|<cluster>`
+#:     suffix from the SoC JSON's `zephyr_cpucluster`, so `alp_banner.c` can
+#:     mark the core the image is BUILT for rather than the board.yaml
+#:     slice's. Ported verbatim. Changes every Zephyr slice's `alp.conf`.
+#:   - `423e0100d` (#866) BEHAVIOURAL, `orchestrator.py::_slice_command`: a
+#:     `--sysbuild` slice now gets `-D<image>_EXTRA_CONF_FILE=<alp.conf>`
+#:     (image = basename of `_zephyr_app_dir(slice.app)`, sysbuild's own
+#:     naming rule) instead of NO conf at all -- the plan-native half of #866
+#:     that retires every example's `--emit zephyr-conf --core` CMakeLists
+#:     bridge, which is why `python/tan/templates/vendored/` is re-vendored in
+#:     this same change (a scaffold keeping the bridge would get `alp.conf`
+#:     twice). Ported verbatim. `kconfig.py` gets a one-line comment reword in
+#:     the same commit (cosmetic).
+#:   - `ed430e271` (#2316) BEHAVIOURAL, `loader.py::_validate_cross_fields`
+#:     + new `_is_i2c_chip_unassembled`: `security.psa.attestation_root:
+#:     optiga_trust_m` is REFUSED on a SKU whose preset names the part but
+#:     marks every `on_module.i2c_devices` entry for it `assembled: false`
+#:     (E1M-AEN801/803) -- #2311's OSPI-guard shape applied to OPTIGA.
+#:     tan-cli#1295. Ported verbatim; `python/tests/planner/
+#:     test_security_psa_optiga_population.py` pins it.
+#:   - `7bde5112d` (#2597) BEHAVIOURAL, `loader.py::load_board_yaml`: new
+#:     `sku=` keyword overriding `som.sku` after schema validation, for
+#:     examples built per sibling SKU. Ported verbatim (tan's own
+#:     `skip_advisories=` keyword kept after it); no tan caller passes it yet,
+#:     so no emitted byte moves. `test_load_board_yaml_sku_override.py`.
+#:   - `169a9be38` (#2328) PERFORMANCE, same semantics, `sdk_compat.py::
+#:     load_family_table`: `yaml.safe_load` -> `strict_loaders.fast_safe_load`
+#:     (libyaml when PyYAML has it). Ported, importing tan's own
+#:     `.strict_loaders` -- the same commit's `strict_loaders.py` half is the
+#:     STRICT_LOADERS_* pin below, moved with this one.
+#:   - `29df99f9e` (#2024, som-preset schema v2) COSMETIC on this tree:
+#:     `som-preset-v1.schema.json` -> `-v2` in four docstrings (`carveout.py`,
+#:     `memory.py`, `secure.py`, `topology.py`) and one `kconfig.py` comment
+#:     drops the deprecated `npu_population` mention. The behavioural half
+#:     of #2024 is in a HAND_PORT source (`alp_project_loader.py`'s
+#:     `write_authority` on derived rows -- see HAND_PORT_PINNED_SDK_COMMIT)
+#:     and in tan-native code (tan-cli#1297, `SOM_SCHEMA_VERSION` 1 -> 2).
+#:   - `42b837a2a` (#2556) COSMETIC: `kconfig.py::_emit_cross_core_shmem_
+#:     cache`'s docstring re-explains why `cacheable: true` rpmsg is refused
+#:     (no per-channel cache field any more); no code change.
+#:
+#: RE-MEASURED against the planner oracle, not assumed: re-captured at
+#: `34c11c9de` -- 102 boards, 714 emits (7 error-contract), 1,355,493 B (was
+#: 100/700/1,334,485). Every changed byte attributed by a YAML/JSON-level
+#: compare (long strings diffed line by line), nothing left over:
+#: `da6c08db4` -- the `CONFIG_ALP_SDK_SOC_CPUS` line in 97 changed
+#: `build-plan.json` goldens (169 lines); `29df99f9e` -- `write_authority` on
+#: derived memory rows in 24 `system-manifest.yaml` goldens (72 leaves);
+#: `423e0100d` -- 3 sysbuild slice commands in 2 `build-plan.json`s
+#: (`connectivity/iot-fleet-ota`, `connectivity/production-deployment`).
+#: The rest is alp-sdk DATA in the same range, read by unchanged planner code:
+#: `2b01e86e8` + `b8a45ed41` (V2N/V2M `default_hw_rev: r2` and the composed
+#: `board_datecode` `2625-<rev>`) -- `som_hw_rev` / `CONFIG_ALP_SDK_SOM_HW_REV`
+#: on 24 V2N-family boards; `ed430e271`'s own `production-deployment`
+#: board.yaml move to `attestation_root: tfm_internal`; `7e54afd34` (#2421,
+#: shared MCUboot dev key path) on the two sysbuild boards; `01c347539`
+#: (`iot-dashboard` drops `st7789`); `ce8f3573e` (`v2n-m1-ros-perception`
+#: E1M-X EVK parts); and two new boards, `v2n/v2n-pmic-inspect`
+#: (`905b210a0`) and `v2n/v2n-drpai-inference` (`f958b6083`).
+#:
+#: `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309 re-sync). FIVE of the 23 tracked
+#: modules changed and the module SET grew by TWO: `ownership.py` and
+#: `linux_ownership.py` are new upstream, relocated byte-identical and added
+#: to PINNED_HASHES below (`git diff --stat 34c11c9d..ac0e2a5e --
+#: scripts/alp_orchestrate/`; the other eighteen hashes re-measured
+#: unchanged). Neither new module imports anything outside the package, and no
+#: mirror file gained an import of a flat `scripts/*.py`. SIX upstream commits
+#: touch this tree (`git log --oneline 34c11c9d..ac0e2a5e --
+#: scripts/alp_orchestrate/`); classified by reading each diff, not its
+#: subject line:
+#:
+#:   - `9baf8ab9c` (#2735) BEHAVIOURAL, `kconfig.py::_slice_local_conf`: a
+#:     `${NAME}` `ota.server.tenant` no longer emits a self-referencing
+#:     `MENDER_TENANT_TOKEN ?= "${...}"`; a comment line points at the
+#:     documented local.conf override instead. Yocto slices only.
+#:   - `d7d17c7ae` (#2705) BEHAVIOURAL, `buildplan.py`: every build-plan now
+#:     carries a top-level `deferredPlaceholders` (always present, additive
+#:     under schemaVersion 1), and `emit_build_plan` refuses a placeholder that
+#:     collides with a plan token, is not upper-case, is absent from the
+#:     project's board.yaml or sits outside `configArtefacts`. `kconfig.py::
+#:     _slice_alp_conf` gains `_refuse_live_kconfig_placeholders`: a `${NAME}`
+#:     on a LIVE Zephyr Kconfig line is refused (a commented hint line is
+#:     not); the `_split_server_url`/`_emit_ota` docstrings are reworded to
+#:     match (cosmetic). `test_build_plan_deferred_placeholders.py`.
+#:   - `e856e7f53` (#2677) BEHAVIOURAL, `kconfig.py`: new
+#:     `_inference_auto_order` reads the SoM preset's `inference.auto_order`
+#:     and emits `CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER="..."` in the Zephyr
+#:     inference block and `ALP_SDK_INFERENCE_AUTO_ORDER ?= "..."` in a Yocto
+#:     slice's local.conf.
+#:   - `8d17d15b7` (#2674) BEHAVIOURAL, NEW `linux_ownership.py` (the
+#:     `--emit linux-ownership-dts` renderer, an `alp_project.py` mode) and a
+#:     refactor of `ownership.py`'s doc lookup (`_ownership_doc_path`/
+#:     `ownership_doc_rel`) plus override acceptance for an instance with an
+#:     `m33` candidate and an `m33:` block.
+#:   - `5a46a9ec8` (#2673) BEHAVIOURAL, NEW `ownership.py`; `loader.py::
+#:     load_board_yaml` resolves board.yaml `ownership:` against the family's
+#:     `core-ownership.yaml` (`BoardProject.ownership`, a new `models.py`
+#:     field), `SystemManifest.to_dict` emits it additively as `ownership:`,
+#:     and `kconfig.py::_slice_alp_conf` appends the Kconfig of assignable
+#:     peripherals a project hands to the M33 core. `test_core_ownership.py`.
+#:   - `319812a16` (#2670) BEHAVIOURAL (a filter), `slugs.py`: `dxm1` joins
+#:     `_ON_MODULE_NON_CHIP_FIELDS`, so the new `on_module.dxm1` strap/reset
+#:     sub-block is never read as a chip slug.
+#:
+#: RE-MEASURED against the planner oracle, not assumed: re-captured at
+#: `ac0e2a5e0` -- 103 boards, 721 emits (7 error-contract), 1,371,793 B (was
+#: 102/714/1,355,493). Every changed byte attributed by a YAML/JSON-level
+#: compare (long strings diffed line by line) over the 99 boards present in
+#: both captures, nothing left over: `d7d17c7ae` -- `deferredPlaceholders`
+#: added to every one of their 98 `build-plan.json` goldens
+#: (`["MENDER_TENANT_TOKEN"]` on `connectivity/iot-fleet-ota` and
+#: `connectivity/production-deployment`, `[]` on the other 96; the four new
+#: boards' plans carry it too, 102 of 102); `e856e7f53` -- `CONFIG_ALP_SDK_INFERENCE_AUTO_ORDER`
+#: in 15 plans' Zephyr `alp.conf` and `ALP_SDK_INFERENCE_AUTO_ORDER ?=` in 51
+#: plans' Yocto local.conf (the same commit adds `inference.auto_order` to the
+#: presets); `5a46a9ec8` -- `ownership:` added to 23 V2N-family
+#: `system-manifest.yaml` goldens. alp-sdk DATA read by unchanged code:
+#: `ac62fdc6c` (#2653, INA228 in the EVK I2C inventory) --
+#: `CONFIG_ALP_SDK_CHIP_INA228` in 21 plans. Board set: `78a71e69b` (#2669)
+#: retires `v2n/v2n-emmc-block-stat`, `v2n/v2n-ethernet-dual` and
+#: `v2n/v2n-xspi-flash-readwrite`; `8c5e1e23f` (#2678) adds
+#: `v2n/v2n-gpu2d-compose`, `8de1d0ca6` (#2672) `v2n/v2n-ros2-som-temperature`,
+#: `6916ab968` (#2668) `v2n/v2n-soc-temperature`, `642e81ea3` (#2676)
+#: `v2n/v2n-two-models`. NOT VISIBLE in the oracle, by construction:
+#: `9baf8ab9c` (no example has a Yocto slice with a `${NAME}` tenant -- both
+#: Mender examples' `MENDER_TENANT_TOKEN` text sits on commented Zephyr hint
+#: lines, unchanged), `d7d17c7ae`'s live-line refusal (no example trips it),
+#: `5a46a9ec8`'s M33 ownership Kconfig (no example assigns a peripheral to
+#: m33) and `319812a16` (a filter).
+#:
+#: RE-MEASURED again at `2d2a85333` (tan-cli#1216) -- 104 boards, 728 emits
+#: (7 error-contract), 2,539,625 B (was 103/721/1,371,793). Every changed byte
+#: attributed, none left over: #2771 -- the additive `alp.overlay` and
+#: `cmake-args.txt` `configArtefacts` entries on every zephyr/baremetal slice
+#: of the 99 changed `build-plan.json` goldens (the whole byte growth); board
+#: set -- one NEW board, `multicore/microros-ros2-v2n` (`042527fd0`, #2721; 7
+#: added files). The V2N board-tree changes (#2747, #2685) are not an oracle
+#: mode, and `loader.py`'s itcm refusal is exercised by no example.
+#:
+#: RE-MEASURED again at `030de105d` (tan-cli#1401) -- 104 boards, 728 emits
+#: (7 error-contract), 2,540,037 B (was 2,539,625). The only changed bytes are the
+#: plan's `sdkVersion` `"0.16.0"` -> `"0.17.0-rc1"` in 103 `build-plan.json`
+#: goldens (the `v0.17.0-rc1` cut, #2763); #2774's console floor is exercised
+#: by no example plan: the re-capture shows no other changed byte.
+#:
+#: RE-MEASURED again at `6159a7b1a` (tan-cli#1216) -- 103 boards, 721 emits
+#: (0 error-contract), 3,046,444 B (was 104 / 728 / 7 / 2,540,037). Every changed
+#: byte is attributed: +171 pairs of `alp_hw_info_build.h` / `alp-west-libs.yml`
+#: `configArtefacts` entries across 100 `build-plan.json` goldens (#2778), and
+#: the 7 `.error` goldens of `rpmsg-imx93` deleted with the example (#2782).
+#: The plan's `sdkVersion` did not move.
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
+#: supersedes the bot's #1310 proposal for the same range, which could not
+#: apply the hand-ports and would have broken two things -- see below).
+#:
+#:   * `buildplan.py` / `__init__.py` -- ported: `_slice_dts_overlay`,
+#:     `_slice_cmake_args_artefact`, `_v1_shaped_project`,
+#:     `DtsOverlayUnavailable`, and the additive `alp.overlay` /
+#:     `cmake-args.txt` `configArtefacts` (alp-sdk#2771). tan adaptations: the
+#:     DTS emitter is `tan.planner.project_emit.dts`, which RAISES
+#:     `DtsOverlayUnavailable` for a missing header (upstream `sys.exit`s and
+#:     converts), and `_sku_family` comes from `tan.planner.som_metadata`.
+#:     #1310's clean 3-way merge kept upstream's sibling-package import
+#:     (`alp_project_emit`), which does not exist in tan.
+#:   * `loader.py` -- upstream (alp-sdk#2762, tan-cli#1350) refuses
+#:     `diagnostics.link: itcm`, because alp-sdk's planner cannot emit an
+#:     ITCM-linked image. tan's planner implements it, so the refusal is NOT
+#:     taken (#1310 took it, which would make `tan build` refuse the knob tan
+#:     itself implements); only the pinned hash moves.
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `2d2a8533` -> `030de105` (tan-cli#1401).
+#: Three mirrored files changed in range, all from alp-sdk#2774 ("diagnostics.
+#: console: ram no longer shrinks an app-set RAM console size"); the rest of the
+#: range (#2763 v0.17.0 release merge, #2772 Riverdi panel, #2776 seam1
+#: allowance, the version bump) touches no planner file:
+#:
+#:   * `models.py` -- `BoardProject.source_dir` (the board.yaml's directory).
+#:     Ported verbatim (the resync tool merged it cleanly).
+#:   * `loader.py` -- `source_dir=Path(path).resolve().parent` on the project.
+#:     Ported by hand (the tool reported a conflict: tan's loader carries the
+#:     `link_target.apply_link_target` call upstream does not).
+#:   * `kconfig.py` -- `_RAM_CONSOLE_MIN_SIZE`, `_app_ram_console_size` (reads the
+#:     slice's own `prj.conf`), and `_emit_console`/`_emit_zephyr_console` emitting
+#:     max(2048, app value). Ported by hand around tan's own `link_applies_to`
+#:     console arm; `import re` was already present.
+#:   * tan-native follow-up (no upstream counterpart): `link_target.itcm_conf`
+#:     now emits max(16384, the same `_app_ram_console_size`) instead of a bare
+#:     16384, because `alp-link-itcm.conf` is layered AFTER `prj.conf` and
+#:     would shrink a larger app buffer. `tests/planner/test_ram_console_floor.py`.
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `030de105` -> `6159a7b1` (tan-cli#1216,
+#: alp-sdk#2778). Thirteen mirrored files changed in range:
+#:
+#:   * `buildplan.py` -- #2778: `HW_INFO_ARTEFACT` / `WEST_LIBS_ARTEFACT`,
+#:     `HwInfoUnavailable`, `_slice_hw_info_h`, `_slice_west_libraries`,
+#:     `_slice_hw_info_artefact` / `_slice_west_libs_artefact`, and the two new
+#:     entries appended AFTER `cmake-args.txt` in `emit_build_plan` (a SKU
+#:     outside the production families downgrades to a `hw-info-unavailable`
+#:     warning). Ported by hand (the tool reported a conflict around tan's
+#:     sibling-subpackage import of the emitters); the helpers import
+#:     `tan.planner.project_emit.*` rather than `alp_project_emit`.
+#:     `planner_emit._render_v1_shaped` now calls the same two helpers for
+#:     `--core`, mirroring `alp_project._run_v2_per_core_emit`.
+#:   * `aperture.py`, `secure.py` -- E1M-NX9101 removal (#2782), comments and
+#:     the `nxp-imx9` boot-method default. Ported by hand (tool conflict on
+#:     tan-side comment edits).
+#:   * `__init__.py`, `carveout.py`, `kconfig.py`, `libraries.py`, `loader.py`,
+#:     `memory.py`, `orchestrator.py`, `partition.py`, `sdk_compat.py`,
+#:     `validate.py` -- NX9101-removal and doc-wording edits; merged cleanly.
+#:     `libraries.py`'s relocated `_SOC_FAMILY_TOKEN` drops `imx93`.
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `6159a7b1` -> `c4eb27645` (tan-cli#1427).
+#: The range is alp-sdk#2782's merge and the #2783 docs commit: no file under
+#: `scripts/**` or `metadata/**` changed, every mirrored hash below was re-computed
+#: at `c4eb27645` and is unchanged, so nothing is ported.
+#:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0dee99fb5` -> `183b05509` (tan-cli#1393).
+#: One commit, `183b05509` (#2736, camera DT generation): `cameras.py`'s module
+#: docstring now names `scripts/gen_camera_dt.py` as the producer of the sensor
+#: DT include -- re-copied verbatim, no code change. `gen_camera_dt.py` and
+#: `check_camera_parity.py` are new SDK-side scripts with no planner caller.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (mirror / PINNED_HASHES; tan-cli#1393): one
+#: upstream commit, #2795 (`a5a137c7b`, SoM power runtime). No file under
+#: `scripts/alp_orchestrate/` changed, so every mirrored hash re-computes
+#: unchanged at `a5a137c7b`.
+#: RE-MEASURED, not assumed: the planner oracle re-captured at `a5a137c7b`
+#: (103 boards, 721 emits, 3,046,444 B) is byte-identical to the committed one
+#: (the oracle modes do not render the Zephyr board); `seam1_field_diff.py --sdk`
+#: exits 0; `scaffold_byte_parity.py --sdk` is rc 0, 10/10.
+#: `5a612e24` -> `1d20103b` (alp-sdk#2822, tan-cli#1487): carveout.py
+#: `_resolve_mailbox_channel` replaces `_resolve_default_mailbox_channel` (reserved
+#: name -> its channel, else lowest unclaimed `reserved_for: app` channel, else a
+#: blocked carve-out with a reason; never a silent channel 0); kconfig.py parses
+#: CONFIG_RAM_CONSOLE_BUFFER_SIZE base-10 unless `0x`. Both 3-way merged cleanly.
+PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
 #: under `tan/planner/` (i.e. the actual drift surface -- files renamed on
 #: relocation, like `alp_project_loader.py` -> `som_metadata.py`, have no
 #: single upstream file to pin and are out of scope for this hash check).
+#:
+#: KNOWN DELIBERATE DIVERGENCE (tan-cli#938, found reviewing #914): upstream's
+#: `topology.py` still hashes to the pinned value above at PINNED_SDK_COMMIT
+#: (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged there since -- until
+#: `29df99f9e`'s docstring-only `som-preset-v2` citation moved the hash at the
+#: `34c11c9de` bump; `_allowed_os_for_core`'s upstream body did not change, so
+#: everything below still holds), so this
+#: gate stays green -- but this gate only ever hashes the UPSTREAM side
+#: (`upstream = root / rel_path`, never `tan/planner/topology.py`), so it
+#: cannot see that tan's own `topology.py` no longer matches upstream
+#: byte-for-byte (the relocation rewrote the module docstring, moved
+#: `_default_os_from_core_type`/`CLASS_RUNTIMES` out to `tan.core.os_class`,
+#: and added four imports) or that tan's `_allowed_os_for_core` no longer
+#: BEHAVES like upstream's.
+#: #914 (tan-cli#870) repointed it to `tan.core.os_class.allowed_os_for_core`
+#: -- the SAME shared function `presets_cmd.allowed_os_lookup` calls -- so an
+#: unresolved core type (`core_type == ""`) now returns `[]`. Upstream's
+#: `topology.py:96-101` at that same pin still open-codes the cross-class
+#: subtraction and returns `["baremetal", "off"]` for `""`, because upstream
+#: never shipped #914's guard. This was NOT missed: `_allowed_os_for_core`'s
+#: own docstring names #914 and the reason (matching `presets_cmd` so the
+#: build-time gate and the wizard's dropdown can never disagree on an
+#: unresolved type) -- reconciling back to upstream's shape would reopen the
+#: exact alp-sdk-vscode#538-shaped defect #870/#914 exist to close, on the
+#: `os-topology` emit specifically. Left diverged on purpose. It reaches
+#: `core_os_topology`'s `allowed_os` field, which `test_planner_emit_parity`
+#: pins byte-for-byte against the oracle -- LATENT, not broken: it only reds
+#: for a shipped board with an unresolved core type, and none exist today
+#: (parity is green at this SHA). If a future board ever hits it, the fix is
+#: NOT to "resync" this file toward upstream's `["baremetal", "off"]` --
+#: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "buildplan.py": "54c49e8bd21dc0a283b6499b6b39314b089cf2cd65166451f884df614b7dca9f",
-    "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
+    "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
+    "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
+    "buildplan.py": "61cab4c1f88a29039b1da8be380917cc11453edc919c4b87b71b998ec4899c59",
+    "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
+    "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
+    "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
-    "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "33671fc14bac333da568ca02e42ee872acb70cae31e6b29b4336b51a366a7276",
-    "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
-    "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
-    "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
-    "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
-    "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
-    "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
-    "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
-    "partition.py": "120f458934f7027175b5d362eec73d34195c282db88f7f0fd41a8c37c9b7a132",
+    "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
+    "kconfig.py": "6acdf0b879afd080676bbd2afebe75a61b763d02a8f50e75b5e382b22529f00b",
+    "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
+    "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
+    "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
+    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
+    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
+    # that refusal: tan's `link_target.apply_link_target` (called at the end of
+    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
+    "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
+    "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
+    "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
+    "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
+    "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
+    "orchestrator.py": "d4f6b83d85132a6f5a954104779294dd111771be24028239b7e96caeee1541d7",
+    "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
+    "partition.py": "837fb76f6a7fe288c863541c98ddcbf1af5ca206f051922d12db06a8670025d8",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
-    "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
-    "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
-    "topology.py": "da07b0af6e66f9e49f33dcb482729b2a6d210395e14990fa257dc0ee3eb7f781",
-    "validate.py": "b3aad05cb4d5a63bbe0cb96e47c4cb41ce552cc8c05dc296f4ca1099cdc48a90",
+    "sdk_compat.py": "255494c4397912d800ab695a48ff35b9ab9233bc8c5136893cc39488ee6234c3",
+    "secure.py": "f804a5e7419c761698667449f527a920735a691b3864e97ea87fc3bf74a711ff",
+    "slugs.py": "4e914a71468ec41529a970783f29501d1ec387ad748fc792cb6dfb53b9818adb",
+    "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
+    "validate.py": "0981ca5a07d5dc5845bbcd13c4f00534285490e52ab2ef8fd8022188b8a850e6",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -616,7 +1553,11 @@ PINNED_HASHES: dict[str, str] = {
 #:     `_scaffold_readme`'s qualified-then-short board-target rewrite plus the
 #:     `_m33_sm` `west flash --host <board-ip>` rule. Both change
 #:     `--emit scaffold` bytes, which is why `python/tan/templates/vendored/`
-#:     is re-vendored in this same change.
+#:     is re-vendored in this same change. (`_cmake_core_map` is GONE since
+#:     the `34c11c9de` bump: alp-sdk#866 retired the CMakeLists `--core`
+#:     bridge it rewrote, and the port deleted it -- see this table's
+#:     `79c834e65` -> `34c11c9de` paragraph below. The `_scaffold_readme`
+#:     half stands.)
 #:
 #: `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). ONE file in this table moved:
 #: `scripts/gen_zephyr_board.py`, by alp-sdk#1352 -- the upstream fix for both
@@ -723,20 +1664,33 @@ PINNED_HASHES: dict[str, str] = {
 #: `_docs_ref()` carries alp-sdk#1535's `_tag_resolves()` guard, which
 #: landed at alp-sdk `94378a05` (`scripts/alp_template.py` sha256
 #: `5d453c5d...` there), a commit this pin does not reach. Moving the pin
-#: to `94378a05` to match would look like the more "correct" state but is
-#: NOT: `scripts/alp_cli/doctor.py` also changed inside `88318e75..94378a05`
-#: (`efeaf65c`, alp-sdk#1471 -- `f2faa07c...` at the pin vs `fe109d98...`
-#: at `94378a05`) and that delta is NOT ported into `tan/commands/
-#: doctor_cmd.py` / `tan/core/doctor_libraries.py`. Re-pinning HAND_PORT_
-#: PINNED_SDK_COMMIT to `94378a05` would re-freeze `doctor.py`'s hash at
-#: its unaudited-but-now-"current" value, silently declaring that drift
-#: reviewed when it never was -- the exact tan-cli#308/#275 failure mode
-#: this whole file exists to prevent, just aimed at a hash instead of a
-#: skip. So the pin stays at `88318e75`, `scripts/alp_template.py` sits
+#: to `94378a05` to match would look like the more "correct" state but was
+#: held back: `scripts/alp_cli/doctor.py` also changed inside
+#: `88318e75..94378a05` (`efeaf65c`, alp-sdk#1471 -- `f2faa07c...` at the pin
+#: vs `fe109d98...` at `94378a05`), and this paragraph originally (through
+#: tan-cli#902) asserted that delta was NOT ported.
+#:
+#: **CORRECTED, tan-cli#910's review:** that assertion was false. The delta
+#: IS carried, under names this table has no way to see: alp-sdk's
+#: `_prereq_linux_pm()` was hand-ported as `detect_linux_pm()`
+#: (`tan/core/bootstrap.py:810`), wired at `tan/commands/doctor_cmd.py:3527-
+#: 3531` and `tan/commands/bootstrap_cmd.py:494` -- same `apt-get`-before-
+#: `dnf` order, `pacman` never probed. It landed via tan-cli#760 (`4f02f99d`,
+#: PR #816), an ancestor of `dev` well before tan-cli#902's own `88318e75`
+#: re-audit; that audit had the code available and simply never
+#: cross-referenced it against `_prereq_linux_pm()` by name. So both named
+#: sources in this `88318e75..94378a05` range (`alp_template.py` above,
+#: `doctor.py` here) are, in fact, already ported.
+#:
+#: The pin is NOT moved by this correction: whether
+#: `HAND_PORT_PINNED_SDK_COMMIT` should now advance to `94378a05` (or
+#: further) is a re-hash-all-19-entries decision, tracked separately and
+#: deliberately at tan-cli#913 rather than decided inline in a comment fix.
+#: So the pin stays at `88318e75` for now, `scripts/alp_template.py` sits
 #: ahead of it on its own, and `python/scripts/planner_resync.py` will
-#: keep re-proposing #1535 as "still unported" until this comment is
-#: read and the whole table -- not just the one file this fix touched --
-#: is re-audited and re-pinned together.
+#: keep re-proposing #1535 as "still unported" (a false negative for the
+#: HAND-PORT half specifically, tracked by tan-cli#913, not this comment)
+#: until tan-cli#913 re-hashes and re-pins the whole table together.
 #:
 #: `PINNED_SDK_COMMIT` HAS since moved to `94378a05` (tan-cli#846's pin
 #: bump) and this pin still has not, which is the SPLIT the two pins exist
@@ -750,7 +1704,780 @@ PINNED_HASHES: dict[str, str] = {
 #: pin-disagreement warning compares `PINNED_SDK_COMMIT` against
 #: `PINNED_SDK_TAG`, not this pin, so the split below stays silent by
 #: design -- this comment is the record that it is deliberate.
-HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk v0.15.0+88, an ancestor of the released v0.16.0 -- deliberately BEHIND PINNED_SDK_COMMIT, see above
+#:
+#: tan-cli#896: a re-hash of all 19 `HAND_PORT_HASHES` sources against
+#: `PINNED_SDK_COMMIT` above (now `eb96112ba7d1cc3b4084c985962ea31772177d74`,
+#: `v0.16.0`) drops the match count from 17/19 (measured at `94378a05` in
+#: `docs/planner-duplicated-derivations.md`) to 13/19 -- FOUR more sources
+#: changed upstream inside `94378a05..eb96112b`, on top of
+#: `scripts/alp_template.py` / `scripts/alp_cli/doctor.py` above. Each was
+#: diffed and classified, not assumed:
+#:
+#:   - `scripts/gen_zephyr_board.py` (`522ea3204`, alp-sdk#1482/#1554):
+#:     COSMETIC. The only hunk touching this file is a docstring correction
+#:     inside `_aen_flash_partitions` ("...unchanged, and still what every
+#:     single-M55 AEN SKU (aen401, aen601) generates" -> "...unchanged.
+#:     This now applies only to a genuinely single-M55 AEN SoM..."), and
+#:     the commit's own message says so in as many words: "No behaviour
+#:     change; comments only." The real #1482 fix landed in the board
+#:     trees and `scripts/check_atoc_reservation.py`, not in this
+#:     generator. tan's own `zephyr_board.py` carried the pre-fix wording
+#:     until this same change, which re-synced it (comment-only, no
+#:     emitted-byte change).
+#:   - `scripts/alp_project_loader.py`, `scripts/alp_project_emit/
+#:     __init__.py`, `scripts/alp_project_emit/west_libs.py` (`85b6b905a`,
+#:     alp-sdk#1485 -- thread `--metadata-root` through every
+#:     `alp_orchestrate` resolver instead of letting an omitted argument
+#:     fall through to the SDK's own in-tree `metadata/`; `__init__.py`
+#:     also carries `95eb64ab8`, alp-sdk#1487's ten missing
+#:     `_CHIP_SUBSYSTEMS` entries): BEHAVIOURAL upstream, but ALREADY
+#:     PORTED here, ahead of this pin -- alp-sdk#1485 was already fixed
+#:     independently in tan as tan-cli#573 (see above), so only its
+#:     residue, plus alp-sdk#1487's ten entries, moved via tan-cli#868's
+#:     `934e74ee` resync ("re-sync tan/planner with alp-sdk ac38a069" --
+#:     both source commits are ancestors of `ac38a069`, confirmed with
+#:     `git merge-base --is-ancestor`).
+#:     Verified by reading the CURRENT tree, not by trusting the resync's
+#:     own commit message: `som_metadata.py`'s
+#:     `silicon_to_kconfig(silicon, metadata_root)` already takes a
+#:     required `metadata_root` and cites "alp-sdk#1485's exact defect" by
+#:     name; `project_emit/west_libs.py`'s `_emit_west_libraries` /
+#:     `_load_curated_library_manifest` / `_library_alias_table` already
+#:     require `metadata_root` the same way; `slugs.py`'s
+#:     `_CHIP_SUBSYSTEMS` already carries all ten entries #1487 added
+#:     (`act8760` through `gd32g553`'s corrected `("SPI", "I2C")`
+#:     OR-dependency), byte-identical to the upstream addition. Nothing
+#:     left to re-sync for any of the three.
+#:
+#: None of the four is missing behaviour tan needs, so none argues for
+#: reopening a re-sync, and none argues for moving this pin to `eb96112b`
+#: either: `scripts/alp_template.py` / `scripts/alp_cli/doctor.py` above are
+#: UNCHANGED between `94378a05` and `eb96112b` (re-hashed: `5d453c5d...` /
+#: `fe109d98...` at both refs). **CORRECTED, tan-cli#910's review:** neither
+#: is actually an un-ported gap -- see the corrected `88318e75` paragraph
+#: above for `doctor.py` (`detect_linux_pm`, tan-cli#760) and its own prior
+#: text for `alp_template.py` (tan-cli#846). What genuinely holds this pin
+#: back from `94378a05`/`eb96112b` is that moving it would re-freeze all 19
+#: `HAND_PORT_HASHES` entries' literal values at once (the pin covers the
+#: whole table, not per-entry), and the other 17 have not been re-hashed and
+#: re-audited at either ref the way these two now have -- that re-audit is
+#: tracked separately at tan-cli#913, deliberately, rather than folded into
+#: this comment fix. So the pin, and every one of the 19 entries' literal
+#: values, stays exactly as written for now; this paragraph remains the
+#: record of the `eb96112b` re-hash and its (corrected) verdict, the same
+#: role the `#846` paragraph plays for the first two sources.
+#:
+#: `88318e75` -> `722320a1` (tan-cli#996, CLOSES tan-cli#913: the
+#: re-hash-all-19-entries-at-once decision the paragraph above deferred).
+#: Auditing `auto/planner-resync`'s machine proposal against a real
+#: `722320a1` checkout (not the placeholder narrative it opened with,
+#: which named seven "hand-port-changed" and seven "removed-upstream"
+#: entries with no verdict) gives, of the 19:
+#:
+#:   - FIVE unchanged (`git diff --stat 88318e75..722320a1` over each path
+#:     is empty, re-hashed one by one, not assumed): `scripts/sentinels.py`,
+#:     `scripts/alp_project_emit/{bom_netlist,dts,hw_info,native_sim}.py`.
+#:     Their `HAND_PORT_HASHES` values below are UNCHANGED by this move.
+#:   - SEVEN carry a real upstream diff but are each already covered on the
+#:     `tan/planner/` side, by an equivalent or already-ported mechanism --
+#:     re-hashed to `722320a1`, no `tan/planner/` code changed for any of
+#:     them:
+#:       * `scripts/gen_zephyr_board.py` (alp-sdk#1354, #1482 doc fix):
+#:         solved DIFFERENTLY -- `zephyr_board.py::_aen_peripherals_dtsi`
+#:         already checks `require_capability(metadata_root,
+#:         AEN_ZEPHYR_PERIPHERALS_DTSI)` and raises `SdkTooOldError` for a
+#:         checkout that predates the field, a capability-registry probe
+#:         (tan-cli#591) rather than upstream's filesystem-probe-for-an-
+#:         overlay-file heuristic; #1482's docstring wording is already
+#:         present at `_aen_flash_partitions`'s docstring, citing
+#:         tan-cli#896.
+#:       * `scripts/alp_project_loader.py` (alp-sdk#1485 continuation --
+#:         thread `metadata_root`, `is_relative_to` hardening): already
+#:         present -- `som_metadata.py:_load_silicon_kconfig`/
+#:         `silicon_to_kconfig` take a required `metadata_root`;
+#:         `project_loader._resolve_sku`'s message uses
+#:         `preset_path.is_relative_to(REPO)` before calling
+#:         `.relative_to(REPO)`. `bind_sdk_root`'s one-shot-root invariant
+#:         (`planner_root.py`) forecloses the defect class this hardening
+#:         guards against structurally.
+#:       * `scripts/alp_project_emit/__init__.py` (alp-sdk#1487's ten
+#:         missing `_CHIP_SUBSYSTEMS` entries): already present, relocated
+#:         to `slugs.py` (see the `94378a05..eb96112b` paragraph above --
+#:         this is the SAME table, re-confirmed byte-identical to the
+#:         `722320a1` addition).
+#:       * `scripts/alp_project_emit/west_libs.py` (alp-sdk#1485
+#:         continuation): already present -- `loader.py:_library_alias_table`
+#:         takes a required `metadata_root`, threaded into
+#:         `project_emit/west_libs.py`'s `_emit_west_libraries` /
+#:         `_load_curated_library_manifest`.
+#:       * `scripts/alp_cli/diagnostic_format.py`: DOCSTRING ONLY (names
+#:         `tan validate` as `alp_cli.validate`'s retirement replacement,
+#:         ADR-0020 end-state B) -- no code changed. Tracked here
+#:         deliberately, not a `HAND_PORT_NO_TAN_FILE_PAIRING` gap.
+#:       * `scripts/alp_cli/validator.py`: a REAL fix (`additionalProperties`
+#:         now walks to the object that actually rejected the extra key
+#:         instead of naming its parent's own path segment) -- but only
+#:         `load_board_schema`/`iter_schema_errors` are hand-ported into
+#:         `tan/planner/loader.py` (see that file's own docstring); the
+#:         fixed function, `_schema_error_to_diagnostic`, does not exist in
+#:         tan at all. Since tan-cli#270 `tan validate` runs a PORT of
+#:         `scripts/validate_board_yaml.py` in-process, so a validator fix is
+#:         NOT inherited: it must be hand-ported into
+#:         `tan/core/board_validator*.py`, and `PORTED_SOURCE_HASHES`
+#:         (`tan/core/board_validator_skew.py`) moved with it -- until then
+#:         users on a newer checkout get the old rules, and `tan validate`
+#:         warns `validate.sdk-validator-newer`.
+#:   - SEVEN are gone from alp-sdk entirely at `722320a1`
+#:     (`scripts/alp_cli/{faultdecode,validate,new_som,doctor,explain,
+#:     monitor,model}.py` -- confirmed by `git diff --stat`, each a pure
+#:     deletion, not a rename: `alp-sdk#1367`/`#1368` via commit `210e9fed`
+#:     ("finish the alp_cli retirement"), whose own message says each "already
+#:     had a released, native tan-cli v0.6.0 port and no in-repo caller
+#:     outside its own tests." RETIRED from this table below (their entries
+#:     removed, not zeroed) -- there is no longer an alp-sdk source to audit
+#:     tan's still-live native ports (`validate_cmd.py`, `new_som_cmd.py`,
+#:     `doctor_cmd.py`/`doctor_libraries.py`, `error_catalog.py`,
+#:     `monitor_cmd.py`, `model_cmd.py`, `faultdecode.py`/`faultdecode_cmd.py`)
+#:     against. `python/tests/gates/test_hand_port_tan_side.py`'s
+#:     `HAND_PORT_TAN_SIDE`/`HAND_PORT_NO_TAN_FILE_PAIRING`/
+#:     `_PAIRING_MAY_ONLY_CONTAIN` drop the matching six/two/two entries in
+#:     the SAME change, per that file's own "drop them in the same change
+#:     that dropped the pin" rule -- `scripts/alp_cli/model.py` is genuinely
+#:     retired THIS time (unlike tan-cli#791's premature attempt, corrected
+#:     at the `88318e75` paragraph above: that check was against
+#:     `eb96112b`/`88318e75`, where the file was still live; `722320a1` is
+#:     past alp-sdk#1470 landing #1367/#1368 for real).
+#:
+#: `scripts/alp_template.py` is the ONE genuine hand-port in this range --
+#: alp-sdk#1652 adds `find_template_by_cores` + `AmbiguousCoresError` (a
+#: `--cores` topology SELECTOR over the catalog, distinct from tan's OWN
+#: `--cores` splice flag on `tan init`) -- PORTED into `tan/planner/
+#: template.py` verbatim in this same change, plus a small standalone
+#: re-implementation in `tan/core/example_catalog.py` (`find_example_by_
+#: cores`) backing the customer-facing `tan init --topology` surface, which
+#: cannot import `tan.planner` before an SDK root is bound (see that
+#: module's own docstring). `tan.planner_cli`'s `--emit scaffold` gains the
+#: matching `--cores` argparse flag, mirroring `alp_project.py`'s own
+#: `_run_scaffold_emit`/`_parse_cores_arg` 1:1, since that entry point IS
+#: the developer/parity mirror of the SDK's own argv.
+#:
+#: Net: all 19 entries are re-hashed against `722320a1` below (12 remain,
+#: 7 retired), and `HAND_PORT_PINNED_SDK_COMMIT` advances to the same
+#: commit as `PINNED_SDK_COMMIT` for the first time since `1a9f753c`.
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `722320a1` -> `f1b1c9df`
+#: (tan-cli#1026). Neither of the two range commits (`b3775381`, `ec8be8b9`,
+#: see the `PINNED_SDK_COMMIT` paragraph above) touches any file this table
+#: pins -- `git diff --stat 722320a1..f1b1c9df` over the 12 remaining
+#: `HAND_PORT_HASHES` paths is empty. Re-hashed all 12 one by one against
+#: `f1b1c9df` to confirm rather than assume: unchanged. This pin moves in
+#: lockstep with `PINNED_SDK_COMMIT` (the two have advanced together since
+#: `722320a1`, per this table's own "Net:" paragraph above) even though
+#: nothing in its own surface moved, so a later diff of this range shows
+#: `HAND_PORT_PINNED_SDK_COMMIT` staying current rather than falling behind
+#: for no stated reason.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `f1b1c9df` -> `0914da38`
+#: (tan-cli#1103). Neither of the two range commits (`1d695037`, `f5c7ff5b`,
+#: see the `PINNED_SDK_COMMIT` paragraph above) touches any file this table
+#: pins -- `gh api repos/alplabai/alp-sdk/compare/f1b1c9df...0914da38`'s
+#: full changed-file list has no path under any of the 12 remaining
+#: `HAND_PORT_HASHES` prefixes (`scripts/gen_zephyr_board.py`,
+#: `scripts/sentinels.py`, `scripts/alp_project_loader.py`,
+#: `scripts/alp_template.py`, `scripts/alp_project_emit/*`,
+#: `scripts/alp_cli/{diagnostic_format,validator}.py`). This pin moves in
+#: lockstep with `PINNED_SDK_COMMIT` even though nothing in its own surface
+#: moved, per this table's own "moves in lockstep" rule above.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `0914da38` -> `ff27f179`
+#: (tan-cli#1118). ONE of the 12 pinned paths moved in this range, and it is
+#: BEHAVIOURAL for tan -- this is not a lockstep no-op like the two ranges
+#: above it.
+#:
+#:   - `scripts/alp_template.py` (+70/-8), from alp-sdk `5c33ef04`
+#:     "fix(scaffold): emit a buildable multicore-rpmsg tree, and rewrite
+#:     bare alp-sdk-tree paths in scaffolded comments" (alp-sdk#1906,
+#:     closing alp-sdk#1855). PORTED BY HAND into `tan/planner/template.py`
+#:     in this same change -- +70/-8 on the tan side too, the same three
+#:     behavioural parts, expressed in tan's restructured shape:
+#:
+#:       1. `_BARE_REPO_PATH_RE` + `_scaffold_bare_repo_paths` -- new, and
+#:          copied through verbatim (diffed byte-for-byte against the
+#:          `ff27f179` blob; the only edit is the repo-local issue-ref
+#:          spelling, `issue #1855` -> `alp-sdk#1855`, which this file's own
+#:          more recent comments already use for an upstream number).
+#:       2. `_scaffold_readme`'s bare-own-path substitution gains the
+#:          `(/\S+)?` capture, so `examples/multicore/mproc-mailbox/peer`
+#:          becomes `./peer` instead of surviving verbatim. The line it
+#:          replaces was byte-identical to upstream's on the tan side, so
+#:          this half applied 1:1.
+#:       3. `render_to_envelope` wiring -- the `board.yaml` arm gains the
+#:          call at its tail, and a NEW `.c`/`.h` arm gains it too, both
+#:          OUTSIDE the sku-conditional. tan's loop is structurally the same
+#:          `if board.yaml / elif CMakeLists.txt / elif README.md` dispatch
+#:          upstream has (tan's divergence in this function is in the guarded
+#:          document READS above the loop, not in the loop), so the two
+#:          insertions landed at the same two points. The function's
+#:          docstring paragraph is re-worded to match upstream's.
+#:
+#:     PROVEN, not asserted: `python/tests/planner/test_scaffold_bare_repo_
+#:     paths.py` (new, 17 cases) reds 16/17 against the UNPORTED
+#:     `template.py` -- 7 of those on their own value assertions through
+#:     `_scaffold_readme` / `render_to_envelope`, which both exist pre-port,
+#:     and 9 on `AttributeError` (the new helper does not exist yet).
+#:     Counted from the run, not estimated.
+#:     Mutation-measured by byte-restoring `dev`'s `template.py` under the
+#:     new test file and back. The 17th (`test_the_examples_own_path_with_
+#:     no_subpath_still_becomes_a_dot`) passes both ways ON PURPOSE: it is
+#:     the no-regression control for part 2's optional capture group.
+#:
+#:     STRONGER THAN THAT, and the measurement that actually settles the
+#:     port: `tests/parity/test_planner_emit_parity.py::test_the_scaffold_
+#:     mode_agrees_on_stdout_through_argv` BYTE-compares tan's whole
+#:     `--emit scaffold` stdout against the bound SDK's own. That node
+#:     collects FOUR cases (`minimal`, `peripheral`, `sensor`, `edge-ai` --
+#:     `test_planner_emit_parity.py`'s own comment says so); the `5` an
+#:     earlier revision of this paragraph quoted was the `-k scaffold`
+#:     SELECTION, which also picks up
+#:     `test_a_scaffold_without_its_flags_refuses_like_alp_project_does`.
+#:     Stated per node, with `ALP_SDK_ROOT` bound to a real `ff27f179`
+#:     checkout: `4 passed` with this port, `3 failed, 1 passed` without it
+#:     (`peripheral`, `sensor`, `edge-ai`, byte-restoring `dev`'s
+#:     `template.py` under the same bound root). By selection: `5 passed`
+#:     vs `3 failed, 2 passed`. So the port is not merely plausible -- it
+#:     reproduces upstream's emit byte for byte on the real catalog, which
+#:     is the only bar a hand-port of an emitter can be held to.
+#:
+#:     Upstream's own new coverage for this commit is
+#:     `tests/scripts/test_alp_template.py` (+89/-2) plus four
+#:     `tests/fixtures/emit-snapshots/scaffold.*.snap` updates; the tan-side
+#:     file above is the equivalent, not a copy (tan has no emit-snapshot
+#:     fixture for scaffold).
+#:
+#:     MEASURED UPSTREAM PROPERTY, ported rather than improved on: the new
+#:     pass is NOT idempotent -- the URL it emits contains the path it
+#:     matched, so a second application produces `.../blob/main/https://
+#:     github.com/...`. That is upstream's behaviour at `ff27f179` and the
+#:     port matches it; a tan-side "already a URL" guard would be exactly
+#:     the divergence this whole hash audit exists to catch. Pinned both
+#:     ways in the new test file (the property itself, and that each arm
+#:     applies the pass exactly once).
+#:
+#: The other ELEVEN pinned paths are untouched in this range -- verified
+#: against the compare API's full changed-file list, which carries no path
+#: under `scripts/gen_zephyr_board.py`, `scripts/sentinels.py`,
+#: `scripts/alp_project_loader.py`, `scripts/alp_project_emit/*` or
+#: `scripts/alp_cli/{diagnostic_format,validator}.py` -- and each was
+#: re-hashed at `ff27f179` one by one rather than assumed: all eleven
+#: literals below are UNCHANGED by this move. Only
+#: `scripts/alp_template.py`'s value changes.
+#:
+#: NOT IN SCOPE, recorded so it is not rediscovered as a gap: the same
+#: upstream commit also edits `metadata/templates/catalog-v1.json` (+2) and
+#: `examples/multicore/rpmsg-aen/linux/CMakeLists.txt` (+6/-1) -- its
+#: "buildable multicore-rpmsg tree" half. Both are alp-sdk DATA that tan
+#: reads out of the customer's own bound checkout at run time (ADR-0017;
+#: `metadata/**` did not relocate), so they arrive automatically and there
+#: is nothing to port for either.
+#:
+#:   scripts/alp_template.py: hand-ported (behavioural -- see above)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 5c33ef04 fix(scaffold): emit a buildable multicore-rpmsg tree, and rewrite bare alp-sdk-tree paths in scaffolded comments (#1906)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `ff27f179` -> `eff266b6`
+#: (tan-cli#1156). THREE upstream commits in range touch this table's
+#: files, none of them the tip commit the PINNED_HASHES merge above cites
+#: -- `git log ff27f179..eff266b6 -- <path>` per file, not assumed from the
+#: PINNED_HASHES paragraph's own range summary:
+#:
+#:   - `scripts/gen_zephyr_board.py` (+584/-31 net, two commits):
+#:     `dbfa06bd` (#655, alp-sdk#1924) adds the first V2N/V2M-family
+#:     pinctrl.dtsi/_defconfig emitter (`_load_supervisor_links_doc`,
+#:     `_v2n_declared_families`, `_load_supervisor_links`,
+#:     `_pin_by_peripheral`, `_rzv_pinmux`, `_v2n_sci_channel`,
+#:     `_v2n_spi_pfc_mnemonic`, `_v2n_pinctrl_dtsi`, `_v2n_defconfig`,
+#:     wired into `emit_zephyr_board()`'s new `elif family in
+#:     _v2n_declared_families(...)` branch), reading a new hand-authored
+#:     `metadata/e1m_modules/v2n/supervisor-links.yaml`; `eff266b6`
+#:     (alp-sdk#1964) adds the AEN BRD_I2C (RTC + temperature sensor)
+#:     pinctrl/dts emission (`_load_aen_on_module_links`, `_c_comment`,
+#:     `_dt_property`, `_aen_i2c_device_nodes`, `_aen_i2c_pinctrl_group`,
+#:     `_aen_brd_i2c_dts`, plus a `links` parameter threaded through
+#:     `_aen_pinctrl_dtsi`/`_aen_dts`), reading a new
+#:     `metadata/e1m_modules/aen/on-module-links.yaml`. Both also extend
+#:     `_generated_banner`/`_with_generated_banner` with an optional
+#:     `extra_source` naming whichever of the two files backs a given
+#:     emitted file. PORTED BY HAND into `tan/planner/zephyr_board.py`,
+#:     both halves, in this same change -- neither new metadata source
+#:     needed vendoring (ADR-0017: alp-sdk DATA, read from the bound SDK
+#:     root at run time).
+#:
+#:     PROVEN, not asserted: the AEN half is covered by an EXISTING node,
+#:     `tests/parity/test_planner_emit_parity.py::test_tan_generate_
+#:     writes_a_zephyr_board_tree_byte_for_byte` -- `1 passed` with this
+#:     port (`ALP_SDK_ROOT` bound to a real `eff266b6` checkout), `1
+#:     failed` (byte-diverging at `alp_e1m_aen801_m55_he-pinctrl.dtsi`
+#:     line 5, the banner's missing `extra_source`) with the port
+#:     reverted -- measured both ways, not estimated. The V2N half has no
+#:     existing test node (nothing previously exercised the V2N/V2M
+#:     branch of `--emit zephyr-board` at all), so it was checked the
+#:     same way this test checks the AEN half, by hand: `tan generate
+#:     --target zephyr-board --core m33_sm --board-yaml examples/
+#:     multicore/rpmsg-v2n/board.yaml`, once with
+#:     `TAN_GENERATE_EXECUTOR=subprocess` (the alp-sdk oracle) and once
+#:     with `=in-process` (tan), against the same bound `eff266b6`
+#:     checkout -- `diff -rq` on the two output directories is empty, all
+#:     five files byte-identical, including the two new
+#:     `alp_e1m_v2n101_m33_sm-pinctrl.dtsi` / `..._defconfig` files.
+#:
+#:   - `scripts/alp_project_emit/hw_info.py` (+14/-1, `eff266b6` /
+#:     alp-sdk#1964): composes `ALP_HW_BUILD_SOM_HW_REV` through the new
+#:     `sdk_compat.board_designator()` (already relocated into
+#:     `tan/planner/sdk_compat.py` by this same re-sync's `PINNED_HASHES`
+#:     merge -- see that pin's own paragraph above) instead of emitting
+#:     the bare `hw_rev`. PORTED BY HAND into `tan/planner/project_emit/
+#:     hw_info.py`: `_emit_hw_info_h` gains a required `metadata_root`
+#:     parameter (threaded from `planner_emit.py`'s `project.
+#:     effective_metadata_root()`, matching `west-libraries`'s existing
+#:     call-site pattern) and composes `som_hw_rev` the same way alp-sdk
+#:     does. New `tests/planner/test_hw_info_board_designator.py`
+#:     (hermetic -- a synthetic `hw-revisions.yaml` under `tmp_path`,
+#:     needs no bound SDK) reds on the composition case when the port is
+#:     byte-reverted: `1 failed, 2 passed` reverted, `3 passed` restored
+#:     -- measured both ways. The two no-datecode / no-file-at-all
+#:     controls stay green either way, on purpose (no-regression pins).
+#:
+#:   - `scripts/alp_template.py` (+13/-0, `43e5b2cb` / alp-sdk#1932,
+#:     closing alp-sdk#1916): refuses `constraints.minimum`/`maximum` on
+#:     a non-`integer` parameter with a curated `ParameterError`, where it
+#:     used to raise a bare `TypeError` on a schema-valid catalog record.
+#:     NOT ported -- tan's own `tan/planner/template.py::_check_
+#:     constraints` ALREADY carries this exact refusal (tan-cli#1087,
+#:     landed well before alp-sdk#1932 closed the gap on alp-sdk's own
+#:     side; that function's docstring says so in so many words:
+#:     "DIVERGES FROM alp-sdk on this input class, deliberately ...
+#:     alp-sdk#1916 tracks closing the gap; until then tan refuses where
+#:     alp-sdk still crashes"). alp-sdk#1932 IS that closing commit; tan
+#:     was the reference here, not the follower. Confirmed by reading
+#:     both bodies side by side, not by the docstring's claim alone: same
+#:     three `constraints:` keys guarded (`enum`/`minimum`/`maximum`),
+#:     same `type != "integer"` refusal, same error-string shape -- the
+#:     only textual difference is `{constraints[bound]!r}` (tan) vs bare
+#:     `{constraints[bound]}` (alp-sdk), a repr-vs-str formatting choice
+#:     in the message, not a behavioural difference. Hash re-pinned; no
+#:     code change.
+#:
+#: `scripts/alp_cli/diagnostic_format.py` (+53/-2, SAME `43e5b2cb` /
+#: alp-sdk#1932) also moved in this range -- the commit's own subject
+#: line ("...; render URI-shaped diagnostic paths") is its OTHER half.
+#: alp-sdk#1909 makes `_uri()`/`to_sarif` render a proper URI reference
+#: (`_is_windows_spelled` + `_path_to_uri_reference`) instead of a bare
+#: filesystem path, and its own new docstring says this "Mirrors tan-cli's
+#: `path_to_uri_reference` (alplabai/tan-cli#1111, python/tan/core/
+#: uri_reference.py) -- ported rather than reimplemented from scratch".
+#: tan-cli#1097/#1111/#1117/#1140 landed `tan/core/uri_reference.py` and
+#: wired it into `validate_cmd.py`'s `_sarif_document`/diagnostic-v1
+#: exporters well before this; that function's own docstring already
+#: said "alp-sdk owes the same fix -- tracked as alp-sdk#1909, not fixed
+#: here (a different repo, different release cadence)". alp-sdk#1932 is
+#: alp-sdk paying that debt, one-directionally (alp-sdk copying tan, not
+#: the reverse) -- confirmed by reading both bodies: alp-sdk's ported
+#: copy uses the pre-tan-cli#1140 shape (`PureWindowsPath.as_uri()` /
+#: `PurePosixPath.as_uri()` called directly, the deprecated stdlib method
+#: tan-cli#1140 has since retired on tan's own side), which is fine --
+#: alp-sdk is not obliged to track tan's later internal refinements, only
+#: to reach the same URI-reference OUTPUT, which it now does for the same
+#: inputs. Not counted as a fourth hand-port above: it is the SAME commit
+#: as `alp_template.py`'s, just its other file. No port; hash re-pinned.
+#:
+#: The remaining EIGHT pinned paths (`scripts/sentinels.py`,
+#: `scripts/alp_project_loader.py`, `scripts/alp_project_emit/{__init__,
+#: bom_netlist,dts,native_sim,west_libs}.py`,
+#: `scripts/alp_cli/validator.py`) are untouched in this range: each was
+#: diffed byte-for-byte against `eff266b6` directly (`diff -q <ff27f179
+#: blob> <eff266b6 blob>`), not inferred from a commit-touches-file log,
+#: and all eight came back identical. Their `HAND_PORT_HASHES` literals
+#: below are therefore UNCHANGED by this move.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - dbfa06bd feat(boards): generate the V2N/V2M pinctrl.dtsi + _defconfig from a supervisor-links metadata source (#655) (#1924)
+#:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
+#:   - 43e5b2cb fix(scripts): refuse non-integer min/max bounds; render URI-shaped diagnostic paths (#1932)
+#: AUDITED RE-SYNC: `eff266b6` -> `15b2f32c` (tan-cli#1239/#1223, moved
+#: alongside `PINNED_SDK_COMMIT` above -- both changed in this range).
+#:
+#:   - `scripts/alp_project_loader.py` (alp-sdk#1943): moves `TargetSpec`/
+#:     `resolve_targets`/`npu_backend`/`accel_config` in from
+#:     `scripts/alp_model/targets.py` (ADR-0028 prep, the eventual deletion
+#:     of `alp_model`). INERT for `tan/planner/`: `project_loader.py`/
+#:     `som_metadata.py` (the two tan-side hand-ports of this file) call
+#:     none of the four new names, and the one docstring line they DO
+#:     hand-port (the `resolve_soc_path()` callsite paragraph) is untouched
+#:     by the move -- confirmed by diffing the two files directly, not
+#:     inferred from the commit subject.
+#:   - `scripts/gen_zephyr_board.py`: two commits, both ported.
+#:     `bc83ce877` (alp-sdk#1988) reshapes `on-module-links.yaml`'s
+#:     `rtc_alarm.risk` from a plain string into a per-part map
+#:     (`{E8: "..."}`) -- tan's OWN independent fix for the same hazard
+#:     (tan-cli#493, gating emission on a hardcoded `if part == "E8"`
+#:     against the OLD string shape) went stale the moment this pin moved:
+#:     `_aen_brd_i2c_dts()` called `_c_comment(alarm["risk"], "")` against
+#:     a dict, crashing `--emit zephyr-board` for every AEN SKU with
+#:     `AttributeError: 'dict' object has no attribute 'split'`
+#:     (measured: `test_planner_emit_parity.py`'s in-process/subprocess
+#:     comparison failed on all ~90 boards touching that code path, not
+#:     just AEN ones, because the subprocess crash starved every mode
+#:     after it). Re-pointed at `(alarm.get("risk") or {}).get(part)`,
+#:     matching upstream's own fix exactly. `e4f2f60e4` (alp-sdk#655
+#:     slice 2, #1947) adds `_v2n_dts()` (~190 lines) + `_v2n_part_display()`
+#:     + the `_V2N_WDT0_*`/`_V2N_OPENAMP_TAIL` string tables, generating the
+#:     V2N/V2M board `.dts` from the SoM preset + SoC JSON +
+#:     `supervisor-links.yaml` -- the "future slice" this file's own
+#:     docstring had flagged as deferred. Ported verbatim (the new content
+#:     is prose/DTS string tables plus one regex-based part-display split,
+#:     no invented logic) and wired into `emit_zephyr_board()`'s `v2n`/
+#:     `v2n-m1` branch. MEASURED, not assumed:
+#:     `test_the_in_process_engine_matches_alp_project_for_every_board_tree`
+#:     -- 89 failed before either fix (crash on every board reaching
+#:     `_aen_brd_i2c_dts`, plus a board-tree FILE SET mismatch on every
+#:     V2N-family board missing its `.dts`) -- 0 failed after both,
+#:     `tests/parity -q` (serial, to rule out the known
+#:     `test_the_breadth_layer_still_covers_every_board` xdist artefact):
+#:     767 passed, 8 skipped, 0 failed.
+#: AUDITED RE-SYNC: `15b2f32c` -> `20fec7a7` (tan-cli#1248, moved alongside
+#: `PINNED_SDK_COMMIT` above -- both changed in this range). ONE upstream
+#: commit touches this table's files; every other `HAND_PORT_HASHES` source
+#: re-hashed identically against the `20fec7a7` checkout, so only the
+#: `gen_zephyr_board.py` literal below moves.
+#:
+#:   - `20fec7a7e` (alp-sdk#2036): `scripts/gen_zephyr_board.py` wires SoC
+#:     I2C2 -- `e1m_i2c0`, portable `alp-i2c0` -- into the AEN board layer,
+#:     because the SoM's own 24C128 manifest EEPROM sits on that bus.
+#:     `_load_aen_on_module_links()` now requires an `e1m_i2c0` entry in
+#:     `metadata/e1m_modules/aen/on-module-links.yaml`; the pinctrl dtsi
+#:     gains a `pinctrl_i2c2` group (`I2C2_SCL_C`/`I2C2_SDA_C` on
+#:     `P5_6`/`P5_7`, pinmux SCL then SDA, `input-enable;` +
+#:     `bias-pull-down;`); the board `.dts` gains `&i2c2` at
+#:     `I2C_BITRATE_STANDARD` plus the `alp-i2c0 = &i2c2;` alias.
+#:     BEHAVIOURAL -- every AEN board tree's bytes move. Ported by applying
+#:     the upstream diff (5 of 6 hunks clean; the sixth, inserting
+#:     `_aen_e1m_i2c0_pinctrl_group()`, rejected only on blank-line context
+#:     and went in by hand). MEASURED by extracting each function from both
+#:     files: `_aen_pinctrl_dtsi`, `_aen_e1m_i2c0_pinctrl_group` and
+#:     `_aen_e1m_i2c0_dts` are byte-identical to upstream's.
+#:     `_load_aen_on_module_links` and `_aen_brd_i2c_dts` still differ, and
+#:     their diff against upstream is line-for-line the one they already
+#:     had at `15b2f32c` -- this port moved neither.
+#:     KNOWN, PRE-EXISTING, NOT FIXED HERE: one of those two differences is
+#:     a real gap, not a relocation shape. Upstream's
+#:     `_load_aen_on_module_links` refuses a bare-string
+#:     `rtc_alarm.risk` with a `ZephyrBoardEmitError` (alp-sdk#1988); tan's
+#:     never got that check, so a pre-#1988-shaped `risk:` reaches
+#:     `_aen_brd_i2c_dts`'s `(alarm.get("risk") or {}).get(part)` and
+#:     raises `AttributeError` instead. The `eff266b6 -> 15b2f32c` paragraph
+#:     above ported the reader half of #1988 and missed this half; this
+#:     table hashes only the upstream side, so it could not see that.
+#:     No `sdk_capability` floor for `e1m_i2c0`, deliberately: `rtc_alarm`
+#:     is hard-required without one, and no released alp-sdk ships
+#:     `on-module-links.yaml` at all (measured: absent at `v0.16.0`, the
+#:     newest tag), so tan's AEN board emit already needs an unreleased
+#:     checkout and a floor would guard nothing a real checkout can reach.
+#:     One tan-only regression guard needed narrowing:
+#:     `test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay`
+#:     (tan-cli#493) forbids any "E8" in a non-E8 AEN board tree, and the
+#:     ported group comment cites its bench validation "on the E8" for every
+#:     AEN part -- provenance for a family-scoped pad config (one
+#:     `on-module-links.yaml` backs every AEN SKU), not an E8 silicon fact.
+#:     The test scrubs exactly that citation string before scanning, and its
+#:     `ensemble_e8` overlay check is untouched; the comment itself stays
+#:     verbatim, since board-tree parity compares it byte-for-byte.
+#:     UPSTREAM PROSE CONTRADICTION, ported verbatim and NOT reconciled here:
+#:     the BRD_I2C group's comment calls `bias-pull-up` DSC=1 "a REAL
+#:     pull-up", while the new `e1m_i2c0` comment says `bias-pull-up` gives a
+#:     DEAD bus because `pinctrl_soc.h`'s encoding "reads inverted vs the
+#:     Alif pad hardware". Each bus emits its own bench-validated value; only
+#:     the explanations disagree, and reconciling them belongs to alp-sdk.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 81a9d515 fix(gen): give the AEN memory-map overlap check the whole-device-alias exception aperture.py has (#2073) (#2089)
+#:       `gen_zephyr_board.py`: `_aen_check_map_overlaps()` gains the
+#:       whole-device-alias exception `classify_region()` already had -- a row
+#:       whose extent equals the App MRAM window EXACTLY is excluded from the
+#:       pairwise overlap comparison, and two such rows are refused outright
+#:       rather than going uncompared. Ported. This ALSO retires a false claim
+#:       tan carried verbatim: the old docstring said a "whole-window
+#:       `mram_main` alias" was skipped, while the code only skipped a
+#:       non-integer `base`. `mram_main.base` is still the literal "TBD" on
+#:       E1M-AEN801/803 (alp-sdk#2053 resolved it, hit exactly this collision,
+#:       and reverted), so the defect was LATENT in tan, never reached.
+#:       Introduces `scripts/whole_device_alias.py`, relocated here as
+#:       `tan/planner/whole_device_alias.py` and pinned in HAND_PORT_HASHES.
+#:   - 80614020 fix(aen): correct the OSPI0 NOR and E1M-EVK encoder part identities (#2062, #2065) (#2087)
+#:       `gen_zephyr_board.py`: the OSPI0 NOR + HyperRAM population clause is
+#:       read from the SoM preset (`on_module.ospi_memories.ospi0`,
+#:       `on_module.hyperram`) instead of the hardcoded Macronix/Winbond pair,
+#:       via seven new helpers; `_aen_dts()` gains `sku_preset`. Ported.
+#:       `alp_template.py`: one part number, `PEC12R-4222F-S0024` ->
+#:       `PEC11R-4215K-S0024`, in `_derive_pin_doc_renames`'s docstring.
+#:   - faefac36 feat(temperature): add portable <alp/temperature.h> for the on-module sensor (#2075)
+#:       `gen_zephyr_board.py`: the aliases comment names `DT_ALIAS(alp_temp0)`
+#:       instead of `DT_ALIAS(ambient_temp0)`. The alias VALUE itself comes from
+#:       `on-module-links.yaml` (`alias: alp-temp0`), so only prose is ported.
+#:   - a14c6c53 fix(aen): board-scope the TMP112 Kconfig collision instead of an app-level workaround (#2043) (#2070)
+#:       `gen_zephyr_board.py`: `_aen_kconfig_defconfig()` emits `config TMP112`
+#:       / `default n`, so upstream Zephyr's `tmp112_init()` does not collide at
+#:       link time with alp-sdk's own `chips/tmp112/tmp112.c`. Ported verbatim.
+#:   - 5a0f6483 fix(aen): resolve the I2C pinctrl pull-direction contradiction and scope the E8 bench citation to its own part (#2046) (#2068)
+#:       `gen_zephyr_board.py`: RETRACTS the claim that `pinctrl_soc.h`'s
+#:       pull-direction encoding "reads inverted vs the Alif pad hardware" (it
+#:       does not -- `ALIF_PINCTRL_BIAS_CFG()` maps bias-pull-up -> DSC=1 and
+#:       bias-pull-down -> DSC=2 unconditionally), and part-scopes the E8 bench
+#:       citation through the new `e1m_i2c0.bench_validation` per-part map.
+#:       Ported, together with the shape check that refuses a bare-string
+#:       `bench_validation`. NOTE: this pin move is what closes the divergence
+#:       recorded below as the BRD_I2C-vs-e1m_i2c0 contradiction -- upstream
+#:       reconciled it, as that note said it must.
+#:       The sibling `rtc_alarm.risk` shape check (alp-sdk#1988), missing in tan
+#:       since the #1241 re-sync ported only the reader half, lands here too --
+#:       that is tan-cli#1253, folded into this re-sync because it edits the
+#:       same function.
+#:
+#: `81a9d515` -> `c81cb5db` (tan-cli#1269 flagged both sources at `0fe9958d`;
+#: this pin move is the human half). TWO of the thirteen `HAND_PORT_HASHES`
+#: sources changed in range, both ported:
+#:
+#:   - `scripts/gen_zephyr_board.py` (#2053, the same `mram_main.base ->
+#:     0x80000000` commit as the mirror pin above): DOCSTRING ONLY.
+#:     `_aen_check_map_overlaps` stops describing the whole-device-alias
+#:     `TBD`-base skip and the App-MRAM-window exact-match exclusion as
+#:     hypothetical ("once its `base` stops being `"TBD"`") and instead says
+#:     #2053 already resolved it on every shipped AEN preset, while noting
+#:     the skip itself stays live for any future preset that authors a
+#:     `TBD` base. Ported verbatim into `zephyr_board.py::
+#:     _aen_check_map_overlaps`. No emitted byte moves -- the code this
+#:     docstring describes did not change upstream either.
+#:   - `scripts/alp_template.py::validate()` (#2197, IMPLICIT-ENCODING
+#:     drain): NO-OP PORT. `validate()` / `ValidateResult` / `_count_passed`
+#:     -- the in-tree twister self-test this hunk's `env=`/`encoding=`
+#:     change lives in -- explicitly did NOT relocate to `tan/planner/`
+#:     (`template.py`'s own module docstring: "An SDK CI gate, not a
+#:     customer path"). Confirmed by search, not assumed: no
+#:     `subprocess.run` invoking `twister` exists anywhere under
+#:     `tan/planner/`, `tan/core/`, or `tan/commands/` in this tree. The
+#:     hash below still re-pins against the new upstream blob -- the point
+#:     of a HAND_PORT_HASHES entry with no matching tan code is exactly to
+#:     keep catching a FUTURE change to this source that isn't similarly
+#:     inert, not to claim today's is.
+#:
+#: `c81cb5db` -> `79c834e65` (this change, alongside the mirror-table bump for
+#: alp-sdk#2311/#2312 above). Of the ten HAND_PORT_HASHES sources, exactly two
+#: changed in this range (`git diff --stat` per file, not assumed):
+#:
+#:   - `scripts/alp_project_loader.py` (alp-sdk#2312, `bf602754a`) -- NO PORT
+#:     NEEDED: adds `vela_memory_mode`/`vela_system_config`/
+#:     `vela_vendor_system_config`/`vela_vendor_config_filename` to
+#:     `TargetSpec` and the matching `_soc_targets` split by
+#:     `system_config_requires_vendor_config`. `tan.model.targets.TargetSpec`/
+#:     `_soc_targets` (NOT a `tan/planner/` file -- this hand-port's tan
+#:     counterpart lives in `tan/model/`, a wholly different subsystem from
+#:     `project_loader.py`/`som_metadata.py`) already carry the identical
+#:     fields and the identical fail-closed split (`_vela_profile`) -- alp-sdk's
+#:     own new docstring says so verbatim ("mirrors tan-cli's `TargetSpec.
+#:     vela_memory_mode`" / "vela_system_config` / `vela_vendor_system_config`
+#:     split, alp-sdk#2312"): alp-sdk is catching up to tan here, not the
+#:     reverse.
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#2288, `b1b89a659`) -- BEHAVIOURAL,
+#:     and PORTED into `tan/planner/zephyr_board.py` in this change: BRD_I2C
+#:     (RIIC8) on the V2N/V2M `m33_sm` board moves to the Cortex-A55/Linux
+#:     side, so the CM33's `_v2n_dts`/`_v2n_defconfig` templates now leave
+#:     `&i2c8` `status = "disabled"` with no alias and no pinctrl/clock-
+#:     frequency/status lines (`_v2n_dts`), and `_v2n_defconfig` asserts
+#:     `brd_i2c.get("status") != "disabled"` (inverted from the old
+#:     `!= "enabled"`) and drops `CONFIG_I2C=y` -- SPI-only supervisor bridge
+#:     now. Applied line-for-line (only the relocation's own `is_tbd` ->
+#:     `_is_tbd` rename differs). MEASURED: `tests/parity/
+#:     test_planner_emit_parity.py` was 25 failed before this port (every V2N/
+#:     V2M board tree + the byte-for-byte scaffold check) and 0 failed/865
+#:     passed after, bound to this same `79c834e65` checkout.
+#:
+#: `79c834e65` -> `34c11c9de` (tan-cli#1278, alongside the mirror-table bump
+#: above). Of the thirteen HAND_PORT_HASHES sources, exactly five changed in
+#: range (`git diff --stat` per file, not assumed; `sentinels.py`,
+#: `whole_device_alias.py`, `diagnostic_format.py` and the other four
+#: `alp_project_emit/` files re-hashed byte-identical). No source was added or
+#: retired, so HAND_PORT_SOURCES and `test_hand_port_tan_side.py`'s three
+#: tables are unchanged -- every key above is still in exactly one of them:
+#:
+#:   - `scripts/alp_project_loader.py` (#2024, `29df99f9e`) -- BEHAVIOURAL,
+#:     PORTED into `som_metadata.py::resolve_memory_map`: every DERIVED
+#:     memory row now states `write_authority` (`customer_runtime` for SoC
+#:     `memory_regions` and SRAM/TCM banks, `composite` for the whole-MRAM
+#:     alias), because som-preset v2 makes the field required rather than
+#:     defaulted (ADR-0034 clause 4). Reaches `system-manifest.yaml`'s memory
+#:     pane -- 24 oracle goldens, see PINNED_SDK_COMMIT above.
+#:     `test_derived_memory_write_authority.py`.
+#:   - `scripts/gen_zephyr_board.py` -- three commits, PORTED into
+#:     `zephyr_board.py`: `cc839f464` (#915) BEHAVIOURAL for emitted text --
+#:     `_AEN_OSPI_XIP_GAP`, which `_aen_ospi_device_state` interpolates into
+#:     the generated AEN board tree's OSPI/MRAM comments, now says
+#:     `flash_ospi_alif.c`'s `flash_driver_api` exists but never calls the
+#:     XIP enable, instead of "ships no flash_driver_api" (zephyr-board bytes
+#:     only; the planner oracle captures no `zephyr-board` mode).
+#:     `a2228e2e8` (#1948) and `29df99f9e` (#2024) are DOCSTRING ONLY: V2M101
+#:     now sets `topology.m33_sm.openamp_ipc` too (the flag reader is
+#:     unchanged; the board-tree delta is metadata-driven), and the schema
+#:     citation moves to `som-preset-v2`. `test_zephyr_board_openamp_ipc.py`.
+#:   - `scripts/alp_template.py` (#866, `423e0100d`) -- BEHAVIOURAL, PORTED:
+#:     `_cmake_core_map`/`_substitute_cmake_core` and their call in
+#:     `render_to_envelope` are DELETED (the CMakeLists `--core` literal they
+#:     rewrote no longer exists in any example), from `template.py`/
+#:     `template_rewrite.py`, plus the matching docstring edits in
+#:     `template_pins.py`. `validate()`'s new `gen_example_alp_conf`
+#:     pre-generation is NOT ported: `validate()` is alp-sdk's twister
+#:     self-test and never relocated (same no-op reasoning as `#2197` above).
+#:   - `scripts/alp_project_emit/hw_info.py` (#866) -- COMMENT ONLY, ported
+#:     verbatim (no longer cites the retired zephyr-conf CMakeLists pattern).
+#:   - `scripts/alp_cli/validator.py` -- `169a9be38` (#2328) switches
+#:     `_load_metadata_yaml` to `fast_safe_load` and `35879bf0b` (#2615) adds
+#:     camera-connector checks. NO TAN PORT: the only part of this file tan
+#:     carries is `load_board_schema`/`iter_schema_errors` in `loader.py`
+#:     (HAND_PORT_NO_TAN_FILE_PAIRING), which neither commit touches, and
+#:     `tan validate` spawns the bound SDK's own `scripts/validate_board_yaml.py`
+#:     (`validate_cmd.VALIDATOR_SCRIPT`), so it picks up #2615 from the SDK.
+#:
+#: `34c11c9de` -> `ac0e2a5e0` (tan-cli#1309, alongside the mirror-table bump
+#: above). Of the thirteen HAND_PORT_HASHES sources tracked until now
+#: (`gen_zephyr_board.py`, `sentinels.py`, `whole_device_alias.py`,
+#: `alp_project_loader.py`, `alp_template.py`, the six `alp_project_emit/`
+#: files, `alp_cli/diagnostic_format.py`, `alp_cli/validator.py`), exactly
+#: three changed in range (`git diff --stat 34c11c9d..ac0e2a5e` per file; the
+#: other ten re-hashed byte-identical). ONE source is ADDED, so the table is
+#: now fourteen: `scripts/alp_project.py`, which `tan/planner_emit.py`
+#: hand-ports (its `_run_v2_per_core_emit`/`main()` emit dispatch) but which
+#: no table tracked -- the gap that let the `dts-overlay` M33-ownership
+#: append below ship unported. It is a key in HAND_PORT_HASHES and in
+#: `test_hand_port_tan_side.py`'s HAND_PORT_TAN_SIDE (paired with
+#: `tan/planner_emit.py`); it is NOT in HAND_PORT_SOURCES, whose keys are
+#: `tan/planner/`-relative and whose coverage walk (`tan/planner/**.py`)
+#: cannot name a file outside that package. Every other key above is still in
+#: exactly one of the tan-side tables, and every tan file they name still
+#: holds its port:
+#:
+#:   - `scripts/gen_zephyr_board.py` -- three commits, all BEHAVIOURAL for the
+#:     emitted V2N/V2M `m33_sm` board tree, PORTED into `zephyr_board.py`:
+#:     `5a46a9ec8` (#2673) -- new `_v2n_assignable_m33`/
+#:     `_v2n_assignable_pinctrl`/`_v2n_assignable_dts`: every
+#:     `core-ownership.yaml` `assignable:` instance with an `m33:` block is
+#:     declared `status = "disabled"` with its pinctrl group, PFC codes from
+#:     the SoC JSON's `linux_dt` via the mirrored `ownership.instance_pfc`
+#:     (upstream imports `alp_orchestrate.ownership`; tan imports
+#:     `.ownership`). `ec4e63dad` (#2679) -- the CM33 `wdt0` node
+#:     (`renesas,rzv-wdt`, disabled) and the `alp-wdt0` alias from the SoC
+#:     spec's `m33_sm` `watchdog` block, refusing a spec with none; the three
+#:     `_V2N_WDT0_*` prose tuples are deleted. `53eeda84d` (#2695) -- an
+#:     optional `gd32-pads` node (`alp,gd32-pads`: swdio/swclk/nrst/attn) and
+#:     the matching GPIO-controller enable, when the links declare
+#:     `gd32_pads`. Zephyr-board bytes only; the planner oracle captures no
+#:     `zephyr-board` mode, so `test_planner_emit_parity.py`'s board-tree
+#:     test is what measures it. `test_zephyr_board_assignable_m33.py`,
+#:     `test_zephyr_board_v2n_gd32_pads_and_wdt.py`.
+#:   - `scripts/alp_project_loader.py` (`8c5e1e23f`, #2678) -- BEHAVIOURAL,
+#:     PORTED into `som_metadata.py::resolve_capabilities`: `gpu2d` is now
+#:     the silicon variant's `optional_features.gpu_mali_g31` (a per-die
+#:     fact: four of the eight RZ/V2N dies are fused without the Mali-G31),
+#:     overriding the SoC-level block. `test_capabilities_gpu2d_per_die.py`.
+#:   - `scripts/alp_project_emit/__init__.py` (`ac62fdc6c`, #2653) --
+#:     BEHAVIOURAL, PORTED: `"ina228": ("I2C",)` joins `_CHIP_SUBSYSTEMS`,
+#:     which tan keeps in `slugs.py` (`test_hand_port_tan_side.py` pairs this
+#:     source with both files for exactly that reason); tan's
+#:     `project_emit/__init__.py` needs no edit.
+#:   - `scripts/alp_project.py` (two commits; newly tracked) --
+#:     `5a46a9ec8` (#2673) BEHAVIOURAL, PORTED into
+#:     `tan/planner_emit.py::_render_dts_overlay`: `--emit dts-overlay`
+#:     appends `project_m33_overlay(project, core)[0]`
+#:     (the `&<label> { status = "okay"; }` + alias block enabling the nodes
+#:     board.yaml `ownership:` assigns to the M33) in BOTH the `--core`-scoped
+#:     and unscoped paths, and maps an `OrchestratorError` to a refusal
+#:     (`PlannerEmitError`). `8d17d15b7` (#2674) adds the
+#:     `linux-ownership-dts` project-wide emit mode, NOT ported here; tan's
+#:     `planner_emit.py` does not serve it (its renderer is the mirrored
+#:     `linux_ownership.py`, compared at library level by
+#:     `test_planner_emit_parity.py`).
+#:     `tests/planner/test_dts_overlay_m33_ownership.py`.
+#: AUDIT `ac0e2a5e` -> `2d2a8533` (tan-cli#1216), the two hand-ports that moved:
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#2747, #2685) -- PORTED into
+#:     `tan/planner/zephyr_board.py` by a 3-way merge of the upstream delta
+#:     (function-placement conflict resolved by hand): V2N `supported:` lists only gpio/spi, sci0 RXD
+#:     `bias-pull-up`, the RAM console node + `zephyr,ram-console` chosen,
+#:     OpenAMP window tokens from the SoC's `openamp_carveout`
+#:     (`_openamp_subst`, `_ram_console`), the ATTN TINT-slot route, and
+#:     `_v2n_defconfig(links, soc_spec)` with the RAM-console Kconfig.
+#:   - `scripts/alp_project.py` (alp-sdk#2771) -- PORTED already: its
+#:     `--emit dts-overlay --core` now calls `_slice_dts_overlay`, which is
+#:     what `planner_emit._render_dts_overlay` does for `--core`, and the
+#:     shared `_v1_shaped_project` is the one `planner_emit` now reuses.
+#: AUDIT `2d2a8533` -> `030de105` (tan-cli#1401): NO hand-port source changed in
+#: range (`git diff --stat 2d2a8533 030de105 -- scripts/gen_zephyr_board.py
+#: scripts/alp_project.py scripts/alp_project_emit scripts/alp_template.py
+#: scripts/alp_project_loader.py scripts/sentinels.py scripts/whole_device_alias.py
+#: scripts/alp_cli` is empty), and every `HAND_PORT_HASHES` entry re-hashes
+#: unchanged at `030de105`, so only the pin moves.
+#: AUDIT `030de105` -> `6159a7b1` (tan-cli#1216): ten hand-port sources changed
+#: in range, all re-hashed in `HAND_PORT_HASHES`. Ported: the E1M-NX9101 removal
+#: (#2782) -- `_SKU_FAMILY` / `_sku_family` lose `NX9` in `som_metadata.py` and
+#: `zephyr_board.py`'s `_sku_family_slug`, `slugs.py`'s `_CHIP_SUBSYSTEMS` loses
+#: `pca9451a`, and the `imx93` west token went with `libraries.py` (above). The
+#: `alp_project_emit/hw_info.py` `metadata_root` parameter was already ported
+#: (alp-sdk#1964; tan's is required, not optional). `alp_project.py`'s
+#: `--core` routing through `_slice_hw_info_h` / `_slice_west_libraries` is
+#: ported in `planner_emit.py` (see the mirror note above). The rest
+#: (`alp_cli/*`, `alp_template.py`, `native_sim.py`, `alp_project_loader.py`
+#: comments) are doc-wording only.
+#:
+#: AUDIT `6159a7b1` -> `c4eb27645` (tan-cli#1427): no hand-port source changed in
+#: range; all `HAND_PORT_HASHES` re-computed at `c4eb27645`, unchanged.
+#:
+#: AUDIT `0dee99fb5` -> `183b05509` (tan-cli#1393): one hand-port source changed,
+#: re-hashed in `HAND_PORT_HASHES`.
+#:   - `scripts/alp_cli/validator.py` (`183b05509`, #2736) -- camera connector
+#:     checks. Nothing to port: tan spawns the SDK validator, and its hand-port
+#:     of this file is only `load_board_schema`/`iter_schema_errors` (in
+#:     `loader.py`), neither of which changed.
+#: Also ported here, from the `c4eb27645` -> `0dee99fb5` range:
+#:   - `scripts/alp_project.py` (`ed57bd025`, #2791) -- `--emit cmake-args`
+#:     turns an `OrchestratorError` (an unbuildable `cameras:` entry) into one
+#:     refusal line. `tan generate --target cmake-args` renders in-process, not
+#:     through the SDK validator, so `planner_emit._render_per_core` maps it to
+#:     `PlannerEmitError` rather than letting `CameraSelectError` escape.
+#:   - `scripts/gen_zephyr_board.py` (#2784) -- the power-node port gains the
+#:     tan-cli#591 floor: a bound checkout without `on-module-links-v2` raises
+#:     `SdkTooOldError` (`aen.som_power_domains`), not the schemaVersion
+#:     authoring error that blames `on-module-links.yaml`.
+#:
+#: AUDIT `183b05509` -> `a5a137c7b` (tan-cli#1393): two hand-port sources changed.
+#: `scripts/gen_zephyr_board.py` (#2795) -- PORTED: `_aen_som_power_dts` now
+#: emits the `&pinctrl { pinctrl_som_power: ... }` group (`group0` with
+#: `pinmux` = every output control pad of the SKU's present domains, sorted,
+#: `PIN_P<port>_<pin>__LPGPIO` for port 15 else `__GPIO`; `input-enable;`
+#: `input-schmitt-enable;`) ahead of the `/ { som-power }` node, and the node
+#: gains `pinctrl-0 = <&pinctrl_som_power>; pinctrl-names = "default";`.
+#: `scripts/alp_cli/validator.py` -- docstring-only (`camera_connector_problems`
+#: follow-up note); tan spawns the SDK validator, nothing to port. Also in range
+#: and needing no port: `on-module-links.yaml` v2 `power_domains` gains
+#: `dependents[].kind: phy_refclk` (schema enum) and the `deep_power_down_cmd`
+#: -> `hold_reset` default_action change; tan reads that YAML through the
+#: existing `power_domains` loader and the enum is validated by the SDK schema,
+#: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
+#: `"phy_refclk"` on the ethernet-PHY domain.
+#: `5a612e24` -> `1d20103b`: no hand-port source moved; hashes unchanged.
+HAND_PORT_PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -776,71 +2503,71 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: `54c0b5c4...`), so pinning it here at HAND_PORT_PINNED_SDK_COMMIT re-freezes
 #: nothing unaudited.
 #:
-#: `scripts/alp_cli/faultdecode.py` is in THIS table for the same reason as
-#: `sentinels.py` above and, like it, deliberately NOT in HAND_PORT_SOURCES:
-#: its port, `tan/core/faultdecode.py`, lives under `tan/core/`, not
-#: `tan/planner/`, so it has no `tan/planner/`-relative path this dict's
-#: `HAND_PORT_SOURCES` half (a coverage list over `tan/planner/**.py`, see
-#: that dict's own docstring) could name. Tracking the SDK-side hash anyway
-#: is the point (tan-cli#560 review, blocker 2): without it, this entire
-#: freshness gate had zero visibility into `scripts/alp_cli/faultdecode.py`,
-#: and alp-sdk dad5b35a (#1389) changed it inside the very
-#: `a3173305..d00dbdc1` range this file's own pin moved across, unseen. sha256
-#: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
-#: already names, so pinning it here re-freezes nothing unaudited either.
+#: `scripts/alp_cli/faultdecode.py`, `.../validate.py`, `.../new_som.py`,
+#: `.../doctor.py`, `.../explain.py`, `.../monitor.py`, `.../model.py` --
+#: the seven sources this paragraph used to track alongside
+#: `diagnostic_format.py`/`validator.py` (tan-cli#560 review, blocker 2 /
+#: minor 2) -- are RETIRED as of `722320a1` (tan-cli#996, see the pin's own
+#: comment above): alp-sdk `210e9fed` (#1367/#1368, "finish the alp_cli
+#: retirement") deletes all seven outright, each superseded by a released,
+#: native tan-cli v0.6.0 port with no in-repo caller left upstream. Their
+#: tan-side counterparts are unaffected and keep working
+#: (`validate_cmd.py`, `new_som_cmd.py`, `doctor_cmd.py`/
+#: `doctor_libraries.py`, `error_catalog.py`, `monitor_cmd.py`,
+#: `model_cmd.py`, `faultdecode.py`/`faultdecode_cmd.py`) -- what is retired
+#: is only the AUDIT, because there is no longer an alp-sdk source on the
+#: other end of it. `test_hand_port_tan_side.py`'s
+#: `HAND_PORT_TAN_SIDE`/`HAND_PORT_NO_TAN_FILE_PAIRING`/
+#: `_PAIRING_MAY_ONLY_CONTAIN` drop the matching entries in this same
+#: change, per that file's own "drop them in the same change that dropped
+#: the pin" rule. `scripts/alp_cli/model.py` genuinely retires this time --
+#: contrast the `88318e75` paragraph above, where the SAME retirement was
+#: attempted prematurely (tan-cli#791) against `eb96112b`, where the file
+#: was still live; `722320a1` is past `210e9fed` landing for real, measured
+#: by `git diff --stat 88318e75..722320a1 -- scripts/alp_cli/model.py`
+#: reporting a pure deletion, not a rename.
 #:
-#: The eight `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
-#: explain,monitor,model,validator}.py` entries below close the same blind
-#: spot (tan-cli#560 review, minor 2): each is named as a hand-port source in
-#: a comment somewhere under `python/tan/` --
-#: `tan/output_format.py`/`tan/commands/validate_cmd.py`
-#: (`diagnostic_format.py`), `tan/commands/validate_cmd.py` (`validate.py`),
-#: `tan/commands/new_som_cmd.py` (`new_som.py`),
-#: `tan/commands/doctor_cmd.py`/`tan/core/doctor_libraries.py` (`doctor.py`),
-#: `tan/core/error_catalog.py`/`tan/commands/explain_cmd.py` (`explain.py`),
-#: `tan/commands/monitor_cmd.py` (`monitor.py`), and
-#: `tan/commands/model_cmd.py` (`model.py`). `scripts/alp_cli/validator.py`'s
-#: `load_board_schema`/`iter_schema_errors` are hand-ported into
+#: `scripts/alp_cli/diagnostic_format.py` and `scripts/alp_cli/validator.py`
+#: remain (see the `88318e75 -> 722320a1` paragraph above for what changed
+#: in each): `diagnostic_format.py`'s hand-port is the ~150-line region
+#: inside `tan/commands/validate_cmd.py` named in
+#: `HAND_PORT_NO_TAN_FILE_PAIRING`; `validator.py`'s is
+#: `load_board_schema`/`iter_schema_errors`, hand-ported into
 #: `tan/planner/loader.py` (that file's own docstring: "RELOCATED from
 #: alp-sdk's scripts/alp_cli/validator.py, the last module-scope import this
 #: file made across the repo boundary") -- `loader.py` itself is already
 #: tracked in `PINNED_HASHES` above (its main body relocated from
-#: `scripts/alp_orchestrate/loader.py`), so this is the SAME split-heritage
-#: shape `sentinels.py` set the precedent for: a hand-port INTO an
-#: already-tracked file still needs its own SDK-side source hashed. None of
-#: these eight sources live under `tan/planner/` themselves, so like
-#: `faultdecode.py` they are deliberately NOT added to `HAND_PORT_SOURCES`
-#: either. sha256 taken directly from the `d00dbdc1` checkout
-#: HAND_PORT_PINNED_SDK_COMMIT already names, and each verified unchanged
-#: across the `a3173305..d00dbdc1` range this file's own pin moved across, so
-#: pinning them here re-freezes nothing unaudited. `scripts/alp_project_loader.py`
-#: -- the ninth source the same review named -- is deliberately NOT re-added:
-#: it is already a key above (added for `tan/planner/project_loader.py` and
-#: `tan/planner/som_metadata.py`), and its OWN additional hand-port sites
-#: (`tan/commands/new_som_cmd.py`) are already
-#: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
-#: source path, not by the consuming `tan` file, so a second key for the same
-#: path would be a no-op duplicate, not a new audit.
+#: `scripts/alp_orchestrate/loader.py`), the same split-heritage shape
+#: `sentinels.py` set the precedent for -- AND, since tan-cli#270, the whole
+#: file in `tan/core/board_validator*.py` (the in-process `tan validate`
+#: engine, with `diagnostic.py`, `yaml_pos.py` and `validate_board_yaml.py`
+#: pinned beside it). None of these lives under `tan/planner/` itself, so none
+#: is in `HAND_PORT_SOURCES` below; `test_hand_port_tan_side.py`'s
+#: `HAND_PORT_TAN_SIDE` is where their tan files are named.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "30ab1b52835d77f226bf4ed07185cd5a91f2c374ea8b8576edb00699627ea8a7",
+    "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
-    "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
-    "scripts/alp_template.py": "9321c7e31759ef4f9c03c2c750b1d7d7f4019b9a50dd2679668deaa2b0054708",
-    "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
+    "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
+    "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
+    "scripts/alp_template.py": "d700c9a7a0039f3fa3b2f0a7d2ce410a647301d3261ee6140118f416b6ea2b35",
+    "scripts/alp_project_emit/__init__.py": "e8d8d4ed3ecc3f2fa1b74d4f8f7dd517f2dda3b6739a1c379ed0dfe63a15e16a",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
-    "scripts/alp_project_emit/hw_info.py": "25673bb45305ce3f54280560beea8577bdf04bfdada44a133ff7ca48fbe05167",
-    "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
-    "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
-    "scripts/alp_cli/faultdecode.py": "3a9e82b7b6892523923e6f571602be1e3bb11e24090dde0b90f6a5ae207aaa0b",
-    "scripts/alp_cli/diagnostic_format.py": "d6f7872013b7990a08ca724814daaf800a8acf37dec4d9a7d5078807757d162d",
-    "scripts/alp_cli/validate.py": "c7b7175798c3e8f0d7961fb40e3318f60570f7ec85d131c599f83109c2cebfe6",
-    "scripts/alp_cli/new_som.py": "1118f99aa8c334c5d058e69b0e454954b4637678971d9c47472e45dc2d4eb558",
-    "scripts/alp_cli/doctor.py": "f2faa07cecbbffc1bcfb510210e3f24d96a3ad6864eef8f3fe92f93886ddacd5",
-    "scripts/alp_cli/explain.py": "b9e05d32896d1e0855f1c040b581b3e77869b4b03b15371c125757be1e0e09fe",
-    "scripts/alp_cli/monitor.py": "1f67ee1372c73e2bd76b5c9338c141e31accdef1e206b7a64806cf8eb691c0e2",
-    "scripts/alp_cli/model.py": "a51be0a8d3a16bd408bb57d01f049175406b73cc48ab9346d39555c3aa5b1925",
-    "scripts/alp_cli/validator.py": "8dac2e4d3799fe67feceb74e587f23b5e8b44a40df2805220632f8edae26a421",
+    "scripts/alp_project_emit/hw_info.py": "32704dc96f2e07f1dd4e5d409c14340eb6a8169dbb52f6110cfa6501e1ba6b4f",
+    "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
+    "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
+    "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
+    "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
+    # tan-cli#270: `tan validate` runs these four IN-PROCESS now instead of
+    # spawning the SDK's script. `validator.py` above was already pinned for the
+    # two schema helpers `tan/planner/loader.py` copied; it is now ALSO the source
+    # of `tan/core/board_validator{,_schema,_compat}.py`. Byte-identical at
+    # `HAND_PORT_PINNED_SDK_COMMIT` and at alp-sdk `origin/dev` `4c7d2d34`
+    # (the commit the port was cut from; verified by hashing both).
+    "scripts/alp_cli/diagnostic.py": "6a96eb120d73640196cefbd30d13e40a515d00d11368e440123594189cd16d96",
+    "scripts/alp_cli/yaml_pos.py": "c83580d86a8f2bc575e20b44f4893847a6a08f765774861f2d29a8bd61ae5b74",
+    "scripts/validate_board_yaml.py": "91e06880f068447f98a2c68f1ffb4b6da29c18d2fcadfa0232d982e6612557d4",
+    "scripts/alp_project.py": "c505f9dfad7557715929cbe190830fe21268695891b637b28752c0de65389afd",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
@@ -852,12 +2579,27 @@ HAND_PORT_SOURCES: dict[str, str] = {
     "project_loader.py": "scripts/alp_project_loader.py",
     "som_metadata.py": "scripts/alp_project_loader.py",
     "template.py": "scripts/alp_template.py",
+    # tan-cli#1142: template.py was 2206 lines against MODULE_CAP=800 and was
+    # split into two sibling modules -- both are this SAME hand-port, not a
+    # second one, the same many-to-one shape alp_project_loader.py already
+    # has two rows below.
+    "template_pins.py": "scripts/alp_template.py",
+    "template_rewrite.py": "scripts/alp_template.py",
     "project_emit/__init__.py": "scripts/alp_project_emit/__init__.py",
     "project_emit/bom_netlist.py": "scripts/alp_project_emit/bom_netlist.py",
     "project_emit/dts.py": "scripts/alp_project_emit/dts.py",
     "project_emit/hw_info.py": "scripts/alp_project_emit/hw_info.py",
     "project_emit/native_sim.py": "scripts/alp_project_emit/native_sim.py",
     "project_emit/west_libs.py": "scripts/alp_project_emit/west_libs.py",
+    # tan-cli#1265: upstream's source is the FLAT `scripts/whole_device_alias.py`
+    # (alp-sdk#2073), not a `scripts/alp_orchestrate/` module, so it belongs in
+    # this table rather than PINNED_HASHES even though its tan counterpart sits
+    # beside the relocated mirror. Unlike `sentinels.py` -- which is in
+    # HAND_PORT_HASHES with NO row here, because its one function is inlined as
+    # `zephyr_board.py::_is_tbd` -- this one keeps a file of its own: two
+    # modules need the predicate (`aperture.py` twice, `zephyr_board.py` once),
+    # and keeping a single spelling is the whole point of alp-sdk#2073.
+    "whole_device_alias.py": "scripts/whole_device_alias.py",
     # strict_loaders.py is intentionally NOT in HAND_PORT_HASHES -- see the
     # STRICT_LOADERS_* block below for why it needs its own pin/root/test
     # rather than joining this bundle.
@@ -890,51 +2632,60 @@ def test_hand_port_sources_declares_its_one_strict_loaders_exception():
 #: tan-cli#485: `tan/planner/strict_loaders.py` (the alp-sdk #1127
 #: duplicate-key-rejecting YAML/JSON loaders, wired into `loader.py`'s
 #: `_load_yaml`/`_load_json` to close the silent-sku-retarget hazard) was
-#: hand-ported from `scripts/strict_loaders.py` -- a file that did not exist
-#: at all at HAND_PORT_PINNED_SDK_COMMIT when this split was written (then
-#: `996937ac`, which predates alp-sdk #1127). It gets its OWN pin/root/test
-#: rather than joining HAND_PORT_HASHES/HAND_PORT_PINNED_SDK_COMMIT,
-#: deliberately: auditing the rest of that bundle between 996937ac and the
-#: pin current at the time turned up a REAL, narrower gap this fix does not
-#: close. (`scripts/strict_loaders.py` DOES exist at the current
-#: HAND_PORT_PINNED_SDK_COMMIT, `d00dbdc1` -- blob
-#: `d4b6ce64850acb7893ecb894a96988636cc32324` -- so "does not exist" is no
-#: longer why it stays split; the gap below is.) `scripts/alp_template.py`
-#: gained `_safe_join`/
-#: `PathEscapeError` (alp-sdk #1125/#1126); `tan/planner/template.py` has its
-#: own parallel `tan.core.fs_confine.PathEscapeError`/`resolve_confined`,
-#: wired into every catalog-driven WRITE (`scaffold.py:1049`,
-#: `init_cmd.py:804`, `generate_cmd.py:488`, `pinmux_cmd.py:347`) -- so no
-#: write can escape its destination root. What it is NOT wired into is
-#: `template.py`'s catalog-driven READS: `_rendered_bytes` (`:210` joins
-#: `base_dir / record["example"]`, `:214` joins that onto each `rel` and
-#: calls `.read_bytes()`) and `render_to_envelope` (`:1091`, the same join
-#: onto `board.yaml`). Measured with a traversal `rel` against a shared
-#: catalog fixture: `tan`'s `_rendered_bytes` returns the escaped file's
-#: bytes; alp-sdk's raises `PathEscapeError`. Those bytes reach the caller
-#: through `emit_scaffold`'s `[{path, contents}]` envelope, so a malicious or
-#: compromised `--metadata-root`/catalog entry can read an arbitrary file
-#: readable by the `tan` process and hand it back as scaffold content.
-#: Threat model, scoped honestly: this requires a hostile SDK/catalog
-#: checkout, which is already trusted to run arbitrary CMake/west during a
-#: normal build -- meaningfully narrower than #1126's write-bug severity (a
-#: write escape corrupts files outside any project the caller chose; this
-#: read escape discloses them), but real, and not closed by this change.
-#: Folding strict_loaders.py into HAND_PORT_HASHES would force a choice
-#: between silently re-freezing the whole bundle past this gap unaudited
-#: (the exact "bare bump" tan-cli#485 exists to name) or fixing it as a
-#: drive-by inside an unrelated change -- filed separately instead (see
-#: tan-cli#485's own report). (alp-sdk #1069's disjoint per-core slot0
-#: memory layout, the OTHER large delta in this bundle's window, is NOT a
-#: gap: tan-cli#432 already ported it into `zephyr_board.py` byte-for-byte,
-#: confirmed by re-reading the whole file, not just the diff.) Same
-#: tan-cli#296 rationale that split PINNED_SDK_COMMIT from
-#: HAND_PORT_PINNED_SDK_COMMIT in the first place: two audits that drifted
-#: at different rates need two pins, not one shared one.
-STRICT_LOADERS_PINNED_SDK_COMMIT = "26b0040e9a762c16aff5c7c53b2e19cc7583b2a4"  # alp-sdk origin/dev, introduces #1127
+#: hand-ported from `scripts/strict_loaders.py`. It has its OWN pin/root/test
+#: rather than a HAND_PORT_HASHES row, and that split is HISTORY now, kept
+#: because `parity.yml` clones a third checkout for it and
+#: `test_hand_port_sources_declares_its_one_strict_loaders_exception` pins
+#: the shape -- not because any audit gap still needs it.
+#:
+#: WHY IT WAS SPLIT. When this block was written, auditing the rest of the
+#: hand-port bundle turned up a REAL gap the strict-loaders port did not
+#: close: alp-sdk #1125/#1126 had given `scripts/alp_template.py` a
+#: `_safe_join`/`PathEscapeError` guard on its catalog-driven READS
+#: (`_rendered_bytes`, `render_to_envelope`), and `tan/planner/template.py`
+#: had no equivalent -- a traversal `rel` in a hostile catalog returned the
+#: escaped file's bytes through `emit_scaffold`'s envelope instead of raising.
+#: Folding `strict_loaders.py` into HAND_PORT_HASHES then would have meant
+#: re-freezing that bundle past an unaudited gap, so it got its own pin at
+#: the commit that introduced the file (`26b0040e`, #1127), and the pin was
+#: documented as never moving.
+#:
+#: THAT GAP IS CLOSED, re-verified against the code at the `34c11c9de` bump
+#: rather than taken from a commit message: `707927ff` (tan-cli#582) ported
+#: `_safe_join` + `PathEscapeError` into `tan/planner/template.py`
+#: (resolve-then-contain, so traversal, absolute `rel` and symlink escape all
+#: fail closed) and applied it at all three catalog-driven read joins --
+#: `_rendered_bytes`'s example dir and per-file join, and
+#: `render_to_envelope`'s example dir. MEASURED: `_rendered_bytes` with
+#: `rel = "../../../../secret.txt"` and with an absolute `rel` both raise
+#: `PathEscapeError` ("template source file ... escapes root ...") instead of
+#: returning bytes.
+#:
+#: `26b0040e` -> `34c11c9de` (tan-cli#1278): so the pin moves with the other
+#: two, and it has to -- the file DID change. Exactly one upstream commit
+#: touches `scripts/strict_loaders.py` in that range (`git log 26b0040e..
+#: 34c11c9d -- scripts/strict_loaders.py`), `169a9be38` (#2328):
+#: `_StrictLoader` now subclasses `CSafeLoader` when PyYAML has libyaml
+#: (`_SAFE_LOADER`), the constructor annotation widens to
+#: `yaml.constructor.SafeConstructor`, and a new lenient `fast_safe_load()`
+#: is added for hot readers. Same values, same duplicate-key rejection,
+#: ~10x faster parse. PORTED verbatim, and `tan/planner/sdk_compat.py::
+#: load_family_table` now calls `fast_safe_load` exactly as upstream's does.
+#: `python/tests/planner/test_strict_loaders_libyaml.py` pins both the
+#: libyaml selection and the unchanged duplicate-key rejection.
+#:
+#: NOT moved at the `34c11c9de` -> `ac0e2a5e0` re-sync (tan-cli#1309):
+#: `git log 34c11c9d..ac0e2a5e -- scripts/strict_loaders.py` is empty and the
+#: file re-hashes to STRICT_LOADERS_HASH at `ac0e2a5e0`, so there is nothing
+#: to audit and the pin keeps naming the commit it was audited at.
+#:
+#: NOT moved at the `ac0e2a5e0` -> `2d2a85333` re-sync (tan-cli#1216) either:
+#: `git log ac0e2a5e..2d2a8533 -- scripts/strict_loaders.py` is empty and the
+#: file still re-hashes to STRICT_LOADERS_HASH at `2d2a85333`.
+STRICT_LOADERS_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #2328 audit (tan-cli#1278, this change)
 
 #: sha256 of `scripts/strict_loaders.py` at STRICT_LOADERS_PINNED_SDK_COMMIT.
-STRICT_LOADERS_HASH = "29cd2c62836e70abf2fa3f4e8c0939b406bd8cb6b976d9e97bc75d4180e38eef"
+STRICT_LOADERS_HASH = "6c33ab4c16c0b7321f7dd4cfd6bbec3f8e35312e72cffcd43be6a90f60511fc1"
 
 #: The env var carrying a checkout pinned at STRICT_LOADERS_PINNED_SDK_COMMIT.
 #: Its own name for the same tan-cli#296 reason HAND_PORT_SDK_ROOT_ENV is not
@@ -1003,6 +2754,19 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # tracks is a REGISTRY of alp-sdk facts (a schema property, a
     # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
     "sdk_capability.py",
+    # tan-cli#1350: `diagnostics.link: itcm` -- the AEN Flow C ITCM retarget
+    # (refusals + the conf/overlay bytes). Tan-native by ADR-0026 (the planner
+    # is tan's; alp-sdk's `alp_orchestrate` does not implement the knob), so
+    # there is no alp-sdk source to drift against.
+    "link_target.py",
+    # tan-cli#1370: the one-slice system-manifest a `board.yaml`-less
+    # `tan build --board` writes. Tan-native -- it composes the planner's own
+    # loader helpers and `_slice_flash_recipe`; alp-sdk has no such module.
+    "plain_slice.py",
+    # `aperture.py` RETIRED from this set at the eff266b6 -> 15b2f32c bump
+    # (tan-cli#1239/#1223): PINNED_SDK_COMMIT now advances past alp-sdk#1365
+    # split B, the commit that added `scripts/alp_orchestrate/aperture.py`,
+    # so it moved into PINNED_HASHES instead -- see that pin's own comment.
 })
 
 
@@ -1119,8 +2883,10 @@ def test_hand_ported_planner_modules_match_their_pinned_sdk_source():
 
     Same shape as `test_relocated_planner_modules_match_the_pinned_sdk_audit`
     above, but keyed by the alp-sdk-relative source path rather than a
-    `scripts/alp_orchestrate/`-relative name -- these nine files live all over
-    alp-sdk's `scripts/` tree, not in one directory. Reads its OWN root
+    `scripts/alp_orchestrate/`-relative name -- these (twelve, as of
+    tan-cli#996's retirement of seven now-deleted-upstream entries) files
+    live all over alp-sdk's `scripts/` tree, not in one directory. Reads its
+    OWN root
     (`_hand_port_sdk_root()`, ALP_SDK_HAND_PORT_ROOT) rather than `_sdk_root()`
     -- see the module docstring's tan-cli#296 note.
     """

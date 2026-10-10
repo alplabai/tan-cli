@@ -120,14 +120,24 @@ def test_an_aen_project_emits_no_dp83825_kconfig_line(planner) -> None:
     # resolved map; only the EMITTED Kconfig line is forbidden. Assert the
     # positive half is untouched by this fix: the genuinely driven
     # SoM-intrinsic chips for this board are still all present.
+    #
+    # `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M` is deliberately NOT in this list
+    # (alp-sdk#1980 / tan-cli#1239 re-sync): E1M-AEN801's Optiga is a hard
+    # DNP (footprint shared with E1M-AEN803, `i2c_devices[].assembled:
+    # false`), so `slugs._slugs_from_on_module` now excludes it from the
+    # SoM-intrinsic set -- it is no longer a "genuinely driven" chip for
+    # THIS board, and asserting its presence here would be asserting the
+    # bug #1980 fixed.
     for expected in (
         "CONFIG_ALP_SDK_CHIP_CC3501E=y",
         "CONFIG_ALP_SDK_CHIP_EEPROM_24C128=y",
-        "CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y",
         "CONFIG_ALP_SDK_CHIP_RV3028C7=y",
         "CONFIG_ALP_SDK_CHIP_TMP112=y",
     ):
         assert expected in text, f"{expected} missing -- fix must not remove driven chips"
+    assert "CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M" not in text, (
+        "E1M-AEN801's Optiga is a hard DNP (assembled: false) -- it must "
+        "not be emitted as a driven chip (alp-sdk#1980)")
 
 
 def _driverless_chip_ids() -> list[str]:

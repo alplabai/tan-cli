@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`tan.core.atomic_write.atomic_write_text` -- tan-cli#516.
+"""`tan.core.atomic_write.atomic_write_text`, and its byte-exact sibling
+`atomic_write_bytes` (tan-cli#904 third round) -- tan-cli#516.
 
 `bootstrap_cmd.reconcile_west_manifest_path` used to write its temp sibling
 with `Path.write_text` + a bare `os.replace`, with no `fsync` anywhere -- the
@@ -14,7 +15,7 @@ import os
 import pytest
 
 from tan.core import atomic_write as atomic_write_mod
-from tan.core.atomic_write import atomic_write_text
+from tan.core.atomic_write import atomic_write_bytes, atomic_write_text
 
 
 def test_fsyncs_the_temp_file_before_renaming_it_into_place(tmp_path, monkeypatch):
@@ -156,5 +157,48 @@ def test_a_fsync_failure_leaves_the_original_untouched_and_no_temp_leftover(tmp_
         atomic_write_text(str(target), "new\n")
 
     assert target.read_text(encoding="utf-8") == "old\n"
+    leftovers = list(tmp_path.glob("*.tan-tmp"))
+    assert leftovers == [], leftovers
+
+
+# ── atomic_write_bytes: the byte-exact sibling, #904 third round nit ────────
+
+
+def test_atomic_write_bytes_round_trips_content_atomic_write_text_could_not(tmp_path):
+    """The one property that justifies a separate function instead of a
+    decode-then-`atomic_write_text` call at the caller: bytes that are not
+    valid UTF-8 -- exactly the shape a hand-edited or malformed
+    `~/.alp/sdk-defaults.json` snapshot can legitimately carry -- must round
+    trip unchanged."""
+    target = tmp_path / "sdk-defaults.json"
+    payload = b'{"/proj": {"sdkPath": "/sdk"}}\xff\xfe'
+    with pytest.raises(UnicodeDecodeError):
+        payload.decode("utf-8")  # the precondition this test exists to cover
+
+    atomic_write_bytes(str(target), payload)
+
+    assert target.read_bytes() == payload
+
+
+def test_atomic_write_bytes_leaves_the_original_untouched_on_a_failed_replace(
+    tmp_path, monkeypatch
+):
+    """Same crash-safety contract as `atomic_write_text`'s own
+    `test_cleans_up_the_temp_file_when_the_replace_fails`, proven against the
+    bytes sibling directly rather than only inherited through the shared
+    `_atomic_write_bytes` internals -- a future split of the two functions
+    must not silently drop this for the bytes half."""
+    target = tmp_path / "sdk-defaults.json"
+    target.write_bytes(b"old-bytes")
+
+    def boom_replace(_src, _dst):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(atomic_write_mod.os, "replace", boom_replace)
+
+    with pytest.raises(OSError):
+        atomic_write_bytes(str(target), b"new-bytes")
+
+    assert target.read_bytes() == b"old-bytes"
     leftovers = list(tmp_path.glob("*.tan-tmp"))
     assert leftovers == [], leftovers
