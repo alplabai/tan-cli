@@ -460,6 +460,7 @@ def test_target_and_contradiction_and_dpidr_rules():
     assert pp.is_he_target("m55_he", None) and pp.is_he_target(None, "m55_he")
     assert not pp.is_he_target("m55_hp", "m55_he") and not pp.is_he_target(None, None)
     assert pp.core_contradiction("m55_he", "conflict-hp") and pp.core_contradiction("m55_hp", "he")
+    assert pp.core_contradiction("m55_he", "conflict")  # tan-cli#1488
     assert pp.core_contradiction("m55_he", "unidentified") is None
     assert pp.core_contradiction(None, "hp") is None
     assert pp.dpidr_state(None, "0x1") is None and pp.dpidr_state("0x4C013477", None) == "unread"

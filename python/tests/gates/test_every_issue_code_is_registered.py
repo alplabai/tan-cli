@@ -856,7 +856,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         #     counted) with a second, SDK-published authority for the same
         #     `core-unknown` code.
         # 9 -> 10.
-        expected_calls=10,
+        #   tan-cli#1488  `_core_required_failure` -- `debug-config.core-required`
+        #     (registered), a multi-core build with no `--core`. 10 -> 11.
+        expected_calls=11,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

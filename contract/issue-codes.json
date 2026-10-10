@@ -467,6 +467,15 @@
       "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from. tan-cli#489 (5) widened this entry's own `consumerEffect` (not a new code) to also cover `_explicit_core_unknown_failure`'s call site: the pre-fix behaviour for `--target-kind` EXPLICIT + a `--core` matching no slice was silent exit 0, an unresolved `device`, and an `executable` pointing at a path this project's build never produced -- `debug-config.core-unknown` was already the right code for 'this cause', just unreachable from that one call path. tan-cli#477 major 2 widened the same entry once more, again with no new code: #489's guard only fired when a build manifest existed, so with NO manifest an unknown `--core` still exited 0 with `device` left as the literal `<resolved-device>` -- a launch.json that looks valid and fails later in the debugger. #508 recorded that half as deliberately open because `--core` pre-build also selects which core's SDK-published debug-probe identity to resolve (alp-sdk#1026), which 'a guard keyed only on \"does a manifest exist\" cannot tell apart from a typo without also consulting the SDK's own published core list'; it now consults it (`_sdk_published_cores`: the SoC JSON's `cores[].id` unioned with the `variants[].debug.jlink_device` keys, off the same `--sdk-root` the identity fallback already reads). Both arms refuse only what they can PROVE unknown -- no slices and no resolvable SDK core list means 'cannot be asked', which stays silent. Server-independent, unlike the `sdk-identity-*` info codes: measured pre-fix, `--server openocd` reported only `sdk-identity-key-absent` and `--server pyocd` reported `issues: []`."
     },
     {
+      "code": "debug-config.core-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--core` is omitted and this project's build/system-manifest.yaml has more than one core of the resolved target class -- exits `ValidationFailure` (2), naming the cores, like `tan probe` / `tan flash`.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#1488: debug-config used to take the first slice of the target class and write a launch configuration that programs that core, exit 0."
+    },
+    {
       "code": "debug-config.target-kind-ambiguous",
       "status": "reserved",
       "severity": "error",
@@ -3736,7 +3745,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/reset_cmd.py",
-      "note": "tan-cli#1452: `--confirm-console` could not be opened (or pyserial is missing: install `tan-cli[monitor]`). Refused before the pulse. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "tan-cli#1452: `--confirm-console` could not be opened (or pyserial is missing: install `./python[monitor]` from a checkout). Refused before the pulse. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "reset.bad-port",
