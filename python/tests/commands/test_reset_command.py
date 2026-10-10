@@ -10,13 +10,14 @@ import pytest
 from typer.testing import CliRunner
 
 from tan.cli import app
-from tan.commands import flash_cmd, reset_cmd
+from tan.commands import flash_cmd, flash_raw, reset_cmd
 from tan.commands import reset_confirm as rc_mod
 from tan.core import reset_plan as rp
 from tan.core.jlink_probe import JLinkProbe
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
 
+_REAL_RESERVATION_REFUSAL = flash_raw._reservation_refusal
 SERIAL = "000999000001"
 PROBE = JLinkProbe("3-4.2", SERIAL)
 
@@ -54,6 +55,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("TAN_JLINK", raising=False)
     monkeypatch.delenv(reset_cmd.PLACE_ENV, raising=False)
     monkeypatch.setattr(flash_cmd, "enumerate_jlinks", lambda: [PROBE])
+    # The session-lease gate has its own tests below; the rest exercise the pulse itself.
+    monkeypatch.setattr(flash_raw, "_reservation_refusal", lambda place, exe, usb: (None, exe))
     return tmp_path
 
 
@@ -520,3 +523,103 @@ def test_an_explicit_jlink_flag_keeps_its_own_binary_source_label(env, monkeypat
     rc, data, _, _ = reset_cmd._run(100, None, "3-4.2", str(shim), str(env),
                                     enumerate_probes=lambda: [PROBE])
     assert rc == 0 and data["jlink"]["binarySource"] == "the --jlink flag"
+
+
+# -- tan-cli#1485: a named place needs this session's lease, as `tan flash --raw` does --------
+
+_NONCE = "ab" * 24
+_CHANGED = "2026-10-09 17:12:47.796610"
+
+
+def _holder():
+    import socket
+    return f"{socket.gethostname()}/{flash_raw._current_user()}"
+
+
+def _show(path="3-4.2", holder=None, changed=_CHANGED):
+    block = f"Acquired resource 'swd' (e/p/NetworkUSBDebugger/swd):\n  {{'path': '{path}'}}\n"
+    return (f"Place 'p':\n  matches:\n    e/NetworkUSBDebugger/swd\n  acquired: {holder or _holder()}\n"
+            f"  changed: {changed}\n{block}")
+
+
+def _real_gate(env, monkeypatch, *, lease=True, nonce=_NONCE, show=None):
+    """The REAL flash_raw gate, with a lease dir and a canned `labgrid-client show`."""
+    as_wrapper(env, monkeypatch)
+    monkeypatch.setattr(flash_raw, "_reservation_refusal", _REAL_RESERVATION_REFUSAL)
+    monkeypatch.setenv("JLINK_RUN_PLACE", "aen-evk-02")
+    leases = env / "leases"
+    leases.mkdir(mode=0o700)
+    os.chmod(leases, 0o700)
+    if lease:
+        f = leases / "aen-evk-02.lease"
+        f.write_text(f"place=aen-evk-02\nnonce={_NONCE}\nchanged={_CHANGED}\n", encoding="utf-8")
+        os.chmod(f, 0o600)
+    monkeypatch.setattr(flash_raw, "LEASE_DIR", str(leases))
+    if nonce is None:
+        monkeypatch.delenv(flash_raw.NONCE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(flash_raw.NONCE_ENV, nonce)
+    monkeypatch.setattr(flash_raw, "_labgrid_show", lambda place: (show or _show(), ""))
+
+
+@pytest.mark.parametrize(
+    "kw, text",
+    [
+        ({"nonce": None}, "TAN_LEASE_NONCE"),
+        ({"nonce": "cd" * 24}, "does not match the lease"),
+        ({"lease": False}, "no readable regular lease file"),
+        ({"show": _show(holder="other-host/someone")}, "do not hold the labgrid place"),
+        ({"show": _show(path="9-9")}, "not the leased place's swd port"),
+        ({"show": _show(changed="2026-10-10 01:00:00.000001")}, "earlier acquisition"),
+    ],
+)
+def test_a_place_without_this_sessions_lease_is_refused_before_any_spawn(env, monkeypatch, kw, text):
+    calls = _no_exec(monkeypatch)
+    _real_gate(env, monkeypatch, **kw)
+    rc, data, issues, _ = _run(env)
+    assert rc == 1 and codes(issues) == ["reset.reservation-required"]
+    assert text in issues[0].message and calls == []
+
+
+def test_a_place_without_a_probe_usb_path_cannot_match_the_lease(env, monkeypatch):
+    calls = _no_exec(monkeypatch)
+    _real_gate(env, monkeypatch)
+    rc, _, issues, _ = _run(env, usb=None)
+    assert rc == 1 and codes(issues) == ["reset.reservation-required"] and calls == []
+
+
+def test_a_place_with_this_sessions_lease_pulses(env, monkeypatch):
+    jl = FakeJlink(monkeypatch)
+    _real_gate(env, monkeypatch)
+    rc, data, issues, _ = _run(env)
+    assert rc == 0, issues
+    assert data["singleSpawn"] is True and jl.reset_scripts()
+
+
+def test_no_place_needs_no_lease(env, monkeypatch):
+    jl = FakeJlink(monkeypatch)
+    monkeypatch.setattr(flash_raw, "_reservation_refusal",
+                        lambda *a: pytest.fail("the lease gate must only run for a named place"))
+    rc, _, _, _ = _run(env)
+    assert rc == 0 and jl.reset_scripts()
+
+
+def _help(*args):
+    out = CliRunner().invoke(app, [*args, "--help"], env={"COLUMNS": "400", "TERM": "dumb"})
+    assert out.exit_code == 0
+    return " ".join(out.output.split())
+
+
+def test_reset_help_states_the_place_mode_rules(env):
+    """tan-cli#1485: the help named neither the wrapper env nor the post-pulse handshake, and its
+    example banner was one the docs say may be missed."""
+    text = _help("reset")
+    assert "TAN_JLINK_WRAPPER" in text and "TAN_LEASE_NONCE" in text
+    assert "AFTER the pulse" in text and "reset.reservation-required" in text
+    assert "--expect 'Zephyr'" not in text
+
+
+def test_flash_help_names_every_raw_reservation_requirement_and_the_setools_trust_rule(env):
+    text = _help("flash")
+    for needle in ("TAN_LEASE_NONCE", "TAN_JLINK_WRAPPER", "swd port", "flash.setools-untrusted-source"):
+        assert needle in text, needle

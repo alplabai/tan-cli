@@ -9,9 +9,13 @@ JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2
 ```
 
 The recovery from a non-waking STOP on the AEN bench is one clean pin pulse.
-`tan reset` sends exactly this J-Link Commander session and nothing else:
+`tan reset` sends exactly this J-Link Commander session and nothing else (the one
+extra line is a leading `exec DisableAutoUpdateFW`, which keeps the probe's firmware
+from being rewritten mid-bench; it is in `data.script` and the temp Commander file,
+exactly as for `tan flash` and `tan probe`):
 
 ```
+exec DisableAutoUpdateFW
 SelectEmuBySN <serial>      (only when a probe is selected)
 r0
 sleep <pulse-ms>
@@ -111,8 +115,6 @@ written, erased or flashed. A test holds the generated script to that verb list.
 * `--confirm-console` accepts a local device path or one of pyserial's built-in
   URL schemes only (`rfc2217://`, `socket://`, `loop://`, `spy://`, `alt://`,
   `hwgrep://`, `cp2110://`); `rfc2217://` and `socket://` need `HOST:PORT`.
-* TODO(#1461/#1457): `tan reset` should also require the per-session lease nonce,
-  sharing one helper with `tan flash --raw` once #1454 merges.
 
 ## `data.wrapper` and what the wrapper trust means
 
@@ -138,6 +140,18 @@ of `TAN_JLINK`, PATH and `/opt/SEGGER`; an explicit `--jlink` still wins but mus
 resolve to that same file. If the wrapper is unset, unsafe or not the resolved
 program, the run is refused as `reset.wrapper-required` BEFORE any spawn, because a
 raw `ShowEmuList` would enumerate every probe on the host, including other places'.
+
+A named place also requires the per-session lease (tan-cli#1457), checked by the very
+helper `tan flash --raw` uses (`flash_raw._reservation_refusal`) before any spawn: this
+shell must have run `eval "$(scripts/bench/tan-lease.sh acquire <place>)"` so
+`TAN_LEASE_NONCE` matches the 0600 lease file for exactly that place, `labgrid-client`
+must show you as the holder of the same acquisition (`changed:`), and
+`--probe-usb-path` must equal the place's `swd` port (so a place run without
+`--probe-usb-path` is refused). labgrid's holder name is `<host>/<user>`, the same for
+every session of one user, so without the nonce a second session could pulse nRESET on
+a board the first is using and destroy its VBAT/BKRAM evidence. Any failure is
+`reset.reservation-required` (exit 1), nothing spawned.
+
 Without a place, the guarded two-pass path with a real JLinkExe is unchanged.
 Timing seen on evk-02: about 47 s from start to pulse single-spawn and about 96 s
 two-pass; that is the wrapper's latency (#1462), not tan's.
