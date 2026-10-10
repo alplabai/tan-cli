@@ -86,4 +86,12 @@
 # `python/pyproject.toml` moves with it. Nothing else about the readiness
 # picture above changes: the alp-sdk-floor blocker this file already
 # documented (tan-cli#1258) still gates the tag push, under the new number.
-TAN_VERSION = "0.7.0-rc1"
+#
+# v0.7.0-rc1 published 2026-10-10 (tan-cli#770's automated post-release bump):
+# the development line still carried the published tag's exact version, the
+# state `version_check.py --not-released` exists to refuse. TAN_VERSION moves
+# to `0.7.0-rc2.dev0` -- a `.devN` tail on the next pre-release -- which
+# promises neither that release nor that pre-release number, only that both
+# sort above it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.0] —
+# Unreleased`, per `release_target()`.
+TAN_VERSION = "0.7.0-rc2.dev0"
