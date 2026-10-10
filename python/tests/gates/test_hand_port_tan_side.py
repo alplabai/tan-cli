@@ -120,6 +120,18 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
     # because the `dts-overlay` M33-ownership append (alp-sdk#2673) landed
     # upstream here and was missed while nothing tracked this file.
     "scripts/alp_project.py": ("tan/planner_emit.py",),
+    # tan-cli#270: `tan validate`'s in-process engine. `validator.py` is split
+    # across three tan modules for the 800-line budget -- ONE port, not three;
+    # `loader.py` also carries its two schema helpers (see the
+    # NO_TAN_FILE_PAIRING history of this key).
+    "scripts/alp_cli/validator.py": (
+        "tan/core/board_validator.py",
+        "tan/core/board_validator_schema.py",
+        "tan/core/board_validator_compat.py",
+    ),
+    "scripts/alp_cli/diagnostic.py": ("tan/core/board_diagnostic.py",),
+    "scripts/alp_cli/yaml_pos.py": ("tan/core/board_yaml_pos.py",),
+    "scripts/validate_board_yaml.py": ("tan/core/board_validator_run.py",),
     "scripts/alp_project_emit/bom_netlist.py": ("tan/planner/project_emit/bom_netlist.py",),
     "scripts/alp_project_emit/dts.py": ("tan/planner/project_emit/dts.py",),
     "scripts/alp_project_emit/hw_info.py": ("tan/planner/project_emit/hw_info.py",),
@@ -168,13 +180,7 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
         "`_is_tbd` inside tan/planner/zephyr_board.py, which this table "
         "already pairs with scripts/gen_zephyr_board.py. Pairing it again "
         "here would pin one file to two upstream sources -- the same shape "
-        "as validator.py below"
-    ),
-    "scripts/alp_cli/validator.py": (
-        "load_board_schema/iter_schema_errors crossed into tan/planner/"
-        "loader.py, 24 lines of 1313 -- and that file is already pinned in "
-        "PINNED_HASHES against scripts/alp_orchestrate/loader.py, so a second "
-        "file pairing would double-pin one file to two upstream sources"
+        "as `loader.py`'s schema helpers did"
     ),
     # "scripts/alp_cli/validate.py" and "scripts/alp_cli/model.py" were here
     # until tan-cli#996: RETIRED, alongside their HAND_PORT_HASHES pins, when
@@ -217,7 +223,6 @@ HAND_PORT_KNOWN_DRIFT: dict[str, str] = {}
 _PAIRING_MAY_ONLY_CONTAIN: frozenset[str] = frozenset(
     {
         "scripts/alp_cli/diagnostic_format.py",
-        "scripts/alp_cli/validator.py",
         "scripts/sentinels.py",
     }
 )

@@ -341,6 +341,19 @@ DATA_SCHEMA_VERSION = "1"
 #: test can shorten it.
 VALIDATOR_TIMEOUT_S = 300
 
+#: tan-cli#270: `tan validate` runs the SDK's board.yaml validator IN-PROCESS
+#: (`tan.core.board_validator_run`). Setting this to `subprocess` pins the
+#: earlier engine -- spawning `<sdk>/scripts/validate_board_yaml.py` -- as a
+#: deliberate choice, like `TAN_GENERATE_EXECUTOR=subprocess`. It is the
+#: reference side of the engine-parity test, and what `tan diff`'s cross-check
+#: still shares (`VALIDATOR_SCRIPT`).
+VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
+
+
+def _subprocess_engine_requested() -> bool:
+    return os.environ.get(VALIDATE_ENGINE_ENV, "").strip().lower() == "subprocess"
+
+
 #: `<sdk>/scripts/validate_board_yaml.py` -- the script the oracle spawns
 #: (`crates/tan-cli/src/commands/validate.rs::run_spawn`). NOT
 #: `python -m alp_cli.main validate`: that needs `<sdk>/scripts` on PYTHONPATH,
@@ -1647,95 +1660,119 @@ def validate(
                 )
                 return
 
-            script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
-            # tan-cli#652: also captures whether this resolved a `tan
-            # bootstrap` workspace venv or fell back to a bare PATH name --
-            # the flag `_synthesised_finding` below needs to tell "this
-            # interpreter is missing a dependency because no workspace venv
-            # exists yet" apart from any other interpreter defect.
-            python_binary, used_workspace_venv = _planner_python_resolution(
-                os.path.abspath(root), str(resolved_sdk)
-            )
+            if not _subprocess_engine_requested():
+                # tan-cli#270: the DEFAULT engine. The SDK's validator is
+                # ported in-process (`tan.core.board_validator_run`), so no
+                # interpreter is probed and nothing is spawned -- the python
+                # floor guard below guards a child interpreter that no longer
+                # exists on this path. The run's (status, stderr) go through
+                # the SAME `analyze_validator_output` a spawned script's did,
+                # so the outcome map, issue codes and envelope are unchanged.
+                from tan.core.board_validator_run import run_board_validator
 
-            # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
-            # AFTER the SDK guard because both of its inputs come from the resolved
-            # checkout: the floor is that checkout's own declared
-            # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
-            # BEFORE the spawn because the whole point is to replace alp-sdk's
-            # `dataclass() got an unexpected keyword argument 'slots'` traceback --
-            # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
-            # with the traceback's last line quoted at the user -- with a message
-            # naming the actual defect. `command_line` is still `""` here: nothing
-            # ran, exactly as on guards 1 and 2 and as the oracle reports.
-            floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
-            if (too_old := _python_too_old(python_binary, floor)) is not None:
-                fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
-                return
-
-            # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
-            # never re-parsed, so it is built beside the argv rather than from it.
-            command_line = f"{python_binary} {script} --input {board_path}"
-            try:
-                out = subprocess.run(
-                    [python_binary, script, "--input", board_path],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    # The validator never reads stdin; without this a child that
-                    # somehow prompts would block forever behind the timeout.
-                    stdin=subprocess.DEVNULL,
-                    timeout=VALIDATOR_TIMEOUT_S,
-                    env=spawn_env(),
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                # The child STARTED, so this is a verdict that never arrived, not a
-                # launch failure: `failed` at exit 2, per tan-cli#262.
-                result = _Result(
-                    OUTCOME_FAILED,
-                    (
-                        _Finding(
-                            "error",
-                            f"the SDK validator did not finish within "
-                            f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
-                        ),
-                    ),
-                )
-            except (OSError, ValueError, subprocess.SubprocessError) as err:
-                # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
-                # could not even be started (no interpreter on PATH, the script
-                # unreadable). Nothing validated anything, so this is not a verdict.
-                fail(
-                    "spawn-failed",
-                    f"could not run the SDK validator ({command_line}): {err}",
-                    ExitCode.RUNTIME_FAILURE,
-                )
-                return
-            else:
-                # tan-cli#1262: captured BEFORE the mapping consumes it. The
-                # `.get(..., OUTCOME_FAILED)` fallback is the right default
-                # for an exit this build does not name, but it must not be all
-                # a consumer is left with -- an UNMAPPED status reaches the
-                # wire as a NUMBER, not only as `failed`.
-                validator_status = out.returncode
-                result = analyze_validator_output(out.returncode, out.stderr)
+                run = run_board_validator(board_path, resolved_sdk)
+                validator_status = run.status
+                result = analyze_validator_output(run.status, run.stderr)
                 if result.outcome != OUTCOME_CLEAN and not result.findings:
-                    # `to_cli_issues`' synthesis: a non-clean run must never reach a
-                    # consumer as "exit 2, zero issues", which reads as no problem.
-                    # `used_workspace_venv=used_workspace_venv` (tan-cli#652) is what
-                    # lets this become "run `tan bootstrap` first" instead of a raw
-                    # `ModuleNotFoundError` when that is the actual cause.
                     result = _Result(
                         result.outcome,
                         (
                             _synthesised_finding(
-                                result.outcome,
-                                out.stderr,
-                                used_workspace_venv=used_workspace_venv,
+                                result.outcome, run.stderr, used_workspace_venv=True
                             ),
                         ),
                     )
+            else:
+                script = os.path.join(str(resolved_sdk), *VALIDATOR_SCRIPT)
+                # tan-cli#652: also captures whether this resolved a `tan
+                # bootstrap` workspace venv or fell back to a bare PATH name --
+                # the flag `_synthesised_finding` below needs to tell "this
+                # interpreter is missing a dependency because no workspace venv
+                # exists yet" apart from any other interpreter defect.
+                python_binary, used_workspace_venv = _planner_python_resolution(
+                    os.path.abspath(root), str(resolved_sdk)
+                )
+
+                # The oracle's guard 3 (`validate.rs:124-129`), the one #376 left out.
+                # AFTER the SDK guard because both of its inputs come from the resolved
+                # checkout: the floor is that checkout's own declared
+                # `pythonMinVersion`, and `_planner_python` prefers its workspace venv.
+                # BEFORE the spawn because the whole point is to replace alp-sdk's
+                # `dataclass() got an unexpected keyword argument 'slots'` traceback --
+                # which arrives as validator exit 1 WITH a traceback, i.e. `failed`
+                # with the traceback's last line quoted at the user -- with a message
+                # naming the actual defect. `command_line` is still `""` here: nothing
+                # ran, exactly as on guards 1 and 2 and as the oracle reports.
+                floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
+                if (too_old := _python_too_old(python_binary, floor)) is not None:
+                    fail("python-too-old", too_old, ExitCode.VALIDATION_FAILURE)
+                    return
+
+                # Verbatim from `run_spawn`'s own `format!` -- this string is reported,
+                # never re-parsed, so it is built beside the argv rather than from it.
+                command_line = f"{python_binary} {script} --input {board_path}"
+                try:
+                    out = subprocess.run(
+                        [python_binary, script, "--input", board_path],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        # The validator never reads stdin; without this a child that
+                        # somehow prompts would block forever behind the timeout.
+                        stdin=subprocess.DEVNULL,
+                        timeout=VALIDATOR_TIMEOUT_S,
+                        env=spawn_env(),
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    # The child STARTED, so this is a verdict that never arrived, not a
+                    # launch failure: `failed` at exit 2, per tan-cli#262.
+                    result = _Result(
+                        OUTCOME_FAILED,
+                        (
+                            _Finding(
+                                "error",
+                                f"the SDK validator did not finish within "
+                                f"{VALIDATOR_TIMEOUT_S}s and was killed: {command_line}",
+                            ),
+                        ),
+                    )
+                except (OSError, ValueError, subprocess.SubprocessError) as err:
+                    # The one RUNTIME_FAILURE (1) case #262 carved out: the subprocess
+                    # could not even be started (no interpreter on PATH, the script
+                    # unreadable). Nothing validated anything, so this is not a verdict.
+                    fail(
+                        "spawn-failed",
+                        f"could not run the SDK validator ({command_line}): {err}",
+                        ExitCode.RUNTIME_FAILURE,
+                    )
+                    return
+                else:
+                    # tan-cli#1262: captured BEFORE the mapping consumes it. The
+                    # `.get(..., OUTCOME_FAILED)` fallback is the right default
+                    # for an exit this build does not name, but it must not be all
+                    # a consumer is left with -- an UNMAPPED status reaches the
+                    # wire as a NUMBER, not only as `failed`.
+                    validator_status = out.returncode
+                    result = analyze_validator_output(out.returncode, out.stderr)
+                    if result.outcome != OUTCOME_CLEAN and not result.findings:
+                        # `to_cli_issues`' synthesis: a non-clean run must never reach a
+                        # consumer as "exit 2, zero issues", which reads as no problem.
+                        # `used_workspace_venv=used_workspace_venv` (tan-cli#652) is what
+                        # lets this become "run `tan bootstrap` first" instead of a raw
+                        # `ModuleNotFoundError` when that is the actual cause.
+                        result = _Result(
+                            result.outcome,
+                            (
+                                _synthesised_finding(
+                                    result.outcome,
+                                    out.stderr,
+                                    used_workspace_venv=used_workspace_venv,
+                                ),
+                            ),
+                        )
+
 
         issues = [
             *sdk_context_issues,

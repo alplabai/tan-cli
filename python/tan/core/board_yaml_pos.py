@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Position-aware YAML loader for board.yaml diagnostics.
+
+PORTED from alp-sdk `scripts/alp_cli/yaml_pos.py` (pinned by
+`tests/gates/test_planner_relocation_freshness.py::BOARD_VALIDATOR_HASHES`).
+The body is unchanged; only this docstring is tan's.
+
+Subclasses PyYAML's SafeLoader so every constructed mapping and
+sequence carries ``__line__``, ``__column__``, ``__end_line__``,
+``__end_column__`` (1-based) and a per-key ``__keys__`` table that
+maps key name -> (line, col, value_line, value_col).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+
+
+class _PosLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_mapping(loader: _PosLoader, node: yaml.MappingNode) -> dict[str, Any]:
+    # Detect duplicates against the node's OWN keys, BEFORE flatten_mapping().
+    #
+    # flatten_mapping() splices the merged mapping's keys into node.value, so
+    # a spec-legal override of a merged key --
+    #
+    #     base: &b {a: 1}
+    #     derived: {<<: *b, a: 9}
+    #
+    # -- would appear as `a` twice afterwards and be rejected. Overriding a
+    # merged key is the entire point of the merge construct (YAML 1.1 merge:
+    # the explicit key wins), and `dev` accepts it, so rejecting it here would
+    # refuse customer board.yaml files that build fine today.
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            mark = key_node.start_mark
+            raise ValueError(
+                f"duplicate key {key!r} at line {mark.line + 1}, "
+                f"column {mark.column + 1}"
+            )
+        seen.add(key)
+
+    loader.flatten_mapping(node)
+    mapping: dict[str, Any] = {}
+    keys: dict[str, dict[str, int]] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        # Last-wins is correct AFTER flattening: PyYAML prepends the merged
+        # keys, so an explicit key encountered later overrides the merged one.
+        value = loader.construct_object(value_node, deep=True)
+        mapping[key] = value
+        keys[key] = {
+            "line": key_node.start_mark.line + 1,
+            "col": key_node.start_mark.column + 1,
+            "value_line": value_node.start_mark.line + 1,
+            "value_col": value_node.start_mark.column + 1,
+            "value_end_line": value_node.end_mark.line + 1,
+            "value_end_col": value_node.end_mark.column + 1,
+        }
+    mapping["__line__"] = node.start_mark.line + 1
+    mapping["__column__"] = node.start_mark.column + 1
+    mapping["__end_line__"] = node.end_mark.line + 1
+    mapping["__end_column__"] = node.end_mark.column + 1
+    mapping["__keys__"] = keys
+    return mapping
+
+
+def _construct_sequence(loader: _PosLoader, node: yaml.SequenceNode) -> list[Any]:
+    items: list[Any] = []
+    for child in node.value:
+        item = loader.construct_object(child, deep=True)
+        if isinstance(item, dict):
+            item.setdefault("__line__", child.start_mark.line + 1)
+            item.setdefault("__column__", child.start_mark.column + 1)
+            item.setdefault("__end_line__", child.end_mark.line + 1)
+            item.setdefault("__end_column__", child.end_mark.column + 1)
+        items.append(item)
+    return items
+
+
+_PosLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping
+)
+_PosLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_SEQUENCE_TAG, _construct_sequence
+)
+
+
+def load_with_positions(text: str, source: str | Path) -> dict[str, Any]:
+    """Parse a YAML document, attaching position metadata to mappings."""
+    data = yaml.load(text, Loader=_PosLoader)
+    if not isinstance(data, dict):
+        raise ValueError(f"{source}: top-level YAML is not a mapping")
+    return data
+
+
+def node_position(
+    mapping: dict[str, Any],
+    key: str,
+    target: Literal["key", "value"] = "key",
+) -> tuple[int, int]:
+    """Return (line, column), 1-based, for a key or its value."""
+    table = mapping.get("__keys__")
+    if not table or key not in table:
+        return (mapping.get("__line__", 1), mapping.get("__column__", 1))
+    entry = table[key]
+    if target == "value":
+        return (entry["value_line"], entry["value_col"])
+    return (entry["line"], entry["col"])
