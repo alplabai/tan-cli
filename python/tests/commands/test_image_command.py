@@ -847,3 +847,20 @@ def test_nested_manifest_relative_helper_firmware_resolves_under_build(tmp_path)
     result = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "X"))
     helper = result["data"]["helper_mcus"][0]
     assert helper["sha256"] == hashlib.sha256(b"NESTEDFW").hexdigest()
+
+
+def test_assemble_bundle_prunes_stale_slices_and_helpers(tmp_path):
+    """tan-cli#1482: archives/helpers from an EARLIER run do not survive."""
+    from tan.commands import image_cmd
+
+    bundle = tmp_path / image_cmd.BUNDLE_DIR
+    stale_slice = bundle / image_cmd.SLICES_DIR / "m55_he-zephyr.tar.gz"
+    stale_helper = bundle / image_cmd.HELPERS_DIR / "2-zephyr.bin"
+    for stale in (stale_slice, stale_helper):
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("old")
+
+    image_cmd._prune_dir_contents(str(bundle / image_cmd.SLICES_DIR))
+    image_cmd._prune_dir_contents(str(bundle / image_cmd.HELPERS_DIR))
+    assert not stale_slice.exists() and not stale_helper.exists()
+    assert (bundle / image_cmd.SLICES_DIR).is_dir()

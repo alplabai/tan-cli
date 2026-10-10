@@ -173,7 +173,15 @@ def _retry_after_clearing_readonly(func, path, exc=None) -> None:
     """
     if func in _NOT_RETRYABLE_WITH_PATH_ALONE:
         _reraise_removal_failure(func, path, exc)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+    # tan-cli#1482: never follow a link -- chmod'ing through it would change the
+    # permissions of a file OUTSIDE the tree being removed, and `os.stat` on a
+    # dangling link raised before the parent fix below could run. A link needs
+    # only its parent's write bit (POSIX unlink consults the parent alone).
+    try:
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            os.chmod(path, os.lstat(path).st_mode | stat.S_IWUSR)
+    except OSError:
+        pass
     parent = os.path.dirname(path)
     if parent and parent != path:
         try:

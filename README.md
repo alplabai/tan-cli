@@ -395,6 +395,10 @@ from `--capture FILE` or live (a RAM-run of the built `diagnostics.link: itcm`
 project; the live form resets the device and needs `--confirm`). Run `tan model
 --help` for every flag.
 
+`tan clean --build-root PATH` takes the same PATH as `tan build --build-root` (the
+project tree, relative to the current directory) and removes `PATH/build`; it
+refuses a target that holds a `board.yaml`.
+
 `tan flash`, `tan size` and `tan image` accept `--build-root PATH` to read the
 `system-manifest.yaml` from a build root other than `<project>/build`, the same
 root `tan build --build-root` wrote to.

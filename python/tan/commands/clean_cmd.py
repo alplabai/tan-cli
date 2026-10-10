@@ -104,6 +104,7 @@ from tan.core.sdk_discovery import (
     sdk_search_summary,
 )
 from tan.core.shapes import SDK_MARKER
+from tan.core.system_manifest import find_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -149,6 +150,13 @@ def _rust_join(base: str, rel: str) -> str:
     if os.path.splitdrive(rel)[0]:
         return rel
     return os.path.join(base, rel)
+
+
+def _cwd_or_dot() -> str:
+    try:
+        return os.getcwd()
+    except OSError:
+        return "."
 
 
 def _normalize(path: str) -> str:
@@ -574,8 +582,10 @@ def _read_manifest(build_root: str) -> tuple[list[dict[str, Any]], str | None]:
     both the directory and the non-UTF-8 cases. Only a document that WAS read
     and could not be understood is a warning.
     """
+    # tan-cli#1482: the nested `<X>/build/system-manifest.yaml` spelling is
+    # found the way size/image/flash find it.
     try:
-        text = Path(build_root, MANIFEST_NAME).read_text(encoding="utf-8")
+        text = Path(find_manifest(build_root)).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError, ValueError):
         return [], None
     return parse_manifest_slices(text)
@@ -770,34 +780,57 @@ def _run(
             text=[f"clean: {message}"],
         )
 
-    # `--build-root`: absolute as-is, relative against the project root,
-    # default `<project_root>/build`. The default is deliberately NOT
-    # normalized -- the oracle normalizes only the flag branch, and
-    # `data.buildRoot` is a compared field.
+    # `--build-root X` means what it means to `tan build` / `size` / `image` /
+    # `flash` (tan-cli#1405/#1411, #1482): X is the PROJECT TREE the build ran
+    # under (absolute as-is, relative against the CURRENT DIRECTORY), and the
+    # build output lives in `<X>/build`, which is what clean removes. Passing the
+    # same X to `build` and `clean` therefore never touches X's sources. Without
+    # the flag it is `<project_root>/build`. The default is deliberately NOT
+    # normalized -- `data.buildRoot` is a compared field.
+    clean_root = project_root
+    refusal: str | None = None
     if build_root_arg is not None:
-        build_root = _normalize(_rust_join(project_root, build_root_arg))
+        if build_root_arg == "":
+            # `rm -rf $UNSET_VAR` shape: an empty value is never a tree name.
+            tree = _normalize(project_root)
+            build_root = tree
+            refusal = "an empty --build-root"
+        else:
+            tree = _normalize(
+                build_root_arg if os.path.isabs(build_root_arg)
+                else _rust_join(_cwd_or_dot(), build_root_arg)
+            )
+            clean_root = tree
+            build_root = _rust_join(tree, "build")
+            if not _has_normal_component(tree):
+                refusal = f"`{tree}` is a filesystem root"
     else:
         build_root = _rust_join(project_root, "build")
 
-    # Fail fast, BEFORE the manifest is read: `--build-root ""` / `.` / `..`
-    # each resolve to the project root or above. Refusing here is what stops
-    # the `rm -rf $UNSET_VAR` shape reaching a recursive removal at exit 0.
-    if is_unsafe_removal_target(project_root, build_root):
-        why = (
-            f"refusing to remove `{build_root}`: a build root may not be the "
-            "project root, an ancestor of it, or a filesystem root"
-        )
+    # Fail fast, BEFORE the manifest is read: the target may not be the project
+    # root, an ancestor of it, a filesystem root, or a directory that is itself a
+    # project tree (holds a board.yaml) -- the `rm -rf` shapes that reach a
+    # recursive removal at exit 0.
+    if refusal is None and (
+        is_unsafe_removal_target(project_root, build_root)
+        or is_unsafe_removal_target(clean_root, build_root)
+    ):
+        refusal = "a build root may not be the project root, an ancestor of it, or a filesystem root"
+    if (
+        refusal is None
+        and not is_link(build_root)
+        and os.path.isfile(os.path.join(build_root, "board.yaml"))
+    ):
+        refusal = "it holds a board.yaml, so it is a project tree, not a build directory"
+    if refusal is not None:
+        why = f"refusing to remove `{build_root}`: {refusal}"
         return _Outcome(
             exit_code=ExitCode.RUNTIME_FAILURE,
             data=_report(build_root, dry_run, [], 0),
             project=project,
             sdk=sdk,
             # tan-cli#468: same reasoning as the guard above -- this refusal
-            # can fire even when `resolved_sdk.path` is `None` (the wide
-            # ladder `sdk_root_resolves` walks can pass while the narrower
-            # tiered resolution `resolve_sdk` reports found nothing, tan-cli
-            # `sdk_root_resolves`'s own docstring), so it must not assume a
-            # checkout resolved either.
+            # can fire even when `resolved_sdk.path` is `None`.
             issues=[*resolution_issues, Issue("clean.unsafe-build-root", "error", why)],
             text=[f"clean: {why}"],
         )
@@ -819,7 +852,7 @@ def _run(
             text.append(f"clean: {detail}")
         issues.append(Issue("clean.manifest-unreadable", "warning", detail))
 
-    plan = plan_clean_targets(project_root, build_root, slices)
+    plan = plan_clean_targets(clean_root, build_root, slices)
 
     records: list[dict[str, str]] = []
     removed = 0
@@ -919,7 +952,11 @@ def clean(
         None,
         "--build-root",
         metavar="PATH",
-        help="Override the build root to remove (default: <APP_PATH>/build).",
+        help=(
+            "Project tree to clean, the same meaning as `tan build --build-root`: "
+            "removes <PATH>/build (default tree: <APP_PATH>). Relative to the "
+            "current directory. Refused if the target holds a board.yaml."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="List the paths that would be removed; delete nothing."

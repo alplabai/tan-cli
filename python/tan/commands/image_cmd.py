@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tarfile
 from dataclasses import dataclass
 from typing import Any
@@ -332,6 +333,24 @@ def _copy_file(src: str, dst: str) -> None:
             writer.write(chunk)
 
 
+def _prune_dir_contents(directory: str) -> None:
+    """Remove every entry directly inside `directory` (links unlinked, never
+    followed), leaving the directory itself."""
+    try:
+        entries = os.listdir(directory)
+    except OSError as err:
+        raise BundleWriteError(f"list {directory}: {err}") from err
+    for name in entries:
+        entry = os.path.join(directory, name)
+        try:
+            if os.path.isdir(entry) and not os.path.islink(entry):
+                shutil.rmtree(entry)
+            else:
+                os.remove(entry)
+        except OSError as err:
+            raise BundleWriteError(f"remove stale {entry}: {err}") from err
+
+
 def _assemble_bundle(
     build_root: str,
     sdk_root: str | None,
@@ -350,6 +369,12 @@ def _assemble_bundle(
             os.makedirs(directory, exist_ok=True)
         except OSError as err:
             raise BundleWriteError(f"mkdir {directory}: {err}") from err
+    # tan-cli#1482: this run's bundle is what the directory holds -- archives and
+    # helper firmware left by an EARLIER run (a slice that has since failed or
+    # been skipped, a helper dropped from the manifest) are pruned so a consumer
+    # that ships the directory never gets firmware this build did not produce.
+    for directory in (slices_dir, helpers_dir):
+        _prune_dir_contents(directory)
 
     notices: list[_Notice] = []
     slice_entries: list[dict[str, Any]] = []
