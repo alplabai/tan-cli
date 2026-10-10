@@ -280,3 +280,41 @@ def test_doctor_and_build_floor_agree_over_manifests(tmp_path, monkeypatch):
         d_m = doctor_cmd._manifest_floor_from_facts(loaded.facts)
         d_z = doctor_cmd._zephyr_manifest_floor_from_facts(loaded.facts)
         assert pf.read_manifest_floors(str(sdk)) == (d_m, d_z), name
+
+
+@posix_only
+def test_bootstrap_probe_picks_the_same_interpreter_as_doctor(tmp_path, path_of):
+    """tan-cli#1483: bootstrap probed only bare `python3`/`python` (3.10) and
+    refused while doctor passed on the deadsnakes `python3.12`."""
+    from tan.commands import bootstrap_cmd
+
+    (d,) = _dirs(tmp_path, "bin")
+    _fake(d, "python3", "3.10")
+    good = _fake(d, "python3.12", "3.12")
+    path_of(d)
+    found = bootstrap_cmd.probe_host_python((3, 12))
+    assert found is not None
+    assert found.version == (3, 12)
+    assert found.argv == (good,)
+    assert doctor_cmd._probe_host_python((3, 12))[1] == (3, 12)
+
+
+def test_bootstrap_probe_never_spawns_a_bare_name(monkeypatch):
+    """tan-cli#1483: on Windows `py`/`python` were handed to CreateProcess
+    bare, which searches the parent's cwd first. Every spawn must carry an
+    absolute `executable=` resolved by `resolve_tool`."""
+    from tan.commands import bootstrap_cmd
+
+    calls = []
+
+    def fake_probe(argv, *a, **kw):
+        calls.append((list(argv), kw.get("executable")))
+        return None
+
+    monkeypatch.setattr(hp, "probe", fake_probe)
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(
+        hp, "resolve_tool", lambda name, env=None: type("R", (), {"resolved": f"C:\\trusted\\{name}.exe"})()
+    )
+    assert bootstrap_cmd.probe_host_python((3, 12)) is None
+    assert calls and all(exe and exe.startswith("C:\\trusted") for _argv, exe in calls)

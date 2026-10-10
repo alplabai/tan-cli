@@ -137,6 +137,7 @@ from tan.core.sdk_removal import (
     RemovalOutcome,
     is_cache_root_itself,
     is_outside_cache_root,
+    removal_would_damage,
     removal_would_take_out,
     remove_sdk_tree,
     resolve_removal_target,
@@ -1160,14 +1161,23 @@ def _load_bearing_reasons(
     # name ONE directory and a raw string compare answers this in the UNSAFE
     # direction: no reason is collected, nothing refuses, the workspace is
     # orphaned.
-    if active.path is not None and removal_would_take_out(_abs_posix(active.path), target_posix):
+    if active.path is not None and removal_would_damage(_abs_posix(active.path), target_posix):
         reasons.append(f'the active alp-sdk for this workspace (sourceTier "{active.tier}")')
     default_target = _sdk_default_pointer_target()
-    if default_target is not None and removal_would_take_out(
+    if default_target is not None and removal_would_damage(
         _abs_posix(default_target), target_posix
     ):
         reasons.append("the machine-global default SDK (~/.alp/sdk-default)")
-    for origin, _sdk_path in registered:
+    named = {origin for origin, _sdk_path in registered}
+    # `registered` holds entries the removal destroys (equal to, or inside,
+    # the target); an entry whose install CONTAINS the target is damaged too.
+    raw = _read_file(registry_path(_home_alp_dir()))
+    for origin, sdk_path in sorted(parse_registry(raw).items()):
+        if origin not in named and removal_would_damage(
+            normalized_sdk_path(sdk_path), target_posix
+        ):
+            named.add(origin)
+    for origin in sorted(named):
         reasons.append(f'the registered global default for project "{origin}"')
     return reasons
 
@@ -1361,7 +1371,7 @@ def _run_remove(
     # being removed is the TARGET -- because the predicate is asymmetric about
     # symlinks (see its section banner).
     active_posix = _abs_posix(active.path) if active.path is not None else None
-    was_active = active_posix is not None and removal_would_take_out(
+    was_active = active_posix is not None and removal_would_damage(
         active_posix, target_posix
     )
 

@@ -172,6 +172,60 @@ def test_a_second_bootstrap_skips_without_spawning_west_again(tmp_path, monkeypa
     assert second_log.warnings == []
 
 
+def test_a_stamped_store_whose_compiler_was_deleted_is_repaired_not_skipped(tmp_path, monkeypatch):
+    """tan-cli#1483: the stamp alone used to short-circuit the phase, so a
+    store whose compiler subtree had been removed was never reinstalled."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    spawned: list[list[str]] = []
+    writer = _fake_west_sdk_install_writes(_install_dir_index())
+
+    def recording_run(self, argv, *a, **kw):
+        spawned.append(list(argv))
+        return writer(self, argv, *a, **kw)
+
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", recording_run)
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    ws = _workspace(tmp_path)
+    bootstrap_cmd.toolchain_phase(
+        ws, bootstrap_cmd.Log(json_mode=True), bootstrap_cmd.Runner(json=True), sdk_root, None,
+        is_windows=False,
+    )
+    manifest, _ = bootstrap_cmd.load_toolchain_manifest(sdk_root)
+    store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    import shutil
+
+    shutil.rmtree(store_dir / "gnu")
+    assert (store_dir / tp.STAMP_FILENAME).is_file()
+    spawned.clear()
+
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(
+        ws, log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False
+    )
+    assert any("install" in a for a in spawned), "stamp over a deleted compiler was skipped"
+    assert (store_dir / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc").is_file()
+
+
+def test_the_install_log_does_not_claim_the_archive_hash_was_checked(tmp_path, monkeypatch, capsys):
+    """tan-cli#1483: the alp-sdk-pinned sha256 is never compared against the
+    installed bytes (west discards the archive), so the log must say so."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", _fake_west_sdk_install_writes(_install_dir_index()))
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    bootstrap_cmd.toolchain_phase(
+        _workspace(tmp_path), bootstrap_cmd.Log(json_mode=False),
+        bootstrap_cmd.Runner(json=False), sdk_root, None, is_windows=False,
+    )
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert "NOT compared against the alp-sdk pin" in text
+    assert "verified and stamped" not in text
+
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
@@ -1004,6 +1058,8 @@ def test_a_crashed_runs_leftover_credential_is_reclaimed_by_the_next_run(tmp_pat
     survivor.mkdir()
     manifest = tp.parse_toolchain_manifest(_small_manifest())
     (root / leaf).mkdir()
+    (root / leaf / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
+    (root / leaf / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc").write_text("x")
     (root / leaf / tp.STAMP_FILENAME).write_text(
         tp.render_stamp(tp.ToolchainStamp("1.0.1", manifest.digest(), tp.TOOLCHAIN_COMPONENT)),
         encoding="utf-8",

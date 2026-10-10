@@ -1285,18 +1285,20 @@ def _host_toolchain_matching_pin(
     the specific `<root>/<store leaf for this manifest version>` directory
     keeps the guard narrow enough to still hold under that escape hatch.
     """
-    root = _zephyr_sdk_detected_root()
-    if root is None:
-        return None
     try:
-        if root.resolve().is_relative_to(_toolchain_store_dir(manifest).resolve()):
-            return None
+        store = _toolchain_store_dir(manifest).resolve()
     except OSError:
-        pass
-    version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
-    if version_text is None or version_text.strip() != manifest.version:
-        return None
-    return root
+        store = None
+    for root in _zephyr_sdk_detected_roots():
+        try:
+            if store is not None and root.resolve().is_relative_to(store):
+                continue
+        except OSError:
+            pass
+        version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+        if version_text is not None and version_text.strip() == manifest.version:
+            return root
+    return None
 
 
 def toolchain_check(sdk_root: str | None) -> Check:
@@ -1365,9 +1367,20 @@ def toolchain_check(sdk_root: str | None) -> Check:
     stamp_text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
     stamp = toolchain_provision.parse_stamp(stamp_text) if stamp_text is not None else None
     if toolchain_provision.stamp_matches_pin(stamp, manifest):
+        if not toolchain_provision.store_compiler_present(store_dir, is_windows=os.name == "nt"):
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for {manifest.version} but "
+                f"its arm-zephyr-eabi-gcc is gone -- run `tan bootstrap` to repair it.",
+                "tan bootstrap",
+                scope="project",
+            )
         return Check(
             "toolchain", "pass",
-            f"arm-zephyr-eabi {manifest.version} verified at {store_dir}.",
+            f"arm-zephyr-eabi {manifest.version} installed at {store_dir}; version and "
+            f"compiler were checked at install, but "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}.",
             scope="project",
         )
     host_root = _host_toolchain_matching_pin(manifest)
@@ -2866,24 +2879,23 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     return roots
 
 
-def _zephyr_sdk_detected_root() -> Path | None:
-    """The SAME scan `_zephyr_sdk_detected` runs, but returns the root that
-    validated instead of collapsing it to a bool -- `toolchain_check` (issue
-    #474 / tan-cli#990 review) needs the actual directory back so it can read
-    ITS `sdk_version` file and compare against the pin, not just know that
-    "some" toolchain exists somewhere. `ZEPHYR_SDK_INSTALL_DIR` wins first,
-    matching `_zephyr_sdk_detected`'s own precedence; the first validated
-    `zephyr-sdk*` entry under `_zephyr_sdk_scan_roots()` otherwise.
+def _zephyr_sdk_detected_roots() -> list[Path]:
+    """EVERY root the scan validates, in precedence order (tan-cli#1483: the
+    adoption check needs to see all of them, not just the first -- a
+    mismatched `ZEPHYR_SDK_INSTALL_DIR` must not hide an installed copy of the
+    pinned version). `ZEPHYR_SDK_INSTALL_DIR` first, then each `zephyr-sdk*`
+    entry under `_zephyr_sdk_scan_roots()`.
 
     Never raises: an unreadable or missing scan root is "nothing found
     there", not a doctor crash.
     """
+    found: list[Path] = []
     env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
     if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
-        return Path(env_dir)
+        found.append(Path(env_dir))
     for root in _zephyr_sdk_scan_roots():
         try:
-            entries = list(root.iterdir())
+            entries = sorted(root.iterdir())
         except OSError:
             continue
         for entry in entries:
@@ -2892,8 +2904,14 @@ def _zephyr_sdk_detected_root() -> Path | None:
                 and not _is_toolchain_wreckage(entry.name)
                 and _zephyr_sdk_root_valid(entry)
             ):
-                return entry
-    return None
+                found.append(entry)
+    return found
+
+
+def _zephyr_sdk_detected_root() -> Path | None:
+    """The first root `_zephyr_sdk_detected_roots` validates, or `None`."""
+    roots = _zephyr_sdk_detected_roots()
+    return roots[0] if roots else None
 
 
 def _zephyr_sdk_detected() -> bool:

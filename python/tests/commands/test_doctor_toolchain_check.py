@@ -54,6 +54,14 @@ def _point_home_at(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
 
 
+def _plant_gcc(root: Path) -> None:
+    bindir = root / "gnu" / "arm-zephyr-eabi" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    gcc = bindir / _GCC_NAME
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+
+
 def test_no_sdk_root_is_unknown_not_a_guess(tmp_path, monkeypatch):
     _point_home_at(monkeypatch, tmp_path)
     check = doctor_cmd.toolchain_check(None)
@@ -83,12 +91,52 @@ def test_a_verified_stamp_matching_the_pin_is_a_pass(tmp_path, monkeypatch):
     manifest = tp.parse_toolchain_manifest(MANIFEST)
     store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
     store_dir.mkdir(parents=True)
+    _plant_gcc(store_dir)
     stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
     (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
 
     check = doctor_cmd.toolchain_check(sdk_root)
     assert check.status == "pass"
     assert manifest.version in check.detail
+    # tan-cli#1483: never claims the archive bytes were checked against the pin.
+    assert "NOT compared" in check.detail
+
+
+def test_a_stamp_over_a_deleted_compiler_is_a_fail_not_verified(tmp_path, monkeypatch):
+    """tan-cli#1483: the stamp is written after a compiler probe, but a later
+    partial delete must not keep reporting 'verified'."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    store_dir.mkdir(parents=True)
+    stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert check.fix == "tan bootstrap"
+    assert "gone" in check.detail
+    assert not tp.store_compiler_present(store_dir, is_windows=os.name == "nt")
+
+
+def test_a_mismatched_first_host_sdk_does_not_hide_an_installed_pinned_copy(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1483: adoption checked only the FIRST detected root."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    home = tmp_path / "home"
+    old = home / "zephyr-sdk-0.17.0"
+    good = home / "zephyr-sdk-1.0.1"
+    for root, ver in ((old, "0.17.0"), (good, "1.0.1")):
+        _plant_gcc(root)
+        (root / "sdk_version").write_text(ver + "\n", encoding="utf-8")
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(old))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "pass"
+    assert str(good) in check.detail
 
 
 def test_a_stamp_for_a_moved_pin_is_a_fail_not_a_pass_version_skew_masquerading_as_health(
