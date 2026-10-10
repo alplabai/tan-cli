@@ -847,3 +847,49 @@ def test_nested_manifest_relative_helper_firmware_resolves_under_build(tmp_path)
     result = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "X"))
     helper = result["data"]["helper_mcus"][0]
     assert helper["sha256"] == hashlib.sha256(b"NESTEDFW").hexdigest()
+
+
+def test_image_run_prunes_a_dropped_slice_between_runs(tmp_path):
+    """tan-cli#1482: driven through the real command, twice."""
+    for core in ("a", "b"):
+        wbytes(tmp_path / "br" / f"{core}-zephyr" / "zephyr" / "z.elf", b"ELF")
+
+    def manifest(cores):
+        rows = "".join(
+            f"- core_id: {c}\n  os: zephyr\n  build_dir: {c}-zephyr\n  status: ok\n"
+            for c in cores
+        )
+        write(
+            tmp_path / "br" / "system-manifest.yaml",
+            f"schema_version: 1\nhw_info: {{}}\nslices:\n{rows}helper_mcus: []\nboot_order: []\n",
+        )
+
+    slices = tmp_path / "br" / "image-bundle" / "slices"
+    manifest(["a", "b"])
+    assert run_cli(tmp_path, "--format", "json", "--build-root", "br").returncode == 0
+    assert (slices / "b-zephyr.tar.gz").is_file()
+    manifest(["a"])
+    assert run_cli(tmp_path, "--format", "json", "--build-root", "br").returncode == 0
+    assert (slices / "a-zephyr.tar.gz").is_file()
+    assert not (slices / "b-zephyr.tar.gz").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation is policy-gated")
+def test_a_symlinked_slices_dir_is_replaced_not_emptied(tmp_path):
+    wbytes(tmp_path / "br" / "a-zephyr" / "zephyr" / "z.elf", b"ELF")
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices:\n- core_id: a\n  os: zephyr\n"
+        "  build_dir: a-zephyr\n  status: ok\nhelper_mcus: []\nboot_order: []\n",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("precious")
+    bundle = tmp_path / "br" / "image-bundle"
+    bundle.mkdir()
+    (bundle / "slices").symlink_to(outside, target_is_directory=True)
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (outside / "keep.txt").read_text() == "precious"
+    assert not (bundle / "slices").is_symlink()
+    assert (bundle / "slices" / "a-zephyr.tar.gz").is_file()
