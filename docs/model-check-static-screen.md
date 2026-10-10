@@ -394,8 +394,9 @@ metadata — a pass reads `"fits-unverified"`, never `"fits"`. Only a `no-fit`
 reached through one of the CERTAIN paths above (or a certain LOWER BOUND, per
 the unresolved case above) is real: it is plain ceil'd-KiB arithmetic against
 a real, sourced number, so a failure is a hard physical fact, not a screen.
-`tan model build` refuses the WHOLE per-model build on a certain no-fit (no
-`.alpmodel` written); `tan model check --exact` reports the SAME certain
+`tan model build` records a certain no-fit as a skipped coverage row for that
+target, and refuses the model (no `.alpmodel` written) only when no ethos_u
+target fits; `tan model check --exact` reports the SAME certain
 no-fit as the `model.sram-no-fit` issue at `ExitCode.VALIDATION_FAILURE`,
 alongside the model's own report (nothing about `sramFit` is hidden even
 when the run refuses). This never offers or implies an MRAM placement — the

@@ -156,7 +156,8 @@ def test_flash_failure_is_passed_through_verbatim(tmp_path, monkeypatch):
                               "message": "HP evidence: refusing"}]
     Stub(monkeypatch, [flow_result(None, status="failed", rc=1)])
     code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
-    assert code == 1 and doc["issues"][0]["code"] == "model.device-flash-failed"
+    # tan-cli#1486: the registry's VALIDATION_FAILURE.
+    assert code == 2 and doc["issues"][0]["code"] == "model.device-flash-failed"
 
 
 def test_ab_runs_each_project_in_turn(tmp_path, monkeypatch):
@@ -381,7 +382,7 @@ def test_ab_b_failing_before_its_load_still_reports_a(tmp_path, monkeypatch):
     Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")),
                        flow_result(None, status="failed", rc=1)])
     code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
-    assert code == 1 and doc["issues"][-1]["code"] == "model.device-flash-failed"
+    assert code == 2 and doc["issues"][-1]["code"] == "model.device-flash-failed"
     assert set(doc["data"]["flash"]) == {"a"}
     assert Path(doc["data"]["flash"]["a"]["consolePath"]).is_file()
 

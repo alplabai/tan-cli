@@ -727,6 +727,38 @@ def test_build_model_no_fit_message_shows_the_min_arena_in_a_range(tmp_path, mon
     assert "SRAM0 needs 5064 KiB" in message
 
 
+def test_build_model_one_target_no_fit_skips_only_that_target(tmp_path, monkeypatch):
+    """tan-cli#1486: u55-128/m55_he certainly no-fits (arena 64 < 100) but the
+    u55-256/m55_hp target fits -- the package ships the fitting one and records
+    the other as a skipped coverage row, rather than refusing the whole model."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(
+        tmp_path, "fake:soc:e8",
+        [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256, "paired_core": "m55_hp"},
+         {"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 128, "paired_core": "m55_he"}],
+        sku="E1M-FAKE", sram_banks_kb={"SRAM0": 4096})
+    from tan.model.adapters.ethos_u import VelaAdapter as _RealVelaAdapter
+    monkeypatch.setattr(_RealVelaAdapter, "compile",
+                        _fake_compile_factory(arena_bytes=100 * 1024, req_sram_kib=100,
+                                               blob_len=10 * 1024))
+    monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 512}},
+                           "m55_he": {"inference": {"default_arena_kib": 64}}}}
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_FIXTURE, src)
+    out = build_model(sku="E1M-FAKE", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=tmp_path, adapters=[_RealVelaAdapter()],
+                      board_doc=board_doc)
+    assert out.is_file()
+    assert not list(tmp_path.glob("*.tan-tmp"))
+    from tan.model.package import read_manifest_file
+    mft = read_manifest_file(out)
+    assert len(mft.targets) == 1
+    assert mft.targets[0].accel_config == "ethos-u55-256"
+    skipped = [c for c in mft.coverage if c.accel_config == "ethos-u55-128"]
+    assert len(skipped) == 1 and skipped[0].status == "skipped" and "arena" in skipped[0].reason
+
+
 def test_build_model_ships_when_the_blob_fits(tmp_path, monkeypatch):
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(
