@@ -2245,3 +2245,60 @@ def test_an_uncorroborated_perf_point_withholds_sram_fit_too(tmp_path):
     rep = _check(tmp_path, hw_rev="r2")
     assert rep.basis == "bench"
     assert rep.sram_fit is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1497: `--exact` evaluates EVERY ethos_u target, as `build` does.
+# ---------------------------------------------------------------------------
+
+def _two_u55_tree(meta: Path) -> None:
+    """The headline (256 MAC/cycle) and a second (128) U55, both paired to m55_hp."""
+    _write_som(meta, "E1M-FAKE", "fake:soc:u55", ethos_u_variant="u55", default_hw_rev="r2")
+    _write_soc(meta, "fake:soc:u55",
+               [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256, "paired_core": "m55_hp"},
+                {"type": "ethos-u55", "subtype": "y", "mac_per_cycle": 128, "paired_core": "m55_hp"}],
+               extra={"npu_toolchain": {"vela": {"memory_mode": "Sram_Only",
+                                                  "system_config_requires_vendor_config": True}}})
+    _write_table(meta, "ethos_u", "u55@vela-1.0.0.json", variant="u55", supported=["FULLY_CONNECTED"])
+
+
+def _exact_by_target(monkeypatch, tmp_path, arena_by_accel):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    seen: list[str] = []
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None, **_kw):
+        seen.append(accel_config)
+        return Blob(format="vela_tflite", payload=b"x" * 1024,
+                    arena_bytes=arena_by_accel[accel_config] * 1024,
+                    compiler_version="vela 5.1.0", req_sram_kib=arena_by_accel[accel_config], cpu_op_count=0, npu_op_count=1)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 128}}}}
+    rep = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=True, board_doc=board_doc)[0]
+    return rep, seen
+
+
+def test_exact_ships_the_target_that_fits_when_the_headline_does_not(tmp_path, monkeypatch):
+    _two_u55_tree(tmp_path)
+    rep, seen = _exact_by_target(
+        monkeypatch, tmp_path, {"ethos-u55-256": 300, "ethos-u55-128": 70})
+    assert seen == ["ethos-u55-256", "ethos-u55-128"]      # headline first, then the rest
+    assert rep.sram_fit is not None and rep.sram_fit.no_fit is False
+    assert any("ethos-u55-256" in n and "ethos-u55-128" in n for n in rep.notes), rep.notes
+
+
+def test_exact_still_reports_no_fit_when_no_target_fits(tmp_path, monkeypatch):
+    _two_u55_tree(tmp_path)
+    rep, seen = _exact_by_target(
+        monkeypatch, tmp_path, {"ethos-u55-256": 300, "ethos-u55-128": 400})
+    assert seen == ["ethos-u55-256", "ethos-u55-128"]
+    assert rep.sram_fit is not None and rep.sram_fit.no_fit is True
+
+
+def test_exact_with_a_fitting_headline_is_unchanged(tmp_path, monkeypatch):
+    _two_u55_tree(tmp_path)
+    rep, _seen = _exact_by_target(
+        monkeypatch, tmp_path, {"ethos-u55-256": 70, "ethos-u55-128": 300})
+    assert rep.sram_fit is not None and rep.sram_fit.no_fit is False
+    assert rep.arena_bytes == 70 * 1024

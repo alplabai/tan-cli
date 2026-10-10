@@ -2862,6 +2862,14 @@
       "note": "tan-cli#1287: the INT8 model's top-1 agreement with fp32 on the calibration set is below the 95% threshold; the output is written and the guidance (try --per-channel, more representative samples) is the message. A warning, exit 0. A plain `Issue(\"model.prep-accuracy-degraded\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.input-dtype-cast",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1497: host `model run`/`ab` cast the user's `--input` .npy to the model input dtype with a different dtype; float to integer truncates toward zero. A warning, exit 0. A plain `Issue(\"model.input-dtype-cast\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "model.run-failed",
       "status": "reserved",
       "severity": "error",

@@ -422,6 +422,9 @@ def _run_ram_entry(
     problem = problem or check_session(transcript, loadbin=True)
     if problem:
         return fail(f"the load session failed: {problem}")
+    # tan-cli#1497: from here the image IS on the board and the device was reset,
+    # whatever fails next; `model run --device` reads this to keep its provenance.
+    report["ram"]["loaded"] = True
     loaded_on = attached_core(transcript)
     checked_on = report["jlink"].get("attachedCore")
     if not (loaded_on and loaded_on.get("apAddr")):

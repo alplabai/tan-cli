@@ -1166,7 +1166,7 @@ def model(
         False, "--per-channel", help="With `prep`: per-channel weight quantization."
     ),
     min_samples: int = typer.Option(
-        8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
+        None, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
     ),
     device: bool = typer.Option(
         False,
@@ -1395,7 +1395,7 @@ def model(
                 "--against": (against is not None, ("ab",)),
                 "--calibration": (calibration is not None, ("prep",)),
                 "--per-channel": (per_channel is True, ("prep",)),
-                "--min-samples": (min_samples != 8, ("prep",)),
+                "--min-samples": (min_samples is not None, ("prep",)),
                 "--exact": (exact is True, ("check",)),
             },
         )
@@ -1435,7 +1435,7 @@ def model(
                 calibration=calibration,
                 out=out,
                 per_channel=per_channel,
-                min_samples=min_samples,
+                min_samples=8 if min_samples is None else min_samples,
             )
         elif subcommand in ("zoo", "add"):
             resolved = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No zoo was read.")

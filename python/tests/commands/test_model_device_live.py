@@ -415,3 +415,18 @@ def test_ab_missing_b_model_refuses_before_a_loads_the_board(tmp_path, monkeypat
     assert code == 2 and [i["code"] for i in doc["issues"]] == ["model.model-source-missing"]
     assert stub.calls == []  # A never loaded the board
     assert "flash" not in doc["data"]
+
+
+def test_a_failed_ram_run_after_the_load_keeps_the_flash_provenance(tmp_path, monkeypatch):
+    """tan-cli#1497: Flow C marks `ram.loaded` once the image is on the board; a
+    later failure (e.g. the console read) must not drop the provenance block."""
+    p = project(tmp_path, "a")
+    boom = Issue("flash.ram-failed", "error", "the image is running but the RAM console read failed")
+    code_, data, issues, lines, sdk = flow_result(None, status="failed", rc=1, issues=[boom])
+    data["entries"][0]["ram"] = {"loaded": True}
+    Stub(monkeypatch, [(code_, data, issues, lines, sdk)])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(p))
+    assert code == int(ExitCode.RUNTIME_FAILURE)
+    assert doc["issues"][0]["code"] == "flash.ram-failed"
+    assert doc["data"]["flash"]["transcriptPath"] == "/t/ram_run-m55_he-1.log"
+    assert doc["data"]["flash"]["core"] == "m55_he"

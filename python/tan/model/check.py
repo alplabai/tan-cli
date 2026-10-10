@@ -165,8 +165,10 @@ def check_model_backends(*, backends: list[str], sku: str, source: Path,
                                   metadata_root=metadata_root, variant=variant)
         if reader_missing and report.table is not None and not report.ops:
             report = _reader_missing_report(report)
+        exact_target: TargetSpec | None = None
         if exact:
-            report = _apply_exact(report, backend, source, sku, metadata_root, board_doc)
+            report, exact_target = _apply_exact(report, backend, source, sku,
+                                                metadata_root, board_doc)
         if perf_published:
             if model_sha256 is None:
                 model_sha256 = _model_sha256(source)
@@ -176,7 +178,10 @@ def check_model_backends(*, backends: list[str], sku: str, source: Path,
             # target` back out of this module (that would be the cycle this
             # split exists to avoid), so the caller that already has this
             # function is the one that calls it.
-            target = (_headline_ethos_u_target(sku, metadata_root)
+            # Under `--exact` it is the target the reported compile came from
+            # (tan-cli#1497: not always the headline one), so a matched bench
+            # point re-bases the SAME target's figures.
+            target = ((exact_target or _headline_ethos_u_target(sku, metadata_root))
                       if backend == "ethos_u" else None)
             report = apply_perf_point(report, backend=backend, sku=sku,
                                        model_sha256=model_sha256,
@@ -205,10 +210,11 @@ def _reader_missing_report(report: BackendReport) -> BackendReport:
 
 
 def _apply_exact(report: BackendReport, backend: str, source: Path, sku: str,
-                  metadata_root: Path, board_doc: dict | None = None) -> BackendReport:
+                  metadata_root: Path, board_doc: dict | None = None,
+                  ) -> tuple[BackendReport, TargetSpec | None]:
     if backend != "ethos_u":
-        return _license_gated_exact_note(report, backend)
-    return _maybe_exact_ethos_u(report, source, sku, metadata_root, board_doc)
+        return _license_gated_exact_note(report, backend), None
+    return _exact_ethos_u(report, source, sku, metadata_root, board_doc)
 
 
 def _license_gated_exact_note(report: BackendReport, backend: str) -> BackendReport:
@@ -348,8 +354,9 @@ def _footprint_refused_note(report: BackendReport, err: Exception) -> BackendRep
                                   "Reporting the static screen instead."])
 
 
-def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
-                          metadata_root: Path, board_doc: dict | None = None) -> BackendReport:
+def _exact_ethos_u(report: BackendReport, source: Path, sku: str,
+                    metadata_root: Path, board_doc: dict | None = None,
+                    ) -> tuple[BackendReport, TargetSpec | None]:
     """Runs the real `vela` compile when it is on PATH; degrades cleanly --
     and SAYS SO, in a note -- back to @report (the static screen) for every
     other case: no vela, no resolvable accelerator config, a vela failure, or
@@ -376,7 +383,7 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
     review: measured a 750-character, 9-newline traceback landing in
     `notes[1]` of the JSON envelope this way)."""
     if not VelaAdapter().accepts(source.suffix.lstrip(".").lower()):
-        return report
+        return report, None
     if shutil.which("vela") is None:
         # TWO notes, not one (tan-cli#791 round-2 review item 4): "vela is
         # not on PATH" is a HOST fact, still true of this run even when a
@@ -392,9 +399,9 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
             "--exact was requested, but vela is not on PATH (pip install "
             "tan-cli[model-compile]).",
             "Reporting the static screen instead.",
-        ])
-    target = _headline_ethos_u_target(sku, metadata_root)
-    if target is None:
+        ]), None
+    headline = _headline_ethos_u_target(sku, metadata_root)
+    if headline is None:
         # NOT split like the sites above (tan-cli#791 round-2 review item 4):
         # `check_model_backends` resolves this SAME `_headline_ethos_u_target`
         # call, with the SAME sku/metadata_root, for the tier-2 step -- a pure
@@ -405,7 +412,55 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         # so its basis clause is never false.
         note = ("--exact could not resolve an Ethos-U accelerator config for "
                  "this SKU; reporting the static screen instead.")
-        return replace(report, notes=[*report.notes, note])
+        return replace(report, notes=[*report.notes, note]), None
+    # tan-cli#1497: `tan model build` compiles EVERY ethos_u target and refuses
+    # the model only when none of them fits, so `--exact` must too -- a
+    # headline-only check exited 2 while build shipped the targets that fit.
+    # The headline target goes first (it keeps deciding a lone-target SKU's
+    # report exactly as before); the first target that compiles AND fits wins;
+    # when none does, the headline result stands, so a model no target can
+    # run still reports its `model.sram-no-fit`.
+    results: list[tuple[TargetSpec, BackendReport]] = []
+    for cand in _exact_ethos_u_targets(sku, metadata_root, headline):
+        results.append((cand, _exact_one_target(report, source, cand, sku,
+                                                metadata_root, board_doc)))
+    chosen_target, chosen = results[0]
+    for cand, res in results:
+        if res.basis == "compiled" and not (res.sram_fit and res.sram_fit.no_fit):
+            chosen_target, chosen = cand, res
+            break
+    else:
+        return chosen, chosen_target
+    skipped = [c.accel_config for c, r in results
+               if r.sram_fit is not None and r.sram_fit.no_fit]
+    if skipped:
+        chosen = replace(chosen, notes=[
+            *chosen.notes,
+            f"--exact: ethos_u target(s) {', '.join(skipped)} do not fit SRAM; "
+            f"`tan model build` skips them and ships {chosen_target.accel_config}."])
+    return chosen, chosen_target
+
+
+def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
+                          metadata_root: Path, board_doc: dict | None = None) -> BackendReport:
+    """`_exact_ethos_u`, minus the target it settled on."""
+    return _exact_ethos_u(report, source, sku, metadata_root, board_doc)[0]
+
+
+def _exact_ethos_u_targets(sku: str, metadata_root: Path,
+                            headline: TargetSpec) -> list[TargetSpec]:
+    """Every ethos_u target `tan model build` compiles for @sku, the headline
+    one first (tan-cli#1497)."""
+    rest = [s for s in resolve_targets(sku, metadata_root=metadata_root)
+            if s.backend == "ethos_u" and s != headline]
+    return [headline, *rest]
+
+
+def _exact_one_target(report: BackendReport, source: Path, target: TargetSpec,
+                       sku: str, metadata_root: Path,
+                       board_doc: dict | None) -> BackendReport:
+    """The real vela compile of ONE target, degrading to a note on @report on
+    any failure. Never raises."""
     accel_config = target.accel_config
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,6 +501,8 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         paired_core=target.paired_core, sku=sku, metadata_root=metadata_root,
     )
     return _report_from_vela_compile(report, blob, accel_config, sram_fit=sram_fit)
+
+
 
 
 def _vela_placement_note(blob: Blob, accel_config: str, total: int, pct: float,

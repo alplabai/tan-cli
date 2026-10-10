@@ -285,6 +285,15 @@ def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tup
         return Issue("model.run-failed", "error", str(err))
 
 
+def _cast_warnings(path: Path, result: Any) -> list[Issue]:
+    """`model.input-dtype-cast` (tan-cli#1497) when the user's `.npy` was cast
+    to the model input dtype -- float to int truncates silently otherwise."""
+    note = getattr(result, "input_cast", None)
+    if not note:
+        return []
+    return [Issue("model.input-dtype-cast", "warning", f"{path.name}: {note}")]
+
+
 def _host_preflight(
     context: ProjectContext, verb: str, raws: list[str | None], data: dict
 ) -> tuple[list[Path], None] | tuple[None, Issue]:
@@ -325,7 +334,7 @@ def run_run(
         return project, sdk, data, [measured], _refusal_exit(measured)
     data["model"] = paths[0].as_posix()
     data["result"] = _result_row(measured[0], paths[0])
-    return project, sdk, data, [], ExitCode.SUCCESS
+    return project, sdk, data, _cast_warnings(paths[0], measured[0]), ExitCode.SUCCESS
 
 
 def run_ab(
@@ -366,7 +375,9 @@ def run_ab(
         "bLatencyMs": cmp.b_latency_ms,
         "sizeDeltaBytes": cmp.size_delta_bytes,
     }
-    return project, sdk, data, [], ExitCode.SUCCESS
+    return (project, sdk, data,
+            [*_cast_warnings(a_path, a_res), *_cast_warnings(b_path, b_res)],
+            ExitCode.SUCCESS)
 
 
 def render_run_text(data: dict) -> list[str]:

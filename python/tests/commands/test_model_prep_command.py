@@ -326,3 +326,12 @@ def test_broken_extra_message_quotes_the_error_separately():
 
     msg = broken_extra_message("prep", "libfoo.so missing")
     assert "libfoo.so missing" in msg and 'pip install "tan-cli[model]"' in msg
+
+
+def test_a_stray_min_samples_is_refused_even_at_its_default_value(tmp_path):
+    """tan-cli#1497: `--min-samples 8` typed on a non-prep subcommand used to
+    equal the default and be silently dropped."""
+    proj = project(tmp_path)
+    code, doc = invoke("run", "m.onnx", "--min-samples", "8", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument"
+    assert "--min-samples" in doc["issues"][0]["message"]
