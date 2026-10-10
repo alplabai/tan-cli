@@ -756,7 +756,9 @@ def test_the_board_yaml_directory_of_this_project_is_not_foreign(tmp_path):
     )
 
     assert plan.rejected == []
-    assert str(cfg / "out") in plan.targets
+    # `_rust_join` keeps the manifest's `/` (Windows: `...\proj\cfg/out`), so
+    # compare against what the planner itself builds, not a `Path` spelling.
+    assert _rust_join(str(proj), "cfg/out") in plan.targets
 
 
 def test_a_dir_owned_by_an_enclosing_project_is_refused_and_says_so(tmp_path):
