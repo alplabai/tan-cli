@@ -111,12 +111,12 @@ def store_compiler_present(store_dir, *, is_windows: bool) -> bool:
 #: and raises `sha256 mismatched` if that archive's digest differs. The
 #: per-toolchain archives are fetched afterwards by the SDK's own
 #: `setup.sh`/`setup.cmd`, which west runs and does not re-verify. So west
-#: checks the minimal bundle only, never every archive, and never against
-#: alp-sdk's pin.
+#: checks the minimal bundle only, never every archive, never against alp-sdk's
+#: pin (docs/toolchain-archive-verification.md).
 ARCHIVE_SHA256_NOTE = (
     "the archive's sha256 was NOT compared against the alp-sdk pin "
-    "(`west sdk install` discards the archive; any check west does is against "
-    "the release's own sha256.sum, not the pin)"
+    "(`west sdk install` discards the archive; west verifies only the minimal bundle "
+    "against sha256.sum, and setup.sh-fetched toolchains are not verified by west)"
 )
 
 
