@@ -701,7 +701,7 @@ def test_clean_sweeps_the_nested_manifest_of_a_build_root(tmp_path, monkeypatch)
     (oot / "a.bin").write_text("x")
     nested = proj / "build" / "build"
     nested.mkdir()
-    (nested / "system-manifest.yaml").write_text(manifest(str(oot)))
+    (nested / "system-manifest.yaml").write_text(manifest(oot.as_posix()))
     isolate(monkeypatch, tmp_path, proj)
 
     result = runner.invoke(app, ["clean", "--format", "json"])
