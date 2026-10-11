@@ -2982,6 +2982,14 @@
       "note": "tan-cli#1287: live `ab --device`: needs `--against-project` for B (or both captures); nothing was run. VALIDATION_FAILURE. A plain `Issue(\"model.device-live-needs-two-projects\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.device-ab-scope-mismatch",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1522: `ab --device` where the two sides' `latencyScope` differ (an app LATENCY-RESULT against a window-span upper bound), so `faster`/`latencyRatio` are not like-for-like. A warning, exit unchanged. A plain `Issue(\"model.device-ab-scope-mismatch\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "model.device-ab-mixed-sources",
       "status": "reserved",
       "severity": "error",

@@ -430,3 +430,46 @@ def test_a_failed_ram_run_after_the_load_keeps_the_flash_provenance(tmp_path, mo
     assert doc["issues"][0]["code"] == "flash.ram-failed"
     assert doc["data"]["flash"]["transcriptPath"] == "/t/ram_run-m55_he-1.log"
     assert doc["data"]["flash"]["core"] == "m55_he"
+
+
+def test_ab_checks_b_preflight_before_a_loads_the_board(tmp_path, monkeypatch):
+    """tan-cli#1522: B unbuilt must refuse before A RAM-runs and resets the board."""
+    a, b = project(tmp_path, "a"), project(tmp_path, "b", manifest=None)
+    stub = Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 2 and doc["issues"][0]["code"] == "model.device-no-manifest"
+    assert stub.calls == [] and "flash" not in doc["data"]
+
+
+def test_run_device_refuses_against_project(tmp_path, monkeypatch):
+    """tan-cli#1522: `run --device --against-project` was accepted and ignored."""
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    stub = Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10"))])
+    code, doc = invoke("run", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.unexpected-argument"
+    assert stub.calls == []
+
+
+def test_ab_warns_when_the_two_latencies_have_different_scopes(tmp_path, monkeypatch):
+    """tan-cli#1522: a LATENCY-RESULT side against a window-span side is not like-for-like."""
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    with_result = CONSOLE.replace("{n}", "10") + 'LATENCY-RESULT {"ms_per_inference": 90.0}\n'
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")), flow_result(with_result)])
+    code, doc = invoke("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))
+    assert code == 0, doc
+    assert doc["data"]["a"]["latencyScope"] != doc["data"]["b"]["latencyScope"]
+    assert "model.device-ab-scope-mismatch" in [i["code"] for i in doc["issues"]]
+
+
+def test_text_mode_labels_device_numbers_as_device_not_host(tmp_path, monkeypatch):
+    """tan-cli#1518: text mode printed the host renderer ('host reference only')."""
+    a, b = project(tmp_path, "a"), project(tmp_path, "b")
+    Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")), flow_result(CONSOLE.replace("{n}", "20"))])
+    for args in (("run", "--device", "--confirm", "--project", str(a)),
+                 ("ab", "--device", "--confirm", "--project", str(a), "--against-project", str(b))):
+        Stub(monkeypatch, [flow_result(CONSOLE.replace("{n}", "10")), flow_result(CONSOLE.replace("{n}", "20"))])
+        result = runner.invoke(app, list(args), catch_exceptions=False)
+        out = result.stdout + result.stderr
+        assert result.exit_code == 0, out
+        assert "host reference only" not in out and "None" not in out and "argmax" not in out, out
+        assert "measured on the device" in out and "ms/inference" in out, out

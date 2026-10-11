@@ -82,7 +82,7 @@ def _refuse(issue: Issue, *before: Issue) -> LiveRefusal:
     return LiveRefusal([*before, issue])
 
 
-def _preflight(context: ProjectContext, live: LiveOptions) -> Issue | None:
+def preflight(context: ProjectContext, live: LiveOptions) -> Issue | None:
     """The project must be built for RAM-run: board.yaml, a manifest, and a
     `ram_run_only` (ITCM-linked) slice for the chosen core."""
     if not Path(context.board_yaml).is_file():
@@ -164,7 +164,7 @@ def _save_console(
 
 def live_console(context: ProjectContext, label: str | None, live: LiveOptions) -> LiveRun | LiveRefusal:
     """RAM-run the project and return its console plus Flow C's issues, or the refusal."""
-    refused = _preflight(context, live)
+    refused = preflight(context, live)
     if refused is not None:
         return _refuse(refused)
     code, data, issues, _lines, _sdk = flash_cmd._run(

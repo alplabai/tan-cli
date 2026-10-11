@@ -1394,6 +1394,7 @@ def model(
             live,
             {
                 "--against": (against is not None, ("ab",)),
+                "--against-project": (against_project is not None, ("ab",)),
                 "--calibration": (calibration is not None, ("prep",)),
                 "--per-channel": (per_channel is True, ("prep",)),
                 "--min-samples": (min_samples is not None, ("prep",)),
