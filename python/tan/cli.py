@@ -8,13 +8,13 @@ this ``main`` to swallow a closed stdout (``tan generate --help | head``) as a
 quiet success instead of a traceback. Anything that must happen for EVERY
 invocation regardless of subcommand belongs there, not here.
 
-Commands register here with a STATIC import -- see ``tan.commands.__init__``
-for why an importlib/pkgutil registry is a trap: it works from source and
-fails inside a PyInstaller ``--onefile`` binary, which is how tan actually
-ships. That is why this module, not a package ``__init__``, is where ``app``
-lives: one obvious place to add each ``app.command()`` call, which is also the
-single table everything else here derives from (``_SUBCOMMAND_NAMES``, and the
-pre-/post-subcommand ``--format`` cases in
+Commands register in ``tan.command_table.COMMAND_TABLE`` with a STATIC,
+function-local import -- see ``tan.commands.__init__`` for why an
+importlib/pkgutil registry is a trap: it works from source and fails inside a
+PyInstaller ``--onefile`` binary, which is how tan actually ships. ``app`` is a
+``LazyTyper`` that refuses ``app.command(...)``: ``COMMAND_TABLE`` is the one
+place to add a command, and the single table everything else here derives from
+(``_SUBCOMMAND_NAMES``, and the pre-/post-subcommand ``--format`` cases in
 ``tests/commands/test_cli_global_flags.py``).
 """
 import io
@@ -22,39 +22,7 @@ import sys
 
 import typer
 from typer.core import TyperCommand
-from typer.main import get_command, get_command_name
 
-from tan.commands.bootstrap_cmd import bootstrap
-from tan.commands.build_cmd import build
-from tan.commands.clean_cmd import clean
-from tan.commands.debug_config_cmd import debug_config
-from tan.commands.completion_cmd import completion
-from tan.commands.diff_cmd import diff
-from tan.commands.inspect_cmd import inspect
-from tan.commands.pinmux_cmd import pinmux
-from tan.commands.scaffold_cmd import scaffold
-from tan.commands.support_bundle_cmd import support_bundle
-from tan.commands.trace_cmd import trace
-from tan.commands.doctor_cmd import doctor
-from tan.commands.examples_cmd import examples
-from tan.commands.explain_cmd import explain
-from tan.commands.faultdecode_cmd import faultdecode
-from tan.commands.flash_cmd import flash
-from tan.commands.probe_cmd import probe
-from tan.commands.reset_cmd import reset
-from tan.commands.generate_cmd import generate
-from tan.commands.image_cmd import image
-from tan.commands.init_cmd import init
-from tan.commands.kconfig_cmd import kconfig
-from tan.commands.model_cmd import model
-from tan.commands.monitor_cmd import monitor
-from tan.commands.new_som_cmd import new_som
-from tan.commands.presets_cmd import presets
-from tan.commands.run_cmd import run
-from tan.commands.sdk_cmd import sdk
-from tan.commands.size_cmd import size
-from tan.commands.validate_cmd import validate
-from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
 from tan.core.global_flags import RELOCATABLE_FLAG_ARITY
 from tan.envelope import (
     Envelope,
@@ -65,10 +33,10 @@ from tan.envelope import (
     envelope_emitted_exit_code,
 )
 from tan.exit_codes import ExitCode
+from tan.lazy_typer import COMMAND_NAMES, LazyTyper
 from tan.output_format import declared_formats, invalid_format_message
 from tan.version import TAN_VERSION
 
-app = typer.Typer(add_completion=False)
 
 #: The `--format` a DISPATCHED subcommand actually resolved to, as a bool, or
 #: `None` when NO command body ran this process (`main()` resets it per run).
@@ -130,87 +98,34 @@ class _DispatchedCommand(TyperCommand):
         return super().invoke(ctx)
 
 
-# Registered with a STATIC import, deliberately -- PyInstaller follows the
-# static import graph only, so a pkgutil/importlib auto-registry works from
-# source and produces a frozen `tan` that cannot find its own commands (see
-# `tan.commands.__init__`). Registering here rather than with a decorator in
-# the command module keeps `tan.commands.*` free of any `tan.cli` import,
-# which would otherwise be a cycle. Each registration also carries a
-# `rich_help_panel` keyword that groups commands into six titled panels on
-# `--help`; a new command gains grouping with the same one-line edit that
-# registers it.
-app.command("bootstrap", rich_help_panel="Setup")(bootstrap)
-app.command("build", rich_help_panel="Build & run")(build)
-app.command("clean", rich_help_panel="Build & run")(clean)
-app.command("completion", rich_help_panel="Setup")(completion)
-app.command("debug-config", rich_help_panel="Hardware")(debug_config)
-app.command("diff", rich_help_panel="Inspect & author")(diff)
-app.command("doctor", rich_help_panel="Setup")(doctor)
-app.command("examples", rich_help_panel="Start a project")(examples)
-app.command("explain", rich_help_panel="Start a project")(explain)
-app.command("faultdecode", rich_help_panel="Hardware")(faultdecode)
-app.command("flash", rich_help_panel="Hardware")(flash)
-app.command("generate", rich_help_panel="Configure")(generate)
-app.command("image", rich_help_panel="Build & run")(image)
-app.command("init", rich_help_panel="Start a project")(init)
-app.command("inspect", rich_help_panel="Inspect & author")(inspect)
-app.command("kconfig", rich_help_panel="Configure")(kconfig)
-app.command(
-    "lock", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
-)(lock)
-app.command(
-    "migrate", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
-)(migrate)
-app.command("model", rich_help_panel="Configure")(model)
-app.command("monitor", rich_help_panel="Hardware")(monitor)
-app.command("new-som", rich_help_panel="Inspect & author")(new_som)
-app.command("pinmux", rich_help_panel="Inspect & author")(pinmux)
-app.command("presets", rich_help_panel="Start a project")(presets)
-app.command("probe", rich_help_panel="Hardware")(probe)
-app.command("reset", rich_help_panel="Hardware")(reset)
-app.command(
-    "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
-)(quality)
-app.command("run", rich_help_panel="Build & run")(run)
-app.command("scaffold", rich_help_panel="Start a project")(scaffold)
-app.command("sdk", rich_help_panel="Setup")(sdk)
-app.command("size", rich_help_panel="Build & run")(size)
-app.command("support-bundle", rich_help_panel="Inspect & author")(support_bundle)
-app.command("trace", rich_help_panel="Inspect & author")(trace)
-app.command("validate", rich_help_panel="Configure")(validate)
+app = LazyTyper(add_completion=False, command_cls=_DispatchedCommand)
 
-# Every command dispatches through `_DispatchedCommand` -- assigned by walking
-# the registration table above rather than by threading `cls=` through all 32
-# `app.command(...)` calls, for the same reason `_SUBCOMMAND_NAMES` below is
-# DERIVED and not retyped: a command registered next year is covered by the one
-# line that registers it, and there is no second place to forget. `cls` is a
-# real `CommandInfo` field (`typer.models.CommandInfo`), read by
-# `typer.main.get_command_from_info` as `command_info.cls or TyperCommand` when
-# `get_command(app)` builds the Click tree -- which happens lazily, well after
-# this module finishes importing.
-for _info in app.registered_commands:
-    _info.cls = _DispatchedCommand
 
-#: Every registered subcommand name, DERIVED from the `app.command(...)` table
-#: above rather than retyped beside it (tan-cli#378). Used only to find the
-#: argv BOUNDARY `_reorder_global_flags` moves a leading global flag across;
-#: it is never itself treated as a flag.
-#:
-#: Hand-kept, this was a second place to forget a command -- and forgetting one
-#: here is silent: a name missing from the set is not recognised as the
-#: boundary, so the whole rewrite aborts and every leading global flag on that
-#: command goes back to being a Click "No such option". Deriving it means a
-#: command registered next year is covered by the single `app.command(...)`
-#: line that registers it.
-#:
-#: `CommandInfo.name` is the explicit name every registration above passes;
-#: `get_command_name` is Typer's own `snake_case` -> `kebab-case` fallback, for
-#: a future registration that omits it (`app.command()(debug_config)` would
-#: otherwise contribute `None`).
-_SUBCOMMAND_NAMES = frozenset(
-    info.name or get_command_name(info.callback.__name__)
-    for info in app.registered_commands
-)
+# Registered through `tan.command_table.COMMAND_TABLE`, whose loaders are plain
+# STATIC `from tan.commands.x_cmd import x` statements inside functions --
+# PyInstaller follows the static import graph only, so a pkgutil/importlib
+# auto-registry works from source and produces a frozen `tan` that cannot find
+# its own commands (see `tan.commands.__init__`), while a function-local import
+# is still seen. Nothing here imports a command module: `LazyTyper` runs a
+# loader only when Click looks that command up, so `tan --version` and
+# `tan <cmd> --help` skip the other ~30 modules (tan-cli#1505). Registering in
+# the table rather than with a decorator in the command module keeps
+# `tan.commands.*` free of any `tan.cli` import, which would be a cycle. Each
+# row carries a `rich_help_panel` that groups commands into six titled panels
+# on `--help`; a new command gains grouping with the same row that registers it.
+# Every command dispatches through `_DispatchedCommand` (set as the Typer's
+# `command_cls`) rather than threading `cls=` through each row.
+
+
+#: Every registered subcommand name, DERIVED from `tan.command_table.COMMAND_TABLE`
+#: rather than retyped beside it (tan-cli#378). Used only to find the argv
+#: BOUNDARY `_reorder_global_flags` moves a leading global flag across; it is
+#: never itself treated as a flag. Hand-kept, this was a second place to forget
+#: a command -- and forgetting one is silent: a name missing from the set is not
+#: recognised as the boundary, so the whole rewrite aborts and every leading
+#: global flag on that command goes back to being a Click "No such option".
+#: Reading names off the table costs no command import (tan-cli#1505).
+_SUBCOMMAND_NAMES = frozenset(COMMAND_NAMES)
 
 #: clap's `GlobalArgs` (`crates/tan-cli/src/cli.rs` lines 24-73) PLUS
 #: `--format`: every field there is `#[arg(long, global = true, ...)]`, so clap
@@ -280,7 +195,7 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     position every golden already uses, and where each command's own
     "'x' (choose from 'text', 'json')" validation lives), so moving the token
     there hands it to a parameter that acts on it. A command added later is
-    covered by the `app.command(...)` line that registers it, with nothing
+    covered by the `COMMAND_TABLE` row that registers it, with nothing
     else to remember -- pinned by
     `tests/commands/test_cli_global_flags.py`, which derives its cases from
     that same registration table.
@@ -398,7 +313,7 @@ def _value_taking_options(command: str | None) -> frozenset[str]:
     `is_flag`; `click.Argument`s are excluded by the leading-dash test (their
     `opts` carry the parameter NAME, not a flag).
     """
-    group = get_command(app)
+    group = app.lazy_group()
     params = list(group.params)
     subcommand = group.commands.get(command) if command is not None else None
     if subcommand is not None:
@@ -485,7 +400,7 @@ def _emit_help_envelope(argv: list[str]) -> int:
     """
     from click.testing import CliRunner  # noqa: PLC0415
 
-    result = CliRunner().invoke(get_command(app), argv, prog_name="tan")
+    result = CliRunner().invoke(app.lazy_group(), argv, prog_name="tan")
     message = result.output.strip()
     code = result.exit_code
     issues = [] if code == 0 else [Issue("cli.parse-error", "error", message)]
@@ -574,7 +489,7 @@ def _every_declared_format() -> tuple[str, ...]:
     exact shape of the bug this replaced.
     """
     seen: dict[str, None] = {}
-    group = get_command(app)
+    group = app.lazy_group()
     for name in sorted(getattr(group, "commands", {})):
         for value in declared_formats(group.commands[name]):
             seen.setdefault(value, None)
