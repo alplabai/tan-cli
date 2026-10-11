@@ -146,8 +146,8 @@ def pcsr_in_ranges(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) ->
     """True when at least one real sample exists and EVERY real sample lies inside
     `ranges` (`[start, end)` of the image tan just flashed). 0xFFFFFFFF is no evidence; a
     sample outside the ranges (old image, loader, ROM) vetoes. The old image is not known to
-    tan, so an old image linked into the same range is not excluded -- that residual is why
-    S_RESET_ST stays the stronger witness."""
+    tan, so an old image linked into the same range is not excluded (tan-cli#1537): a True here
+    is "the core runs code from this range", never "the new image runs" or "a reset happened"."""
     real = [x for x in samples if x not in PCSR_NO_SAMPLES]
     return bool(real) and bool(ranges) and all(
         any(lo <= x < hi for lo, hi in ranges) for x in real

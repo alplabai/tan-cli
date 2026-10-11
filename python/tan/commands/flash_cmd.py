@@ -1927,10 +1927,6 @@ _FLOW_D_VERIFIED_ONLY = (
 )
 #: tan-cli#1445: `--no-reset`. Honest about what tan can and cannot promise: J-Link's `exit`
 #: has been seen to resume the core even without a reset command (bench, tan-cli#1458).
-#: tan-cli#1453 review: PCSR proves the NEW code runs, not that the SE pin reset took.
-_FLOW_D_NEW_IMAGE = (
-    "; cache-verified; PIN-reset requested, new image confirmed running without a halt: {witness}"
-)
 _FLOW_D_NO_RESET = (
     "; cache-verified; --no-reset: no reset command was sent, but J-Link's exit may resume the "
     "core (the board is not held in reset)"
@@ -3660,11 +3656,7 @@ def _flash_entry_body(
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
-            if report.get("jlink", {}).get("resetConfirmedBy") == "pcsr":
-                ok_message = ok_message.replace(
-                    _FLOW_D_VERIFIED_AND_RESET,
-                    _FLOW_D_NEW_IMAGE.format(witness=report["jlink"]["witness"]), 1)
-            elif report.get("jlink", {}).get("resetConfirmedBy"):
+            if report.get("jlink", {}).get("resetConfirmedBy"):
                 ok_message = ok_message.replace(
                     _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
                         witness=report["jlink"]["witness"]), 1)
@@ -3932,15 +3924,6 @@ def _flow_d_image_ranges(shape: FlowDShape) -> list[tuple[int, int]]:
     return []
 
 
-def _pcsr_witness(samples: Sequence[int], ranges: Sequence[tuple[int, int]]) -> str:
-    real = [x for x in samples if x not in (0xFFFFFFFF, 0)]
-    inside = next(((lo, hi) for lo, hi in ranges if real and lo <= real[0] < hi), ranges[0])
-    return (
-        f"{len(real)} PC sample(s) (DWT_PCSR, e.g. 0x{real[0]:08X}) inside the image range "
-        f"0x{inside[0]:08X}-0x{inside[1]:08X}"
-    )
-
-
 def _save_session_log(
     ctx: _Context, entry_id: str, label: str, script: str, outcome: _Outcome
 ) -> dict[str, Any]:
@@ -3970,9 +3953,9 @@ def _flow_d_confirm_boot(
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
     the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
-    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened; failing
-    that, PC samples (DWT_PCSR) that all fall inside the new image do (`resetConfirmedBy:
-    "pcsr"`). True, and
+    sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened. PC samples
+    (DWT_PCSR) inside the new image's range prove nothing (the replaced image shares it,
+    tan-cli#1537) and only set `coreRunning`. True, and
     the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
     `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
     unconfirmed. Never raises, never writes."""
@@ -4009,20 +3992,21 @@ def _flow_d_confirm_boot(
             "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
         )
         return True
-    # Second, non-halting witness: S_RESET_ST is usually already cleared by J-Link's own reads.
-    # The PC samples (DWT_PCSR) must all fall inside the image tan just flashed; 0xFFFFFFFF
-    # (halted/sleeping) is no evidence, and a halted or locked-up core never confirms.
+    # tan-cli#1537: PC samples (DWT_PCSR) inside the new image's range are NOT proof of a boot.
+    # An image previously linked at the same slot0 address covers most of the same range, and
+    # tan holds no pre-write copy of it, so the old image idling produces the same samples. Telling
+    # them apart would need an extra pre-write J-Link read of slot0; instead the claim is dropped:
+    # in-range samples only show the core runs *some* code from that range (`coreRunning`), and the
+    # reset stays `unconfirmed`. Only S_RESET_ST (above) proves a reset happened.
     halted = value is not None and bool(value & (DHCSR_S_HALT | DHCSR_S_LOCKUP))
     if not halted and pcsr_in_ranges(samples, image_ranges):
-        block.update(
-            reset="new-image-running", resetConfirmedBy="pcsr",
-            dhcsr=None if value is None else f"0x{value:08X}",
-            witness=_pcsr_witness(samples, image_ranges),
-            resetNote="the halt after the reset failed, but every PC sample (DWT_PCSR, read "
-            "without halting) lies inside the image just flashed: the new code is running. That "
-            "does not prove the Secure Enclave PIN reset itself took.",
+        block["coreRunning"] = True
+        block["bootProbe"]["pcsrInImageRange"] = True
+        block["resetNote"] = (
+            "every PC sample (DWT_PCSR, read without halting) lies inside the flashed image's "
+            "range, but an image previously linked there produces the same samples: the new "
+            "image is not proven to run, and the PIN reset is not proven."
         )
-        return True
     return False
 
 
@@ -5082,7 +5066,7 @@ def _run(
                 + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
                 + "); "
                 + (
-                    "core running, reset not proven: a read-only DHCSR check shows a running "
+                    "core running, reset not proven: a read-only DHCSR/PCSR check shows a running "
                     "core but not a reset since the write -- it may be the old image. "
                     if running else
                     "no witness: the halt failed and the read-only DHCSR/PCSR check read nothing "

@@ -7,6 +7,7 @@ No hardware: `_spawn_jlink` is stubbed with a fake J-Link that answers
 `ShowEmuList`, a write script and a read-back script."""
 from __future__ import annotations
 
+import json
 import hashlib
 import re
 from pathlib import Path
@@ -279,17 +280,49 @@ def test_a_probe_session_that_reset_or_failed_to_halt_cannot_confirm(tmp_path, m
 PC_IN = "E000101C = 80010000\n"  # inside the 1-byte mramxip app at 0x80010000 of `_ARGS`
 
 
-def test_pc_samples_inside_the_new_image_confirm_when_the_reset_bit_is_gone(tmp_path, monkeypatch):
+def test_pc_samples_inside_the_image_range_do_not_confirm_a_new_image(tmp_path, monkeypatch):
+    """tan-cli#1537: the replaced image shares the range, so in-range PCs prove nothing
+    about the reset; the failed-reset transcript stays the reported outcome."""
     out = "E000EDF0 = 01040001\n" + PC_IN * 3
     fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
     assert rc == 0, (data, issues)
     jl = data["entries"][0]["jlink"]
-    assert jl["resetConfirmedBy"] == "pcsr" and jl["reset"] == "new-image-running"
-    assert "PIN-reset requested, new image confirmed running" in data["entries"][0]["message"]
-    assert "and PIN-reset (" not in data["entries"][0]["message"]
-    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+    assert jl["reset"] == "unconfirmed" and "resetConfirmedBy" not in jl
+    assert jl["coreRunning"] is True and jl["bootProbe"]["pcsrInImageRange"] is True
+    assert jl["resetFailures"] == ["Failed to halt CPU"]
+    assert "new-image-running" not in json.dumps(data)
+    assert "new image confirmed" not in data["entries"][0]["message"]
+    assert "NOT confirmed" in data["entries"][0]["message"]
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
     assert jl["bootProbe"]["pcsr"] == ["0x80010000"] * 3
     assert jl["bootProbe"]["imageRanges"] == [["0x80010000", "0x80010001"]]
+
+
+def test_all_three_reset_failures_plus_an_in_range_pc_is_not_new_image_running(tmp_path, monkeypatch):
+    """tan-cli#1537 bench transcript: the three failure markers and a PC in the (old and new)
+    shared range must not read as the new image running."""
+    write = CLEAN + "Failed to halt CPU\nCPU is not halted\n****** Error: Reset: Failed\n"
+    out = "E000EDF0 = 01040001\n" + PC_IN + "E000101C = 80010000\n" * 2
+    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": write, "probe_out": out})
+    jl = data["entries"][0]["jlink"]
+    assert jl["resetFailures"] == ["Failed to halt CPU", "CPU is not halted", "Reset: Failed"]
+    assert jl["reset"] == "unconfirmed" and "resetConfirmedBy" not in jl
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+
+
+def test_an_old_image_overlapping_the_new_range_cannot_pass_as_the_new_one(tmp_path, monkeypatch):
+    """The old image idles at a PC the new image's range also covers (0x80020BA8 vs the new
+    0x80010000-0x80031D6C): identical samples whether or not the reset took. In this fixture the
+    new image is one byte at 0x80010000, the address the old image's code also covers."""
+    from tan.core import flow_d_report as fdr
+
+    new_range = [(0x80010000, 0x80031D6C)]
+    old_idle = [0x80020BA8] * 3
+    assert fdr.pcsr_in_ranges(old_idle, new_range)  # the range test alone cannot tell
+    out = "E000EDF0 = 01040001\n" + PC_IN * 3  # the old image idling inside the shared range
+    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
+    jl = data["entries"][0]["jlink"]
+    assert jl["reset"] != "new-image-running" and "resetConfirmedBy" not in jl
 
 
 @pytest.mark.parametrize(
@@ -964,14 +997,6 @@ def test_the_preflight_dpidr_survives_a_later_refusal(tmp_path, monkeypatch):
 
 
 # ── tan-cli#1458: bench follow-ups ──────────────────────────────────────────
-
-
-def test_the_message_names_the_pcsr_witness_not_dhcsr(tmp_path, monkeypatch):
-    out = "E000EDF0 = 01040001\n" + PC_IN * 3
-    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
-    msg = data["entries"][0]["message"]
-    assert "3 PC sample(s) (DWT_PCSR, e.g. 0x80010000) inside the image range 0x80010000-0x80010001" in msg
-    assert "DHCSR" not in msg
 
 
 def test_no_witness_in_a_stop_window_is_info_with_honest_wording(tmp_path, monkeypatch):

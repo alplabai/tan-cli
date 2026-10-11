@@ -164,11 +164,11 @@ containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU ma
 have not been reset` first triggers a read-only, non-halting DHCSR check in a fresh
 session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset:`
 or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
-"dhcsr"`, no issue code). Because J-Link's own reads usually clear it, a second non-halting
-witness also confirms: three `DWT_PCSR` (0xE000101C) PC samples that all fall inside the
-image just flashed (`resetConfirmedBy: "pcsr"`, `jlink.reset: "new-image-running"` -- PCSR proves the new code
-runs, not that the Secure Enclave pin reset took; the ranges are the PF_X LOAD segments of the
-app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+"dhcsr"`, no issue code). J-Link's own reads usually clear it, and `DWT_PCSR` (0xE000101C) PC samples inside the flashed image's range
+(the PF_X LOAD segments of the app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes) do **not**
+substitute: an image previously linked at the same slot0 address covers the same range and produces the same samples
+(tan-cli#1537). They only set `jlink.coreRunning` (and `bootProbe.pcsrInImageRange`); `jlink.reset` stays `unconfirmed`, and
+`new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted. `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
