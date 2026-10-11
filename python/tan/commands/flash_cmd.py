@@ -219,6 +219,12 @@ from tan.core.atoc_replacement import (
     written_entries,
 )
 from tan.core.jlink_binary import ENV_OVERRIDE as JLINK_ENV, resolve_jlink
+from tan.core.flow_d_uptime import (
+    UptimeProbe,
+    load_uptime_probe,
+    uptime_evidence,
+    uptime_script_lines,
+)
 from tan.core.flow_d_report import (
     SectorOverlapError,
     find_overlaps,
@@ -2901,6 +2907,7 @@ def _flash_entry_body(
     preflight_facts: dict[str, Any] = {}
     flow_d_writes: list[dict[str, Any]] = []
     flow_d_ranges: list[tuple[int, int]] = []
+    flow_d_uptime: UptimeProbe | None = None
     # tan-cli#1509: the other slices signed into this entry's single ATOC.
     extras: list[tuple[str, FlowDShape]] = []
 
@@ -3405,6 +3412,7 @@ def _flash_entry_body(
                 )
             flow_d_writes = _flow_d_writes(flash_args, shape, extras)
             flow_d_ranges = _flow_d_image_ranges(shape)
+            flow_d_uptime = load_uptime_probe(os.path.splitext(shape.artefact)[0] + ".elf")
             for _extra_id, extra in extras:
                 flow_d_ranges += _flow_d_image_ranges(extra)
             # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
@@ -3627,7 +3635,7 @@ def _flash_entry_body(
                     entry_id=entry_id,
                 )
         if reset_unconfirmed and _flow_d_confirm_boot(
-            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id
+            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id, flow_d_uptime
         ):
             reset_unconfirmed = False
     if inline is not None and readback_failure is None and outcome.success:
@@ -3949,13 +3957,16 @@ def _flow_d_confirm_boot(
     jlink_exe: str | None = None,
     image_ranges: Sequence[tuple[int, int]] = (),
     entry_id: str = "entry",
+    uptime: UptimeProbe | None = None,
 ) -> bool:
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
     the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
     sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened. PC samples
     (DWT_PCSR) inside the new image's range prove nothing (the replaced image shares it,
-    tan-cli#1537) and only set `coreRunning`. True, and
+    tan-cli#1537) and only set `coreRunning`. tan-cli#1539: with `uptime` (the ELF's tick
+    counter), the same session also reads it a few times without halting; a small, increasing
+    value proves a boot within seconds (`resetConfirmedBy: "uptime"`). True, and
     the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
     `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
     unconfirmed. Never raises, never writes."""
@@ -3963,7 +3974,9 @@ def _flow_d_confirm_boot(
     if plan.jlink_script is None:
         return False
     try:
-        script = nohalt_probe_script(plan.jlink_script)
+        script = nohalt_probe_script(
+            plan.jlink_script, uptime_script_lines(uptime) if uptime else ()
+        )
     except ValueError:
         return False
     probe = _execute(
@@ -3992,6 +4005,11 @@ def _flow_d_confirm_boot(
             "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
         )
         return True
+    if uptime is not None:
+        block["bootProbe"]["uptime"], confirmed = uptime_evidence(text, uptime)
+        if confirmed:
+            block.update(confirmed)
+            return True
     # tan-cli#1537: PC samples (DWT_PCSR) inside the new image's range are NOT proof of a boot.
     # An image previously linked at the same slot0 address covers most of the same range, and
     # tan holds no pre-write copy of it, so the old image idling produces the same samples. Telling

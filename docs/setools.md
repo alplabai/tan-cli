@@ -168,7 +168,15 @@ or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
 (the PF_X LOAD segments of the app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes) do **not**
 substitute: an image previously linked at the same slot0 address covers the same range and produces the same samples
 (tan-cli#1537). They only set `jlink.coreRunning` (and `bootProbe.pcsrInImageRange`); `jlink.reset` stays `unconfirmed`, and
-`new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted. `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+`new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted. What does confirm (tan-cli#1539, `jlink.resetConfirmedBy:
+"uptime"`): the same non-halting probe session also reads the kernel tick counter `curr_tick` (a `uint64_t`) four times,
+600 ms apart, at the address the ELF being flashed (`<artefact>.elf`) gives it -- never a hardcoded one, and only inside a RAM
+LOAD segment in the slice core's own DTCM / SRAM0, never HP ITCM `0x50000000`. The tick rate is the ELF's
+`CONFIG_SYS_CLOCK_TICKS_PER_SEC` symbol, else the `.config` beside it. A value that rises across the reads and ends at 30 s
+or less proves the image booted within seconds, which the replaced image (up since before the write) cannot satisfy;
+`bootProbe.uptime` records `symbol`, `address`, `ticks` and `ticksPerSec`. A counter that is large, flat (halted or
+gated), or all-ones, a missing / duplicated / unreadable symbol, or an unknown tick rate keeps `unconfirmed`, with no new
+failure. A sleeping app whose timer fires less often than the 1.8 s read window stays `unconfirmed`. `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
