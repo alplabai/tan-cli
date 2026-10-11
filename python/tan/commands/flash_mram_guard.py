@@ -116,7 +116,9 @@ def slot0_address(flash_args: Any) -> int | None:
 
 def mram_link_guard(artefact_path: str, entry_id: str, *, slot0: int) -> str | None:
     """The refusal for a Flow D entry whose ELF is loaded below `slot0`
-    (`slot0_load_address`), or whose same-stem ELF is much older than its `.bin`, or whose `.bin` is older than its ELF, else `None`.
+    (`slot0_load_address`), or whose same-stem ELF is much older than its `.bin`, or whose `.bin`
+    is older than its ELF, or whose sibling `.bin` (what `loadbin` writes) is much newer than an
+    ELF artefact, else `None`.
     The caller invokes this only for the shapes tan controls (see the module docstring)."""
     prefix = f"{FLOW_D_METHOD}[{entry_id}]: refusing -- "
     older = written_bin_older_than_elf(artefact_path)
