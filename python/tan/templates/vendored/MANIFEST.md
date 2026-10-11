@@ -99,6 +99,14 @@ from an un-revendored SDK change.
   (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, alp-sdk tag `v0.17.0-rc2`) — the release merge of `dev` at
   `1d20103ba` (tree-identical to it except the release bump). See the note below.
 
+  The `84a6e0d21` -> `64481b8e9` planner re-sync (tan-cli#1525) moves ONE scaffold input:
+  alp-sdk#2826 (`b874b1334`, warm-aware CC3501E bring-up in every `cc3501e_bridge` copy, #2797)
+  rewrote `examples/aen/aen-cc3501e-*/src/cc3501e_bridge.c`, which the `iot` scaffold ships as
+  `iot/E1M-AEN801/src/cc3501e_bridge.c`. That one file was re-vendored byte-for-byte from the emit
+  (the bytes are the only change; the vendor-point label above is unchanged because the rest of the
+  tree is identical at both commits), and
+  `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
 - **Prior vendor point (all templates):** **`1d20103ba`**
   (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
   `5a612e24a` -> `1d20103ba` planner re-sync (alp-sdk#2822: carveout.py
