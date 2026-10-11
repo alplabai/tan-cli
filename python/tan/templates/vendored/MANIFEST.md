@@ -99,6 +99,10 @@ from an un-revendored SDK change.
   (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, alp-sdk tag `v0.17.0-rc2`) — the release merge of `dev` at
   `1d20103ba` (tree-identical to it except the release bump). See the note below.
 
+  The `84a6e0d21` -> `64481b8e9` planner re-sync (tan-cli#1525) moves no scaffold input
+  (no `templates/**` or `examples/**` change), so nothing was re-vendored:
+  `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
 - **Prior vendor point (all templates):** **`1d20103ba`**
   (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
   `5a612e24a` -> `1d20103ba` planner re-sync (alp-sdk#2822: carveout.py
