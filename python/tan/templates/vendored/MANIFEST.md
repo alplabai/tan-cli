@@ -100,7 +100,7 @@ from an un-revendored SDK change.
   `1d20103ba` (tree-identical to it except the release bump). See the note below.
 
   The `84a6e0d21` -> `64481b8e9` planner re-sync (tan-cli#1525) moves no scaffold input
-  (no `templates/**` or `examples/**` change), so nothing was re-vendored:
+  (no `templates/**` change and no change to any vendored scaffold's source example), so nothing was re-vendored:
   `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
 
 - **Prior vendor point (all templates):** **`1d20103ba`**

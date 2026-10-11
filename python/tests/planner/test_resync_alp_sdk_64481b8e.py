@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Hermetic ports from the alp-sdk `84a6e0d2` -> `64481b8e` planner re-sync
 (tan-cli#1525): the E1M CAN -> Linux netdev map (alp-sdk#2352) and the AEN
-`alp,wired-lpgpio-pads` property (alp-sdk#2831).  No alp-sdk checkout needed.
+`alp,wired-lpgpio-pads` property (alp-sdk#2831).  No alp-sdk checkout needed: a synthetic planner root is
+bound (`bound_sdk_root`), so these run on every PR.
 """
 from __future__ import annotations
 
 import pytest
 
-from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
-
-pytestmark = pytest.mark.skipif(
-    SDK is None,
-    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
-           "checkout) -- tan.planner needs a bound root to import.",
-)
-
+from tests.planner._baremetal_support import bound_sdk_root  # noqa: F401
 
 @pytest.fixture
 def lo():
@@ -52,6 +46,25 @@ def test_can_netdev_is_the_rank_among_enabled_channels(lo, monkeypatch):
     # e1m_can1 -> channel 0 -> can0; e1m_can0 -> channel 2 -> can1;
     # hw_blocked e1m_can2 never enabled -> "".
     assert lo.can_netdev_map(doc, soc, own) == ["can1", "can0"]
+
+
+def test_render_disables_the_other_channels_and_emits_the_netdev_map(lo, monkeypatch):
+    doc, soc, own = _can_fixture(lo, monkeypatch)
+    monkeypatch.setattr(lo, "cm33_clocks", lambda *_a, **_k: [])
+    for e in doc["assignable"].values():
+        e["linux_evidence"] = "bench"
+        if e.get("hw_blocked"):
+            e["hw_blocked"] = {"reason": "test"}
+    monkeypatch.setattr(
+        lo, "instance_pfc",
+        lambda _soc, _e: [({"pad": "P", "peripheral": "TX"}, ("P0", 1, 2))])
+    text, labels = lo.render(doc, soc, {}, own)
+    # channel0 + channel2 are enabled by Linux; only channel1 is disabled.
+    assert '&canfd {\n\tchannel1 {\n\t\tstatus = "disabled";\n\t};\n};' in text
+    assert 'channel0 {\n\t\tstatus = "disabled"' not in text
+    assert 'channel2 {\n\t\tstatus = "disabled"' not in text
+    assert '/ {\n\talp,e1m-can-netdev = "can1", "can0";\n};' in text
+    assert "canfd/channel1" in labels
 
 
 def test_can_netdev_blank_for_a_bus_linux_does_not_enable(lo, monkeypatch):
