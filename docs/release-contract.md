@@ -450,6 +450,12 @@ none is written to `GITHUB_ENV`. The `.p12` is deleted right after import, the
 `.p8` is decoded inside the notarize step and deleted on its exit, and the
 keychain is locked at the end of the sign step and deleted in an `if: always()` step.
 
+**Store the five secrets as environment secrets**, not repository secrets:
+Settings > Environments > `release-signing` (the `build` job names it), with
+deployment branches and tags limited to the tag rule `v*`. Repository secrets
+are readable by a workflow pushed on any branch; environment secrets reach
+only a `v*` tag run.
+
 **Prerequisite:** a paid Apple Developer Program account, a *Developer ID
 Application* certificate exported with its private key as `.p12`, and an App
 Store Connect API key (Users and Access > Integrations > Keys; Developer

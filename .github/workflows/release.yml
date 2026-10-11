@@ -397,6 +397,12 @@ jobs:
             # `crane digest python:3.12-slim-bullseye` or the registry API, and
             # re-measure the glibc floor below before moving it.
             container: python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db # python:3.12-slim-bullseye
+    # tan-cli#1506: the five APPLE_* signing secrets belong to this
+    # environment, not the repository, with its deployment rule limited to
+    # `v*` tags. Repository secrets are readable by a workflow pushed on any
+    # branch; environment secrets reach only jobs that name the environment
+    # and pass its rule. With no secrets in it the environment is inert.
+    environment: release-signing
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
