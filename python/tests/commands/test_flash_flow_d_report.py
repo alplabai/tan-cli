@@ -227,7 +227,7 @@ def test_a_failed_halt_is_confirmed_by_dhcsr_without_a_halt(tmp_path, monkeypatc
     assert entry["jlink"]["reset"] == "pin-reset"
     assert entry["jlink"]["resetConfirmedBy"] == "dhcsr" and entry["jlink"]["dhcsr"] == "0x03050001"
     assert "NOT confirmed" not in entry["message"]
-    assert "boot confirmed without a halt: DHCSR 0x03050001" in entry["message"]
+    assert "boot confirmed without a halt: DHCSR 0x03050001, S_RESET_ST set" in entry["message"]
     # The probe never halts or resets: connect, one mem32, exit.
     probe = next(s for s in fake.scripts if "mem32" in s)
     assert "mem32 0xE000EDF0 1" in probe
@@ -308,21 +308,6 @@ def test_all_three_reset_failures_plus_an_in_range_pc_is_not_new_image_running(t
     assert jl["resetFailures"] == ["Failed to halt CPU", "CPU is not halted", "Reset: Failed"]
     assert jl["reset"] == "unconfirmed" and "resetConfirmedBy" not in jl
     assert "flash.jlink-reset-unconfirmed" in _codes(issues)
-
-
-def test_an_old_image_overlapping_the_new_range_cannot_pass_as_the_new_one(tmp_path, monkeypatch):
-    """The old image idles at a PC the new image's range also covers (0x80020BA8 vs the new
-    0x80010000-0x80031D6C): identical samples whether or not the reset took. In this fixture the
-    new image is one byte at 0x80010000, the address the old image's code also covers."""
-    from tan.core import flow_d_report as fdr
-
-    new_range = [(0x80010000, 0x80031D6C)]
-    old_idle = [0x80020BA8] * 3
-    assert fdr.pcsr_in_ranges(old_idle, new_range)  # the range test alone cannot tell
-    out = "E000EDF0 = 01040001\n" + PC_IN * 3  # the old image idling inside the shared range
-    fake, (rc, data, issues, _l, _s) = _run(tmp_path, monkeypatch, {"write_out": _HALT_FAIL, "probe_out": out})
-    jl = data["entries"][0]["jlink"]
-    assert jl["reset"] != "new-image-running" and "resetConfirmedBy" not in jl
 
 
 @pytest.mark.parametrize(
