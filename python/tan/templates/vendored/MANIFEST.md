@@ -107,6 +107,11 @@ from an un-revendored SDK change.
   tree is identical at both commits), and
   `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
 
+  The `64481b8e9` -> `7584a3562` planner re-sync (tan-cli#1541) moves no scaffold input. Its
+  `examples/**` edits (`aen-power-stop`, `aen-trace-runner`, `aen-hp-core-smoke`) are not templates
+  or catalog entries, so nothing was re-vendored and the label above is unchanged.
+  `scaffold_byte_parity.py --sdk <7584a3562 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
 - **Prior vendor point (all templates):** **`1d20103ba`**
   (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
   `5a612e24a` -> `1d20103ba` planner re-sync (alp-sdk#2822: carveout.py

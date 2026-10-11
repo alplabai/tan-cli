@@ -1414,7 +1414,11 @@ from tests.conftest import sdk_root
 #: the disabled-channel nodes plus `alp,e1m-can-netdev` (3-way merged cleanly);
 #: `kconfig.py` is a comment-only edit (the removed i.MX 93 m33), applied by hand
 #: because tan's copy of that comment sits on a line the merge read as adapted.
-PINNED_SDK_COMMIT = "64481b8e91275f8dc256d311263964714896ce81"  # alp-sdk origin/dev -- #2352 CAN netdev map, #2831 wired LPGPIO pads (gen_zephyr_board.py ported)
+#: `64481b8e9` -> `7584a3562` (tan-cli#1541; alp-sdk#2838): `buildplan.py` is a
+#: docstring-only edit (the retired `tan renode` reference). The bot's 3-way
+#: merge conflicted on tan's own rewording of that line; resolved to upstream's
+#: text. No behavioural change; the planner oracle re-captured byte-identical.
+PINNED_SDK_COMMIT = "7584a3562e9e5b9c09c86ada233cac42d2103b14"  # alp-sdk origin/dev -- #2838 buildplan docstring (retired tan renode)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1456,7 +1460,7 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
-    "buildplan.py": "61cab4c1f88a29039b1da8be380917cc11453edc919c4b87b71b998ec4899c59",
+    "buildplan.py": "17bca79ceeae97f5d2b02a437b181235891eafa661f0693235a99bb2bcacbe7c",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
     "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
@@ -2489,7 +2493,11 @@ PINNED_HASHES: dict[str, str] = {
 #: (with a comment naming the nets) inside the `alp,som-power` node. The planner
 #: oracle re-captured byte-identical (it does not render the Zephyr board);
 #: `scaffold_byte_parity.py` 10/10 (no `templates/**`/`examples/**` change).
-HAND_PORT_PINNED_SDK_COMMIT = "64481b8e91275f8dc256d311263964714896ce81"  # alp-sdk origin/dev -- gen_zephyr_board.py #2831 wired LPGPIO pads ported
+#: AUDIT `64481b8e9` -> `7584a3562` (tan-cli#1541): no hand-port source moved;
+#: hashes unchanged. The range's new `scripts/*.py` (`bump_version.py`,
+#: `check_abidiff.py`, `check_version_doc_sync.py`) are SDK-only gates nothing in
+#: `tan/planner/` imports.
+HAND_PORT_PINNED_SDK_COMMIT = "7584a3562e9e5b9c09c86ada233cac42d2103b14"  # alp-sdk origin/dev -- no hand-port source moved
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
