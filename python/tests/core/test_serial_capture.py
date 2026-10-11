@@ -196,3 +196,18 @@ def test_without_until_every_byte_is_kept():
     clk, sink = Clock(), io.BytesIO()
     sc.capture(Port(clk, [b"a\nb\nc"]), duration_s=0.15, sink=sink, clock=clk)
     assert sink.getvalue() == b"a\nb\nc"
+
+
+def test_match_later_in_a_chunk_read_at_the_deadline_still_matches():
+    """tan-cli#1515: a multi-line read returning after the deadline is searched whole."""
+    clk = Clock()
+
+    class LatePort:
+        def read(self, size=1):
+            clk.t = 5.0
+            return b"noise\nBooting Zephyr OS\n"
+
+    sink = io.BytesIO()
+    res = sc.capture(LatePort(), duration_s=1, until=sc.compile_until("Booting Zephyr"), sink=sink, clock=clk)
+    assert res.matched and res.matched_line == "Booting Zephyr OS"
+    assert sink.getvalue() == b"noise\nBooting Zephyr OS\n"
