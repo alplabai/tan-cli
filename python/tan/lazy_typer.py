@@ -177,8 +177,9 @@ class LazyTyper(typer.Typer):
                 return group
             return _REAL_GET_COMMAND(typer_instance)
 
+        original = typer.main.get_command
         typer.main.get_command = _get_command  # type: ignore[assignment]
         try:
             return super().__call__(*args, **kwargs)
         finally:
-            typer.main.get_command = _REAL_GET_COMMAND
+            typer.main.get_command = original

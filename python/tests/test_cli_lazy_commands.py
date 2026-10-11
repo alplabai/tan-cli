@@ -123,12 +123,10 @@ _NOT_REGISTERED = {"model_device_cmd", "model_host_cmd", "model_zoo_cmd"}
 
 def test_every_command_module_is_in_the_table():
     commands = Path(__file__).resolve().parents[1] / "tan" / "commands"
-    table = (Path(__file__).resolve().parents[1] / "tan" / "command_table.py").read_text()
+    in_table = {m.rsplit(".", 1)[1] for mods in _loader_modules().values() for m in mods}
     missing = {
-        f.stem
-        for f in commands.glob("*_cmd.py")
-        if f.stem not in _NOT_REGISTERED and f"tan.commands.{f.stem} import" not in table
-    }
+        f.stem for f in commands.glob("*_cmd.py") if f.stem not in _NOT_REGISTERED
+    } - in_table
     assert not missing, f"not in COMMAND_TABLE: {sorted(missing)}"
 
 
@@ -145,3 +143,33 @@ def test_lazy_group_is_cached_and_get_command_is_not_hijacked():
     real = typer.main.get_command
     assert real(other).name != "tan"
     assert typer.main.get_command is real
+
+
+def test_get_command_is_not_hijacked_from_inside_a_running_app(monkeypatch):
+    import typer
+    import typer.main
+
+    import tan.commands.size_cmd as size_cmd
+    from tan.cli import app
+
+    other = typer.Typer()
+    other.command("hi")(lambda: None)
+    other.command("yo")(lambda: None)
+    seen = {}
+
+    def spy():
+        seen["name"] = typer.main.get_command(other).name
+        raise SystemExit(0)
+
+    monkeypatch.setattr(size_cmd, "size", spy, raising=False)
+    # Force a fresh lazy build of `size` so the patched callback is the one used.
+    app._infos.pop("size", None)
+    app._lazy_group = None
+    try:
+        app(["size"], prog_name="tan")
+    except SystemExit:
+        pass
+    finally:
+        app._infos.pop("size", None)
+        app._lazy_group = None
+    assert seen.get("name") not in (None, "tan")
