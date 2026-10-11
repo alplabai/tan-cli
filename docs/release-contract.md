@@ -423,6 +423,71 @@ covered by the same attestation. The `release` job is the only job with
 `id-token: write` / `attestations: write` — every other job keeps the
 workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
+## macOS signing and notarization (tan-cli#1506)
+
+A freshly downloaded macOS asset that is only ad-hoc signed pays a 7.7-8.7 s
+first launch (Gatekeeper/XProtect inspect each of the ~54 bundled Mach-O
+files); later launches take ~0.21 s. `release.yml` therefore Developer ID signs
+and notarizes both darwin legs **when the secrets exist**. With any secret
+absent the step logs a `::notice::` (a `::warning::` when only some are set)
+and the asset stays ad-hoc signed, exactly as before; the release never fails
+for lack of them.
+
+**First signed run is on a tag.** `release.yml` runs only on `v*` tag pushes,
+so the first tag after the secrets are added is the first time import, sign
+and notarize execute, and any failure there withholds every asset and spends
+the tag. Add the secrets, then cut a throwaway pre-release tag (for example
+`v<next>-rc0`, deleted afterwards) to prove the path before a real one.
+
+The notary values reach only the notarize step (straight from `secrets.`);
+none is written to `GITHUB_ENV`. The `.p12` is deleted right after import, the
+`.p8` is decoded inside the notarize step and deleted on its exit, and the
+keychain is locked before notarization and deleted in an `if: always()` step.
+
+**Prerequisite:** a paid Apple Developer Program account, a *Developer ID
+Application* certificate exported with its private key as `.p12`, and an App
+Store Connect API key (Users and Access > Integrations > Keys; Developer
+access suffices) for `notarytool`.
+
+| Repo secret | Content |
+|---|---|
+| `APPLE_DEVELOPER_ID_P12_BASE64` | `base64 -i cert.p12` of the Developer ID Application identity |
+| `APPLE_DEVELOPER_ID_P12_PASSWORD` | the `.p12` export password |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID |
+| `APPLE_NOTARY_ISSUER_ID` | issuer UUID shown on the Keys page |
+| `APPLE_NOTARY_KEY_P8_BASE64` | `base64 -i AuthKey_XXXX.p8` |
+
+How it works: the identity is imported into a throwaway keychain
+(deleted in an `if: always()` step); `build_binary.sh` signs every Mach-O under
+`dist/tan/` (nested code first, `tan` last, `--options runtime --timestamp`,
+entitlements `python/scripts/macos_entitlements.plist` on `tan` only) before
+the archive is made, so the tarball carries signed bytes;
+`scripts/macos_notarize.sh` then submits a zip of the same tree with
+`notarytool submit --wait` and fails the leg unless the status is `Accepted`.
+`test_packaged_binary.py` runs against the signed binary, so a hardened-runtime
+start failure fails the leg. The entitlement set is deliberately minimal
+(`allow-unsigned-executable-memory` only); widen it only on evidence.
+
+**No stapling.** A ticket cannot be stapled to a bare tarball or Mach-O. The
+notarization still takes effect through Gatekeeper's online ticket lookup by
+code-directory hash; an offline first launch can still take the slow path.
+
+**Measuring quarantine cost** (run on macOS, on a fresh copy each time, never
+a copy that has already launched once):
+
+```
+d=$(mktemp -d) && tar -xzf tan-aarch64-apple-darwin.tar.gz -C "$d"
+xattr -w com.apple.quarantine "0083;5f000000;curl;" "$d/tan"   # quarantined
+time "$d/tan/tan" --version
+d2=$(mktemp -d) && tar -xzf tan-aarch64-apple-darwin.tar.gz -C "$d2"
+xattr -dr com.apple.quarantine "$d2"                           # stripped
+time "$d2/tan/tan" --version
+```
+
+`tar` does not itself add the flag, hence the explicit `xattr -w`. Compare the
+first-launch time of the signed+notarized asset against the ad-hoc one; the
+issue closes only once that measurement exists.
+
 ## alp-sdk must be released BEFORE (or with) the tan tag that requires it
 
 **Check this before every tag.** `tan/planner/` is a hash-audited mirror of
