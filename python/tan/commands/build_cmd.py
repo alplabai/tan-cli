@@ -129,7 +129,7 @@ from tan.core.sdk_discovery import (
     sdk_ladder_divergence_issue,
     with_sdk_search,
 )
-from tan.core.shapes import SDK_MARKER, is_sdk_root
+from tan.core.shapes import SDK_MARKER, is_sdk_root, rejected_sdk_root_message
 from tan.env import stderr_is_tty, terminal_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1517,9 +1517,9 @@ def _build(
     issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
-    # A plain Zephyr build (`--board`) has no board.yaml, so no manifest to write:
-    # expected, not a warning (the stderr note still says why).
-    if manifest_reason is not None and plain_plan_text is None:
+    # The plain route (`--board`) has its own writer (tan-cli#1381), so a failed
+    # write there is as real as on the planned route (tan-cli#1517).
+    if manifest_reason is not None:
         # A failed manifest write used to report only through `on_output`
         # (stderr) -- so the envelope said `ok: true, issues: []` while
         # `system-manifest.yaml` still named the PREVIOUS run's status and
@@ -1856,6 +1856,9 @@ def build(
             json_mode,
         )
     plain_plan_text: str | None = None
+    # The raw flag, kept before `sdk_root` is reassigned to the RESOLVED root (None
+    # for a rejected flag) so the refusal below can name what the caller typed.
+    sdk_root_flag = sdk_root
     if board is not None or define:
         _refuse_plain_route(board, define, board_yaml, plan_from, mode, json_mode)
 
@@ -2035,7 +2038,13 @@ def build(
         message = err.message
         if err.code == "build.sdk-root-unresolved":
             # tan-cli#1423: where the ladder looked, beside the message's own remedy.
-            message = with_sdk_search(message, workspace_root)
+            if (sdk_root_flag or "").strip():
+                # `--sdk-root` is terminal (I-31): no other tier was tried, so
+                # name the rejected value instead of recommending the flag or
+                # claiming the ladder was searched (tan-cli#1521).
+                message = rejected_sdk_root_message(sdk_root_flag, "Nothing was built.")
+            else:
+                message = with_sdk_search(message, workspace_root)
         exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", message)]
     except Exception as err:  # noqa: BLE001 -- see below
         # The port's most-repeated defect class: an uncaught exception

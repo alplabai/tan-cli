@@ -893,3 +893,33 @@ def test_a_symlinked_slices_dir_is_replaced_not_emptied(tmp_path):
     assert (outside / "keep.txt").read_text() == "precious"
     assert not (bundle / "slices").is_symlink()
     assert (bundle / "slices" / "a-zephyr.tar.gz").is_file()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs an unreadable file, which root and Windows can still read",
+)
+def test_a_failed_rerun_leaves_no_stale_bundle_manifest(tmp_path):
+    """tan-cli#1521: run 2 prunes the old archives, then dies mid-assembly; the
+    old bundle-manifest.json must not survive naming archives that are gone."""
+    for core in ("a", "b"):
+        wbytes(tmp_path / "br" / f"{core}-zephyr" / "zephyr" / "z.elf", b"ELF")
+    rows = "".join(
+        f"- core_id: {c}\n  os: zephyr\n  build_dir: {c}-zephyr\n  status: ok\n" for c in "ab"
+    )
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        f"schema_version: 1\nhw_info: {{}}\nslices:\n{rows}helper_mcus: []\nboot_order: []\n",
+    )
+    manifest_out = tmp_path / "br" / "image-bundle" / "bundle-manifest.json"
+    assert run_cli(tmp_path, "--format", "json", "--build-root", "br").returncode == 0
+    assert manifest_out.is_file()
+
+    unreadable = tmp_path / "br" / "b-zephyr" / "zephyr" / "z.elf"
+    unreadable.chmod(0)
+    try:
+        failed = run_cli(tmp_path, "--format", "json", "--build-root", "br")
+    finally:
+        unreadable.chmod(0o644)
+    assert failed.returncode != 0, failed.stdout
+    assert not manifest_out.exists()

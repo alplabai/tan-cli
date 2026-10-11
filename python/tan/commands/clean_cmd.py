@@ -908,6 +908,17 @@ def _run(
             build_root = _rust_join(tree, "build")
             if not _has_normal_component(tree):
                 refusal = f"`{tree}` is a filesystem root"
+            elif os.path.isfile(_rust_join(tree, "system-manifest.yaml")) and not os.path.isfile(
+                _rust_join(build_root, "system-manifest.yaml")
+            ):
+                # tan-cli#1521: `size`/`image`/`flash` also accept X as the build
+                # directory itself, but clean appends `/build` to X, so that
+                # spelling would target `X/build`, find nothing and exit 0 with
+                # the real build tree still in place. Refuse loudly instead.
+                refusal = (
+                    f"`{tree}` is itself a build directory (it holds system-manifest.yaml); "
+                    "pass the project tree it was built under, not its `build` directory"
+                )
     else:
         build_root = _rust_join(project_root, "build")
 
