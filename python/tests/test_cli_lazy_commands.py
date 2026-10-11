@@ -106,3 +106,42 @@ def test_lazy_and_eager_trees_agree():
     eager = get_command(app)
     assert list(lazy.commands) == list(eager.commands)
     assert [c.name for c in lazy.commands.values()] == [c.name for c in eager.commands.values()]
+
+
+def test_app_command_registration_is_refused():
+    from tan.cli import app
+
+    with pytest.raises(TypeError, match="COMMAND_TABLE"):
+        app.command("x")(lambda: None)
+    with pytest.raises(TypeError, match="COMMAND_TABLE"):
+        app.registered_commands = [object()]
+
+
+#: Submodules of `model`, loaded by `model_cmd` itself, not registered commands.
+_NOT_REGISTERED = {"model_device_cmd", "model_host_cmd", "model_zoo_cmd"}
+
+
+def test_every_command_module_is_in_the_table():
+    commands = Path(__file__).resolve().parents[1] / "tan" / "commands"
+    table = (Path(__file__).resolve().parents[1] / "tan" / "command_table.py").read_text()
+    missing = {
+        f.stem
+        for f in commands.glob("*_cmd.py")
+        if f.stem not in _NOT_REGISTERED and f"tan.commands.{f.stem} import" not in table
+    }
+    assert not missing, f"not in COMMAND_TABLE: {sorted(missing)}"
+
+
+def test_lazy_group_is_cached_and_get_command_is_not_hijacked():
+    import typer
+    import typer.main
+
+    from tan.cli import app
+
+    assert app.lazy_group() is app.lazy_group()
+    other = typer.Typer()
+    other.command("hi")(lambda: None)
+    other.command("yo")(lambda: None)
+    real = typer.main.get_command
+    assert real(other).name != "tan"
+    assert typer.main.get_command is real

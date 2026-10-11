@@ -8,13 +8,13 @@ this ``main`` to swallow a closed stdout (``tan generate --help | head``) as a
 quiet success instead of a traceback. Anything that must happen for EVERY
 invocation regardless of subcommand belongs there, not here.
 
-Commands register here with a STATIC import -- see ``tan.commands.__init__``
-for why an importlib/pkgutil registry is a trap: it works from source and
-fails inside a PyInstaller ``--onefile`` binary, which is how tan actually
-ships. That is why this module, not a package ``__init__``, is where ``app``
-lives: one obvious place to add each ``app.command()`` call, which is also the
-single table everything else here derives from (``_SUBCOMMAND_NAMES``, and the
-pre-/post-subcommand ``--format`` cases in
+Commands register in ``tan.command_table.COMMAND_TABLE`` with a STATIC,
+function-local import -- see ``tan.commands.__init__`` for why an
+importlib/pkgutil registry is a trap: it works from source and fails inside a
+PyInstaller ``--onefile`` binary, which is how tan actually ships. ``app`` is a
+``LazyTyper`` that refuses ``app.command(...)``: ``COMMAND_TABLE`` is the one
+place to add a command, and the single table everything else here derives from
+(``_SUBCOMMAND_NAMES``, and the pre-/post-subcommand ``--format`` cases in
 ``tests/commands/test_cli_global_flags.py``).
 """
 import io
@@ -195,7 +195,7 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     position every golden already uses, and where each command's own
     "'x' (choose from 'text', 'json')" validation lives), so moving the token
     there hands it to a parameter that acts on it. A command added later is
-    covered by the `app.command(...)` line that registers it, with nothing
+    covered by the `COMMAND_TABLE` row that registers it, with nothing
     else to remember -- pinned by
     `tests/commands/test_cli_global_flags.py`, which derives its cases from
     that same registration table.
