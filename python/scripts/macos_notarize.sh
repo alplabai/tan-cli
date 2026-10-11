@@ -18,18 +18,33 @@ set -euo pipefail
 root=${1:?usage: macos_notarize.sh <onedir-root>}
 : "${APPLE_NOTARY_KEY_PATH:?}" "${APPLE_NOTARY_KEY_ID:?}" "${APPLE_NOTARY_ISSUER_ID:?}"
 
-zip_path="$(mktemp -d)/tan-notarize.zip"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+zip_path="$tmp/tan-notarize.zip"
 ditto -c -k --keepParent "$root" "$zip_path"
 
+# A bounded wait: the build leg's timeout-minutes covers this step too, and
+# a runner kill mid-wait would leave no diagnostic at all. `|| rc=$?` keeps
+# set -e from exiting before the output and the log below are printed.
+rc=0
 out=$(xcrun notarytool submit "$zip_path" \
   --key "$APPLE_NOTARY_KEY_PATH" --key-id "$APPLE_NOTARY_KEY_ID" \
-  --issuer "$APPLE_NOTARY_ISSUER_ID" --wait --output-format json)
+  --issuer "$APPLE_NOTARY_ISSUER_ID" --wait --timeout 20m --output-format json) || rc=$?
 echo "$out"
 
-id=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
-status=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')
+field() {
+  printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except ValueError:
+    print("")
+' "$1"
+}
+id=$(field id)
+status=$(field status)
 if [ "$status" != "Accepted" ]; then
-  echo "ERROR: notarization status '$status' (submission $id)" >&2
+  echo "ERROR: notarization status '$status' (submission $id, notarytool exit $rc)" >&2
   if [ -n "$id" ]; then
     xcrun notarytool log "$id" \
       --key "$APPLE_NOTARY_KEY_PATH" --key-id "$APPLE_NOTARY_KEY_ID" \

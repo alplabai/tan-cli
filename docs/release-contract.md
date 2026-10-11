@@ -429,8 +429,20 @@ A freshly downloaded macOS asset that is only ad-hoc signed pays a 7.7-8.7 s
 first launch (Gatekeeper/XProtect inspect each of the ~54 bundled Mach-O
 files); later launches take ~0.21 s. `release.yml` therefore Developer ID signs
 and notarizes both darwin legs **when the secrets exist**. With any secret
-absent the step logs a `::notice::` and the asset stays ad-hoc signed, exactly
-as before; the release never fails for lack of them.
+absent the step logs a `::notice::` (a `::warning::` when only some are set)
+and the asset stays ad-hoc signed, exactly as before; the release never fails
+for lack of them.
+
+**First signed run is on a tag.** `release.yml` runs only on `v*` tag pushes,
+so the first tag after the secrets are added is the first time import, sign
+and notarize execute, and any failure there withholds every asset and spends
+the tag. Add the secrets, then cut a throwaway pre-release tag (for example
+`v<next>-rc0`, deleted afterwards) to prove the path before a real one.
+
+The notary values reach only the notarize step (straight from `secrets.`);
+none is written to `GITHUB_ENV`. The `.p12` is deleted right after import, the
+`.p8` is decoded inside the notarize step and deleted on its exit, and the
+keychain is locked before notarization and deleted in an `if: always()` step.
 
 **Prerequisite:** a paid Apple Developer Program account, a *Developer ID
 Application* certificate exported with its private key as `.p12`, and an App

@@ -18,8 +18,17 @@ root=${1:?usage: macos_sign.sh <onedir-root> <entitlements.plist>}
 entitlements=${2:?usage: macos_sign.sh <onedir-root> <entitlements.plist>}
 : "${TAN_CODESIGN_IDENTITY:?TAN_CODESIGN_IDENTITY is not set}"
 
-kc=()
-[ -n "${TAN_CODESIGN_KEYCHAIN:-}" ] && kc=(--keychain "$TAN_CODESIGN_KEYCHAIN")
+# One codesign wrapper instead of an args array: "${arr[@]}" on an empty
+# array is an unbound-variable error under set -u on macOS's bash 3.2.
+sign() {
+  if [ -n "${TAN_CODESIGN_KEYCHAIN:-}" ]; then
+    codesign --force --options runtime --timestamp \
+      --keychain "$TAN_CODESIGN_KEYCHAIN" --sign "$TAN_CODESIGN_IDENTITY" "$@"
+  else
+    codesign --force --options runtime --timestamp \
+      --sign "$TAN_CODESIGN_IDENTITY" "$@"
+  fi
+}
 
 main="$root/tan"
 [ -f "$main" ] || { echo "ERROR: $main not found" >&2; exit 1; }
@@ -29,15 +38,17 @@ n=0
 # Mach-O regardless of extension. Deepest paths first.
 while IFS= read -r f; do
   [ "$f" = "$main" ] && continue
-  if file -b "$f" | grep -q 'Mach-O'; then
-    codesign --force --options runtime --timestamp "${kc[@]}" \
-      --sign "$TAN_CODESIGN_IDENTITY" "$f"
-    n=$((n + 1))
-  fi
+  case "$(file -b "$f")" in
+    *Mach-O*)
+      sign "$f"
+      # Fail here, naming the file, rather than at notarization.
+      codesign --verify --strict "$f"
+      n=$((n + 1))
+      ;;
+  esac
 done < <(find "$root" -type f -print | awk -F/ '{print NF " " $0}' | sort -rn | cut -d' ' -f2-)
 
-codesign --force --options runtime --timestamp "${kc[@]}" \
-  --entitlements "$entitlements" --sign "$TAN_CODESIGN_IDENTITY" "$main"
+sign --entitlements "$entitlements" "$main"
 n=$((n + 1))
 
 # Fail the build on a bad signature rather than at notarization.
