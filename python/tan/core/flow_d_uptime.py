@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#1539: a sound NEW-image boot witness for Flow D -- the kernel uptime.
+"""tan-cli#1539: a boot witness for Flow D -- the kernel uptime, bounded by the wall clock.
 
 After a write whose halt failed, DHCSR `S_RESET_ST` is usually gone and PC samples cannot tell the
-new image from the replaced one (tan-cli#1537). A free-running tick counter can: read twice a
-short interval apart, a small value that is increasing means the running image booted within the
-last few seconds -- which the replaced image, up since long before the write, cannot satisfy.
+new image from the replaced one (tan-cli#1537). A free-running tick counter can, provided it is
+compared with the time tan itself measured: the probe's last read must show an uptime no larger
+than the monotonic time elapsed since the write session ended (plus a slack for the reset tail
+inside that session). An image that was already running when the write began has an uptime of at
+least the write's own duration more than that bound allows, unless it was reset by the write.
+This proves a RECENT BOOT, not that the SE PIN reset took (reported as `reset: "booted"`).
 
 The counter is Zephyr's kernel tick count (`curr_tick`, a `static uint64_t` in `kernel/timeout.c`;
 present in an AEN alp-console ELF at a DTCM address). Its address is resolved from the ELF being
@@ -28,11 +31,12 @@ TICKS_PER_SEC_SYMBOL = "CONFIG_SYS_CLOCK_TICKS_PER_SEC"
 #: ISR announces, so the window must span more than one idle wake-up of a typical sleeper.
 UPTIME_READS = 4
 UPTIME_SLEEP_MS = 600
-#: "booted within the last few seconds": the largest last-read uptime that still confirms.
-UPTIME_MAX_SECONDS = 30.0
-#: The only address windows ever read: the slice core's DTCM (local alias) and SRAM0. HP ITCM
-#: (0x50000000) and every other aperture are out.
-_READABLE = ((0x20000000, 0x20100000), (0x02000000, 0x03000000))
+#: Slack (s) added to the elapsed time: the reset tail runs inside the write session, so the
+#: image boots slightly BEFORE the session's end timestamp.
+UPTIME_SLACK_SECONDS = 1.0
+#: The only address windows ever read: the slice core's DTCM (local alias, 1 MiB window) and the
+#: E8's 4 MiB SRAM0. HP ITCM (0x50000000) and every other aperture are out.
+_READABLE = ((0x20000000, 0x20100000), (0x02000000, 0x02400000))
 
 
 @dataclass(frozen=True)
@@ -73,12 +77,19 @@ def config_ticks_per_sec(config_text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def load_uptime_probe(elf_path: str) -> UptimeProbe | None:
-    """`plan_uptime_probe` for the ELF at `elf_path`; `None` when it cannot be read or parsed."""
+def load_elf(elf_path: str) -> ElfImage | None:
+    """The parsed ELF at `elf_path`, or `None` when it cannot be read or parsed."""
     try:
         with open(elf_path, "rb") as fh:
-            elf = parse_elf(fh.read())
+            return parse_elf(fh.read())
     except (OSError, RamRunError):
+        return None
+
+
+def load_uptime_probe(elf: ElfImage | None, elf_path: str) -> UptimeProbe | None:
+    """`plan_uptime_probe` for the parsed `elf` (read from `elf_path`, whose directory may hold
+    the build's `.config`); `None` when there is no ELF."""
+    if elf is None:
         return None
     rate = None
     try:
@@ -110,33 +121,41 @@ def uptime_ticks(transcript: str, probe: UptimeProbe) -> list[int]:
 
 
 def uptime_confirms_boot(
-    ticks: Sequence[int], ticks_per_sec: int, max_seconds: float = UPTIME_MAX_SECONDS
+    ticks: Sequence[int], ticks_per_sec: int, elapsed_s: float,
+    slack_s: float = UPTIME_SLACK_SECONDS,
 ) -> bool:
     """True only for a counter that moved (never going backwards, last > first) and whose last
-    value is small. A constant counter is a halted or gated core; a large one is an image that
-    has been up long before the write; an all-ones word is an unreadable bus, not a count."""
+    value is no more uptime than `elapsed_s` (monotonic seconds since the write session ended)
+    plus `slack_s`. A constant counter is a halted or gated core; a larger uptime is an image
+    that was running before the write; an all-ones word is an unreadable bus, not a count. The
+    64-bit counter is read as two 32-bit words, so a read can tear across a carry: it shows as a
+    huge jump or a step backwards and is rejected by the same rules."""
     if len(ticks) < 2 or any(t in (0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF) for t in ticks):
         return False
     if any(b < a for a, b in zip(ticks, ticks[1:])) or ticks[-1] <= ticks[0]:
         return False
-    return ticks[-1] / ticks_per_sec <= max_seconds
+    return ticks[-1] / ticks_per_sec <= elapsed_s + slack_s
 
 
-def uptime_evidence(transcript: str, probe: UptimeProbe) -> tuple[dict, dict | None]:
+def uptime_evidence(
+    transcript: str, probe: UptimeProbe, elapsed_s: float
+) -> tuple[dict, dict | None]:
     """`(bootProbe.uptime evidence, jlink-block update)`; the update is `None` unless the
     counter confirms a boot."""
     ticks = uptime_ticks(transcript, probe)
     evidence = {
         "symbol": probe.symbol, "address": f"0x{probe.address:08X}",
-        "ticks": ticks, "ticksPerSec": probe.ticks_per_sec,
+        "ticks": [f"0x{t:X}" for t in ticks], "ticksPerSec": probe.ticks_per_sec,
+        "elapsedSinceWriteSeconds": round(elapsed_s, 2),
     }
-    if not uptime_confirms_boot(ticks, probe.ticks_per_sec):
+    if not uptime_confirms_boot(ticks, probe.ticks_per_sec, elapsed_s):
         return evidence, None
     return evidence, {
-        "coreRunning": True, "reset": "pin-reset", "resetConfirmedBy": "uptime",
-        "witness": f"{probe.symbol} 0x{ticks[0]:X} -> 0x{ticks[-1]:X}, "
-        f"up {ticks[-1] / probe.ticks_per_sec:.1f} s",
-        "resetNote": "the halt after the reset failed, but the new image's kernel tick counter "
-        f"({probe.symbol}, read without halting from the flashed ELF's own address) is small "
-        "and increasing: the image booted within the last few seconds.",
+        "coreRunning": True, "reset": "booted", "resetConfirmedBy": "uptime",
+        "witness": f"{probe.symbol} 0x{ticks[0]:X} -> 0x{ticks[-1]:X}, up "
+        f"{ticks[-1] / probe.ticks_per_sec:.1f} s, {elapsed_s:.1f} s after the write",
+        "resetNote": "the halt after the reset failed, but the kernel tick counter "
+        f"({probe.symbol}, read without halting at the flashed ELF's own address) is rising and "
+        "shows no more uptime than the time elapsed since the write ended: the image booted "
+        "after the write. That proves a recent boot, not that the SE PIN reset took.",
     }

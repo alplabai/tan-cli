@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import struct
 
+from tan.commands import flash_cmd
 from tan.core import flow_d_uptime
 from tan.core.flow_d_uptime import UptimeProbe
 from tan.core.ram_run import parse_elf
@@ -50,7 +51,10 @@ def reads(*values: int, address: int = TICK) -> str:
     )
 
 
-def _flash(tmp_path, monkeypatch, probe_out, elf: bytes | None):
+def _flash(tmp_path, monkeypatch, probe_out, elf: bytes | None, elapsed: float = 20.0):
+    """`elapsed` fakes the monotonic seconds between the write ending and the probe ending."""
+    clock = iter([0.0, elapsed])
+    monkeypatch.setattr(flash_cmd, "_now", lambda: next(clock))
     (tmp_path / "build").mkdir(exist_ok=True)
     if elf is not None:
         (tmp_path / "build" / "a.elf").write_bytes(elf)
@@ -69,15 +73,28 @@ def _jl(out):
 def test_a_small_increasing_tick_counter_confirms_the_new_image(tmp_path, monkeypatch):
     fake, out = _flash(tmp_path, monkeypatch, DHCSR + reads(12000, 18000, 24000, 30000), make_elf(GOOD))
     jl, issues, data = _jl(out)
-    assert jl["reset"] == "pin-reset" and jl["resetConfirmedBy"] == "uptime"
+    assert jl["reset"] == "booted" and jl["resetConfirmedBy"] == "uptime"
     assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
     assert jl["bootProbe"]["uptime"]["address"] == "0x200088C0"
-    assert jl["bootProbe"]["uptime"]["ticks"] == [12000, 18000, 24000, 30000]
+    assert jl["bootProbe"]["uptime"]["ticks"] == ["0x2EE0", "0x4650", "0x5DC0", "0x7530"]
     assert jl["bootProbe"]["uptime"]["ticksPerSec"] == HZ
-    assert "boot confirmed without a halt: curr_tick" in data["entries"][0]["message"]
+    msg = data["entries"][0]["message"]
+    assert "boot proven, PIN reset not" in msg and "curr_tick" in msg and "and PIN-reset" not in msg
+    assert jl["bootProbe"]["uptime"]["elapsedSinceWriteSeconds"] == 20.0
     probe = next(s for s in fake.scripts if "mem32" in s)
     assert f"mem32 0x{TICK:08X} 2" in probe  # the address came from the ELF
     assert not any(w in probe for w in ("RSetType", "loadbin", "halt", "\ng\n"))
+
+
+def test_an_uptime_longer_than_the_time_since_the_write_is_not_this_boot(tmp_path, monkeypatch):
+    """A replaced image that booted before the write keeps (or resumes) counting: 3 s of
+    uptime cannot belong to a boot that happened after a write that ended 1 s ago."""
+    _f, out = _flash(tmp_path, monkeypatch, DHCSR + reads(12000, 18000, 24000, 30000),
+                     make_elf(GOOD), elapsed=1.0)
+    jl, issues, _d = _jl(out)
+    assert jl["reset"] == "unconfirmed" and "resetConfirmedBy" not in jl
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+    assert jl["bootProbe"]["uptime"]["ticks"][-1] == "0x7530"
 
 
 def test_a_large_counter_is_the_old_image_up_a_long_time(tmp_path, monkeypatch):
@@ -111,6 +128,7 @@ def test_a_missing_ambiguous_or_misplaced_symbol_stays_unconfirmed(tmp_path, mon
         jl, issues, _d = _jl(out)
         assert jl["reset"] == "unconfirmed" and "resetConfirmedBy" not in jl, name
         assert "uptime" not in jl["bootProbe"], name
+        assert not any("0x5000" in s for s in _f.scripts), name
         assert "flash.jlink-reset-unconfirmed" in _codes(issues), name
 
 
@@ -140,7 +158,10 @@ def test_a_duplicate_static_symbol_is_ambiguous_and_gets_no_probe():
 
 def test_confirmation_arithmetic():
     ok = flow_d_uptime.uptime_confirms_boot
-    assert ok([10, 20], 10) and ok([0, 5], 10)
-    assert not ok([20], 10) and not ok([20, 20], 10) and not ok([20, 10], 10)
-    assert not ok([0xFFFFFFFF, 0xFFFFFFFF], 10)
-    assert not ok([10, 10 + 31 * 10], 10)
+    assert ok([10, 20], 10, 5.0) and ok([0, 5], 10, 0.0)
+    assert not ok([20], 10, 5.0) and not ok([20, 20], 10, 5.0) and not ok([20, 10], 10, 5.0)
+    assert not ok([0xFFFFFFFF, 0xFFFFFFFF], 10, 5.0)
+    # the bound is the elapsed time plus the slack, not a fixed number of seconds
+    assert ok([10, 10 + 59 * 10], 10, 59.5) and not ok([10, 10 + 59 * 10], 10, 58.0)
+    # a read torn across a 32-bit carry (low word wrapped, high word not yet bumped)
+    assert not ok([0xFFFFFF00, 0x00000010], 10, 1e9) and not ok([5, 0x1_0000_0005], 10, 100.0)
