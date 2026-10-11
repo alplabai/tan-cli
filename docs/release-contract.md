@@ -439,10 +439,16 @@ and notarize execute, and any failure there withholds every asset and spends
 the tag. Add the secrets, then cut a throwaway pre-release tag (for example
 `v<next>-rc0`, deleted afterwards) to prove the path before a real one.
 
+The identity is imported only **after** the freeze-and-test step (pip,
+every locked dependency, PyInstaller, pytest), so no third-party code ever
+runs while the keychain is unlocked. A separate step then signs the onedir,
+rebuilds the archive with `/usr/bin/python3 -I` (stdlib only), re-checks the
+size ceiling and locks the keychain.
+
 The notary values reach only the notarize step (straight from `secrets.`);
 none is written to `GITHUB_ENV`. The `.p12` is deleted right after import, the
 `.p8` is decoded inside the notarize step and deleted on its exit, and the
-keychain is locked before notarization and deleted in an `if: always()` step.
+keychain is locked at the end of the sign step and deleted in an `if: always()` step.
 
 **Prerequisite:** a paid Apple Developer Program account, a *Developer ID
 Application* certificate exported with its private key as `.p12`, and an App
