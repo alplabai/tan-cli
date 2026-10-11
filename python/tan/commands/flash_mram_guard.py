@@ -58,6 +58,22 @@ def written_bin_older_than_elf(artefact_path: str) -> tuple[str, str] | None:
     return (written, elf) if gap > BIN_OLDER_SLACK_SECONDS else None
 
 
+def written_bin_much_newer_than_elf(artefact_path: str) -> tuple[str, str] | None:
+    """`(bin, elf)` when the ELF artefact's sibling `.bin` (what Flow D `loadbin`s) is more
+    than [`STALE_ELF_SECONDS`] newer than the ELF, else `None`. The `.bin`-artefact case is
+    `find_elf`'s `stale`; this closes the same gap when the manifest names the ELF, which
+    the stale refusal itself recommends (tan-cli#1514): the ELF's link address cannot vouch
+    for a `.bin` swapped in long after it."""
+    written = resolve_slot0_binary(artefact_path, os.path.isfile)
+    if written is None or written == artefact_path:
+        return None
+    try:
+        gap = os.path.getmtime(written) - os.path.getmtime(artefact_path)
+    except OSError:
+        return None
+    return (written, artefact_path) if gap > STALE_ELF_SECONDS else None
+
+
 def find_elf(artefact_path: str) -> tuple[bytes, bool] | None:
     """`(bytes, stale)` of the ELF behind a Flow D artefact: the artefact itself when it
     carries ELF magic, else the same-stem `.elf` beside a raw `.bin`. Read once.
@@ -109,6 +125,14 @@ def mram_link_guard(artefact_path: str, entry_id: str, *, slot0: int) -> str | N
             f"{prefix}the .bin that would be written to slot0 ({os.path.basename(older[0])}) is "
             f"older than its ELF ({os.path.basename(older[1])}), so it was not produced from that "
             "link and its load address is unknown. Rebuild so the .bin is regenerated from the ELF."
+        )
+    newer = written_bin_much_newer_than_elf(artefact_path)
+    if newer is not None:
+        return (
+            f"{prefix}the .bin that would be written to slot0 ({os.path.basename(newer[0])}) is "
+            f"much newer than its ELF ({os.path.basename(newer[1])}), so it was not produced from "
+            "that link and the ELF's link address cannot vouch for it. Rebuild so the .bin is "
+            "regenerated from the ELF."
         )
     found = find_elf(artefact_path)
     if found is None:

@@ -269,3 +269,13 @@ def test_a_bare_bin_with_no_elf_beside_it_is_not_checked(tmp_path, monkeypatch):
     rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
     assert CODE not in [i.code for i in issues] and rc == 0
 
+
+
+@posix_only
+def test_a_bin_much_newer_than_an_elf_artefact_is_refused(tmp_path):
+    """tan-cli#1514: naming the ELF (as the stale refusal advises) used to skip the check."""
+    _pair(tmp_path, elf_age_s=600)  # ELF 10 minutes older than the .bin
+    (tmp_path / "a.elf").write_bytes(make_elf(base=SLOT0))
+    os.utime(tmp_path / "a.elf", (2_000_000_000 - 600, 2_000_000_000 - 600))
+    message = flash_mram_guard.mram_link_guard(str(tmp_path / "a.elf"), "m55_he", slot0=SLOT0)
+    assert message is not None and "a.bin" in message and "much newer than its ELF" in message
