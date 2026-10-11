@@ -95,10 +95,10 @@ PCSR_NO_SAMPLES = (PCSR_NO_SAMPLE, 0x00000000)
 PCSR_SAMPLES = 3
 
 
-def nohalt_probe_script(jlink_script: str) -> str:
+def nohalt_probe_script(jlink_script: str, extra_reads: Sequence[str] = ()) -> str:
     """A fresh, read-only, NON-halting session: the write's preamble up to and including
-    `connect`, one `mem32` of DHCSR, `exit` (tan-cli#1453). Raises `ValueError` without a
-    `connect` line."""
+    `connect`, one `mem32` of DHCSR, the PCSR samples, then `extra_reads` (the read-only uptime
+    reads of tan-cli#1539), `exit` (tan-cli#1453). Raises `ValueError` without a `connect` line."""
     out: list[str] = []
     for line in jlink_script.splitlines():
         out.append(line)
@@ -109,6 +109,7 @@ def nohalt_probe_script(jlink_script: str) -> str:
     out.append(f"mem32 {DHCSR_ADDRESS} 1")
     for _ in range(PCSR_SAMPLES):
         out += [f"mem32 {DWT_PCSR_ADDRESS} 1", "Sleep 5"]
+    out += extra_reads
     out.append("exit")
     return "\n".join(out) + "\n"
 

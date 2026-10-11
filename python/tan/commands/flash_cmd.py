@@ -219,6 +219,13 @@ from tan.core.atoc_replacement import (
     written_entries,
 )
 from tan.core.jlink_binary import ENV_OVERRIDE as JLINK_ENV, resolve_jlink
+from tan.core.flow_d_uptime import (
+    UptimeProbe,
+    load_uptime_probe,
+    load_elf,
+    uptime_evidence,
+    uptime_script_lines,
+)
 from tan.core.flow_d_report import (
     SectorOverlapError,
     find_overlaps,
@@ -1932,6 +1939,9 @@ _FLOW_D_NO_RESET = (
     "core (the board is not held in reset)"
 )
 #: tan-cli#1453: the halt failed but a non-halting DHCSR read proved the core ran.
+_FLOW_D_VERIFIED_BOOTED = (
+    "; cache-verified; boot proven, PIN reset not (the image booted after the write: {witness})"
+)
 _FLOW_D_VERIFIED_NOHALT = "; cache-verified and PIN-reset (boot confirmed without a halt: {witness})"
 
 
@@ -2901,6 +2911,7 @@ def _flash_entry_body(
     preflight_facts: dict[str, Any] = {}
     flow_d_writes: list[dict[str, Any]] = []
     flow_d_ranges: list[tuple[int, int]] = []
+    flow_d_uptime: UptimeProbe | None = None
     # tan-cli#1509: the other slices signed into this entry's single ATOC.
     extras: list[tuple[str, FlowDShape]] = []
 
@@ -3404,9 +3415,14 @@ def _flash_entry_body(
                     lines,
                 )
             flow_d_writes = _flow_d_writes(flash_args, shape, extras)
-            flow_d_ranges = _flow_d_image_ranges(shape)
+            elf_path = os.path.splitext(shape.artefact)[0] + ".elf"
+            main_elf = load_elf(elf_path)
+            flow_d_ranges = _flow_d_image_ranges(shape, main_elf)
+            flow_d_uptime = load_uptime_probe(main_elf, elf_path)
             for _extra_id, extra in extras:
-                flow_d_ranges += _flow_d_image_ranges(extra)
+                flow_d_ranges += _flow_d_image_ranges(
+                    extra, load_elf(os.path.splitext(extra.artefact)[0] + ".elf")
+                )
             # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
             # that reaches into another write's first sector (or a resident entry the
             # new ATOC does not rewrite) would erase it. Refused before anything is
@@ -3602,6 +3618,7 @@ def _flash_entry_body(
                   probe_refusal=probe_guard.tripped_code),
             lines,
         )
+    write_ended = _now()  # tan-cli#1539: the clock the uptime witness is bounded by
     reset_unconfirmed = False
     readback_failure: tuple[str, str] | None = None
     if method == FLOW_D_METHOD:
@@ -3627,7 +3644,8 @@ def _flash_entry_body(
                     entry_id=entry_id,
                 )
         if reset_unconfirmed and _flow_d_confirm_boot(
-            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id
+            plan, ctx, report, probe_guard, jlink_exe, flow_d_ranges, entry_id, flow_d_uptime,
+            write_ended,
         ):
             reset_unconfirmed = False
     if inline is not None and readback_failure is None and outcome.success:
@@ -3656,7 +3674,11 @@ def _flash_entry_body(
         # `unresolved_message` on a failure.
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
-            if report.get("jlink", {}).get("resetConfirmedBy"):
+            if report.get("jlink", {}).get("resetConfirmedBy") == "uptime":
+                ok_message = ok_message.replace(
+                    _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_BOOTED.format(
+                        witness=report["jlink"]["witness"]), 1)
+            elif report.get("jlink", {}).get("resetConfirmedBy"):
                 ok_message = ok_message.replace(
                     _FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_NOHALT.format(
                         witness=report["jlink"]["witness"]), 1)
@@ -3898,23 +3920,25 @@ def _flow_d_record(
     return bool(failures) and outcome.success
 
 
-def _flow_d_image_ranges(shape: FlowDShape) -> list[tuple[int, int]]:
+def _now() -> float:
+    """Monotonic seconds; a seam so tests can fake the time between the write and the probe."""
+    return time.monotonic()
+
+
+def _flow_d_image_ranges(shape: FlowDShape, elf: Any = ...) -> list[tuple[int, int]]:
     """`[start, end)` ranges the NEW image executes from, for the PCSR boot witness: the
     LOAD segments of the app ELF beside the flashed `.bin`; else, in the mramxip shape, the
-    blob's own MRAM window. Empty (no PCSR evidence possible) when neither is known."""
-    from tan.core.ram_run import RamRunError, parse_elf
-
-    try:
-        with open(os.path.splitext(shape.artefact)[0] + ".elf", "rb") as fh:
-            elf = parse_elf(fh.read())
-        ranges = [
-            (seg.vaddr, seg.vaddr + seg.filesz)
-            for seg in elf.segments if seg.filesz > 0 and seg.flags & 1  # PF_X only
-        ]
-        if ranges:
-            return ranges
-    except (OSError, RamRunError):
-        pass
+    blob's own MRAM window. Empty (no PCSR evidence possible) when neither is known.
+    `elf` is the already-parsed `ElfImage` beside the artefact (or `None`); omitted, it is read."""
+    if elf is ...:
+        elf = load_elf(os.path.splitext(shape.artefact)[0] + ".elf")
+    ranges = [
+        (seg.vaddr, seg.vaddr + seg.filesz)
+        for seg in (elf.segments if elf is not None else ())
+        if seg.filesz > 0 and seg.flags & 1  # PF_X only
+    ]
+    if ranges:
+        return ranges
     try:
         if shape.app_address is not None:
             start = int(shape.app_address, 16)
@@ -3949,13 +3973,18 @@ def _flow_d_confirm_boot(
     jlink_exe: str | None = None,
     image_ranges: Sequence[tuple[int, int]] = (),
     entry_id: str = "entry",
+    uptime: UptimeProbe | None = None,
+    write_ended: float | None = None,
 ) -> bool:
     """tan-cli#1453: J-Link could not HALT the core after the PIN reset (an app that
     quickly enters WFI/STOP gates the debug domain), which says nothing about whether
     the image booted. Ask without halting: a fresh read-only session reads DHCSR, whose
     sticky S_RESET_ST bit (core not halted or locked up) proves a reset happened. PC samples
     (DWT_PCSR) inside the new image's range prove nothing (the replaced image shares it,
-    tan-cli#1537) and only set `coreRunning`. True, and
+    tan-cli#1537) and only set `coreRunning`. tan-cli#1539: with `uptime` (the ELF's tick
+    counter), the same session also reads it a few times without halting; a small, increasing
+    value no larger than the time elapsed since the write proves a boot after it
+    (`reset: "booted"`, `resetConfirmedBy: "uptime"`; not that the PIN reset took). True, and
     the `jlink` block says so, only on that proof; S_SLEEP / S_RETIRE_ST alone only set
     `coreRunning` (they are also the old image idling); any failure to ask leaves the reset
     unconfirmed. Never raises, never writes."""
@@ -3963,13 +3992,16 @@ def _flow_d_confirm_boot(
     if plan.jlink_script is None:
         return False
     try:
-        script = nohalt_probe_script(plan.jlink_script)
+        script = nohalt_probe_script(
+            plan.jlink_script, uptime_script_lines(uptime) if uptime else ()
+        )
     except ValueError:
         return False
     probe = _execute(
         dataclasses.replace(plan, jlink_script=script),
         True, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe,
     )
+    probe_ended = _now()
     text = f"{probe.stdout}\n{probe.stderr}"
     saved = _save_session_log(ctx, entry_id, "bootprobe", script, probe)
     value = dhcsr_in(text) if probe.success else None
@@ -3992,6 +4024,13 @@ def _flow_d_confirm_boot(
             "S_RESET_ST set with S_HALT and S_LOCKUP clear: a reset happened and the core runs.",
         )
         return True
+    if uptime is not None and write_ended is not None:
+        block["bootProbe"]["uptime"], confirmed = uptime_evidence(
+            text, uptime, probe_ended - write_ended
+        )
+        if confirmed:
+            block.update(confirmed)
+            return True
     # tan-cli#1537: PC samples (DWT_PCSR) inside the new image's range are NOT proof of a boot.
     # An image previously linked at the same slot0 address covers most of the same range, and
     # tan holds no pre-write copy of it, so the old image idling produces the same samples. Telling

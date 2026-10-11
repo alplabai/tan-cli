@@ -82,6 +82,9 @@ class ElfImage:
     segments: tuple[Segment, ...]
     #: name -> (address, size)
     symbols: dict[str, tuple[int, int]]
+    #: names the symbol table defines more than once at different addresses (static
+    #: symbols of the same name in several files); `symbols` keeps the first of them.
+    ambiguous: frozenset[str] = frozenset()
 
 
 def parse_elf(data: bytes) -> ElfImage:
@@ -105,16 +108,19 @@ def parse_elf(data: bytes) -> ElfImage:
             )
             if p_type == 1:  # PT_LOAD
                 segments.append(Segment(p_paddr, p_vaddr, p_filesz, p_memsz, p_flags))
-        symbols = _symbols(data, shoff, shentsize, shnum)
+        symbols, ambiguous = _symbols(data, shoff, shentsize, shnum)
     except struct.error as err:
         raise RamRunError(f"truncated ELF file ({err})") from err
-    return ElfImage(entry, tuple(segments), symbols)
+    return ElfImage(entry, tuple(segments), symbols, ambiguous)
 
 
-def _symbols(data: bytes, shoff: int, shentsize: int, shnum: int) -> dict[str, tuple[int, int]]:
+def _symbols(
+    data: bytes, shoff: int, shentsize: int, shnum: int
+) -> tuple[dict[str, tuple[int, int]], frozenset[str]]:
     out: dict[str, tuple[int, int]] = {}
+    ambiguous: set[str] = set()
     if not shoff or not shnum:
-        return out
+        return out, frozenset()
     if shnum > MAX_SECTIONS:
         raise RamRunError(f"the ELF declares {shnum} sections; refusing to parse it")
     headers = [
@@ -143,8 +149,9 @@ def _symbols(data: bytes, shoff: int, shentsize: int, shnum: int) -> dict[str, t
             end = strtab.find(b"\0", st_name)
             name = strtab[st_name : end if end >= 0 else None].decode("ascii", "replace")
             if name:
-                out.setdefault(name, (st_value, st_size))
-    return out
+                if out.setdefault(name, (st_value, st_size)) != (st_value, st_size):
+                    ambiguous.add(name)
+    return out, frozenset(ambiguous)
 
 
 # ── the image plan ──────────────────────────────────────────────────────────
