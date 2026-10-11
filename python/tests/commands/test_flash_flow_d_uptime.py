@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import struct
 
+import pytest
+
 from tan.commands import flash_cmd
 from tan.core import flow_d_uptime
 from tan.core.flow_d_uptime import UptimeProbe
@@ -53,8 +55,9 @@ def reads(*values: int, address: int = TICK) -> str:
 
 def _flash(tmp_path, monkeypatch, probe_out, elf: bytes | None, elapsed: float = 20.0):
     """`elapsed` fakes the monotonic seconds between the write ending and the probe ending."""
-    clock = iter([0.0, elapsed])
-    monkeypatch.setattr(flash_cmd, "_now", lambda: next(clock))
+    stamps = [0.0, elapsed]
+    # Tolerates extra `_now()` calls: every call after the second keeps returning `elapsed`.
+    monkeypatch.setattr(flash_cmd, "_now", lambda: stamps.pop(0) if len(stamps) > 1 else stamps[0])
     (tmp_path / "build").mkdir(exist_ok=True)
     if elf is not None:
         (tmp_path / "build" / "a.elf").write_bytes(elf)
@@ -165,3 +168,12 @@ def test_confirmation_arithmetic():
     assert ok([10, 10 + 59 * 10], 10, 59.5) and not ok([10, 10 + 59 * 10], 10, 58.0)
     # a read torn across a 32-bit carry (low word wrapped, high word not yet bumped)
     assert not ok([0xFFFFFF00, 0x00000010], 10, 1e9) and not ok([5, 0x1_0000_0005], 10, 100.0)
+
+
+@pytest.mark.parametrize("over,confirmed", [(0.9, True), (1.1, False)])
+def test_the_slack_boundary(tmp_path, monkeypatch, over, confirmed):
+    """Realistic timing: uptime 3.0 s (30000 ticks) against elapsed = 3.0 - over."""
+    _f, out = _flash(tmp_path, monkeypatch, DHCSR + reads(12000, 18000, 24000, 30000),
+                     make_elf(GOOD), elapsed=3.0 - over)
+    jl, _issues, _d = _jl(out)
+    assert (jl["reset"] == "booted") is confirmed

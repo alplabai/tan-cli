@@ -5,8 +5,10 @@ After a write whose halt failed, DHCSR `S_RESET_ST` is usually gone and PC sampl
 new image from the replaced one (tan-cli#1537). A free-running tick counter can, provided it is
 compared with the time tan itself measured: the probe's last read must show an uptime no larger
 than the monotonic time elapsed since the write session ended (plus a slack for the reset tail
-inside that session). An image that was already running when the write began has an uptime of at
-least the write's own duration more than that bound allows, unless it was reset by the write.
+inside that session). SysTick stops while the core is halted for the write, so an image that was
+already running when the write began resumes with its uptime frozen at the halt; the bound admits it
+only if that frozen uptime was at most the slack, i.e. it booted under ~1 s before the write halted
+it, which the preceding probe/preflight sessions already rule out in practice.
 This proves a RECENT BOOT, not that the SE PIN reset took (reported as `reset: "booted"`).
 
 The counter is Zephyr's kernel tick count (`curr_tick`, a `static uint64_t` in `kernel/timeout.c`;
@@ -32,7 +34,8 @@ TICKS_PER_SEC_SYMBOL = "CONFIG_SYS_CLOCK_TICKS_PER_SEC"
 UPTIME_READS = 4
 UPTIME_SLEEP_MS = 600
 #: Slack (s) added to the elapsed time: the reset tail runs inside the write session, so the
-#: image boots slightly BEFORE the session's end timestamp.
+#: image boots slightly BEFORE the session's end timestamp. Measured on e1m-aen-evk-02
+#: (alp-console, 2026-10-11): uptime - elapsed = -0.04..-0.05 s, so 1 s is all headroom.
 UPTIME_SLACK_SECONDS = 1.0
 #: The only address windows ever read: the slice core's DTCM (local alias, 1 MiB window) and the
 #: E8's 4 MiB SRAM0. HP ITCM (0x50000000) and every other aperture are out.

@@ -175,8 +175,8 @@ LOAD segment in the slice core's own DTCM / E8 SRAM0, never HP ITCM `0x50000000`
 `CONFIG_SYS_CLOCK_TICKS_PER_SEC` symbol, else the `.config` beside it. tan takes a monotonic timestamp when the write session
 ends and another when the probe ends; the counter must rise across the reads and its last value, as seconds, must not exceed
 the time elapsed between those two timestamps plus 1 s of slack (the reset tail runs inside the write session, so the image
-boots just before the first timestamp). That proves the running image booted after the write ended, which an image already
-running when the write began cannot satisfy by its own uptime; it does **not** prove the SE PIN reset took, so the value is
+boots just before the first timestamp). That proves the running image booted after the write ended (SysTick freezes while the core is halted for the write, so
+an image already running resumes with its pre-write uptime and passes only if that was under the 1 s slack); it does **not** prove the SE PIN reset took, so the value is
 `booted`, not `pin-reset`, and the message says "boot proven, PIN reset not". `bootProbe.uptime` records `symbol`, `address`,
 `ticks` (hex strings), `ticksPerSec` and `elapsedSinceWriteSeconds`. A counter that is flat (halted or gated), larger than the
 elapsed time, or all-ones, a missing / duplicated / unreadable symbol, or an unknown tick rate keeps `unconfirmed`, with no new
