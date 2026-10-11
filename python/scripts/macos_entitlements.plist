@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the frozen `tan` executable (tan-cli#1506).
+  Kept to the one the CPython runtime needs: ctypes/libffi (used by truststore
+  to reach the macOS Security framework) allocates executable closure pages,
+  which hardened runtime blocks without allow-unsigned-executable-memory.
+  disable-library-validation is deliberately NOT granted: every bundled dylib
+  is signed by macos_sign.sh with the SAME identity, so library validation
+  passes. If a signed freeze fails to start, test_packaged_binary.py (run right
+  after the freeze) fails the leg; add an entitlement only on that evidence.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>
