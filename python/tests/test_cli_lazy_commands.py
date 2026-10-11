@@ -8,6 +8,7 @@ invocation pulled in.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -30,10 +31,16 @@ print(json.dumps(sorted(m for m in sys.modules if m.startswith("tan.commands."))
 
 
 def _loaded_after(argv: list[str]) -> set[str]:
+    # Pin UTF-8 both ways: Windows defaults the child's pipe and this side's
+    # decode to cp1252, and rich's help output then fails to decode (stdout
+    # comes back None).
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE, json.dumps(argv)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
