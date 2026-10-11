@@ -2342,3 +2342,49 @@ def test_exact_skips_a_headline_that_places_nothing_on_the_npu(tmp_path, monkeyp
                                 metadata_root=tmp_path, exact=True, board_doc=board_doc)[0]
     assert any("ethos-u55-256" in n and "place no operator" in n for n in rep.notes), rep.notes
     assert any("ethos-u55-128" in n and "compiled for" in n for n in rep.notes), rep.notes
+
+
+def test_exact_non_headline_variant_reports_its_own_variant_and_table(tmp_path, monkeypatch):
+    """tan-cli#1519: a u85-headline SKU whose u55 target wins must not keep the
+    u85 variant/table on a report whose figures are the u55 compile's."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:mix", ethos_u_variant="u85", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:mix",
+               [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256, "paired_core": "m55_hp"},
+                {"type": "ethos-u55", "subtype": "y", "mac_per_cycle": 256, "paired_core": "m55_hp"}],
+               extra={"npu_toolchain": {"vela": {"memory_mode": "Sram_Only",
+                                                  "system_config_requires_vendor_config": True}}})
+    _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85", supported=["FULLY_CONNECTED"])
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55", supported=["FULLY_CONNECTED"])
+    rep, seen = _exact_by_target(
+        monkeypatch, tmp_path, {"ethos-u85-256": 300, "ethos-u55-256": 70})
+    assert seen == ["ethos-u85-256", "ethos-u55-256"]
+    assert rep.arena_bytes == 70 * 1024
+    assert rep.variant == "u55"
+    assert rep.table is not None and "u55" in rep.table and "u85" not in rep.table
+
+
+def test_exact_failed_rescreen_says_so_instead_of_keeping_the_headline_silently(tmp_path, monkeypatch):
+    """tan-cli#1519 review: a re-screen that raises must leave a note, not a
+    silent u85 variant/table next to u55 figures."""
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:mix", ethos_u_variant="u85", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:mix",
+               [{"type": "ethos-u85", "subtype": "x", "mac_per_cycle": 256, "paired_core": "m55_hp"},
+                {"type": "ethos-u55", "subtype": "y", "mac_per_cycle": 256, "paired_core": "m55_hp"}],
+               extra={"npu_toolchain": {"vela": {"memory_mode": "Sram_Only",
+                                                  "system_config_requires_vendor_config": True}}})
+    _write_table(tmp_path, "ethos_u", "u85@vela-1.0.0.json", variant="u85", supported=["FULLY_CONNECTED"])
+    _write_table(tmp_path, "ethos_u", "u55@vela-1.0.0.json", variant="u55", supported=["FULLY_CONNECTED"])
+    real = check_mod.analyze_backend
+    calls = {"n": 0}
+
+    def _flaky(**kw):
+        if kw.get("variant") == "u55":
+            raise RuntimeError("boom")
+        calls["n"] += 1
+        return real(**kw)
+
+    monkeypatch.setattr(check_mod, "analyze_backend", _flaky)
+    rep, _seen = _exact_by_target(
+        monkeypatch, tmp_path, {"ethos-u85-256": 300, "ethos-u55-256": 70})
+    assert rep.variant == "u85"
+    assert any("could not re-screen against u55" in n and "boom" in n for n in rep.notes), rep.notes

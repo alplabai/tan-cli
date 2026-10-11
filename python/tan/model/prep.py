@@ -71,7 +71,12 @@ def load_calibration(cal_dir: Path, input_shape: list[int]) -> list[Any]:
             raise PrepError(
                 f"calibration sample {f.name} shape {list(arr.shape)} "
                 f"!= model input {input_shape}")
-        out.append(arr)
+        if input_shape[0] == -1 and arr.shape[0] > 1:
+            # tan-cli#1522: a batched file is N samples, not one -- the sample
+            # count, the min-samples floor and the per-image top-1 all count images.
+            out.extend(arr[i:i + 1] for i in range(arr.shape[0]))
+        else:
+            out.append(arr)
     return out
 
 
