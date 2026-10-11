@@ -1880,6 +1880,11 @@ def test_seven_zip_stays_a_warn_not_a_fail_so_the_verdict_is_unchanged(
     # answer for `west`, `cmake` and every other PATH check in `_collect`.
     monkeypatch.setattr(
         doctor_cmd, "SEVEN_ZIP_PROGRAMS", ("alp-no-such-archiver-7z",))
+    # tan-cli#1523: doctor now probes through bootstrap's `_find_seven_zip`,
+    # so stub its list too, or a runner with a real 7z on PATH passes.
+    from tan.commands import bootstrap_toolchain_fetch
+    monkeypatch.setattr(
+        bootstrap_toolchain_fetch, "SEVEN_ZIP_EXTRACTORS", ("alp-no-such-archiver-7z",))
     checks = doctor_cmd._collect(None)
     seven = next(c for c in checks if c.name == "sevenZip")
     assert seven.status == "warn", seven
