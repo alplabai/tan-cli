@@ -211,3 +211,73 @@ def test_match_later_in_a_chunk_read_at_the_deadline_still_matches():
     res = sc.capture(LatePort(), duration_s=1, until=sc.compile_until("Booting Zephyr"), sink=sink, clock=clk)
     assert res.matched and res.matched_line == "Booting Zephyr OS"
     assert sink.getvalue() == b"noise\nBooting Zephyr OS\n"
+
+
+class _Spec:
+    watches_lines = True
+
+
+class FakeActions:
+    """Duck-typed CaptureActions: records lines, optionally burns clock time per line."""
+
+    spec = _Spec()
+
+    def __init__(self, port, clk=None, burn_to=None):
+        self.port, self.clk, self.burn_to, self.lines = port, clk, burn_to, []
+
+    def tick(self):
+        pass
+
+    def line(self, text, partial=False):
+        if not partial:
+            self.lines.append(text)
+            if self.burn_to is not None:
+                self.clk.t = self.burn_to
+
+    def take_flush(self):
+        return False
+
+
+class OnePort:
+    def __init__(self, clk, data):
+        self.clk, self.data = clk, data
+
+    def read(self, size=1):
+        self.clk.t += 0.1
+        data, self.data = self.data, b""
+        return data
+
+
+def test_scan_overrunning_the_deadline_logs_only_the_lines_it_searched():
+    """tan-cli#1515: the log never holds a later line the result says was not searched."""
+    clk, sink = Clock(), io.BytesIO()
+    port = OnePort(clk, b"a\nBooting Zephyr\n")
+    actions = FakeActions(port, clk, burn_to=5.0)
+    res = sc.capture(
+        port, duration_s=1, until=sc.compile_until("Zephyr"), sink=sink, clock=clk, actions=actions,
+    )
+    assert not res.matched and actions.lines == ["a"]
+    assert sink.getvalue() == b"a\n" and res.bytes_seen == 2
+
+
+def test_late_chunk_drives_action_triggers_for_later_lines():
+    clk = Clock()
+
+    class LatePort:
+        def read(self, size=1):
+            clk.t = 5.0
+            return b"noise\ntrigger\n"
+
+    port = LatePort()
+    actions = FakeActions(port)
+    sc.capture(port, duration_s=1, sink=io.BytesIO(), clock=clk, actions=actions)
+    assert actions.lines == ["noise", "trigger"]
+
+
+def test_initial_tail_with_zero_duration_matches_prompt_on_a_later_line():
+    clk, sink = Clock(), io.BytesIO()
+    res = sc.capture(
+        OnePort(clk, b""), duration_s=0, until=sc.compile_until("=> $"),
+        initial=b"x\n=> \n", sink=sink, clock=clk,
+    )
+    assert res.matched and sink.getvalue() == b"x\n=> \n"
