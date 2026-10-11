@@ -229,7 +229,7 @@ inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolu
 host/user (real-uid account) as the single `acquired:` holder, with the leased place's `swd` USB path equal to the selected probe's (`--probe-usb-path`). The wrapper and `labgrid-client` must be owned by root or you and not writable by others or by a shared group, along the symlink's own chain and the resolved target's. This guards against accidental writes; it is
 not a security boundary. The MRAM window is the SKU's own variant `mram_mb` at the SoC
 document's `soc_flash_base`; a SKU that does not resolve is refused. The envelope's
-`raw.writes[]` carries each blob's `sha256`, address and sector span;
+`raw.writes[]` carries each blob's absolute `path` (the file hashed and written), `sha256`, address and sector span;
 `raw.resetCommands` is `false` (no reset command is sent, but `loadbin` may halt the
 core). Power-cycle afterwards so the Secure Enclave boots the restored contents.
 
