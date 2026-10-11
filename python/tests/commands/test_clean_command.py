@@ -1441,3 +1441,24 @@ def test_read_only_retry_never_chmods_through_a_symlink(tmp_path):
     remove_dir(str(tmp_path / "rt" / "b"))
     assert not (tmp_path / "rt" / "b").exists()
     assert (outside.stat().st_mode & 0o777) == 0o444
+
+
+def test_build_root_naming_the_build_dir_itself_refuses_instead_of_a_silent_noop(
+    tmp_path, monkeypatch
+):
+    # tan-cli#1521: `--build-root build` (the spelling size/image/flash accept)
+    # used to target build/build, report it absent and exit 0 with the real
+    # build tree still in place.
+    proj = make_project(tmp_path, manifest_text=manifest("m55_hp-zephyr"))
+    isolate(monkeypatch, tmp_path, proj)
+    before = survivors(tmp_path)
+
+    result = runner.invoke(
+        app, ["clean", "--build-root", str(proj / "build"), "--format", "json"]
+    )
+    doc = json.loads(result.stdout)
+    assert result.exit_code == 1, result.stdout
+    assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
+    assert "itself a build directory" in doc["issues"][0]["message"]
+    assert not doc["issues"][0]["message"].startswith("refusing to remove")
+    assert survivors(tmp_path) == before

@@ -385,6 +385,16 @@ def _assemble_bundle(
     # helper firmware left by an EARLIER run (a slice that has since failed or
     # been skipped, a helper dropped from the manifest) are pruned so a consumer
     # that ships the directory never gets firmware this build did not produce.
+    # tan-cli#1521: the previous bundle-manifest.json goes FIRST. It names the
+    # archives pruned below, so a run that dies mid-assembly would otherwise
+    # leave a manifest pointing at deleted or re-hashed archives.
+    stale_manifest = os.path.join(bundle_dir, BUNDLE_MANIFEST)
+    try:
+        os.remove(stale_manifest)
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        raise BundleWriteError(f"remove stale {stale_manifest}: {err}") from err
     for directory in (slices_dir, helpers_dir):
         _prune_dir_contents(directory)
 

@@ -893,6 +893,7 @@ def _run(
     # normalized -- `data.buildRoot` is a compared field.
     clean_root = project_root
     refusal: str | None = None
+    build_dir_why: str | None = None
     if build_root_arg is not None:
         if build_root_arg == "":
             # `rm -rf $UNSET_VAR` shape: an empty value is never a tree name.
@@ -908,6 +909,20 @@ def _run(
             build_root = _rust_join(tree, "build")
             if not _has_normal_component(tree):
                 refusal = f"`{tree}` is a filesystem root"
+            elif os.path.isfile(_rust_join(tree, "system-manifest.yaml")) and not os.path.isfile(
+                _rust_join(build_root, "system-manifest.yaml")
+            ):
+                # tan-cli#1521: `size`/`image`/`flash` also accept X as the build
+                # directory itself, but clean appends `/build` to X, so that
+                # spelling would target `X/build`, find nothing and exit 0 with
+                # the real build tree still in place. Refuse loudly instead.
+                # Own text, not the shared `refusing to remove <tree>/build`
+                # prefix: that path does not exist, X is the build dir.
+                build_dir_why = (
+                    f"`{tree}` is itself a build directory (it holds system-manifest.yaml); "
+                    "pass the project tree it was built under, not its `build` directory"
+                )
+                refusal = build_dir_why
     else:
         build_root = _rust_join(project_root, "build")
 
@@ -927,7 +942,11 @@ def _run(
     ):
         refusal = "it holds a board.yaml, so it is a project tree, not a build directory"
     if refusal is not None:
-        why = f"refusing to remove `{build_root}`: {refusal}"
+        why = (
+            build_dir_why
+            if refusal is build_dir_why
+            else f"refusing to remove `{build_root}`: {refusal}"
+        )
         return _Outcome(
             exit_code=ExitCode.RUNTIME_FAILURE,
             data=_report(build_root, dry_run, [], 0),
