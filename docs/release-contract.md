@@ -635,14 +635,14 @@ and the planner module has 1860 passed, 0 failed.
   no longer planned or buildable, `tan explain --template` publishes
   `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant` no longer
   offers `u65`. This is one of the `BREAKING` entries in `CHANGELOG.md`'s
-  `## [0.7.0]` preamble; no NX9101 leg exists in the tag-time matrix any more.
+  `## [0.7.0-rc1]` preamble (carried into `## [0.7.0]` at GA); no NX9101 leg exists in the tag-time matrix any more.
 - **Renumbered `0.6.1` -> `0.7.0` (maintainer, 2026-09-19).** Pre-1.0 SemVer
   puts a break in the minor: the floor breaks a v0.6.0 consumer's `tan build`
   on *any* Zephyr board (Kconfig configure aborts on the undefined
   `ALP_SDK_SOM_HW_REV` symbol; `b3775381`, alp-sdk#1862, is an ancestor of the
   floor), not only AEN/V2N/V2M's `tan generate --target zephyr-board`. That is
-  one of several `BREAKING` entries; `CHANGELOG.md`'s `## [0.7.0]` preamble
-  names every one.
+  one of several `BREAKING` entries; `CHANGELOG.md`'s `## [0.7.0-rc1]` preamble
+  (carried into `## [0.7.0]` at GA) names every one.
 
 Done when:
 
@@ -655,8 +655,8 @@ Done when:
   planner step does not act on them);
 - the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
   did for `v0.16.0`, naming the real tag in place of the `v0.17.0` (stable
-  release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0]`
-  preamble carries today (tan-cli#1258).
+  release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0-rc1]`
+  preamble (to be carried into `## [0.7.0]`) carries today (tan-cli#1258).
 
 ## Decisions
 

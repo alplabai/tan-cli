@@ -145,3 +145,42 @@ def test_an_absent_heading_is_still_reported_as_absent(tmp_path: pathlib.Path) -
     problems = module.changelog_problems("9.9.7-rc1.dev0")
     assert problems and "no `## [9.9.7]` section" in problems[0], problems
     assert "EMPTY" not in problems[0], problems
+
+
+BOT_ONLY = """\
+# Changelog
+
+## [9.9.9] — Unreleased
+
+### Fixed
+
+- `TAN_VERSION` moved to `9.9.9-rc2.dev0` off the published `v9.9.9-rc1` tag
+  (tan-cli#770's automated post-release bump).
+
+## [9.9.9-rc1] — 2026-01-01
+
+**BREAKING: preamble**
+
+- a real entry
+"""
+
+
+def test_a_stable_tag_refuses_a_section_holding_only_the_bot_bump_bullet(
+    tmp_path: pathlib.Path,
+) -> None:
+    """tan-cli#1524: the bot bullet satisfied the non-empty guard, so a stable
+    tag could publish with no preamble. A development tree must stay green."""
+    module = _load(BOT_ONLY, tmp_path)
+    assert module.changelog_problems("9.9.9-rc2.dev0") == []
+    problems = module.changelog_problems("9.9.9")
+    assert problems and "automated" in problems[0], problems
+
+
+def test_a_stable_tag_accepts_the_bot_bullet_beside_real_content(
+    tmp_path: pathlib.Path,
+) -> None:
+    text = BOT_ONLY.replace(
+        "## [9.9.9-rc1]", "- a real entry for GA\n\n## [9.9.9-rc1]", 1
+    )
+    module = _load(text, tmp_path)
+    assert module.changelog_problems("9.9.9") == []

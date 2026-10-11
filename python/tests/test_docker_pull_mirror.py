@@ -81,3 +81,31 @@ def test_every_registry_failing_exits_non_zero_with_an_attributed_error(tmp_path
     assert proc.stdout == ""
     assert f"::error::could not pull {_IMAGE} from any registry" in proc.stderr
     assert len(_pulls(tmp_path)) == 9
+
+
+def test_the_e2e_container_harness_image_goes_through_the_mirror(tmp_path: Path) -> None:
+    """tan-cli#1524: `e2e-container.sh` ran `docker run ubuntu:24.04` straight
+    from Docker Hub; the image it runs must be the mirror ref docker-pull.sh
+    resolved, pulled before the run."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = bin_dir / "docker"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> "{log}"\n'
+        "exit 0\n"
+    )
+    fake.chmod(0o755)
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_PULL_BACKOFF_S": "0"}
+    subprocess.run(
+        ["bash", str(_REPO_ROOT / "scripts" / "e2e-container.sh"), str(frozen)],
+        capture_output=True, text=True, env=env, timeout=60, check=False,
+    )
+    calls = log.read_text().splitlines()
+    pull = next(i for i, c in enumerate(calls) if c.startswith("pull "))
+    run = next(i for i, c in enumerate(calls) if c.startswith("run "))
+    assert pull < run
+    assert "mirror.gcr.io/library/ubuntu:24.04 bash -c" in calls[run]
