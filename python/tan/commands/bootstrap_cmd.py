@@ -87,7 +87,6 @@ from tan.core.sdk_discovery import (
 from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
-    SEVEN_ZIP_PROGRAMS,
     _read_text,
     on_path,
     probe,
@@ -2198,11 +2197,13 @@ def _acquire_toolchain(
         # `doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION` -- that is a SEPARATE,
         # hardcoded fallback constant that can desync from the pin THIS run
         # actually resolved.
+        # tan-cli#1520: never prescribe a hand-run `west sdk install -t ...`:
+        # that route's setup.sh fetches the toolchain archive with wget and
+        # no integrity check, so it bypasses the alp-sdk sha256 pin.
         remedy = (
-            f"run `west sdk install --version {manifest.version} -t "
-            f"{toolchain_provision.TOOLCHAIN_COMPONENT}` by hand from your west "
-            f"workspace's top-level directory (see docs/getting-started.md), or "
-            f"re-run `tan bootstrap`."
+            "re-run `tan bootstrap` (it verifies the toolchain archive against "
+            "alp-sdk's sha256 pin; do not install it with a hand-run "
+            "`west sdk install -t`, which downloads it unchecked)."
         )
         log.warn("toolchain-install", f"west sdk install failed: {augmented} {remedy}")
         return
@@ -2314,11 +2315,17 @@ def toolchain_phase(
         )
         return
 
-    if is_windows and not any(on_path(program) for program in SEVEN_ZIP_PROGRAMS):
+    from tan.commands.bootstrap_toolchain_fetch import SEVEN_ZIP_EXTRACTORS  # noqa: PLC0415
+
+    # tan-cli#1523: tan's own .7z extractor runs only these binaries (not
+    # `unar`, which doctor's wider SEVEN_ZIP_PROGRAMS also accepts), so
+    # preflight on the same tuple instead of failing after the download.
+    if is_windows and not any(on_path(program) for program in SEVEN_ZIP_EXTRACTORS):
         log.warn(
             "toolchain-install",
-            "No 7-Zip on PATH -- `west sdk install` extracts the toolchain with "
-            "patoolib, which has no pure-Python fallback on native Windows. Install "
+            "No 7-Zip (7z, 7za, 7zr, 7zz or 7zzs) on PATH -- tan extracts the .7z "
+            "toolchain archive and `west sdk install` extracts its bundle with it; "
+            "`unar` alone is not enough. Install "
             "it (`tan doctor --fix`, or `winget install -e --id 7zip.7zip`), then "
             "re-run `tan bootstrap`.",
         )

@@ -378,6 +378,9 @@ VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
 
 #: tan-cli#270: the alp-sdk commit the in-process validator was audited against
 #: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
+#: Leading words of the finding `run_in_process_engine` writes for a crashed
+#: port; `tan diff` keys on it to avoid calling the board invalid.
+VALIDATOR_CRASH_PREFIX = "tan's built-in validator could not read this SDK"
 PORTED_FROM_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"
 
 
@@ -401,6 +404,29 @@ def subprocess_engine_requested() -> bool:
     return _subprocess_engine_requested()
 
 
+def _sdk_direction(sdk_root: Path) -> str | None:
+    """`"newer"` / `"older"` when git can order the bound checkout against the
+    commit the port was audited at; None when it cannot (not a git checkout,
+    commit unknown, git missing). A hash mismatch alone has no direction."""
+    import subprocess
+
+    def _is_ancestor(ancestor: str, descendant: str) -> bool | None:
+        try:
+            run = subprocess.run(
+                ["git", "-C", str(sdk_root), "merge-base", "--is-ancestor", ancestor, descendant],
+                capture_output=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return {0: True, 1: False}.get(run.returncode)
+
+    if _is_ancestor(PORTED_FROM_SDK_COMMIT, "HEAD"):
+        return "newer"
+    if _is_ancestor("HEAD", PORTED_FROM_SDK_COMMIT):
+        return "older"
+    return None
+
+
 def skew_warning(sdk_root: Path) -> str | None:
     """Message for `validate.sdk-validator-newer`, or None when the bound
     checkout's validator sources are the ones the port was audited against."""
@@ -409,12 +435,30 @@ def skew_warning(sdk_root: Path) -> str | None:
     skewed = skewed_sources(sdk_root)
     if not skewed:
         return None
+    version = _bound_sdk_version(sdk_root)
+    ported = PORTED_FROM_SDK_COMMIT[:8]
+    direction = _sdk_direction(sdk_root)
+    fallback = f"run with {VALIDATE_ENGINE_ENV}=subprocess to use the SDK's own validator."
+    if direction == "older":
+        return (
+            f"the bound alp-sdk ({version}) has validator sources older than the ones "
+            f"tan's built-in validator was ported from ({ported}): {', '.join(skewed)}. "
+            "The built-in validator may apply rules this SDK does not, so it can reject "
+            f"a board this SDK accepts -- {fallback}"
+        )
+    if direction == "newer":
+        return (
+            f"the bound alp-sdk ({version}) has validator sources "
+            f"newer than the ones tan's built-in validator was ported from "
+            f"({ported}): {', '.join(skewed)}. Rules added since are "
+            "not applied, so a clean verdict here may not match the SDK's own validator "
+            f"-- {fallback}"
+        )
     return (
-        f"the bound alp-sdk ({_bound_sdk_version(sdk_root)}) has validator sources "
-        f"newer than the ones tan's built-in validator was ported from "
-        f"({PORTED_FROM_SDK_COMMIT[:8]}): {', '.join(skewed)}. Rules added since are "
-        "not applied, so a clean verdict here may not match the SDK's own validator "
-        f"-- run with {VALIDATE_ENGINE_ENV}=subprocess to use it."
+        f"the bound alp-sdk ({version}) has validator sources that differ from the ones "
+        f"tan's built-in validator was ported from ({ported}): {', '.join(skewed)}. "
+        "It may be newer (rules not applied here) or older (rules this SDK lacks), so "
+        f"the verdict may not match the SDK's own validator -- {fallback}"
     )
 
 
@@ -435,7 +479,7 @@ def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _R
             (
                 _Finding(
                     "error",
-                    "tan's built-in validator could not read this SDK "
+                    f"{VALIDATOR_CRASH_PREFIX} "
                     f"(bound alp-sdk {_bound_sdk_version(sdk_root)}; the "
                     f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
                     "This is not a verdict on board.yaml -- retry with "

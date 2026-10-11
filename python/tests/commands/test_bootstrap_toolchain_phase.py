@@ -392,10 +392,10 @@ def test_a_permanent_west_sdk_install_failure_names_the_manual_remedy_command(
 
     assert log.blocking() == ["toolchain-install"]
     msg = log.warnings[0][1]
-    # The exact command a customer can copy-paste, naming THIS run's actual
-    # resolved pin (never a possibly-stale `doctor_cmd` constant).
-    assert "west sdk install --version 1.0.1 -t arm-zephyr-eabi" in msg
-    assert "tan bootstrap" in msg
+    # tan-cli#1520: the remedy is `tan bootstrap`, never a hand-run
+    # `west sdk install -t arm-zephyr-eabi` (it downloads the toolchain unchecked).
+    assert "--version 1.0.1 -t arm-zephyr-eabi" not in msg
+    assert "re-run `tan bootstrap`" in msg
 
 
 def test_a_west_sdk_install_call_asks_for_the_wide_capture_tail(tmp_path, monkeypatch):

@@ -1418,7 +1418,10 @@ def toolchain_check(sdk_root: str | None) -> Check:
             "pass",
             f"arm-zephyr-eabi {manifest.version} detected at {host_root} -- not tan's "
             f"own store, but its `sdk_version` matches this checkout's pin, so this "
-            f"host already has what `tan bootstrap` would otherwise download again.",
+            f"host already has what `tan bootstrap` would otherwise download again. "
+            f"That match is the `sdk_version` text file only: this install was never "
+            f"compared with the pin (its archive may have been fetched unchecked); "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}.",
             scope="project",
         )
     if stamp is not None:

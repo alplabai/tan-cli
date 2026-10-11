@@ -167,6 +167,7 @@ from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.validate_cmd import (
     OUTCOME_CLEAN,
     OUTCOME_FAILED,
+    VALIDATOR_CRASH_PREFIX,
     VALIDATOR_SCRIPT,
     VALIDATOR_TIMEOUT_S,
     _Finding,
@@ -713,6 +714,12 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
         if result.outcome == OUTCOME_CLEAN:
             return
         detail = "; ".join(finding.message for finding in result.findings)
+        if any(f.message.startswith(VALIDATOR_CRASH_PREFIX) for f in result.findings):
+            # The port crashed: board.yaml was never judged (tan-cli#1523).
+            raise ParseFailure(
+                result.outcome,
+                f"could not check board.yaml before diffing: {detail}",
+            )
         raise ParseFailure(
             result.outcome,
             "board.yaml is not valid: the SDK's own validator rejects it -- run "
