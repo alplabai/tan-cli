@@ -1460,4 +1460,5 @@ def test_build_root_naming_the_build_dir_itself_refuses_instead_of_a_silent_noop
     assert result.exit_code == 1, result.stdout
     assert [i["code"] for i in doc["issues"]] == ["clean.unsafe-build-root"]
     assert "itself a build directory" in doc["issues"][0]["message"]
+    assert not doc["issues"][0]["message"].startswith("refusing to remove")
     assert survivors(tmp_path) == before
