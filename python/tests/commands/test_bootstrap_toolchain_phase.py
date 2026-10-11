@@ -324,6 +324,9 @@ def test_windows_with_no_7zip_refuses_before_spawning_west(tmp_path, monkeypatch
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest(host="windows-x86_64"))
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "win32")
     monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        "tan.commands.bootstrap_toolchain_fetch._find_seven_zip", lambda: None
+    )
     monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
 
     def refuse_any_spawn(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
@@ -392,10 +395,10 @@ def test_a_permanent_west_sdk_install_failure_names_the_manual_remedy_command(
 
     assert log.blocking() == ["toolchain-install"]
     msg = log.warnings[0][1]
-    # The exact command a customer can copy-paste, naming THIS run's actual
-    # resolved pin (never a possibly-stale `doctor_cmd` constant).
-    assert "west sdk install --version 1.0.1 -t arm-zephyr-eabi" in msg
-    assert "tan bootstrap" in msg
+    # tan-cli#1520: the remedy is `tan bootstrap`, never a hand-run
+    # `west sdk install -t arm-zephyr-eabi` (it downloads the toolchain unchecked).
+    assert "--version 1.0.1 -t arm-zephyr-eabi" not in msg
+    assert "re-run `tan bootstrap`" in msg
 
 
 def test_a_west_sdk_install_call_asks_for_the_wide_capture_tail(tmp_path, monkeypatch):

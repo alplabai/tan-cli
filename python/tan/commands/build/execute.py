@@ -1656,17 +1656,17 @@ def execute_slices(
             )
         elif saw_no_zephyr_sdk:
             # tan-cli#419: name the cause and the remedy tan already knows.
-            # `doctor`'s `zephyrSdk` check assembles the same command from the
-            # same pin, so the two cannot drift into naming different SDK
-            # versions -- imported rather than re-spelled here for exactly the
-            # reason `zephyr_sdk_install_command`'s own docstring gives.
-            from tan.commands.doctor_cmd import zephyr_sdk_install_command
+            # tan-cli#1520: the remedy is `tan bootstrap` (verified archive),
+            # not a hand-run `west sdk install -t arm-zephyr-eabi`, whose
+            # setup.sh fetch skips the alp-sdk sha256 pin. Same constant
+            # `doctor`'s `zephyrSdk` check uses, so the two cannot drift.
+            from tan.commands.doctor_cmd import ZEPHYR_SDK_BOOTSTRAP_FIX
 
             message = (
                 f"slice `{sl.core_id}` terminated with exit code: {code} -- the Zephyr "
                 f"SDK cross toolchain is not installed (CMake could not find the "
-                f"`Zephyr-sdk` package). From an initialised west workspace, run "
-                f"`{zephyr_sdk_install_command()}`, then re-run the build; "
+                f"`Zephyr-sdk` package). Run "
+                f"`{ZEPHYR_SDK_BOOTSTRAP_FIX}`, then re-run the build; "
                 f"`tan doctor --build` reports this as `zephyrSdk` with the same fix."
             )
         else:

@@ -209,6 +209,8 @@ def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, m
     assert check.status == "pass"
     assert "1.0.1" in check.detail
     assert str(host_sdk) in check.detail
+    # tan-cli#1520: matched on the sdk_version text only -> same caveat as the stamped pass.
+    assert "never compared with the pin" in check.detail
     # No tan-written stamp exists anywhere -- this is the host-scan path,
     # not `stamp_matches_pin`, that produced the pass.
     manifest = tp.parse_toolchain_manifest(MANIFEST)

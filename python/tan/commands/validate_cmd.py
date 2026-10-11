@@ -380,6 +380,10 @@ VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
 #: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
 PORTED_FROM_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"
 
+#: Leading words of the finding `run_in_process_engine` writes for a crashed
+#: port (kept for display/tests; `_Result.crashed` is the structured signal).
+VALIDATOR_CRASH_PREFIX = "tan's built-in validator could not read this SDK"
+
 
 def _bound_sdk_version(sdk_root: Path) -> str:
     """`metadata/sdk_version.yaml`'s version, for the skew message."""
@@ -401,6 +405,43 @@ def subprocess_engine_requested() -> bool:
     return _subprocess_engine_requested()
 
 
+def _sdk_direction(sdk_root: Path) -> str | None:
+    """`"newer"` / `"older"` when git can order the bound checkout against the
+    commit the port was audited at; None when it cannot (not a git checkout,
+    commit unknown, git missing, or HEAD is exactly the audited commit with
+    locally modified sources). A hash mismatch alone has no direction."""
+    import subprocess
+
+    from tan.core.doctor_git import _resolve_git_executable
+    from tan.core.subprocess_env import spawn_env
+
+    git = _resolve_git_executable()
+    if git is None:
+        return None
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(  # noqa: S603
+                [git, "-C", str(sdk_root), *args],
+                capture_output=True, text=True, timeout=10, check=False, env=spawn_env(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def _is_ancestor(ancestor: str, descendant: str) -> bool | None:
+        run = _git("merge-base", "--is-ancestor", ancestor, descendant)
+        return None if run is None else {0: True, 1: False}.get(run.returncode)
+
+    head = _git("rev-parse", "HEAD")
+    if head is None or head.returncode != 0 or head.stdout.strip() == PORTED_FROM_SDK_COMMIT:
+        return None
+    if _is_ancestor(PORTED_FROM_SDK_COMMIT, "HEAD"):
+        return "newer"
+    if _is_ancestor("HEAD", PORTED_FROM_SDK_COMMIT):
+        return "older"
+    return None
+
+
 def skew_warning(sdk_root: Path) -> str | None:
     """Message for `validate.sdk-validator-newer`, or None when the bound
     checkout's validator sources are the ones the port was audited against."""
@@ -409,12 +450,30 @@ def skew_warning(sdk_root: Path) -> str | None:
     skewed = skewed_sources(sdk_root)
     if not skewed:
         return None
+    version = _bound_sdk_version(sdk_root)
+    ported = PORTED_FROM_SDK_COMMIT[:8]
+    direction = _sdk_direction(sdk_root)
+    fallback = f"run with {VALIDATE_ENGINE_ENV}=subprocess to use the SDK's own validator."
+    if direction == "older":
+        return (
+            f"the bound alp-sdk ({version}) has validator sources older than the ones "
+            f"tan's built-in validator was ported from ({ported}): {', '.join(skewed)}. "
+            "The built-in validator may apply rules this SDK does not, so it can reject "
+            f"a board this SDK accepts -- {fallback}"
+        )
+    if direction == "newer":
+        return (
+            f"the bound alp-sdk ({version}) has validator sources "
+            f"newer than the ones tan's built-in validator was ported from "
+            f"({ported}): {', '.join(skewed)}. Rules added since are "
+            "not applied, so a clean verdict here may not match the SDK's own validator "
+            f"-- {fallback}"
+        )
     return (
-        f"the bound alp-sdk ({_bound_sdk_version(sdk_root)}) has validator sources "
-        f"newer than the ones tan's built-in validator was ported from "
-        f"({PORTED_FROM_SDK_COMMIT[:8]}): {', '.join(skewed)}. Rules added since are "
-        "not applied, so a clean verdict here may not match the SDK's own validator "
-        f"-- run with {VALIDATE_ENGINE_ENV}=subprocess to use it."
+        f"the bound alp-sdk ({version}) has validator sources that differ from the ones "
+        f"tan's built-in validator was ported from ({ported}): {', '.join(skewed)}. "
+        "It may be newer (rules not applied here) or older (rules this SDK lacks), so "
+        f"the verdict may not match the SDK's own validator -- {fallback}"
     )
 
 
@@ -435,7 +494,7 @@ def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _R
             (
                 _Finding(
                     "error",
-                    "tan's built-in validator could not read this SDK "
+                    f"{VALIDATOR_CRASH_PREFIX} "
                     f"(bound alp-sdk {_bound_sdk_version(sdk_root)}; the "
                     f"validator was ported from {PORTED_FROM_SDK_COMMIT[:8]}). "
                     "This is not a verdict on board.yaml -- retry with "
@@ -443,6 +502,7 @@ def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _R
                     f"validator. Underlying error: {last}",
                 ),
             ),
+            crashed=True,
         )
     if result.outcome != OUTCOME_CLEAN and not result.findings:
         result = _Result(
@@ -699,6 +759,9 @@ class _Result:
     #: path carries the validator's own severities (see `_HEADER_SEVERITY`
     #: and `_severity_for_outcome`).
     findings: tuple[_Finding, ...]
+    #: True when tan's in-process validator crashed, so board.yaml was never
+    #: judged (tan-cli#1523); `tan diff` branches on this, not on message text.
+    crashed: bool = False
 
 
 class BoardShapeError(Exception):

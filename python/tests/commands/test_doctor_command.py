@@ -1446,12 +1446,16 @@ def test_zephyr_sdk_detected_passes():
     assert check.fix is None
 
 
-def test_zephyr_sdk_not_detected_fails_and_names_the_exact_install_command():
+def test_zephyr_sdk_not_detected_fails_and_names_the_verified_remedy():
+    """tan-cli#1520: the fix is `tan bootstrap` (verified archive), never the
+    unchecked `west sdk install -t arm-zephyr-eabi` route."""
     check = doctor_cmd.zephyr_sdk_check(False)
     assert check.status == "fail"
-    command = "west sdk install --version 1.0.1 -t arm-zephyr-eabi"
-    assert command in check.detail
-    assert command in (check.fix or "")
+    assert "`tan bootstrap`" in check.detail
+    assert "`tan bootstrap`" in (check.fix or "")
+    for text in (check.detail, check.fix or ""):
+        assert "-t arm-zephyr-eabi" not in text
+        assert "west sdk install --version" not in text
 
 
 def test_zephyr_sdk_check_names_the_env_var_when_it_points_at_a_bad_directory():
@@ -1876,6 +1880,11 @@ def test_seven_zip_stays_a_warn_not_a_fail_so_the_verdict_is_unchanged(
     # answer for `west`, `cmake` and every other PATH check in `_collect`.
     monkeypatch.setattr(
         doctor_cmd, "SEVEN_ZIP_PROGRAMS", ("alp-no-such-archiver-7z",))
+    # tan-cli#1523: doctor now probes through bootstrap's `_find_seven_zip`,
+    # so stub its list too, or a runner with a real 7z on PATH passes.
+    from tan.commands import bootstrap_toolchain_fetch
+    monkeypatch.setattr(
+        bootstrap_toolchain_fetch, "SEVEN_ZIP_EXTRACTORS", ("alp-no-such-archiver-7z",))
     checks = doctor_cmd._collect(None)
     seven = next(c for c in checks if c.name == "sevenZip")
     assert seven.status == "warn", seven

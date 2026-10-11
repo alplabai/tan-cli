@@ -171,6 +171,7 @@ from tan.commands.validate_cmd import (
     VALIDATOR_TIMEOUT_S,
     _Finding,
     run_in_process_engine,
+    skew_warning,
     subprocess_engine_requested,
     _synthesised_finding,
     analyze_validator_output,
@@ -713,10 +714,18 @@ def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path:
         if result.outcome == OUTCOME_CLEAN:
             return
         detail = "; ".join(finding.message for finding in result.findings)
+        if result.crashed:
+            # The port crashed: board.yaml was never judged (tan-cli#1523).
+            raise ParseFailure(
+                result.outcome,
+                f"could not check board.yaml before diffing: {detail}",
+            )
+        skew = skew_warning(Path(sdk_info.root))
         raise ParseFailure(
             result.outcome,
-            "board.yaml is not valid: the SDK's own validator rejects it -- run "
-            f"`tan validate` for full diagnostics: {detail}",
+            "board.yaml is not valid: tan's validator rejects it -- run "
+            f"`tan validate` for full diagnostics: {detail}"
+            + (f" (caveat: {skew})" if skew else ""),
         )
     if not os.path.isfile(script):
         return
