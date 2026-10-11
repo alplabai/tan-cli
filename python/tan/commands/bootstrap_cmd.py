@@ -2315,12 +2315,12 @@ def toolchain_phase(
         )
         return
 
-    from tan.commands.bootstrap_toolchain_fetch import SEVEN_ZIP_EXTRACTORS  # noqa: PLC0415
+    from tan.commands.bootstrap_toolchain_fetch import _find_seven_zip  # noqa: PLC0415
 
-    # tan-cli#1523: tan's own .7z extractor runs only these binaries (not
-    # `unar`, which doctor's wider SEVEN_ZIP_PROGRAMS also accepts), so
-    # preflight on the same tuple instead of failing after the download.
-    if is_windows and not any(on_path(program) for program in SEVEN_ZIP_EXTRACTORS):
+    # tan-cli#1523: preflight on the exact predicate tan's own .7z extractor
+    # uses (`_find_seven_zip`: not `unar`, and not a 7z.exe planted in the cwd),
+    # so the refusal happens before the download, not after it.
+    if is_windows and _find_seven_zip() is None:
         log.warn(
             "toolchain-install",
             "No 7-Zip (7z, 7za, 7zr, 7zz or 7zzs) on PATH -- tan extracts the .7z "

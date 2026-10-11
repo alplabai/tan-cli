@@ -378,10 +378,11 @@ VALIDATE_ENGINE_ENV = "TAN_VALIDATE_ENGINE"
 
 #: tan-cli#270: the alp-sdk commit the in-process validator was audited against
 #: (the freshness gate asserts it equals `HAND_PORT_PINNED_SDK_COMMIT`).
-#: Leading words of the finding `run_in_process_engine` writes for a crashed
-#: port; `tan diff` keys on it to avoid calling the board invalid.
-VALIDATOR_CRASH_PREFIX = "tan's built-in validator could not read this SDK"
 PORTED_FROM_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"
+
+#: Leading words of the finding `run_in_process_engine` writes for a crashed
+#: port (kept for display/tests; `_Result.crashed` is the structured signal).
+VALIDATOR_CRASH_PREFIX = "tan's built-in validator could not read this SDK"
 
 
 def _bound_sdk_version(sdk_root: Path) -> str:
@@ -407,19 +408,33 @@ def subprocess_engine_requested() -> bool:
 def _sdk_direction(sdk_root: Path) -> str | None:
     """`"newer"` / `"older"` when git can order the bound checkout against the
     commit the port was audited at; None when it cannot (not a git checkout,
-    commit unknown, git missing). A hash mismatch alone has no direction."""
+    commit unknown, git missing, or HEAD is exactly the audited commit with
+    locally modified sources). A hash mismatch alone has no direction."""
     import subprocess
 
-    def _is_ancestor(ancestor: str, descendant: str) -> bool | None:
+    from tan.core.doctor_git import _resolve_git_executable
+    from tan.core.subprocess_env import spawn_env
+
+    git = _resolve_git_executable()
+    if git is None:
+        return None
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
         try:
-            run = subprocess.run(
-                ["git", "-C", str(sdk_root), "merge-base", "--is-ancestor", ancestor, descendant],
-                capture_output=True, timeout=10, check=False,
+            return subprocess.run(  # noqa: S603
+                [git, "-C", str(sdk_root), *args],
+                capture_output=True, text=True, timeout=10, check=False, env=spawn_env(),
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        return {0: True, 1: False}.get(run.returncode)
 
+    def _is_ancestor(ancestor: str, descendant: str) -> bool | None:
+        run = _git("merge-base", "--is-ancestor", ancestor, descendant)
+        return None if run is None else {0: True, 1: False}.get(run.returncode)
+
+    head = _git("rev-parse", "HEAD")
+    if head is None or head.returncode != 0 or head.stdout.strip() == PORTED_FROM_SDK_COMMIT:
+        return None
     if _is_ancestor(PORTED_FROM_SDK_COMMIT, "HEAD"):
         return "newer"
     if _is_ancestor("HEAD", PORTED_FROM_SDK_COMMIT):
@@ -487,6 +502,7 @@ def run_in_process_engine(board_path: str, sdk_root: Path) -> tuple[int, str, _R
                     f"validator. Underlying error: {last}",
                 ),
             ),
+            crashed=True,
         )
     if result.outcome != OUTCOME_CLEAN and not result.findings:
         result = _Result(
@@ -743,6 +759,9 @@ class _Result:
     #: path carries the validator's own severities (see `_HEADER_SEVERITY`
     #: and `_severity_for_outcome`).
     findings: tuple[_Finding, ...]
+    #: True when tan's in-process validator crashed, so board.yaml was never
+    #: judged (tan-cli#1523); `tan diff` branches on this, not on message text.
+    crashed: bool = False
 
 
 class BoardShapeError(Exception):

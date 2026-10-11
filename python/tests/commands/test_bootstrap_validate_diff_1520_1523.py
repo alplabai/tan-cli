@@ -41,8 +41,20 @@ def test_an_unordered_checkout_gets_a_neutral_message(sdk):
 
 def test_windows_preflight_rejects_unar_only(tmp_path, monkeypatch):
     """tan-cli#1523: unar is not enough for tan's own .7z extractor, so the
-    preflight must refuse before the download."""
-    monkeypatch.setattr(bootstrap_cmd, "on_path", lambda program: program == "unar")
+    preflight must refuse before the download. Uses tan's real extractor
+    predicate (`_find_seven_zip`) against a PATH holding only `unar`."""
+    from tan.commands import bootstrap_toolchain_fetch as fetch
+
+    def _unar_only(name, _env):
+        return types.SimpleNamespace(resolved=str(tmp_path / "bin" / name) if name == "unar" else None)
+
+    monkeypatch.setattr("tan.core.tool_lookup.resolve_tool", _unar_only)
+    assert fetch._find_seven_zip() is None
+
+    def _must_not_acquire(*_a, **_k):
+        raise AssertionError("preflight let an unar-only host reach the download")
+
+    monkeypatch.setattr(bootstrap_cmd, "_acquire_toolchain", _must_not_acquire)
     log = bootstrap_cmd.Log(json_mode=True)
     ws = bootstrap_cmd.Workspace(
         is_windows=True,
@@ -81,6 +93,7 @@ def test_diff_crash_message_does_not_call_the_board_invalid(tmp_path, monkeypatc
             "error",
             f"{validate_cmd.VALIDATOR_CRASH_PREFIX} (bound alp-sdk v1). This is not a verdict on board.yaml",
         ),),
+        crashed=True,
     )
     monkeypatch.setattr(diff_cmd, "run_in_process_engine", lambda *_a: (1, "", crash))
     monkeypatch.setattr(diff_cmd, "subprocess_engine_requested", lambda: False)
@@ -88,7 +101,7 @@ def test_diff_crash_message_does_not_call_the_board_invalid(tmp_path, monkeypatc
     sdk_info = types.SimpleNamespace(root=str(tmp_path))
     with pytest.raises(diff_cmd.ParseFailure) as err:
         diff_cmd._reject_if_sdk_validator_disagrees(sdk_info, str(tmp_path), str(tmp_path / "board.yaml"))
-    assert "board.yaml is not valid" not in err.value.message
+    assert not err.value.message.startswith("board.yaml is not valid")
     assert "not a verdict on board.yaml" in err.value.message
 
 
@@ -103,3 +116,91 @@ def test_diff_genuine_rejection_keeps_the_invalid_wording(tmp_path, monkeypatch)
     with pytest.raises(diff_cmd.ParseFailure) as err:
         diff_cmd._reject_if_sdk_validator_disagrees(sdk_info, str(tmp_path), "b.yaml")
     assert err.value.message.startswith("board.yaml is not valid")
+
+
+def test_diff_crash_is_keyed_on_the_flag_not_the_message(tmp_path, monkeypatch):
+    crash = validate_cmd._Result(
+        validate_cmd.OUTCOME_FAILED,
+        (validate_cmd._Finding("error", "reworded entirely"),),
+        crashed=True,
+    )
+    monkeypatch.setattr(diff_cmd, "run_in_process_engine", lambda *_a: (1, "", crash))
+    monkeypatch.setattr(diff_cmd, "subprocess_engine_requested", lambda: False)
+    (tmp_path / "metadata").mkdir()
+    with pytest.raises(diff_cmd.ParseFailure) as err:
+        diff_cmd._reject_if_sdk_validator_disagrees(
+            types.SimpleNamespace(root=str(tmp_path)), str(tmp_path), "b.yaml"
+        )
+    assert err.value.message.startswith("could not check board.yaml")
+
+
+def test_diff_rejection_names_tans_validator_and_carries_skew(tmp_path, monkeypatch):
+    bad = validate_cmd._Result("schema-violation", (validate_cmd._Finding("error", "x"),))
+    monkeypatch.setattr(diff_cmd, "run_in_process_engine", lambda *_a: (1, "", bad))
+    monkeypatch.setattr(diff_cmd, "subprocess_engine_requested", lambda: False)
+    monkeypatch.setattr(diff_cmd, "skew_warning", lambda _r: "validator sources differ")
+    (tmp_path / "metadata").mkdir()
+    with pytest.raises(diff_cmd.ParseFailure) as err:
+        diff_cmd._reject_if_sdk_validator_disagrees(
+            types.SimpleNamespace(root=str(tmp_path)), str(tmp_path), "b.yaml"
+        )
+    assert "tan's validator rejects it" in err.value.message
+    assert "SDK's own validator rejects" not in err.value.message
+    assert "validator sources differ" in err.value.message
+
+
+def test_sdk_direction_without_git_is_neutral(sdk, monkeypatch):
+    from tan.core import doctor_git
+
+    monkeypatch.setattr(doctor_git, "_resolve_git_executable", lambda: None)
+    assert validate_cmd._sdk_direction(sdk) is None
+    assert "differ from" in validate_cmd.skew_warning(sdk)
+
+
+def _git_repo(tmp_path):
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git not available")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@e", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null"}
+    import os
+
+    full = {**os.environ, **env}
+
+    def run(*args):
+        return subprocess.run([git, "-C", str(repo), *args], check=True, capture_output=True,
+                              text=True, env=full).stdout.strip()
+
+    run("init", "-q")
+    commits = []
+    for n in range(3):
+        (repo / "f").write_text(str(n))
+        run("add", "f")
+        run("-c", "commit.gpgsign=false", "commit", "-q", "-m", str(n))
+        commits.append(run("rev-parse", "HEAD"))
+    return repo, commits, run
+
+
+def test_sdk_direction_against_real_git(tmp_path, monkeypatch):
+    repo, (c0, c1, c2), run = _git_repo(tmp_path)
+    # HEAD (c2) is newer than the audited c1.
+    monkeypatch.setattr(validate_cmd, "PORTED_FROM_SDK_COMMIT", c1)
+    assert validate_cmd._sdk_direction(repo) == "newer"
+    # HEAD (c2) is older than a later audited commit.
+    run("checkout", "-q", c0)
+    assert validate_cmd._sdk_direction(repo) == "older"
+    # Same commit (locally modified sources): no direction claimed.
+    monkeypatch.setattr(validate_cmd, "PORTED_FROM_SDK_COMMIT", c0)
+    assert validate_cmd._sdk_direction(repo) is None
+
+
+def test_missing_sdk_build_message_does_not_prescribe_the_unchecked_route():
+    from tan.commands import doctor_cmd
+
+    assert doctor_cmd.ZEPHYR_SDK_BOOTSTRAP_FIX == "tan bootstrap"

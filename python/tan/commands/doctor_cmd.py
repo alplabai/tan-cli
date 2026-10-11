@@ -1127,6 +1127,10 @@ def west_resolved_check(
     return Check("westResolved", "pass", f"west {_fmt(version)} resolved: {found}.", scope="project")
 
 
+#: tan-cli#1520: the verified remedy for a missing Zephyr SDK toolchain.
+ZEPHYR_SDK_BOOTSTRAP_FIX = "tan bootstrap"
+
+
 def zephyr_sdk_install_command() -> str:
     """The exact `west sdk install` invocation the `zephyrSdk` check's `fix`
     names -- the ONE place it is assembled, mirroring
@@ -1135,6 +1139,12 @@ def zephyr_sdk_install_command() -> str:
     doctor` above reports it, and names the exact install command"; this is
     what makes that promise true rather than a second, independently-worded
     copy able to drift from it.
+
+    tan-cli#1520: this is now the README's MANUAL command only. The
+    `zephyrSdk` check and `tan build`'s missing-SDK message deliberately
+    diverge from the Rust oracle and point at `tan bootstrap` instead, because
+    this command's setup.sh fetches the toolchain archive with no integrity
+    check, skipping the alp-sdk sha256 pin (#1501).
     """
     return f"west sdk install --version {ZEPHYR_SDK_INSTALL_VERSION} -t arm-zephyr-eabi"
 
@@ -1177,50 +1187,20 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         if env_dir
         else "ZEPHYR_SDK_INSTALL_DIR unset"
     )
-    # tan-cli#424: on POSIX that command needs `file(1)`, which NOTHING else
-    # tells the customer about -- the SDK's own host-tools step dies with
-    # "ERROR: Host tools installation failed" / "FATAL ERROR: command
-    # `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed", naming neither the tool
-    # nor a remedy. Isolated to that single variable in a pristine
-    # ubuntu:24.04: identical bootstrapped workspace, identical HOME, `file`
-    # the only difference -- WITH it `west sdk install` exits 0 ("All done"),
-    # WITHOUT it exits 1 with those two lines.
-    #
-    # Named HERE rather than added to the manifest's `prerequisites`, because
-    # `tan bootstrap` genuinely does not need it and succeeds without it --
-    # promoting it there would refuse hosts over a tool the bootstrap never
-    # uses. What MAKES that claim true is that `tan bootstrap`'s automatic
-    # acquisition path passes `--no-hosttools`
-    # (`tan.core.toolchain_provision.west_sdk_install_argv`), so it never runs
-    # the SDK's host-tools step and never reaches `file` at all; between
-    # tan-cli#990 (which added that path) and tan-cli#1176 (which added the
-    # flag) the sentence above was FALSE -- `tan bootstrap` ran the very
-    # command this note is about and failed on exactly these two lines. Do not
-    # delete the flag without moving `file` into the prerequisites manifest.
-    # The command in `zephyr_sdk_install_command()` above carries no
-    # `--no-hosttools` on purpose (it mirrors the Rust oracle verbatim), which
-    # is why the note below still applies to it.
-    #
-    # This is the message immediately preceding the failure, which is
-    # where it is actionable. Same shape as `seven_zip_check` above: a
-    # host-tool prerequisite of `west sdk install` itself, surfaced beside the
-    # command that needs it rather than folded into the bootstrap gate.
-    host_tool_note = (
-        ""
-        if os.name == "nt"
-        else " On Linux/macOS the SDK's host-tools step also needs `file` on PATH"
-        " (Debian/Ubuntu: `sudo apt-get install -y file`); without it the install"
-        ' fails with "Host tools installation failed" and names nothing.'
-    )
+    # tan-cli#1520: the remedy is `tan bootstrap`, NOT the oracle's
+    # `west sdk install ... -t arm-zephyr-eabi` (deliberate divergence): that
+    # command's setup.sh downloads the toolchain archive with no integrity
+    # check, bypassing the alp-sdk sha256 pin that #1501 made the boundary.
+    # `tan bootstrap` verifies the archive and passes `--no-hosttools`, so the
+    # tan-cli#424 `file(1)` prerequisite note no longer applies to this fix.
     return Check(
         "zephyrSdk",
         "fail",
-        f"Zephyr SDK toolchain not detected ({where}) -- from "
-        f"an initialised west workspace, run `{zephyr_sdk_install_command()}`.",
+        f"Zephyr SDK toolchain not detected ({where}) -- run `{ZEPHYR_SDK_BOOTSTRAP_FIX}`.",
         f"Install the Zephyr SDK toolchain (arm-zephyr-eabi, version "
-        f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
-        f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
-        "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+        f"{ZEPHYR_SDK_INSTALL_VERSION}) with `{ZEPHYR_SDK_BOOTSTRAP_FIX}`, which "
+        "verifies the downloaded archive against the alp-sdk pin; a hand-run "
+        "`west sdk install` does not.",
         scope="host",
     )
 
@@ -4339,7 +4319,12 @@ def _collect(
     # `warn`, not a `fail`: see `seven_zip_check`'s docstring and
     # tan-cli#204 for why the SEVERITY is right and only the GATE was wrong.
     if os.name == "nt":
-        _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
+        # tan-cli#1523: same predicate `tan bootstrap`'s preflight uses, so
+        # doctor cannot pass a host (unar-only, or 7z.exe only in the cwd)
+        # that bootstrap refuses.
+        from tan.commands.bootstrap_toolchain_fetch import _find_seven_zip
+
+        _add(seven_zip_check(_find_seven_zip() is not None))
 
     # tan-cli#1323: the precedence `tan flash` applies (`resolve_setools_dir`),
     # minus the per-run `--setools-dir` flag doctor cannot see: $SETOOLS_DIR,

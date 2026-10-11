@@ -324,6 +324,9 @@ def test_windows_with_no_7zip_refuses_before_spawning_west(tmp_path, monkeypatch
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest(host="windows-x86_64"))
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "win32")
     monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        "tan.commands.bootstrap_toolchain_fetch._find_seven_zip", lambda: None
+    )
     monkeypatch.setattr(bootstrap_cmd, "on_path", lambda _name: None)
 
     def refuse_any_spawn(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
