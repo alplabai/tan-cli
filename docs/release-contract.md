@@ -635,7 +635,8 @@ and the planner module has 1860 passed, 0 failed.
   no longer planned or buildable, `tan explain --template` publishes
   `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant` no longer
   offers `u65`. This is one of the `BREAKING` entries in `CHANGELOG.md`'s
-  `## [0.7.0-rc1]` preamble (carried into `## [0.7.0]` at GA); no NX9101 leg exists in the tag-time matrix any more.
+  `## [0.7.0-rc1]` preamble (carried into `## [0.7.0]` at GA); no NX9101 leg
+  exists in the tag-time matrix any more.
 - **Renumbered `0.6.1` -> `0.7.0` (maintainer, 2026-09-19).** Pre-1.0 SemVer
   puts a break in the minor: the floor breaks a v0.6.0 consumer's `tan build`
   on *any* Zephyr board (Kconfig configure aborts on the undefined

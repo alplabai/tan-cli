@@ -176,11 +176,36 @@ def test_a_stable_tag_refuses_a_section_holding_only_the_bot_bump_bullet(
     assert problems and "automated" in problems[0], problems
 
 
-def test_a_stable_tag_accepts_the_bot_bullet_beside_real_content(
+def test_a_stable_tag_refuses_a_leftover_bot_bullet_beside_real_content(
     tmp_path: pathlib.Path,
 ) -> None:
     text = BOT_ONLY.replace(
         "## [9.9.9-rc1]", "- a real entry for GA\n\n## [9.9.9-rc1]", 1
     )
     module = _load(text, tmp_path)
+    assert module.changelog_problems("9.9.9-rc2.dev0") == []
+    problems = module.changelog_problems("9.9.9")
+    assert problems and "still carries" in problems[0], problems
+
+
+def test_a_stable_tag_accepts_real_content_once_the_bot_bullet_is_deleted(
+    tmp_path: pathlib.Path,
+) -> None:
+    text = (
+        "# Changelog\n\n## [9.9.9] \u2014 Unreleased\n\n### Fixed\n\n"
+        "- a real entry for GA\n\n## [9.9.9-rc1] \u2014 2026-01-01\n\n- x\n"
+    )
+    module = _load(text, tmp_path)
     assert module.changelog_problems("9.9.9") == []
+
+
+def test_the_bot_bullet_match_stops_at_its_indented_continuation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A paragraph or `* ` item after the bot bullet is real content and must
+    not be swallowed with it."""
+    text = BOT_ONLY.replace(
+        "\n## [9.9.9-rc1]", "\nPreamble paragraph.\n\n* star item\n\n## [9.9.9-rc1]", 1
+    )
+    module = _load(text, tmp_path)
+    assert module.changelog_has_user_facing_body("9.9.9")

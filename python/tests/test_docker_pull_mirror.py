@@ -94,6 +94,7 @@ def test_the_e2e_container_harness_image_goes_through_the_mirror(tmp_path: Path)
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f'echo "$*" >> "{log}"\n'
+        'case "$1 $2" in "image inspect") exit 1;; esac\n'
         "exit 0\n"
     )
     fake.chmod(0o755)
@@ -109,3 +110,49 @@ def test_the_e2e_container_harness_image_goes_through_the_mirror(tmp_path: Path)
     run = next(i for i, c in enumerate(calls) if c.startswith("run "))
     assert pull < run
     assert "mirror.gcr.io/library/ubuntu:24.04 bash -c" in calls[run]
+
+
+def _fake_docker(tmp_path: Path, script: str) -> tuple[dict, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = bin_dir / "docker"
+    fake.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{log}"\n{script}\n')
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_PULL_BACKOFF_S": "0"}
+    return env, log
+
+
+def _run_e2e(tmp_path: Path, env: dict) -> list[str]:
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    subprocess.run(
+        ["bash", str(_REPO_ROOT / "scripts" / "e2e-container.sh"), str(frozen)],
+        capture_output=True, text=True, env=env, timeout=60, check=False,
+    )
+    return (tmp_path / "docker.log").read_text().splitlines()
+
+
+def test_the_e2e_container_uses_a_locally_cached_image_without_pulling(tmp_path: Path) -> None:
+    env, _ = _fake_docker(tmp_path, "exit 0")
+    calls = _run_e2e(tmp_path, env)
+    assert not any(c.startswith("pull ") for c in calls), calls
+    run = next(c for c in calls if c.startswith("run "))
+    assert " ubuntu:24.04 bash -c" in run and "mirror.gcr.io" not in run
+
+
+def test_the_e2e_container_falls_back_to_the_bare_ref_when_every_pull_fails(tmp_path: Path) -> None:
+    env, _ = _fake_docker(tmp_path, 'case "$1" in image|pull) exit 1;; esac\nexit 0')
+    calls = _run_e2e(tmp_path, env)
+    run = next(c for c in calls if c.startswith("run "))
+    assert " ubuntu:24.04 bash -c" in run and "mirror.gcr.io" not in run
+
+
+def test_a_namespaced_image_skips_the_library_mirrors(tmp_path: Path) -> None:
+    env, log = _fake_docker(tmp_path, "exit 0")
+    proc = subprocess.run(
+        ["bash", str(_REPO_ROOT / "scripts" / "ci" / "docker-pull.sh"), "ghcr.io/org/x:1"],
+        capture_output=True, text=True, env=env, timeout=60, check=False,
+    )
+    assert proc.stdout.strip() == "ghcr.io/org/x:1"
+    assert log.read_text().splitlines() == ["pull --quiet ghcr.io/org/x:1"]

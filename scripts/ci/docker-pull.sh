@@ -13,9 +13,11 @@
 # DOCKER_PULL_BACKOFF_S scales the retry sleep (tests set it to 0).
 set -euo pipefail
 image="${1:?usage: docker-pull.sh IMAGE}"
-for ref in "mirror.gcr.io/library/${image}" \
-           "public.ecr.aws/docker/library/${image}" \
-           "${image}"; do
+# Only a bare library name (no `/`) lives under the mirrors' library/ namespace;
+# `user/img` or `ghcr.io/org/x` go straight to their own registry.
+refs=("mirror.gcr.io/library/${image}" "public.ecr.aws/docker/library/${image}" "${image}")
+case "$image" in */*) refs=("${image}") ;; esac
+for ref in "${refs[@]}"; do
   for attempt in 1 2 3; do
     if ${DOCKER:-docker} pull --quiet "$ref" >&2; then
       echo "pulled ${ref}" >&2

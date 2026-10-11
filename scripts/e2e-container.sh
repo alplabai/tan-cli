@@ -86,7 +86,15 @@ fi
 # every other CI `docker run` of a library image (tan-cli#1471). A bare
 # `docker run ubuntu:24.04` pulls anonymously from Docker Hub and dies on
 # "toomanyrequests" on a shared runner.
-RUN_IMAGE=$(DOCKER="$DOCKER" bash "$HERE/ci/docker-pull.sh" "$IMAGE") || exit 2
+#
+# A locally cached or locally built image needs no registry, and a failed pull
+# (offline host, image no registry has) falls back to the bare ref rather than
+# aborting: `docker run` then reports the real error if it is truly absent.
+if $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
+  RUN_IMAGE=$IMAGE
+else
+  RUN_IMAGE=$(DOCKER="$DOCKER" bash "$HERE/ci/docker-pull.sh" "$IMAGE") || RUN_IMAGE=$IMAGE
+fi
 
 echo "=== isolated e2e: $IMAGE ==="
 echo "  frozen:  $MOUNT_SRC"

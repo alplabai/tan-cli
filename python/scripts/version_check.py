@@ -281,8 +281,8 @@ def changelog_section_body(target: str) -> str:
 
 _BOT_BUMP_BULLET = re.compile(
     r"^- `TAN_VERSION` moved to `[^`]+` off the published `[^`]+` tag"
-    r"(?:(?!^- |^#).)*",
-    re.MULTILINE | re.DOTALL,
+    r"[^\n]*(?:\n[ \t]+[^\n]*)*",
+    re.MULTILINE,
 )
 
 
@@ -297,6 +297,11 @@ def changelog_has_user_facing_body(target: str) -> bool:
     body = _BOT_BUMP_BULLET.sub("", changelog_section_body(target))
     body = re.sub(r"^### .*$", "", body, flags=re.MULTILINE)
     return bool(body.strip())
+
+
+def changelog_carries_bot_bullet(target: str) -> bool:
+    """Is bump_dev_version's bullet still in the section?"""
+    return _BOT_BUMP_BULLET.search(changelog_section_body(target)) is not None
 
 
 def changelog_problems(tan_version: str) -> list[str]:
@@ -334,6 +339,14 @@ def changelog_problems(tan_version: str) -> list[str]:
                 f"tag would publish it as the whole release body. Carry the "
                 f"preamble (BREAKING list, alp-sdk floor) and the real entries "
                 f"into this section first."
+            ]
+        if not is_development and changelog_carries_bot_bullet(target):
+            return [
+                f"CHANGELOG.md's `## [{target}]` section still carries the "
+                f"automated `TAN_VERSION moved to ...` bump bullet. It is "
+                f"internal bookkeeping and a v{target} tag would publish it as "
+                f"a user-facing entry. Delete it when carrying the preamble "
+                f"over."
             ]
         return []
     return [
