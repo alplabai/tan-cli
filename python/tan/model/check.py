@@ -474,10 +474,53 @@ def _exact_ethos_u_targets(sku: str, metadata_root: Path,
     return [headline, *rest]
 
 
+def _screen_for_target(report: BackendReport, source: Path, target: TargetSpec,
+                        metadata_root: Path) -> BackendReport:
+    """tan-cli#1519: the static screen's `variant`/`table`/per-op verdicts come
+    from the SoM preset's headline variant; a target of another variant (u55 on
+    a u85-headline SKU) must be reported against ITS OWN table, not the
+    headline's. Same-variant targets, and any failure to re-screen, keep
+    @report unchanged."""
+    variant = target.accel_config.split("-")[1] if target.accel_config.count("-") >= 2 else None
+    if not variant or report.variant is None or variant == report.variant:
+        return report
+    try:
+        rescreened = analyze_backend(
+            backend="ethos_u", src_format=source.suffix.lstrip(".").lower(),
+            ops=extract_ops(source), metadata_root=metadata_root, variant=variant)
+    except Exception as err:  # noqa: BLE001 -- a failed re-screen keeps the headline screen
+        # ...but says so: u85 variant/table next to u55 compile figures is the
+        # #1519 mislabel, and must not be silent.
+        return replace(report, notes=[
+            *report.notes,
+            f"--exact: could not re-screen against {variant}'s table "
+            f"({str(err)[:120]}); variant/table below are the headline's."])
+    return replace(
+        report, variant=rescreened.variant, table=rescreened.table, ops=rescreened.ops,
+        npu_coverage=rescreened.npu_coverage,
+        compute_on_npu_pct_max=rescreened.compute_on_npu_pct_max,
+        uncosted_cpu_op_count=rescreened.uncosted_cpu_op_count)
+
+
 def _exact_one_target(report: BackendReport, source: Path, target: TargetSpec,
                        sku: str, metadata_root: Path,
                        board_doc: dict | None,
                        ) -> tuple[BackendReport, Blob | None]:
+    """Re-screen @report against @target's own variant, then compile it. A
+    successful compile rebuilds `notes` from scratch, so a re-screen-failure
+    note (host fact, starts with `--exact`) is re-added on that path."""
+    screened = _screen_for_target(report, source, target, metadata_root)
+    kept = screened.notes[len(report.notes):]
+    out, blob = _exact_compile_target(screened, source, target, sku, metadata_root, board_doc)
+    if kept and blob is not None:
+        out = replace(out, notes=[*out.notes, *kept])
+    return out, blob
+
+
+def _exact_compile_target(report: BackendReport, source: Path, target: TargetSpec,
+                           sku: str, metadata_root: Path,
+                           board_doc: dict | None,
+                           ) -> tuple[BackendReport, Blob | None]:
     """The real vela compile of ONE target, degrading to a note on @report on
     any failure (blob is then `None`). Never raises."""
     accel_config = target.accel_config

@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import os
 import posixpath
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from tan.core.pending import PENDING_PLACEHOLDER as PENDING_SENTINEL, is_pending_placeholder
@@ -242,6 +243,98 @@ class FlashTarget:
     #: tan-cli#611 -- carried from `HelperMcu.flash_policy`; always `None` for a
     #: slice, which is an application core and a genuine customer flash target.
     flash_policy: str | None = None
+    #: tan-cli#1509 -- further `alif_mram_jlink` slices of the same board folded into
+    #: this one write, so ONE ATOC names them all (see `merge_flow_d_targets`).
+    co_slices: tuple["FlashTarget", ...] = ()
+
+
+def _signable_flow_d(t: FlashTarget) -> bool:
+    """A slice `tan flash` would sign for itself via Flow D: no `atoc`/`atoc_map`/
+    `atoc_address` of the customer's own, and no unresolved `TBD`."""
+    if t.kind != SLICE or select_flash_method(t) != FLOW_D_METHOD:
+        return False
+    fa = t.flash_args
+    if flash_args_has_tbd(fa) or not t.output_artefact:
+        return False
+    try:
+        return all(fa_str_checked(fa, k, True) is None for k in ("atoc", "atoc_map", "atoc_address"))
+    except FlashPlanError:
+        return False
+
+
+#: The keys that say WHICH board a Flow D slice targets; slices that differ on any are
+#: separate writes (separate ATOCs), never one.
+_BOARD_KEYS = ("jlink_flash_device", "jlink_serial", "jlink_device", "expect_dpidr")
+
+#: Keys read from the LEAD slice only (the combined entry has one preflight, one confirm
+#: gate, one device config, one ATOC acknowledgement). A co-slice that disagrees is
+#: refused rather than silently ignored.
+_LEAD_ONLY_KEYS = (
+    "confirm", "resident_atoc_entries", "setools_device_config", "atoc_unqueryable",
+    "setools_dir",
+)
+
+
+def check_co_slice_args(lead_id: str, lead_args: Any, co_id: str, co_args: Any) -> None:
+    """tan-cli#1509: refuse a co-slice whose `_LEAD_ONLY_KEYS` differ from the lead's."""
+
+    def _get(fa: Any, key: str) -> Any:
+        value = fa.get(key) if hasattr(fa, "get") else None
+        return bool(value) if key in ("confirm", "atoc_unqueryable") else value
+
+    for key in _LEAD_ONLY_KEYS:
+        if _get(lead_args, key) != _get(co_args, key):
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: slices '{lead_id}' and '{co_id}' are written in ONE "
+                f"ATOC, but flash_args.{key} differs between them "
+                f"({_get(lead_args, key)!r} vs {_get(co_args, key)!r}); only '{lead_id}''s "
+                f"would be honoured. Set flash_args.{key} identically on both."
+            )
+
+
+def merge_flow_d_targets(targets: Sequence[FlashTarget]) -> tuple[FlashTarget, ...]:
+    """tan-cli#1509: fold every signable `alif_mram_jlink` slice that shares one
+    `jlink_flash_device` into the FIRST one's `co_slices`, so a single ATOC names
+    them all. A second ATOC at the same package address would delist the first
+    core (the loader replaces the whole table). Anything else, and a lone slice,
+    passes through untouched."""
+    groups: dict[tuple[str | None, ...], list[FlashTarget]] = {}
+    for t in targets:
+        if _signable_flow_d(t):
+            try:
+                # One board = one device profile, one probe, one expected SW-DP ID.
+                key = tuple(
+                    fa_str_checked(t.flash_args, k, k == "expect_dpidr")
+                    for k in _BOARD_KEYS
+                )
+            except FlashPlanError:
+                continue
+            groups.setdefault(key, []).append(t)
+    folded = {id(c) for g in groups.values() if len(g) > 1 for c in g[1:]}
+    heads = {id(g[0]): g[1:] for g in groups.values() if len(g) > 1}
+    return tuple(
+        replace(t, co_slices=tuple(heads[id(t)])) if id(t) in heads else t
+        for t in targets
+        if id(t) not in folded
+    )
+
+
+def left_out_flow_d(manifest: Manifest, targets: Sequence[FlashTarget]) -> tuple[str, ...]:
+    """Ids of the manifest's `alif_mram_jlink` slices that THIS run does not flash
+    (a `--core` filter) -- the ones the lone ATOC will delist. Only reported when
+    the run has exactly one Flow D write (a combined one names them already)."""
+    ours = [t for t in targets if t.kind == SLICE and select_flash_method(t) == FLOW_D_METHOD]
+    if len(ours) != 1 or ours[0].co_slices:
+        return ()
+    ran = {ours[0].id}
+    return tuple(
+        s.core_id
+        for s in manifest.slices
+        if s.core_id and s.core_id not in ran
+        and select_flash_method(
+            FlashTarget(SLICE, s.core_id, s.flash_method, s.flash_args)
+        ) == FLOW_D_METHOD
+    )
 
 
 @dataclass(frozen=True)
@@ -1065,6 +1158,9 @@ class FlashInputs:
     #: `flash_args.confirm` is OR-ed in by the gated builders, so the effective
     #: gate is `flash_args.confirm OR ALP_FLASH_FORCE=1`.
     force_confirm: bool = False
+    #: tan-cli#1509: `(slice id, resolved .bin, slot0 address)` of the other slices a
+    #: combined Flow D write also loads, ahead of the single ATOC. Empty = today's plan.
+    extra_apps: tuple[tuple[str, str, str], ...] = ()
 
 
 #: The one place the confirm gate's remedy is written (tan-cli#719). Three
@@ -2006,15 +2102,20 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # unquoted for `ok_message` and every other use above.
     commander_artefact = commander_path(artefact)
     commander_atoc = commander_path(atoc)
-    lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
+    apps: list[tuple[str, str]] = []
     if app_address is not None:
         # `artefact`, not `inp.artefact`: the tan-cli#353 sibling resolution
         # above may have swapped an ELF for its real raw `.bin`, and the
         # write must use what was RESOLVED or the guard would be decorative.
-        lines.append(f"loadbin {commander_artefact} {app_address}")
+        apps.append((commander_artefact, app_address))
+    for _extra_id, extra_bin, extra_address in inp.extra_apps:
+        validate_commander_path(extra_bin, "the flash artefact path")
+        validate_address(extra_address, "slot0_load_address")
+        apps.append((commander_path(extra_bin), extra_address))
+    lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
+    lines += [f"loadbin {path} {addr}" for path, addr in apps]
     lines.append(f"loadbin {commander_atoc} {atoc_address}")
-    if app_address is not None:
-        lines.append(f"verifybin {commander_artefact} {app_address}")
+    lines += [f"verifybin {path} {addr}" for path, addr in apps]
     lines += [
         f"verifybin {commander_atoc} {atoc_address}",
         # PIN reset (RSetType 2), then run: the Secure Enclave boot ROM re-reads
@@ -2031,8 +2132,9 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     )
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
     ok_message = (
-        f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}, signed ATOC -> "
-        f"{atoc_address} via J-Link ({device}); cache-verified and PIN-reset"
+        f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}"
+        + "".join(f", {i} app -> {a}" for i, _b, a in inp.extra_apps)
+        + f", signed ATOC -> {atoc_address} via J-Link ({device}); cache-verified and PIN-reset"
         if app_address is not None
         else (
             f"{FLOW_D_METHOD}[{inp.core_id}]: signed ATOC (app embedded) -> "

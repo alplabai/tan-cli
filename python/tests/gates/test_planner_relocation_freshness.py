@@ -1409,7 +1409,20 @@ from tests.conftest import sdk_root
 #: name -> its channel, else lowest unclaimed `reserved_for: app` channel, else a
 #: blocked carve-out with a reason; never a silent channel 0); kconfig.py parses
 #: CONFIG_RAM_CONSOLE_BUFFER_SIZE base-10 unless `0x`. Both 3-way merged cleanly.
-PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- #2795 SoM power runtime (pinctrl_som_power ported), #2736 camera DT generator (cameras.py docstring)
+#: `84a6e0d21` -> `64481b8e9` (tan-cli#1525; alp-sdk#2352, #2831, #2832):
+#: `linux_ownership.py` gains `_can_channels`/`can_netdev_map` and `render` emits
+#: the disabled-channel nodes plus `alp,e1m-can-netdev` (3-way merged cleanly);
+#: `kconfig.py` is a comment-only edit (the removed i.MX 93 m33), applied by hand
+#: because tan's copy of that comment sits on a line the merge read as adapted.
+#: `64481b8e9` -> `7584a3562` (tan-cli#1541; alp-sdk#2838): `buildplan.py` is a
+#: docstring-only edit (the retired `tan renode` reference). The bot's 3-way
+#: merge conflicted on tan's own rewording of that line; resolved to upstream's
+#: text. No behavioural change; the planner oracle re-captured byte-identical.
+#: `7584a3562` -> `84132b98a` (alp-sdk `v0.17.0`, tan `0.7.0`, tan-cli#1258): no
+#: `scripts/alp_orchestrate/` file moved (`planner_resync.py`: up to date). The
+#: planner oracle re-captured with only `sdkVersion` changed (`0.17.0-rc2` ->
+#: `0.17.0`, all 103 build-plan emits).
+PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no planner source moved since 7584a356
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1451,16 +1464,16 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
-    "buildplan.py": "61cab4c1f88a29039b1da8be380917cc11453edc919c4b87b71b998ec4899c59",
+    "buildplan.py": "17bca79ceeae97f5d2b02a437b181235891eafa661f0693235a99bb2bcacbe7c",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
     "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
     "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
-    "kconfig.py": "6acdf0b879afd080676bbd2afebe75a61b763d02a8f50e75b5e382b22529f00b",
+    "kconfig.py": "564c5f51dfa4b5ed4bdf3abbdb00c051c29e26005c32bf4ff1f5073ebe1a7551",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
-    "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
+    "linux_ownership.py": "6545d851e8520e576d896608bfebcef74631b320284f50973d4de32e774135aa",
     # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
     # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
     # that refusal: tan's `link_target.apply_link_target` (called at the end of
@@ -2477,7 +2490,21 @@ PINNED_HASHES: dict[str, str] = {
 #: so `_aen_som_power_dts` already renders them. `alp,dependents` now lists
 #: `"phy_refclk"` on the ethernet-PHY domain.
 #: `5a612e24` -> `1d20103b`: no hand-port source moved; hashes unchanged.
-HAND_PORT_PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-sdk origin/dev -- gen_zephyr_board.py #2795 pinctrl_som_power group ported; validator.py docstring-only
+#: AUDIT `84a6e0d21` -> `64481b8e9` (tan-cli#1525): one hand-port source moved.
+#: `scripts/gen_zephyr_board.py` (alp-sdk#2831) -- PORTED: `_load_aen_wired_lpgpio_pads`
+#: reads `wired_lpgpio_pads:` of `on-module-links.yaml` (refusing a pad outside
+#: P15_0..P15_7) and `_aen_som_power_dts` emits `alp,wired-lpgpio-pads = <..>;`
+#: (with a comment naming the nets) inside the `alp,som-power` node. The planner
+#: oracle re-captured byte-identical (it does not render the Zephyr board);
+#: `scaffold_byte_parity.py` 10/10 (no `templates/**`/`examples/**` change).
+#: AUDIT `64481b8e9` -> `7584a3562` (tan-cli#1541): no hand-port source moved;
+#: hashes unchanged. The range's new `scripts/*.py` (`bump_version.py`,
+#: `check_abidiff.py`, `check_version_doc_sync.py`) are SDK-only gates nothing in
+#: `tan/planner/` imports.
+#: AUDIT `7584a3562` -> `84132b98a` (alp-sdk `v0.17.0`, tan-cli#1258): no hand-port
+#: source moved; hashes unchanged. The range's two `scripts/*.py` edits
+#: (`check_cross_platform.py`, `select_aen_twister.py`) are SDK-only gates.
+HAND_PORT_PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no hand-port source moved
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2545,7 +2572,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "84a6e0d211d6cc7898e1c3827cfff9b43ed309c7"  # alp-
 #: is in `HAND_PORT_SOURCES` below; `test_hand_port_tan_side.py`'s
 #: `HAND_PORT_TAN_SIDE` is where their tan files are named.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "9aaf318ffd0d5e578318b371c4282fec86a6bd9c7a9e1662c9a0217d69ba3304",
+    "scripts/gen_zephyr_board.py": "d416fcabf1c737b7244918bafab2c570a73efe1de8bafd98ceab1ea7f94bbc3c",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",

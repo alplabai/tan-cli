@@ -164,11 +164,23 @@ containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU ma
 have not been reset` first triggers a read-only, non-halting DHCSR check in a fresh
 session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset:`
 or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
-"dhcsr"`, no issue code). Because J-Link's own reads usually clear it, a second non-halting
-witness also confirms: three `DWT_PCSR` (0xE000101C) PC samples that all fall inside the
-image just flashed (`resetConfirmedBy: "pcsr"`, `jlink.reset: "new-image-running"` -- PCSR proves the new code
-runs, not that the Secure Enclave pin reset took; the ranges are the PF_X LOAD segments of the
-app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+"dhcsr"`, no issue code). J-Link's own reads usually clear it, and `DWT_PCSR` (0xE000101C) PC samples inside the flashed image's range
+(the PF_X LOAD segments of the app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes) do **not**
+substitute: an image previously linked at the same slot0 address covers the same range and produces the same samples
+(tan-cli#1537). They only set `jlink.coreRunning` (and `bootProbe.pcsrInImageRange`); `jlink.reset` stays `unconfirmed`, and
+`new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted. What does confirm a boot (tan-cli#1539, `jlink.reset: "booted"`, `jlink.resetConfirmedBy:
+"uptime"`): the same non-halting probe session also reads the kernel tick counter `curr_tick` (a `uint64_t`) four times,
+600 ms apart, at the address the ELF being flashed (`<artefact>.elf`) gives it -- never a hardcoded one, and only inside a RAM
+LOAD segment in the slice core's own DTCM / E8 SRAM0, never HP ITCM `0x50000000`. The tick rate is the ELF's
+`CONFIG_SYS_CLOCK_TICKS_PER_SEC` symbol, else the `.config` beside it. tan takes a monotonic timestamp when the write session
+ends and another when the probe ends; the counter must rise across the reads and its last value, as seconds, must not exceed
+the time elapsed between those two timestamps plus 1 s of slack (the reset tail runs inside the write session, so the image
+boots just before the first timestamp). That proves the running image booted after the write ended (SysTick freezes while the core is halted for the write, so
+an image already running resumes with its pre-write uptime and passes only if that was under the 1 s slack); it does **not** prove the SE PIN reset took, so the value is
+`booted`, not `pin-reset`, and the message says "boot proven, PIN reset not". `bootProbe.uptime` records `symbol`, `address`,
+`ticks` (hex strings), `ticksPerSec` and `elapsedSinceWriteSeconds`. A counter that is flat (halted or gated), larger than the
+elapsed time, or all-ones, a missing / duplicated / unreadable symbol, or an unknown tick rate keeps `unconfirmed`, with no new
+failure. A sleeping app whose timer fires less often than the 1.8 s read window stays `unconfirmed`. `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
@@ -229,7 +241,7 @@ inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolu
 host/user (real-uid account) as the single `acquired:` holder, with the leased place's `swd` USB path equal to the selected probe's (`--probe-usb-path`). The wrapper and `labgrid-client` must be owned by root or you and not writable by others or by a shared group, along the symlink's own chain and the resolved target's. This guards against accidental writes; it is
 not a security boundary. The MRAM window is the SKU's own variant `mram_mb` at the SoC
 document's `soc_flash_base`; a SKU that does not resolve is refused. The envelope's
-`raw.writes[]` carries each blob's `sha256`, address and sector span;
+`raw.writes[]` carries each blob's absolute `path` (the file hashed and written), `sha256`, address and sector span;
 `raw.resetCommands` is `false` (no reset command is sent, but `loadbin` may halt the
 core). Power-cycle afterwards so the Secure Enclave boots the restored contents.
 

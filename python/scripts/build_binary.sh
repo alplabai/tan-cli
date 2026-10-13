@@ -129,6 +129,17 @@ case "${OS:-}" in Windows_NT) ADD_DATA_SEP=';' ;; esac
   --collect-data certifi \
   --paths . tan/__main__.py
 
+# Developer ID signing (tan-cli#1506), for a LOCAL signed build only: set
+# TAN_CODESIGN_IDENTITY yourself. release.yml deliberately does not use this
+# hook -- it imports the identity only after this script and its tests have
+# run, then signs and re-archives in a separate step, so no third-party code
+# runs while the keychain is unlocked. Unset (every other build), the onedir
+# keeps PyInstaller's ad-hoc signature. Must run BEFORE the archive below so
+# the tarball carries the signed bytes.
+if [ -n "${TAN_CODESIGN_IDENTITY:-}" ]; then
+  bash "$(dirname "$0")/macos_sign.sh" dist/tan "$(dirname "$0")/macos_entitlements.plist"
+fi
+
 # Archive the onedir folder into the actual release artefact -- one file, so
 # `checksums.txt`/the attestation/install.sh all still deal with a single
 # thing per target, matching the old raw-binary contract's shape even though

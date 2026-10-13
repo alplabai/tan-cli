@@ -82,6 +82,20 @@ else
   exit 2
 fi
 
+# tan-cli#1524: resolve the harness image through the registry mirrors, like
+# every other CI `docker run` of a library image (tan-cli#1471). A bare
+# `docker run ubuntu:24.04` pulls anonymously from Docker Hub and dies on
+# "toomanyrequests" on a shared runner.
+#
+# A locally cached or locally built image needs no registry, and a failed pull
+# (offline host, image no registry has) falls back to the bare ref rather than
+# aborting: `docker run` then reports the real error if it is truly absent.
+if $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
+  RUN_IMAGE=$IMAGE
+else
+  RUN_IMAGE=$(DOCKER="$DOCKER" bash "$HERE/ci/docker-pull.sh" "$IMAGE") || RUN_IMAGE=$IMAGE
+fi
+
 echo "=== isolated e2e: $IMAGE ==="
 echo "  frozen:  $MOUNT_SRC"
 echo "  harness: $HARNESS"
@@ -115,7 +129,7 @@ $DOCKER run --rm \
   -e "ZEPHYR_SDK_VERSION=${ZEPHYR_SDK_VERSION:-1.0.1}" \
   -e "ZEPHYR_SDK_INSTALL_TIMEOUT=${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}" \
   -e TAN_GITHUB_TOKEN \
-  "$IMAGE" bash -c '
+  "$RUN_IMAGE" bash -c '
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 bash /scripts/ci/apt-bounded.sh update -qq >/dev/null 2>&1

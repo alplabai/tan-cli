@@ -386,9 +386,9 @@ jobs:
   # require. After #1390 the Windows and both macOS legs exist only on
   # `merge_group`/push/dispatch, and no `freeze-and-smoke` context is required,
   # so a non-Linux freeze or smoke regression in a queued merge went red
-  # without blocking anything. Same shape as parity.yml's `python-tests`: a
-  # stub pass on `pull_request` (the context must report there for a PR to be
-  # enqueued at all), the real check everywhere else, where anything but
+  # without blocking anything. On `pull_request` the matrix holds only the
+  # Linux leg, and the real check below reads it (tan-cli#1524: a red Linux
+  # freeze used to show this required context green). Everywhere, anything but
   # `success` from the whole matrix -- a failed, cancelled or skipped leg, or a
   # `matrix-plan` that never produced one -- fails this job.
   freeze-and-smoke-all:
@@ -400,17 +400,7 @@ jobs:
     # in 5 minutes is stuck, not slow (same reasoning as python-tests).
     timeout-minutes: 5
     steps:
-      - name: stub pass (non-Linux legs skipped on pull_request; run in merge_group)
-        if: ${{ github.event_name == 'pull_request' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          msg="clean host (freeze): non-Linux legs skipped on pull_request; all legs run in merge_group"
-          echo "${msg}"
-          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
-
       - name: verify every freeze-and-smoke leg succeeded
-        if: ${{ github.event_name != 'pull_request' }}
         shell: bash
         env:
           PLAN_RESULT: ${{ needs.matrix-plan.result }}

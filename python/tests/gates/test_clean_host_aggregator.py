@@ -77,9 +77,11 @@ def test_the_aggregator_always_reports_under_its_required_name():
     assert "pull_request" in triggers and "merge_group" in triggers
 
 
-def test_the_stub_fires_on_pull_request_only_and_the_check_everywhere_else():
-    assert _step("stub pass")["if"] == "${{ github.event_name == 'pull_request' }}"
-    assert _step("verify every freeze-and-smoke leg")["if"] == "${{ github.event_name != 'pull_request' }}"
+def test_the_real_check_runs_on_every_event_including_pull_request():
+    # tan-cli#1524: a PR-wide stub never read the Linux leg that does run on a
+    # PR, so a red Linux freeze showed the required context green.
+    assert not [s for s in _aggregator()["steps"] if s.get("name", "").startswith("stub pass")]
+    assert "if" not in _step("verify every freeze-and-smoke leg")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash to execute the step body")

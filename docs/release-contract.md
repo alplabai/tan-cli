@@ -423,6 +423,83 @@ covered by the same attestation. The `release` job is the only job with
 `id-token: write` / `attestations: write` — every other job keeps the
 workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
+## macOS signing and notarization (tan-cli#1506)
+
+A freshly downloaded macOS asset that is only ad-hoc signed pays a 7.7-8.7 s
+first launch (Gatekeeper/XProtect inspect each of the ~54 bundled Mach-O
+files); later launches take ~0.21 s. `release.yml` therefore Developer ID signs
+and notarizes both darwin legs **when the secrets exist**. With any secret
+absent the step logs a `::notice::` (a `::warning::` when only some are set)
+and the asset stays ad-hoc signed, exactly as before; the release never fails
+for lack of them.
+
+**First signed run is on a tag.** `release.yml` runs only on `v*` tag pushes,
+so the first tag after the secrets are added is the first time import, sign
+and notarize execute, and any failure there withholds every asset and spends
+the tag. Add the secrets, then cut a throwaway pre-release tag (for example
+`v<next>-rc0`, deleted afterwards) to prove the path before a real one.
+
+The identity is imported only **after** the freeze-and-test step (pip,
+every locked dependency, PyInstaller, pytest), so no third-party code ever
+runs while the keychain is unlocked. A separate step then signs the onedir,
+rebuilds the archive with `/usr/bin/python3 -I` (stdlib only), re-checks the
+size ceiling and locks the keychain.
+
+The notary values reach only the notarize step (straight from `secrets.`);
+none is written to `GITHUB_ENV`. The `.p12` is deleted right after import, the
+`.p8` is decoded inside the notarize step and deleted on its exit, and the
+keychain is locked at the end of the sign step and deleted in an `if: always()` step.
+
+**Store the five secrets as environment secrets**, not repository secrets:
+Settings > Environments > `release-signing` (the `build` job names it), with
+deployment branches and tags limited to the tag rule `v*`. Repository secrets
+are readable by a workflow pushed on any branch; environment secrets reach
+only a `v*` tag run.
+
+**Prerequisite:** a paid Apple Developer Program account, a *Developer ID
+Application* certificate exported with its private key as `.p12`, and an App
+Store Connect API key (Users and Access > Integrations > Keys; Developer
+access suffices) for `notarytool`.
+
+| Repo secret | Content |
+|---|---|
+| `APPLE_DEVELOPER_ID_P12_BASE64` | `base64 -i cert.p12` of the Developer ID Application identity |
+| `APPLE_DEVELOPER_ID_P12_PASSWORD` | the `.p12` export password |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID |
+| `APPLE_NOTARY_ISSUER_ID` | issuer UUID shown on the Keys page |
+| `APPLE_NOTARY_KEY_P8_BASE64` | `base64 -i AuthKey_XXXX.p8` |
+
+How it works: the identity is imported into a throwaway keychain
+(deleted in an `if: always()` step); `build_binary.sh` signs every Mach-O under
+`dist/tan/` (nested code first, `tan` last, `--options runtime --timestamp`,
+entitlements `python/scripts/macos_entitlements.plist` on `tan` only) before
+the archive is made, so the tarball carries signed bytes;
+`scripts/macos_notarize.sh` then submits a zip of the same tree with
+`notarytool submit --wait` and fails the leg unless the status is `Accepted`.
+`test_packaged_binary.py` runs against the signed binary, so a hardened-runtime
+start failure fails the leg. The entitlement set is deliberately minimal
+(`allow-unsigned-executable-memory` only); widen it only on evidence.
+
+**No stapling.** A ticket cannot be stapled to a bare tarball or Mach-O. The
+notarization still takes effect through Gatekeeper's online ticket lookup by
+code-directory hash; an offline first launch can still take the slow path.
+
+**Measuring quarantine cost** (run on macOS, on a fresh copy each time, never
+a copy that has already launched once):
+
+```
+d=$(mktemp -d) && tar -xzf tan-aarch64-apple-darwin.tar.gz -C "$d"
+xattr -w com.apple.quarantine "0083;5f000000;curl;" "$d/tan"   # quarantined
+time "$d/tan/tan" --version
+d2=$(mktemp -d) && tar -xzf tan-aarch64-apple-darwin.tar.gz -C "$d2"
+xattr -dr com.apple.quarantine "$d2"                           # stripped
+time "$d2/tan/tan" --version
+```
+
+`tar` does not itself add the flag, hence the explicit `xattr -w`. Compare the
+first-launch time of the signed+notarized asset against the ad-hoc one; the
+issue closes only once that measurement exists.
+
 ## alp-sdk must be released BEFORE (or with) the tan tag that requires it
 
 **Check this before every tag.** `tan/planner/` is a hash-audited mirror of
@@ -535,6 +612,23 @@ user sees first: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an
 ancestor of `7d58ef32`, so every checkout with the field already has the
 region.
 
+**CLEARED for a stable tag on 2026-10-13.** alp-sdk `v0.17.0`
+(`84132b98a53a9f0e5ef9e7622a38c6d637439873`) is `releases/latest` and contains
+the floor `4b206c8a60d56af318741491a6fecdc499dfcd36` (`compare/4b206c8a...v0.17.0`
+reports `status=ahead`; against `v0.16.0` it reports `behind`). tan's pins moved
+from `7584a3562e9e5b9c09c86ada233cac42d2103b14` (an ancestor of `v0.17.0`,
+`ahead_by=15`, `behind_by=0`) to the `v0.17.0` tag commit itself.
+`planner_resync.py --to 84132b98` reported up to date; the planner oracle was
+recaptured and only `sdkVersion` changed (`0.17.0-rc2` -> `0.17.0`, all 103
+build-plan emits); the vendored scaffold's doc links were re-vendored from
+`v0.17.0-rc2` to `v0.17.0` (19 files). Measured against the `v0.17.0` checkout:
+`kconfig_fixture_parity.py`, `toolchain_lock_parity.py` and
+`scaffold_byte_parity.py` (10/10 pairs) exit 0, and with `ALP_SDK_ROOT` bound
+to it `tests/parity/test_planner_emit_parity.py` (the guard and the breadth
+node included) passed with 0 failures. The table and the "Done when" list
+below are the pre-release record; `v0.17.0` resolves every **NO** row in it.
+The text below is the record of how the gate stood before that release.
+
 **NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
 cleared separately; see "Pre-release cut" below. The planner mirror, the
 vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
@@ -635,14 +729,15 @@ and the planner module has 1860 passed, 0 failed.
   no longer planned or buildable, `tan explain --template` publishes
   `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant` no longer
   offers `u65`. This is one of the `BREAKING` entries in `CHANGELOG.md`'s
-  `## [0.7.0]` preamble; no NX9101 leg exists in the tag-time matrix any more.
+  `## [0.7.0-rc1]` preamble (carried into `## [0.7.0]` at GA); no NX9101 leg
+  exists in the tag-time matrix any more.
 - **Renumbered `0.6.1` -> `0.7.0` (maintainer, 2026-09-19).** Pre-1.0 SemVer
   puts a break in the minor: the floor breaks a v0.6.0 consumer's `tan build`
   on *any* Zephyr board (Kconfig configure aborts on the undefined
   `ALP_SDK_SOM_HW_REV` symbol; `b3775381`, alp-sdk#1862, is an ancestor of the
   floor), not only AEN/V2N/V2M's `tan generate --target zephyr-board`. That is
-  one of several `BREAKING` entries; `CHANGELOG.md`'s `## [0.7.0]` preamble
-  names every one.
+  one of several `BREAKING` entries; `CHANGELOG.md`'s `## [0.7.0-rc1]` preamble
+  (carried into `## [0.7.0]` at GA) names every one.
 
 Done when:
 
@@ -654,9 +749,8 @@ Done when:
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
 - the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
-  did for `v0.16.0`, naming the real tag in place of the `v0.17.0` (stable
-  release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0]`
-  preamble carries today (tan-cli#1258).
+  did for `v0.16.0` (tan-cli#1258). Done for `0.7.0`: `## [0.7.0]` names
+  `v0.17.0`.
 
 ## Decisions
 

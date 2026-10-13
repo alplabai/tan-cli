@@ -1418,7 +1418,7 @@ def _emit_inference(
     # Look up this slice's core in the SoC spec; pick exactly one of
     # NEON / HELIUM / REF based on the vector_extension field.  Defaults
     # to REF when the SoC JSON is silent (paper-correct on the scalar
-    # M33s -- iMX 93 m33, V2N m33_sm).
+    # M33s -- V2N m33_sm).
     #
     # `c.get("type")` is UNVALIDATED against `soc-spec-v1.schema.json`'s own
     # `"type": {"type": "string"}` -- the identical gap `presets_cmd.

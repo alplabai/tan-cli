@@ -95,9 +95,30 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`84a6e0d21`**
+- **Current vendor point (all templates):** **`84132b98a`**
+  (`84132b98a53a9f0e5ef9e7622a38c6d637439873`, alp-sdk tag `v0.17.0`) — the stable release
+  merge, for tan `0.7.0` (tan-cli#1258). Re-vendored links only: the emit's doc-link renderer
+  now renders `blob|tree/v0.17.0/`, so every vendored `v0.17.0-rc2` link (19 files) plus the
+  matching `DELIBERATE_EDITS` strings in `scaffold_byte_parity.py` moved to `v0.17.0`. No other
+  byte changed. `scaffold_byte_parity.py --sdk <v0.17.0>` is rc 0, **10/10**; before the swap,
+  10/10 FAIL. The pin moved in the same change as every other pin site.
+
+- **Prior vendor point (all templates):** **`84a6e0d21`**
   (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, alp-sdk tag `v0.17.0-rc2`) — the release merge of `dev` at
   `1d20103ba` (tree-identical to it except the release bump). See the note below.
+
+  The `84a6e0d21` -> `64481b8e9` planner re-sync (tan-cli#1525) moves ONE scaffold input:
+  alp-sdk#2826 (`b874b1334`, warm-aware CC3501E bring-up in every `cc3501e_bridge` copy, #2797)
+  rewrote `examples/aen/aen-cc3501e-*/src/cc3501e_bridge.c`, which the `iot` scaffold ships as
+  `iot/E1M-AEN801/src/cc3501e_bridge.c`. That one file was re-vendored byte-for-byte from the emit
+  (the bytes are the only change; the vendor-point label above is unchanged because the rest of the
+  tree is identical at both commits), and
+  `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
+  The `64481b8e9` -> `7584a3562` planner re-sync (tan-cli#1541) moves no scaffold input. Its
+  `examples/**` edits (`aen-power-stop`, `aen-trace-runner`, `aen-hp-core-smoke`) are not templates
+  or catalog entries, so nothing was re-vendored and the label above is unchanged.
+  `scaffold_byte_parity.py --sdk <7584a3562 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
 
 - **Prior vendor point (all templates):** **`1d20103ba`**
   (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
@@ -676,7 +697,7 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.17.0-rc2` — the ref every shipped doc link in this tree pins, and the
+- Ref: `v0.17.0` — the ref every shipped doc link in this tree pins, and the
   one `tests/core/test_template_integrity.py` reads off THIS line to check
   them against. It is the emit's OWN rendered ref rather than a hand-edit:
   the emit renders the link ref from the SDK's `VERSION` (dropping any
@@ -690,8 +711,8 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`84a6e0d21`** (alp-sdk tag `v0.17.0-rc2`, full sha
-  `84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`) — the checkout the emit was RUN
+- Commit: **`84132b98a`** (alp-sdk tag `v0.17.0`, full sha
+  `84132b98a53a9f0e5ef9e7622a38c6d637439873`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::

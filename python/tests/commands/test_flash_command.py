@@ -1677,6 +1677,7 @@ def _flow_d_run(
     spawned: list | None = None,
     atoc_unqueryable: bool = False,
     probe_kwargs: dict | None = None,
+    output_artefact: str = "a.bin",
 ):
     """A confirmed, real Flow D write with every spawn stubbed.
 
@@ -1701,12 +1702,12 @@ def _flow_d_run(
     manifest = """schema_version: 1
 hw_info: {sku: S}
 slices:
-- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,
+- {core_id: m55_hp, os: zephyr, output_artefact: OUTPUT_ARTEFACT, status: ok,
    flash_method: alif_mram_jlink,
    flash_args: FLASH_ARGS}
 helper_mcus: []
 boot_order: []
-""".replace("FLASH_ARGS", flash_args)
+""".replace("FLASH_ARGS", flash_args).replace("OUTPUT_ARTEFACT", output_artefact)
     (tmp_path / "build" / "system-manifest.yaml").write_text(
         manifest, encoding="utf-8", newline=""
     )

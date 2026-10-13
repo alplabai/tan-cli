@@ -2043,8 +2043,6 @@ def test_a_missing_zephyr_sdk_is_named_not_left_as_a_bare_exit_code(tmp_path):
     Asserts the CODE and the REMEDY, not merely that the slice failed -- a
     failure with the old bare message would satisfy any weaker check.
     """
-    from tan.commands.doctor_cmd import zephyr_sdk_install_command
-
     # `backend="baremetal"`: this drives the failure-message path, not Zephyr's
     # own artefact guard (tan-cli#309), which would otherwise decide the status
     # for a `zephyr` slice before the message is built.
@@ -2075,7 +2073,8 @@ def test_a_missing_zephyr_sdk_is_named_not_left_as_a_bare_exit_code(tmp_path):
     assert out[0].exit_code == 1
     message = out[0].message or ""
     assert "Zephyr SDK" in message, message
-    assert zephyr_sdk_install_command() in message, message
+    assert "`tan bootstrap`" in message, message
+    assert "-t arm-zephyr-eabi" not in message, message  # tan-cli#1520
     assert "doctor --build" in message, message
 
 
