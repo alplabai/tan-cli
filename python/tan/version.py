@@ -94,4 +94,9 @@
 # promises neither that release nor that pre-release number, only that both
 # sort above it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.0] —
 # Unreleased`, per `release_target()`.
-TAN_VERSION = "0.7.0-rc2.dev0"
+#
+# 0.7.0 RELEASE BUMP (2026-10-13). alp-sdk `v0.17.0` is the first stable
+# release containing the floor (tan-cli#1258), so the `.dev0` tail comes off:
+# this tree is what `v0.7.0` will name, and `## [0.7.0]` is dated in the same
+# change, with the 20 post-rc1 `changelog.d/` fragments folded into it.
+TAN_VERSION = "0.7.0"

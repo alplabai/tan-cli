@@ -5,13 +5,192 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.7.0] — Unreleased
+## [0.7.0] — 2026-10-13
+
+*`v0.7.0-rc1` (2026-10-10) was published as a GitHub **pre-release**, so
+`install.sh`/`install.ps1` never resolved it and nothing upgraded onto it —
+`v0.6.0` remained the release a default install produced. Everything in the
+`## [0.7.0-rc1]` section below therefore ships to users for the first time
+**with this release**, together with everything in this section. This section
+alone carries the post-rc1 delta, because `release.yml` slices the release
+body by an exact `^## \[0.7.0\]` match and stops at the next `## [` header.*
+
+**BREAKING: this release ships changes that break a v0.6.0
+consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
+patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
+exact before/after:
+
+- tan's effective alp-sdk floor rises to the first alp-sdk release
+  containing commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (alp-sdk#2685:
+  the SoC spec's `openamp_carveout` block, which `tan generate --target
+  zephyr-board` reads for a V2N/V2M `m33_sm` core; the floors it replaced,
+  `81a9d515a` through `ac0e2a5e0`, were each an ancestor of the next); `tan build`
+  on *any* Zephyr board against an older alp-sdk fails Kconfig configure
+  (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
+  and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
+  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
+- tan reads and scaffolds som-preset schema v2 only (alp-sdk#2024): against
+  an alp-sdk older than the floor above, `tan presets` lists no SoMs (now
+  with a `presets.som-schema-version-skipped` warning), `tan size` reports
+  every budget unknown, and `tan new-som` cannot find
+  `som-preset-v2.schema.json` (tan-cli#1297)
+- a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
+  `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
+  that it replaces the whole ATOC (tan-cli#1252)
+- `tan bootstrap` installs the `arm-zephyr-eabi` toolchain by default as a
+  blocking phase; `--no-toolchain` opts out (#474)
+- `tan doctor` gains a `toolchain` check that can `fail` (exit 4,
+  `doctor.toolchain`) on a host that passed before (#474)
+- `tan build --plan` / `--manifest` / `--manifest-from` /
+  `--no-auto-bootstrap` now refuse with `build.flag-retired` (exit 2)
+  instead of `cli.command-deferred` (exit 1) (#427)
+- `tan validate` / `tan diff` hw_rev refusals move off the generic
+  `validate.failed` / `diff.failed` onto
+  `validate.hardware-revision-unknown` / `-not-buildable` (and the `diff.`
+  equivalents) (#1262)
+- `tan presets` / `tan clean` / `tan diff` / `tan lock` / `tan migrate` /
+  `tan quality` / `tan examples` / `tan generate` / `tan bootstrap` / `tan
+  new-som` / `tan explain --code` now prepend (or, for `tan generate`'s
+  resolvable path, reorder to prepend; or, for `tan diff`'s previously-silent
+  nothing-resolved case, newly emit at all) `sdk.project-pin-unresolved`
+  ahead of the command's own refusal in `issues[]`, so a consumer keyed on
+  `issues[0]` sees a different code (`generate`'s is what alp-sdk-vscode's
+  toast reads, `src/alpCli/service.ts:1310`)
+- `tan validate --format sarif` / `--format diagnostic-v1` now emit a
+  `file:` URI, or a percent-encoded relative reference, instead of a raw
+  host path for `uri` / `artifactLocation.uri` (#1097)
+- the `swd_probe` flash backend is removed; a manifest declaring it now
+  refuses with `flash.entry-failed` (tan-cli#732; safe to land now that
+  alp-sdk#1439 stopped emitting `flash_method: swd_probe`)
+- generated firmware config composes `ALP_HW_BUILD_SOM_HW_REV` as
+  `"2626-r2"` rather than the bare `"r2"` for families that declare a
+  `board_datecode` (#1156)
+- `tan init` refuses several `--som` / SoM inputs that used to silently
+  succeed: `init.som-flow-style-unsupported` (#1035) and
+  `init.som-block-unsupported` (#1041)
+- E1M-NX9101 (i.MX 93) is removed from tan: alp-sdk dropped the module
+  (alp-sdk#2781, #2782; it was never produced) and tan no longer carries its
+  SoM family row, buildability and scaffold arms, `pinmux` / model-zoo rows
+  or `rpmsg-imx93` fixtures, so a `board.yaml` or `--som` argument naming
+  `E1M-NX9101` is no longer planned or buildable; `tan explain --template`
+  publishes `initRefusesSkuPrefixes: []`, and `tan new-som --ethos-u-variant`
+  no longer offers `u65` (tan-cli#1425)
+
+*This release requires alp-sdk **`v0.17.0`** or newer, the first stable
+alp-sdk release containing the floor commit
+`4b206c8a60d56af318741491a6fecdc499dfcd36` (alp-sdk#2793, the AEN SoM
+`power_domains:` block, alp-sdk#2784), which descends from the earlier floor
+`b04bb0f7a0edf6af759053311ba66eda0158968b`. The previous stable release,
+`v0.16.0`, does not contain it (see the `## [0.7.0-rc1]` preamble for what it
+lacks). tan's planner mirror, vendored scaffold and planner oracle are pinned
+to alp-sdk `7584a3562e9e5b9c09c86ada233cac42d2103b14`, an ancestor of
+`v0.17.0` (`84132b98a53a9f0e5ef9e7622a38c6d637439873`) with no planner or
+hand-port source changed between them (`planner_resync.py`: up to date,
+tan-cli#1258).*
 
 ### Fixed
 
-- `TAN_VERSION` moved to `0.7.0-rc2.dev0` off the published `v0.7.0-rc1` tag
-  (tan-cli#770's automated post-release bump).
+- **The packaged-binary `--onedir` startup gate no longer fails a release on a
+  cold first launch.** `test_version_probe_stays_within_the_onedir_budget`
+  timed a single `--version` run, so on a freshly unpacked macOS bundle it also
+  paid the one-time dylib verification cost (tan-cli#1506). The `v0.7.0-rc1`
+  tag's `macos-15-intel` build measured 1.20 s and then 0.83 s against the
+  0.6 s budget and withheld every asset. The gate now makes one untimed
+  warm-up launch and takes the best of three. A `--onefile` regression
+  re-extracts on every launch, so it still fails.
 
+- **`tan flash` signs one ATOC for several `alif_mram_jlink` slices.** A manifest with two Flow D slices (`m55_he` and `m55_hp`) used to sign one ATOC per slice at the same package address, so the second write delisted the first core. One run now signs a single ATOC naming `DEVICE` and every slice, writes each app to its slot0, then the package once; `--core` still writes one entry and its preview names the other slice(s) as delisted. (#1509) Slices are grouped only when `jlink_flash_device`, `jlink_serial`, `jlink_device` and `expect_dpidr` agree; `confirm`, `resident_atoc_entries`, `setools_device_config`, `atoc_unqueryable` and `setools_dir` must match the lead slice's or the entry is refused. Each folded slice gets its own `entries[]` row. A placeholder or missing artefact on any grouped slice fails the whole combined entry (fail-closed).
+
+- **`tan flash --raw` writes the file it hashed when the blob path is relative.** The size, sha256 and range check read the path against tan's cwd while J-Link runs with cwd set to the west topdir, so a same-named older file there could be loaded and verified instead. The path is now made absolute before it is read and before it goes into the Commander script. `raw.writes[].path` in the JSON envelope therefore now holds that absolute path (the one hashed and written), not the path as typed.
+
+- **The Flow D slot0 link-address guard no longer passes a swapped-in `.bin` when the manifest names the ELF.** Only the `.bin`-artefact form checked for a `.bin` far newer than its ELF, yet the refusal recommends passing the ELF. An ELF artefact whose sibling `.bin` (the file `loadbin` writes) is more than 60 s newer is now refused too.
+
+- **`tan monitor --capture --until` no longer reports a false timeout when the matching line arrives in the same read as an earlier line at the deadline.**
+  A multi-line read returned at or after `--duration` was logged whole, but the capture gave up after its first line, so `--until` (and any `--on` / `--send-on` trigger) never saw the later lines and the run exited as a timeout with the match already in `--log`.
+  A read that returns at or after the deadline is now searched line by line to its end; scanning that itself overruns the deadline still stops, and then only the lines already searched are logged (tan-cli#1515).
+
+- **`tan clean` no longer deletes another project's build output when a project was copied or renamed.**
+  `tan build` records each slice `build_dir` in `build/system-manifest.yaml` as an absolute path.
+  After `cp -R projA projB`, `tan clean` in `projB` read that copied manifest, which still named `projA/build/...`, and removed `projA`'s slice build tree with exit 0 and no issues.
+  `tan clean` now refuses any slice dir that lies inside another project's tree: the nearest ancestor holding a `board.yaml` is not this project, checked both as spelled and with symlinks resolved.
+  It reports the refusal as `clean.unsafe-target`, names that project, and still cleans this project's own build root (tan-cli#1516).
+  Out-of-tree slice dirs outside any project, such as a Yocto tmp dir, stay removable, and so do dirs in this project's own `--board-yaml` directory.
+  A dir inside an enclosing parent project (a nested example's slice under its repo's tree) now counts as another project's, and is refused.
+
+- **A failed `tan build --board` system-manifest write now reaches the envelope.**
+  The plain route got its own manifest writer in tan-cli#1381, but the #1361
+  suppression of `build.manifest-write-failed` stayed, so an unwritable
+  `system-manifest.yaml` reported `ok: true, issues: []` while the file kept the
+  previous run's status and flash recipe for `tan flash`/`size`/`image` to
+  consume (tan-cli#1517). The warning is now raised on both routes.
+
+- **`tan model run --device` and `ab --device` text output no longer labels a measured on-device number as a host reference.**
+  Text mode sent every run through the host renderer, so a device row printed `median ... over N runs, output argmax None` and `host reference only -- not SoM performance`.
+  The text now says the figure was measured on the device, names the latency scope, and shows peak SRAM and energy when present (tan-cli#1518).
+
+- **`tan model check --exact` reports the variant and op table of the target that actually won.**
+  When a non-headline `ethos_u` target of another variant won (a u55 on a u85-headline SKU), the report kept the headline's `variant` and table, so u55 figures appeared under an Ethos-U85 header.
+  The winning target is now re-screened against its own variant's table (tan-cli#1519).
+
+- **`tan bootstrap`, `tan doctor` and `tan build` no longer send users to the unchecked toolchain install, and `tan doctor` no longer reports a hand-installed toolchain as a clean pass.**
+  When `west sdk install` failed all retries, the `toolchain-install` warning prescribed a hand-run `west sdk install -t arm-zephyr-eabi`, whose setup.sh downloads the toolchain archive with no integrity check, skipping the alp-sdk sha256 pin.
+  That warning, the `zephyrSdk` doctor check and fix, and the missing-SDK `tan build` failure message now say to run `tan bootstrap`, which verifies the archive (a deliberate divergence from the Rust oracle).
+  The `toolchain` doctor check's host-adoption pass (a toolchain found outside tan's store, matched on its `sdk_version` file) now carries the same "never compared with the pin" caveat as the stamped-store pass (tan-cli#1520).
+
+- **Three low-severity refusals in `build`, `clean` and `image` now say the
+  right thing (tan-cli#1521).** `tan build --board <t> --sdk-root /typo` names
+  the rejected path instead of claiming the whole discovery ladder was
+  searched. `tan clean --build-root build`, where `build` is the build
+  directory itself, refuses with `clean.unsafe-build-root` instead of
+  silently removing nothing and exiting 0. `tan image` removes the previous
+  `bundle-manifest.json` before pruning its archives, so a run that fails
+  mid-assembly no longer leaves a manifest naming deleted or re-hashed archives.
+
+- **Four `tan model` edge cases are closed.**
+  `ab --device` now warns with `model.device-ab-scope-mismatch` when the two sides' latencies have different scopes, since `faster` is then not like-for-like.
+  A live `ab --device` runs both projects' preflight before the first RAM-run, so an unbuilt B refuses before A resets the board.
+  `run --device --against-project` is refused instead of silently ignored.
+  `model prep` counts each image of a batched calibration `.npy` as a sample, for the minimum-samples floor and the per-image top-1 agreement (tan-cli#1522).
+
+- **Low-severity message and preflight fixes in `tan validate`, `tan bootstrap`, `tan doctor` and `tan diff`.**
+  `tan validate` no longer calls an older bound alp-sdk "newer" with "rules added since not applied"; it orders the checkout against the audited commit with git (resolved through PATH, never a bare `git`), says the built-in validator may reject a board an older SDK accepts, and uses neutral wording when the order cannot be determined, including a checkout at the audited commit with modified sources.
+  The Windows 7-Zip preflight in `tan bootstrap` and the `sevenZip` doctor check now share the predicate tan's own `.7z` extractor uses, so a host with only `unar`, or a `7z.exe` only in the current directory, is refused before the download and flagged by doctor.
+  `tan diff` no longer reports "board.yaml is not valid: the SDK's own validator rejects it" when tan's built-in validator itself crashed (it says the board could not be checked, keyed on a structured flag), names tan's validator when it ran, and appends the version-skew caveat to a rejection.
+  `tan diff` still does not emit `validate.sdk-validator-newer` as a separate issue on a clean verdict (tan-cli#1523).
+
+- **CI gate gaps closed.** `version_check` no longer counts `bump_dev_version`'s automated `TAN_VERSION moved to ...` bullet as content for a stable tag's `CHANGELOG.md` section, so `v0.7.0` cannot publish with only that bullet and no BREAKING preamble; `docs/release-contract.md` now points at the `## [0.7.0-rc1]` preamble that GA must carry over. The `clean host (freeze): all legs` aggregator now reads the Linux leg's result on `pull_request` instead of stub-passing, and `scripts/e2e-container.sh` pulls its harness image through `scripts/ci/docker-pull.sh` (tan-cli#1524). A stable tag now also refuses a section that still carries the bot bullet, and `scripts/e2e-container.sh` uses a locally cached image and falls back to the bare ref instead of aborting when the mirrors cannot serve it.
+
+- **The planner re-sync to alp-sdk `64481b8e` is now fully ported, not just re-pinned.**
+  `tan/planner/` now emits the E1M CAN to Linux netdev map and the disabled-channel nodes for the V2N Linux fragment (alp-sdk#2352), and the AEN `alp,wired-lpgpio-pads` property on the `alp,som-power` node, built from `wired_lpgpio_pads:` in `on-module-links.yaml` (alp-sdk#2831).
+  The freshness pins, `ci.yml`, `parity.yml` and the planner oracle provenance all moved to `64481b8e` together (tan-cli#1525).
+
+- **`tan flash` (Flow D) no longer reports `reset: new-image-running` on evidence the replaced image also satisfies.**
+  After a Flow D write whose J-Link transcript carried reset failures (`Failed to halt CPU`, `CPU is not halted`, `Reset: Failed`), the boot probe accepted PC samples (`DWT_PCSR`) inside the new image's range as proof the new image ran.
+  An image previously linked at the same slot0 address covers the same range, so the old image produced the same result even when the reset never took.
+  In-range PC samples now only set `jlink.coreRunning` (and `jlink.bootProbe.pcsrInImageRange`): `jlink.reset` stays `unconfirmed`, `flash.jlink-reset-unconfirmed` is raised, and `new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted.
+  A DHCSR `S_RESET_ST` read without halting still confirms the reset (`resetConfirmedBy: "dhcsr"`).
+  Telling old from new by PC would need a pre-write read of slot0, so tan drops the claim instead (tan-cli#1537).
+  **Expect the info issue on healthy flashes:** J-Link's own reads usually clear `S_RESET_ST`, so a successful Flow D flash of an app that sleeps (WFI/STOP) will now usually carry the info-level `flash.jlink-reset-unconfirmed`. `ok` and the exit code are unchanged. A sound new-image witness is tracked in tan-cli#1539.
+
+### Added
+
+- **`tan flash` (Flow D) can prove a healthy flash of a sleeping app booted, via the kernel uptime.**
+  When the post-write halt fails and `DHCSR` `S_RESET_ST` is gone, the existing non-halting boot-probe session now also reads Zephyr's `curr_tick` four times, 600 ms apart, at the address the flashed ELF gives it (never hardcoded; DTCM / SRAM0 of the slice core only, never HP ITCM).
+  tan timestamps the end of the write session and of the probe; a rising counter whose last uptime does not exceed the time elapsed between them (plus 1 s slack) proves the image booted after the write, which an image already running before it cannot satisfy.
+  This proves a boot, not that the SE PIN reset took: `jlink.reset: "booted"`, `jlink.resetConfirmedBy: "uptime"`, evidence in `jlink.bootProbe.uptime`, message "boot proven, PIN reset not", and no `flash.jlink-reset-unconfirmed`.
+  A missing, duplicated or unreadable symbol, a flat or too-large counter, or an unknown tick rate (`CONFIG_SYS_CLOCK_TICKS_PER_SEC` from the ELF, else the `.config` beside it) keeps today's honest `unconfirmed`; nothing new can fail the flash (tan-cli#1539).
+  A bench check on an AEN app that sleeps is still owed.
+
+### Changed
+
+- **`tan --version` and `tan <cmd> --help` no longer import every command module.**
+  `tan.cli` imported all 31 command modules at module scope, so every invocation paid ~0.14 s for modules it never used, and alp-sdk-vscode shells `tan` for every action.
+  Commands are now built on first lookup from `tan.command_table.COMMAND_TABLE`, whose loaders are plain function-local `from tan.commands.x_cmd import x` statements so PyInstaller still sees every command module.
+  `--help`, the `--format json` help envelope, and error output are byte-unchanged; whole-tree walks (`tan --help`, `--format` domain checks) still load every command (tan-cli#1505).
+
+- **The macOS release assets are Developer ID signed and notarized when the Apple secrets are configured.** A fresh `tan-*-apple-darwin` asset that is only ad-hoc signed takes 7.7-8.7 s to launch the first time because Gatekeeper inspects each bundled Mach-O (tan-cli#1506). `release.yml` now signs every Mach-O in the onedir before archiving and submits it to `notarytool`; with the five `APPLE_*` secrets absent it logs a notice and ships ad-hoc signed as before. Notarization is not stapled (a bare tarball cannot be), so it takes effect via Gatekeeper's online lookup. Required secrets and the measurement recipe are in `docs/release-contract.md`.
+
+- Planner re-synced to alp-sdk `7584a356`. The range carries no behavioural planner change: `buildplan.py` gains only upstream's docstring rewording of the retired `tan renode` reference (alp-sdk#2838). The planner oracle re-captured byte-identical, `scaffold_byte_parity.py` stays 10/10 with no re-vendoring, and every pin site moved together (tan-cli#1541).
 ## [0.7.0-rc1] — 2026-10-10
 
 **BREAKING: this release ships changes that break a v0.6.0

@@ -612,6 +612,15 @@ user sees first: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an
 ancestor of `7d58ef32`, so every checkout with the field already has the
 region.
 
+**CLEARED for a stable tag on 2026-10-13.** alp-sdk `v0.17.0`
+(`84132b98a53a9f0e5ef9e7622a38c6d637439873`) is `releases/latest` and contains
+the floor `4b206c8a60d56af318741491a6fecdc499dfcd36` (`compare/4b206c8a...v0.17.0`
+reports `status=ahead`; against `v0.16.0` it reports `behind`). tan's pins sit
+at `7584a3562e9e5b9c09c86ada233cac42d2103b14`, an ancestor of `v0.17.0`
+(`ahead_by=15`, `behind_by=0`), and `planner_resync.py --to 84132b98` reports
+up to date, so `0.7.0` ships with the pins where the last re-sync left them.
+The text below is the record of how the gate stood before that release.
+
 **NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
 cleared separately; see "Pre-release cut" below. The planner mirror, the
 vendored scaffold point and the frozen planner oracle are pinned at alp-sdk
@@ -731,7 +740,7 @@ Done when:
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
-- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
+- (DONE for `0.7.0`, which names `v0.17.0`) the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
   did for `v0.16.0`, naming the real tag in place of the `v0.17.0` (stable
   release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0-rc1]`
   preamble (to be carried into `## [0.7.0]`) carries today (tan-cli#1258).
