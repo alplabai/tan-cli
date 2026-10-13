@@ -623,7 +623,10 @@ recaptured and only `sdkVersion` changed (`0.17.0-rc2` -> `0.17.0`, all 103
 build-plan emits); the vendored scaffold's doc links were re-vendored from
 `v0.17.0-rc2` to `v0.17.0` (19 files). Measured against the `v0.17.0` checkout:
 `kconfig_fixture_parity.py`, `toolchain_lock_parity.py` and
-`scaffold_byte_parity.py` (10/10 pairs) exit 0.
+`scaffold_byte_parity.py` (10/10 pairs) exit 0, and with `ALP_SDK_ROOT` bound
+to it `tests/parity/test_planner_emit_parity.py` (the guard and the breadth
+node included) passed with 0 failures. The table and the "Done when" list
+below are the pre-release record; `v0.17.0` resolves every **NO** row in it.
 The text below is the record of how the gate stood before that release.
 
 **NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is
@@ -745,10 +748,9 @@ Done when:
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
-- (DONE for `0.7.0`, which names `v0.17.0`) the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
-  did for `v0.16.0`, naming the real tag in place of the `v0.17.0` (stable
-  release pending, alp-sdk#2047) placeholder `CHANGELOG.md`'s `## [0.7.0-rc1]`
-  preamble (to be carried into `## [0.7.0]`) carries today (tan-cli#1258).
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s
+  did for `v0.16.0` (tan-cli#1258). Done for `0.7.0`: `## [0.7.0]` names
+  `v0.17.0`.
 
 ## Decisions
 

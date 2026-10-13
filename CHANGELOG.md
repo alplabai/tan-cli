@@ -10,21 +10,24 @@ All notable changes to `tan` are documented here. Format follows
 *`v0.7.0-rc1` (2026-10-10) was published as a GitHub **pre-release**, so
 `install.sh`/`install.ps1` never resolved it and nothing upgraded onto it —
 `v0.6.0` remained the release a default install produced. Everything in the
-`## [0.7.0-rc1]` section below therefore ships to users for the first time
-**with this release**, together with everything in this section. This section
-alone carries the post-rc1 delta, because `release.yml` slices the release
-body by an exact `^## \[0.7.0\]` match and stops at the next `## [` header.*
+[`0.7.0-rc1` section of CHANGELOG.md](https://github.com/alplabai/tan-cli/blob/v0.7.0/CHANGELOG.md#070-rc1--2026-10-10) therefore ships to users for the
+first time **with this release**, together with everything in this section.
+This section repeats the rc1 BREAKING summary below and otherwise carries only
+the post-rc1 delta, because `release.yml` slices the release body by an exact
+`^## \[0.7.0\]` match and stops at the next `## [` header.*
 
 **BREAKING: this release ships changes that break a v0.6.0
 consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
-patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
-exact before/after:
+patch (`0.6.1`) — see the matching `BREAKING` entry in the
+[`0.7.0-rc1` section](https://github.com/alplabai/tan-cli/blob/v0.7.0/CHANGELOG.md#070-rc1--2026-10-10) for each one's exact before/after:
 
-- tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (alp-sdk#2685:
-  the SoC spec's `openamp_carveout` block, which `tan generate --target
-  zephyr-board` reads for a V2N/V2M `m33_sm` core; the floors it replaced,
-  `81a9d515a` through `ac0e2a5e0`, were each an ancestor of the next); `tan build`
+- tan's effective alp-sdk floor rises to alp-sdk `v0.17.0`, the first release
+  containing commit `4b206c8a60d56af318741491a6fecdc499dfcd36` (alp-sdk#2793:
+  the AEN SoM `power_domains:` block), which descends from
+  `b04bb0f7a0edf6af759053311ba66eda0158968b` (alp-sdk#2685: the SoC spec's
+  `openamp_carveout` block, which `tan generate --target zephyr-board` reads
+  for a V2N/V2M `m33_sm` core; the floors before it, `81a9d515a` through
+  `ac0e2a5e0`, were each an ancestor of the next); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
   (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
   and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
@@ -191,6 +194,7 @@ links now point at `v0.17.0` instead of `v0.17.0-rc2` (tan-cli#1258).*
 - **The macOS release assets are Developer ID signed and notarized when the Apple secrets are configured.** A fresh `tan-*-apple-darwin` asset that is only ad-hoc signed takes 7.7-8.7 s to launch the first time because Gatekeeper inspects each bundled Mach-O (tan-cli#1506). `release.yml` now signs every Mach-O in the onedir before archiving and submits it to `notarytool`; with the five `APPLE_*` secrets absent it logs a notice and ships ad-hoc signed as before. Notarization is not stapled (a bare tarball cannot be), so it takes effect via Gatekeeper's online lookup. Required secrets and the measurement recipe are in `docs/release-contract.md`.
 
 - Planner re-synced to alp-sdk `7584a356`. The range carries no behavioural planner change: `buildplan.py` gains only upstream's docstring rewording of the retired `tan renode` reference (alp-sdk#2838). The planner oracle re-captured byte-identical, `scaffold_byte_parity.py` stays 10/10 with no re-vendoring, and every pin site moved together (tan-cli#1541).
+
 ## [0.7.0-rc1] — 2026-10-10
 
 **BREAKING: this release ships changes that break a v0.6.0
