@@ -83,10 +83,10 @@ alp-sdk release containing the floor commit
 `b04bb0f7a0edf6af759053311ba66eda0158968b`. The previous stable release,
 `v0.16.0`, does not contain it (see the `## [0.7.0-rc1]` preamble for what it
 lacks). tan's planner mirror, vendored scaffold and planner oracle are pinned
-to alp-sdk `7584a3562e9e5b9c09c86ada233cac42d2103b14`, an ancestor of
-`v0.17.0` (`84132b98a53a9f0e5ef9e7622a38c6d637439873`) with no planner or
-hand-port source changed between them (`planner_resync.py`: up to date,
-tan-cli#1258).*
+to alp-sdk `v0.17.0` itself (`84132b98a53a9f0e5ef9e7622a38c6d637439873`); no
+planner or hand-port source changed since the previous pin `7584a356`, the
+planner oracle changed only in `sdkVersion`, and the scaffold's shipped doc
+links now point at `v0.17.0` instead of `v0.17.0-rc2` (tan-cli#1258).*
 
 ### Fixed
 

@@ -615,10 +615,15 @@ region.
 **CLEARED for a stable tag on 2026-10-13.** alp-sdk `v0.17.0`
 (`84132b98a53a9f0e5ef9e7622a38c6d637439873`) is `releases/latest` and contains
 the floor `4b206c8a60d56af318741491a6fecdc499dfcd36` (`compare/4b206c8a...v0.17.0`
-reports `status=ahead`; against `v0.16.0` it reports `behind`). tan's pins sit
-at `7584a3562e9e5b9c09c86ada233cac42d2103b14`, an ancestor of `v0.17.0`
-(`ahead_by=15`, `behind_by=0`), and `planner_resync.py --to 84132b98` reports
-up to date, so `0.7.0` ships with the pins where the last re-sync left them.
+reports `status=ahead`; against `v0.16.0` it reports `behind`). tan's pins moved
+from `7584a3562e9e5b9c09c86ada233cac42d2103b14` (an ancestor of `v0.17.0`,
+`ahead_by=15`, `behind_by=0`) to the `v0.17.0` tag commit itself.
+`planner_resync.py --to 84132b98` reported up to date; the planner oracle was
+recaptured and only `sdkVersion` changed (`0.17.0-rc2` -> `0.17.0`, all 103
+build-plan emits); the vendored scaffold's doc links were re-vendored from
+`v0.17.0-rc2` to `v0.17.0` (19 files). Measured against the `v0.17.0` checkout:
+`kconfig_fixture_parity.py`, `toolchain_lock_parity.py` and
+`scaffold_byte_parity.py` (10/10 pairs) exit 0.
 The text below is the record of how the gate stood before that release.
 
 **NOT CLEARED for a stable tag as of 2026-10-10.** A pre-release tag is

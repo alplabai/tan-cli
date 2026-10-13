@@ -1418,7 +1418,11 @@ from tests.conftest import sdk_root
 #: docstring-only edit (the retired `tan renode` reference). The bot's 3-way
 #: merge conflicted on tan's own rewording of that line; resolved to upstream's
 #: text. No behavioural change; the planner oracle re-captured byte-identical.
-PINNED_SDK_COMMIT = "7584a3562e9e5b9c09c86ada233cac42d2103b14"  # alp-sdk origin/dev -- #2838 buildplan docstring (retired tan renode)
+#: `7584a3562` -> `84132b98a` (alp-sdk `v0.17.0`, tan `0.7.0`, tan-cli#1258): no
+#: `scripts/alp_orchestrate/` file moved (`planner_resync.py`: up to date). The
+#: planner oracle re-captured with only `sdkVersion` changed (`0.17.0-rc2` ->
+#: `0.17.0`, all 103 build-plan emits).
+PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no planner source moved since 7584a356
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2497,7 +2501,10 @@ PINNED_HASHES: dict[str, str] = {
 #: hashes unchanged. The range's new `scripts/*.py` (`bump_version.py`,
 #: `check_abidiff.py`, `check_version_doc_sync.py`) are SDK-only gates nothing in
 #: `tan/planner/` imports.
-HAND_PORT_PINNED_SDK_COMMIT = "7584a3562e9e5b9c09c86ada233cac42d2103b14"  # alp-sdk origin/dev -- no hand-port source moved
+#: AUDIT `7584a3562` -> `84132b98a` (alp-sdk `v0.17.0`, tan-cli#1258): no hand-port
+#: source moved; hashes unchanged. The range's two `scripts/*.py` edits
+#: (`check_cross_platform.py`, `select_aen_twister.py`) are SDK-only gates.
+HAND_PORT_PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no hand-port source moved
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
