@@ -95,7 +95,15 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`84a6e0d21`**
+- **Current vendor point (all templates):** **`84132b98a`**
+  (`84132b98a53a9f0e5ef9e7622a38c6d637439873`, alp-sdk tag `v0.17.0`) — the stable release
+  merge, for tan `0.7.0` (tan-cli#1258). Re-vendored links only: the emit's doc-link renderer
+  now renders `blob|tree/v0.17.0/`, so every vendored `v0.17.0-rc2` link (19 files) plus the
+  matching `DELIBERATE_EDITS` strings in `scaffold_byte_parity.py` moved to `v0.17.0`. No other
+  byte changed. `scaffold_byte_parity.py --sdk <v0.17.0>` is rc 0, **10/10**; before the swap,
+  10/10 FAIL. The pin moved in the same change as every other pin site.
+
+- **Prior vendor point (all templates):** **`84a6e0d21`**
   (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, alp-sdk tag `v0.17.0-rc2`) — the release merge of `dev` at
   `1d20103ba` (tree-identical to it except the release bump). See the note below.
 
@@ -689,7 +697,7 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.17.0-rc2` — the ref every shipped doc link in this tree pins, and the
+- Ref: `v0.17.0` — the ref every shipped doc link in this tree pins, and the
   one `tests/core/test_template_integrity.py` reads off THIS line to check
   them against. It is the emit's OWN rendered ref rather than a hand-edit:
   the emit renders the link ref from the SDK's `VERSION` (dropping any
@@ -703,8 +711,8 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`84a6e0d21`** (alp-sdk tag `v0.17.0-rc2`, full sha
-  `84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`) — the checkout the emit was RUN
+- Commit: **`84132b98a`** (alp-sdk tag `v0.17.0`, full sha
+  `84132b98a53a9f0e5ef9e7622a38c6d637439873`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::

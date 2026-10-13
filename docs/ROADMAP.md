@@ -39,14 +39,13 @@ The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.16.0** | **v0.17.0-rc1** (2026-10-08) |
-| tan | **v0.6.0** | none tagged; `0.7.0` is unreleased on `dev` |
+| alp-sdk | **v0.17.0** (2026-10-13) | none live |
+| tan | **v0.6.0** | **v0.7.0-rc1** (2026-10-10); `0.7.0` is dated on `dev` and tags next |
 | Alp IDE | **v0.6.0** | none live |
 
-`tan` `0.7.0` is waiting on a stable alp-sdk release that contains its floor
-commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (alp-sdk#2047);
-`v0.17.0-rc1` contains it but is a pre-release. `docs/release-contract.md` has
-the decision.
+`tan` `0.7.0` requires alp-sdk `v0.17.0`, the first stable release that
+contains its floor commit `4b206c8a60d56af318741491a6fecdc499dfcd36`
+(alp-sdk#2047, tan-cli#1258). `docs/release-contract.md` has the decision.
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and
 `SUPPORTED_CLI_VERSION` moved to it (now `0.5.1`) on `alp-sdk-vscode`'s `main`
