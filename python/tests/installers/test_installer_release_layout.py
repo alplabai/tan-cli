@@ -152,6 +152,17 @@ RELEASES: dict[str, tuple[str, ...]] = {
         "tan-x86_64-pc-windows-msvc.zip",
         "tan-x86_64-unknown-linux-gnu.tar.gz",
     ),
+    # v0.7.0 (2026-10-13) is the tag `latest` resolves to today. Verified with
+    #   gh release view v0.7.0 --repo alplabai/tan-cli --json assets
+    # which returns these four archives plus `checksums.txt`,
+    # `envelope-contract.json` and `dependency-lock.txt` (#437). This dict
+    # omits all three: neither installer fetches `dependency-lock.txt` either.
+    "v0.7.0": (
+        "tan-aarch64-apple-darwin.tar.gz",
+        "tan-x86_64-apple-darwin.tar.gz",
+        "tan-x86_64-pc-windows-msvc.zip",
+        "tan-x86_64-unknown-linux-gnu.tar.gz",
+    ),
 }
 
 #: What the fixture's POSIX executable prints, so a test can tell the payload
