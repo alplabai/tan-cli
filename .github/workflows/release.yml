@@ -686,7 +686,7 @@ jobs:
       # be published as a release asset.
       - name: upload the measured glibc floor
         if: ${{ matrix.container }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: glibc-floor
           path: python/dist/glibc-floor.txt
@@ -700,7 +700,7 @@ jobs:
       # entries (`pywin32-ctypes`, `pefile`, `macholib`). Its own artifact,
       # same reasoning as glibc-floor above -- never a release asset.
       - name: upload the resolved dependency inventory
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dependency-inventory-${{ matrix.asset }}
           path: python/dependency-inventory.txt
@@ -760,7 +760,7 @@ jobs:
       - name: stage asset
         shell: bash
         run: cp "python/dist/tan.${{ matrix.archive_ext }}" "${{ matrix.asset }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}

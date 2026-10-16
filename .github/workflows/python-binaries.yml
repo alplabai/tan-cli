@@ -201,7 +201,7 @@ jobs:
         if: inputs.verify
         shell: bash
         run: python/scripts/verify_binary.sh python/dist/tan/tan.exe alp-sdk
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: python/${{ matrix.asset }}
@@ -290,7 +290,7 @@ jobs:
           image=$(bash scripts/ci/docker-pull.sh "$image")
           docker run --rm -v "$PWD:/w" -w /w "$image" \
             sh python/scripts/verify_binary.sh "/w/python/dist/tan/tan" /w/alp-sdk
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: python/${{ matrix.asset }}
@@ -400,7 +400,7 @@ jobs:
       - name: verify
         if: inputs.verify
         run: bash python/scripts/verify_binary.sh "$PWD/python/dist/tan/tan" "$PWD/alp-sdk"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: python/${{ matrix.asset }}
@@ -429,7 +429,7 @@ jobs:
           test "$(ls | wc -l)" -eq 8 || { echo "::error::expected 8 assets"; exit 1; }
           sha256sum * > checksums.txt
           cat checksums.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: checksums.txt
           path: assets/checksums.txt
