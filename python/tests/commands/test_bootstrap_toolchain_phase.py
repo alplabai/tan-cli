@@ -773,6 +773,10 @@ def _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen):
     retry sleep neutered. Returns the `(log, runner)` pair the assertions
     read."""
     _point_home_at(monkeypatch, tmp_path)
+    # tan-cli#1552 filters SDK roots out of these for the child; keep the
+    # developer's own PATH (which may hold one) out of the assertions.
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.delenv("CMAKE_PREFIX_PATH", raising=False)
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
     monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
@@ -913,13 +917,19 @@ def test_a_rate_limited_failure_names_tans_own_surface_not_wests_flag(tmp_path, 
 
 def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path, monkeypatch):
     """tan-cli#1143 acceptance: with no token in the environment the download
-    path is byte-for-byte what it was -- no netrc, no `$NETRC`, no extra env
-    of any kind on the `west sdk install` spawn."""
+    path is byte-for-byte what it was -- no netrc, no `$NETRC` on the `west
+    sdk install` spawn. The only extra env is tan-cli#1552's discovery
+    isolation: a scratch `HOME` and the SDK location variables blanked."""
+    from tan.core.west_sdk_isolation import SDK_LOCATION_ENV_VARS
+
     seen: dict = {}
     _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
 
     assert "netrc_path" not in seen
-    assert seen["extra_env"] == [{}, {}, {}]
+    assert len(seen["extra_env"]) == 3
+    for env in seen["extra_env"]:
+        assert sorted(env) == sorted(["HOME", *SDK_LOCATION_ENV_VARS])
+        assert all(env[var] == "" for var in SDK_LOCATION_ENV_VARS)
     expected = tp.west_sdk_install_argv(
         "west", version="1.0.1", install_dir=seen["argv"][0][_install_dir_index()]
     )

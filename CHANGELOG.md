@@ -11,6 +11,12 @@ All notable changes to `tan` are documented here. Format follows
 
 - `TAN_VERSION` moved to `0.7.1-rc1.dev0` off the published `v0.7.0` tag
   (tan-cli#770's automated post-release bump).
+- `tan bootstrap` no longer fails `toolchain-install` on a host that already
+  has the pinned Zephyr SDK in `$HOME` or on `PATH`: `west sdk install` now
+  runs with that discovery hidden, so it installs into tan's store instead of
+  reusing the other copy, and on Linux/macOS it no longer leaves a dead
+  `~/.cmake/packages/Zephyr-sdk` entry behind. A reuse tan cannot hide is
+  reported by name instead of as a looping version mismatch (tan-cli#1552).
 
 ## [0.7.0] — 2026-10-13
 

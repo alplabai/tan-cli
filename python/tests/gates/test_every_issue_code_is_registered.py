@@ -800,7 +800,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # toolchain download carry seven new `log.warn` sites, all on the registered
         # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`;
         # 42 = 34 + 7 (#1496) + 1 (#1503, merged from dev).
-        expected_calls=42,
+        # 43 since tan-cli#1552: `_west_reused_an_existing_sdk` adds one
+        # `log.warn("toolchain-install", ...)`, an already-registered code.
+        expected_calls=43,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were

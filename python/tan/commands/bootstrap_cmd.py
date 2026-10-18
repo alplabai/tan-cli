@@ -1770,8 +1770,9 @@ def _finish_toolchain_install(
             "toolchain-install",
             f"west sdk install exited 0, but {_native(tmp_dir)} reports SDK version "
             f"{installed_version!r}, not the pinned {manifest.version!r} -- leaving it "
-            f"in place for inspection rather than trusting it. Remove that directory "
-            f"and re-run `tan bootstrap` once you know why they disagree.",
+            f"in place for inspection rather than trusting it (the next `tan bootstrap` "
+            f"reclaims it). Re-running repeats the same install, so find out why they "
+            f"disagree first.",
         )
         return
     triple = _probe_toolchain_compiler(tmp_dir, is_windows=is_windows)
@@ -2100,6 +2101,62 @@ def _install_pinned_toolchain(
     return False
 
 
+def _run_isolated_west_sdk_install(
+    ws: Workspace,
+    log: Log,
+    runner: Runner,
+    argv: list[str],
+    tmp_dir: Path,
+    root: Path,
+    leaf: str,
+    credential: _SdkCredential | None,
+) -> str | None:
+    """tan-cli#1552: the retried `west sdk install` under a scratch `HOME`, the
+    SDK location variables blanked and SDK roots dropped from `PATH` /
+    `CMAKE_PREFIX_PATH`, so west's discovery cannot reuse an install from the
+    user's home, POSIX registry or `PATH`, and on POSIX its `setup.sh -c`
+    cannot register the `.tmp-*` path in the user's registry (Windows' HKCU
+    registry is not redirected). See `tan.core.west_sdk_isolation`. A staged
+    credential's `$NETRC` wins over the user's own. Under `--dry-run` nothing
+    is created."""
+    from tan.commands import bootstrap_west_sdk_isolation as isolation  # noqa: PLC0415
+
+    staged = credential.extra_env if credential is not None else {}
+    if runner.dry_run:
+        return _run_west_sdk_install_with_retries(
+            ws, log, runner, argv, tmp_dir, extra_env=staged or None
+        )
+    try:
+        home = isolation.make_scratch_home(root, leaf)
+    except OSError as err:
+        return f"cannot create a scratch HOME under {_native(root)}: {err}"
+    try:
+        env = {**isolation.isolated_env(home), **staged}
+        return _run_west_sdk_install_with_retries(ws, log, runner, argv, tmp_dir, extra_env=env)
+    finally:
+        isolation.discard_scratch_home(home)
+
+
+def _west_reused_an_existing_sdk(
+    log: Log, manifest: toolchain_provision.ToolchainManifest, tmp_dir: Path
+) -> bool:
+    """tan-cli#1552: west exited 0 but left no `sdk_version` in `tmp_dir` --
+    it found the pinned version somewhere the scratch `HOME` cannot hide and
+    used that. Checked BEFORE the toolchain download, which would otherwise
+    land in a directory with no SDK base and fail as a version mismatch."""
+    if _read_installed_sdk_version(tmp_dir) is not None:
+        return False
+    from tan.commands import bootstrap_west_sdk_isolation as isolation  # noqa: PLC0415
+    from tan.core.west_sdk_isolation import reused_sdk_message  # noqa: PLC0415
+
+    candidates = isolation.reusable_sdk_candidates(manifest.version)
+    log.warn(
+        "toolchain-install",
+        reused_sdk_message(manifest.version, _native(tmp_dir), candidates),
+    )
+    return True
+
+
 def _acquire_toolchain(
     ws: Workspace,
     log: Log,
@@ -2147,13 +2204,8 @@ def _acquire_toolchain(
     )
     credential = _sdk_credential(ws, log, runner, root, manifest.version)
     try:
-        detail = _run_west_sdk_install_with_retries(
-            ws,
-            log,
-            runner,
-            argv,
-            tmp_dir,
-            extra_env=credential.extra_env if credential is not None else None,
+        detail = _run_isolated_west_sdk_install(
+            ws, log, runner, argv, tmp_dir, root, leaf, credential
         )
     finally:
         if credential is not None:
@@ -2211,6 +2263,8 @@ def _acquire_toolchain(
         _plan_tan_downloads(runner, manifest, "after west sdk install", archive=True)
         return
     if not _recheck_release_sum(log, manifest, sum_text or ""):
+        return
+    if _west_reused_an_existing_sdk(log, manifest, tmp_dir):
         return
     if not _install_pinned_toolchain(log, manifest, tmp_dir, root, leaf):
         return
