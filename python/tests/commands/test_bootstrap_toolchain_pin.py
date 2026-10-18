@@ -4,6 +4,8 @@
 west never spawned."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tan.commands import bootstrap_cmd, bootstrap_toolchain_pin
@@ -32,6 +34,13 @@ def _run(tmp_path, monkeypatch, fetch):
 
     def record(self, argv, *a, **kw):
         spawned.append(list(argv))
+        # A real `west sdk install --install-dir X` leaves `X/sdk_version`;
+        # without it tan reports a reused SDK (tan-cli#1552) before the
+        # toolchain download these tests exercise.
+        if "--install-dir" in argv:
+            install_dir = Path(argv[argv.index("--install-dir") + 1])
+            install_dir.mkdir(parents=True, exist_ok=True)
+            (install_dir / "sdk_version").write_text("1.0.1\n", encoding="utf-8")
 
     monkeypatch.setattr(bootstrap_cmd.Runner, "run", record)
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
