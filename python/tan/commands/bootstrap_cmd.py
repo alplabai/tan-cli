@@ -155,6 +155,7 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
+from tan.commands import bootstrap_sdk_isolation as isolation
 from tan.commands.bootstrap_patches import patches_phase
 from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
@@ -2146,15 +2147,21 @@ def _acquire_toolchain(
         f"(this can take several minutes on a slow link)"
     )
     credential = _sdk_credential(ws, log, runner, root, manifest.version)
+    # tan-cli#1552: west's SDK discovery must not see the user's real home.
+    real_home = os.path.expanduser("~")
     try:
-        detail = _run_west_sdk_install_with_retries(
-            ws,
-            log,
-            runner,
-            argv,
-            tmp_dir,
-            extra_env=credential.extra_env if credential is not None else None,
-        )
+        with isolation.scratch_home(
+            root, leaf, os.getpid(), enabled=not runner.dry_run
+        ) as home:
+            detail = _run_west_sdk_install_with_retries(
+                ws, log, runner, argv, tmp_dir,
+                extra_env=isolation.isolated_env(
+                    home,
+                    credential.extra_env if credential is not None else None,
+                    real_home=real_home,
+                    environ=os.environ,
+                ),
+            )
     finally:
         if credential is not None:
             _discard_sdk_credential(credential.scratch_dir)
@@ -2211,6 +2218,9 @@ def _acquire_toolchain(
         _plan_tan_downloads(runner, manifest, "after west sdk install", archive=True)
         return
     if not _recheck_release_sum(log, manifest, sum_text or ""):
+        return
+    if not _is_file(tmp_dir / "sdk_version"):
+        log.warn("toolchain-install", isolation.reuse_warning(manifest.version, tmp_dir, real_home))
         return
     if not _install_pinned_toolchain(log, manifest, tmp_dir, root, leaf):
         return

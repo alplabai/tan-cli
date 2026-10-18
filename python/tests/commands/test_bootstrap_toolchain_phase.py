@@ -913,13 +913,15 @@ def test_a_rate_limited_failure_names_tans_own_surface_not_wests_flag(tmp_path, 
 
 def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path, monkeypatch):
     """tan-cli#1143 acceptance: with no token in the environment the download
-    path is byte-for-byte what it was -- no netrc, no `$NETRC`, no extra env
-    of any kind on the `west sdk install` spawn."""
+    path is what it was -- no netrc, no `$NETRC`; the only extra env is the
+    tan-cli#1552 scratch home (`HOME`/`USERPROFILE`)."""
     seen: dict = {}
     _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
 
     assert "netrc_path" not in seen
-    assert seen["extra_env"] == [{}, {}, {}]
+    for env in seen["extra_env"]:
+        assert {"HOME", "USERPROFILE"} <= set(env)
+        assert "NETRC" not in env or env["NETRC"].endswith((".netrc", "_netrc"))
     expected = tp.west_sdk_install_argv(
         "west", version="1.0.1", install_dir=seen["argv"][0][_install_dir_index()]
     )
@@ -1669,3 +1671,151 @@ def test_an_unstamped_dir_under_an_adopted_root_refuses_before_any_download(tmp_
     assert "nothing was downloaded" in message
     assert "ALP_TOOLCHAIN_ROOT" in message
     assert (store_dir / "keep.txt").read_text(encoding="utf-8") == "mine"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1552: west's SDK discovery is isolated, and a reused SDK is named
+# ---------------------------------------------------------------------------
+
+
+def _run_phase(tmp_path, monkeypatch, fake_run):
+    _point_home_at(monkeypatch, tmp_path)
+    for var in ("ZEPHYR_SDK_INSTALL_DIR", "Zephyr-sdk_DIR", "Zephyr-sdk_ROOT", "CMAKE_PREFIX_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_run)
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _s: None)
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(
+        _workspace(tmp_path), log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False
+    )
+    return log
+
+
+def test_west_sdk_install_runs_with_a_scratch_home_that_is_removed_afterwards(tmp_path, monkeypatch):
+    seen: dict = {}
+    inner = _fake_west_sdk_install_writes(_install_dir_index())
+
+    def fake(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
+        seen["env"] = dict(extra_env or {})
+        seen["home_existed"] = Path(seen["env"].get("HOME", "/nonexistent")).is_dir()
+        return inner(self, argv, cwd, extra_env, tail_lines, isolated=isolated)
+
+    log = _run_phase(tmp_path, monkeypatch, fake)
+
+    real_home = str(tmp_path / "home")
+    assert log.blocking() == []
+    assert seen["env"]["HOME"] != real_home
+    assert seen["env"]["USERPROFILE"] == seen["env"]["HOME"]
+    assert seen["home_existed"] is True
+    assert Path(seen["env"]["HOME"]).parent == tmp_path / "home" / ".alp" / "toolchains"
+    assert not Path(seen["env"]["HOME"]).exists()
+
+
+def test_a_staged_credential_still_reaches_west_through_netrc_with_the_scratch_home(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GH_TOKEN", "ghp_sentinel_1552")
+    seen: dict = {}
+    inner = _fake_west_sdk_install_writes(_install_dir_index())
+
+    def fake(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
+        seen["env"] = dict(extra_env or {})
+        seen["netrc_text"] = Path(seen["env"]["NETRC"]).read_text(encoding="utf-8")
+        return inner(self, argv, cwd, extra_env, tail_lines, isolated=isolated)
+
+    _run_phase(tmp_path, monkeypatch, fake)
+
+    assert "ghp_sentinel_1552" in seen["netrc_text"]
+    assert seen["env"]["HOME"] != str(tmp_path / "home")
+
+
+def test_the_users_own_netrc_is_kept_reachable_when_no_credential_is_staged(tmp_path, monkeypatch):
+    for var in ("GH_TOKEN", "GITHUB_TOKEN", "TAN_GITHUB_TOKEN", "NETRC"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / ".netrc").write_text("machine x login y password z\n", encoding="utf-8")
+    seen: dict = {}
+    inner = _fake_west_sdk_install_writes(_install_dir_index())
+
+    def fake(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
+        seen["env"] = dict(extra_env or {})
+        return inner(self, argv, cwd, extra_env, tail_lines, isolated=isolated)
+
+    _run_phase(tmp_path, monkeypatch, fake)
+
+    assert seen["env"]["NETRC"] == str(tmp_path / "home" / ".netrc")
+
+
+def test_a_west_that_reused_an_existing_sdk_gets_a_specific_warning_not_the_loop_remedy(
+    tmp_path, monkeypatch
+):
+    """West exits 0 but writes nothing into `--install-dir`."""
+    (tmp_path / "home").mkdir()
+    reused = tmp_path / "home" / "zephyr-sdk-1.0.1"
+    reused.mkdir()
+    (reused / "sdk_version").write_text("1.0.1\n", encoding="utf-8")
+
+    log = _run_phase(tmp_path, monkeypatch, lambda self, argv, **kw: None)
+
+    assert log.blocking() == ["toolchain-install"]
+    msg = log.warnings[0][1]
+    assert "already installed" in msg
+    assert str(reused) in msg
+    assert "Move or rename that SDK" in msg
+    assert "Remove that directory" not in msg
+
+
+def test_a_reused_sdk_with_no_visible_directory_points_at_the_registry(tmp_path, monkeypatch):
+    log = _run_phase(tmp_path, monkeypatch, lambda self, argv, **kw: None)
+
+    msg = log.warnings[0][1]
+    assert "CMake package registry" in msg
+    assert "HKEY_CURRENT_USER" in msg
+
+
+def test_the_scratch_home_is_removed_even_when_west_fails(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def fake(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
+        seen["home"] = extra_env["HOME"]
+        return "boom"
+
+    _run_phase(tmp_path, monkeypatch, fake)
+
+    assert not Path(seen["home"]).exists()
+    assert ".tmp-" in Path(seen["home"]).name
+
+
+def test_an_sdk_exported_or_on_path_is_hidden_from_wests_discovery(tmp_path, monkeypatch):
+    sdk = tmp_path / "elsewhere" / "zephyr-sdk-1.0.1"
+    (sdk / "cmake").mkdir(parents=True)
+    (sdk / "cmake" / "Zephyr-sdkConfig.cmake").write_text("", encoding="utf-8")
+    (sdk / "bin").mkdir()
+    keep = tmp_path / "tools" / "bin"
+    keep.mkdir(parents=True)
+    seen: dict = {}
+
+    def fake(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
+        seen["env"] = dict(extra_env or {})
+        return "boom"
+
+    _point_home_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(sdk))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(sdk / "bin"), str(keep)]))
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(sdk))
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake)
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _s: None)
+    bootstrap_cmd.toolchain_phase(
+        _workspace(tmp_path), bootstrap_cmd.Log(json_mode=True),
+        bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False,
+    )
+
+    assert seen["env"]["ZEPHYR_SDK_INSTALL_DIR"] == ""
+    assert seen["env"]["PATH"] == str(keep)
+    assert seen["env"]["CMAKE_PREFIX_PATH"] == ""
