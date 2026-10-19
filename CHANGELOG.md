@@ -15,7 +15,8 @@ All notable changes to `tan` are documented here. Format follows
   on the machine.** `west sdk install` ignores `--install-dir` and reuses any SDK that CMake
   can discover, so the toolchain step failed on every run. tan now runs west with a scratch
   `HOME` and without the SDK pointers in the environment, which also stops west from
-  registering a deleted scratch path in `~/.cmake/packages`; an SDK it still reuses (`/opt`,
+  registering a deleted scratch path in `~/.cmake/packages` (POSIX only: on Windows CMake's
+  registry is in HKCU, which tan cannot redirect, so that entry still dangles); an SDK it still reuses (`/opt`,
   `/usr/local`, the Windows registry) is named in the `toolchain-install` warning with the
   remedy (tan-cli#1552).
 

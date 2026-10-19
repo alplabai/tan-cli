@@ -2151,7 +2151,7 @@ def _acquire_toolchain(
     real_home = os.path.expanduser("~")
     try:
         with isolation.scratch_home(
-            root, leaf, os.getpid(), enabled=not runner.dry_run
+            root, leaf, os.getpid(), enabled=not runner.dry_run, on_degraded=log.line
         ) as home:
             detail = _run_west_sdk_install_with_retries(
                 ws, log, runner, argv, tmp_dir,
@@ -2219,8 +2219,11 @@ def _acquire_toolchain(
         return
     if not _recheck_release_sum(log, manifest, sum_text or ""):
         return
-    if not _is_file(tmp_dir / "sdk_version"):
-        log.warn("toolchain-install", isolation.reuse_warning(manifest.version, tmp_dir, real_home))
+    if not _is_file(tmp_dir / toolchain_provision.SDK_VERSION_FILE_RELPATH):
+        log.warn(
+            "toolchain-install",
+            isolation.reuse_warning(manifest.version, tmp_dir, real_home, os.environ),
+        )
         return
     if not _install_pinned_toolchain(log, manifest, tmp_dir, root, leaf):
         return

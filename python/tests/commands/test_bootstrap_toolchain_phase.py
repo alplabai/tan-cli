@@ -913,15 +913,21 @@ def test_a_rate_limited_failure_names_tans_own_surface_not_wests_flag(tmp_path, 
 
 def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path, monkeypatch):
     """tan-cli#1143 acceptance: with no token in the environment the download
-    path is what it was -- no netrc, no `$NETRC`; the only extra env is the
-    tan-cli#1552 scratch home (`HOME`/`USERPROFILE`)."""
+    path is what it was -- nothing staged and no netrc; the only extra env is
+    the tan-cli#1552 scratch home and what keeps west working under it
+    (`HOME`, `USERPROFILE`, `PYTHONUSERBASE`). A `NETRC` appears only when the
+    user has a `~/.netrc` of their own, which this setup has none of."""
+    for var in (
+        "NETRC", "PYTHONUSERBASE", "WEST_CONFIG_GLOBAL", "CMAKE_PREFIX_PATH",
+        "ZEPHYR_SDK_INSTALL_DIR", "Zephyr-sdk_DIR", "Zephyr-sdk_ROOT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
     seen: dict = {}
     _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
 
     assert "netrc_path" not in seen
-    for env in seen["extra_env"]:
-        assert {"HOME", "USERPROFILE"} <= set(env)
-        assert "NETRC" not in env or env["NETRC"].endswith((".netrc", "_netrc"))
+    assert [set(env) for env in seen["extra_env"]] == [{"HOME", "USERPROFILE", "PYTHONUSERBASE"}] * 3
     expected = tp.west_sdk_install_argv(
         "west", version="1.0.1", install_dir=seen["argv"][0][_install_dir_index()]
     )
@@ -1682,6 +1688,7 @@ def _run_phase(tmp_path, monkeypatch, fake_run):
     _point_home_at(monkeypatch, tmp_path)
     for var in ("ZEPHYR_SDK_INSTALL_DIR", "Zephyr-sdk_DIR", "Zephyr-sdk_ROOT", "CMAKE_PREFIX_PATH"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
     monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_run)
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")

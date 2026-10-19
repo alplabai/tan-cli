@@ -9,7 +9,9 @@ $HOME/.local/opt $HOME/bin`. tan then finds its scratch directory without
 `sdk_version`, and the old "remove that directory and re-run" remedy looped
 forever. Separately, when west DID honour `--install-dir`, its `setup.sh -c`
 registered the scratch path in the user's real `~/.cmake/packages`, and tan
-then moved the directory away, leaving a dangling entry.
+then moved the directory away, leaving a dangling entry. The scratch HOME fixes
+that on POSIX only: on Windows CMake's registry is in HKCU, which no environment
+variable redirects, so the dangling entry for the moved scratch path remains.
 
 Two halves:
 
@@ -28,7 +30,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterator
+import site
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,44 +56,107 @@ def scratch_home_path(root: Path, leaf: str, pid: int) -> Path:
 #: removed, because `Runner` only overlays.
 _SDK_POINTER_VARS = ("ZEPHYR_SDK_INSTALL_DIR", "Zephyr-sdk_DIR", "Zephyr-sdk_ROOT")
 
-#: List-valued variables CMake derives search prefixes from.
-_SDK_PREFIX_LIST_VARS = ("PATH", "CMAKE_PREFIX_PATH")
+#: Tools `west sdk install` shells out to. A PATH entry that is the only home of
+#: one of these is never dropped (see [`_cleaned_path`]).
+_NEEDED_TOOLS = ("west", "cmake", "7z", "7za", "7zz", "tar", "git")
 
 
-def _names_a_zephyr_sdk(entry: str, *, is_bin: bool) -> bool:
-    """Whether a PATH-style entry would let CMake find a Zephyr SDK package:
-    a `<sdk>/bin` on PATH (CMake searches the parent prefix) or an SDK root
-    on CMAKE_PREFIX_PATH."""
-    if not entry:
-        return False
-    base = Path(entry)
-    root = base.parent if is_bin and base.name in ("bin", "sbin") else base
+def _strip_bin(entry: Path) -> Path:
+    """CMake turns a PATH entry ending in `bin`/`sbin` (any case) into its
+    parent prefix; any other entry is used as-is."""
+    return entry.parent if entry.name.lower() in ("bin", "sbin") else entry
+
+
+def _sdk_like_dirs(prefix: Path) -> list[Path]:
+    """`prefix` and its case-insensitive `zephyr-sdk*` children."""
+    out = [prefix]
     try:
-        return (root / "cmake" / "Zephyr-sdkConfig.cmake").is_file()
+        out += [c for c in prefix.iterdir() if c.name.lower().startswith("zephyr-sdk") and c.is_dir()]
     except OSError:
-        return False
+        pass
+    return out
 
 
-def _without_sdk_entries(value: str, *, is_bin: bool) -> str:
-    return os.pathsep.join(
-        e for e in value.split(os.pathsep) if not _names_a_zephyr_sdk(e, is_bin=is_bin)
-    )
+def _sdk_dirs_at(prefix: Path) -> list[Path]:
+    """Zephyr SDK directories CMake's config search takes from `prefix`: those
+    of [`_sdk_like_dirs`] holding `Zephyr-sdkConfig.cmake` directly or under
+    `cmake/` or `CMake/`."""
+    found = []
+    for cand in _sdk_like_dirs(prefix):
+        try:
+            if any((cand / sub / "Zephyr-sdkConfig.cmake").is_file() for sub in ("cmake", "CMake", "")):
+                found.append(cand)
+        except OSError:
+            continue
+    return found
+
+
+def _prefixes_of(value: str, *, is_path: bool) -> list[tuple[str, Path]]:
+    """(original entry, prefix CMake searches) for each ABSOLUTE entry. A
+    relative entry is relative to west's cwd, not tan's, so it is not judged."""
+    out = []
+    for entry in value.split(os.pathsep):
+        if entry and os.path.isabs(entry):
+            out.append((entry, _strip_bin(Path(entry)) if is_path else Path(entry)))
+    return out
+
+
+def _tool_only_here(entry: str, value: str, without: str) -> bool:
+    here = Path(entry)
+    for tool in _NEEDED_TOOLS:
+        found = shutil.which(tool, path=value)
+        if found and Path(found).parent == here and shutil.which(tool, path=without) is None:
+            return True
+    return False
+
+
+def _cleaned_path(value: str, *, is_path: bool) -> str:
+    """`value` minus the entries through which CMake would discover a Zephyr SDK.
+
+    Decision (tan-cli#1552 review): CMake offers no environment variable that
+    disables PATH/CMAKE_PREFIX_PATH-derived search, and listsdk's cmake run
+    cannot be given one, so the entry itself must go. For PATH that is risky
+    for a general prefix such as `~/bin` or `~/.local/bin` (user-installed
+    `west`, `cmake`, `7z`), so such an entry is kept when a needed tool
+    resolves ONLY through it; the post-hoc reuse warning is then the backstop.
+    An entry that is itself an SDK (`<sdk>/bin`) is always dropped.
+    """
+    hits = [
+        (entry, prefix)
+        for entry, prefix in _prefixes_of(value, is_path=is_path)
+        if _sdk_dirs_at(prefix)
+    ]
+    if not hits:
+        return value
+    drop = {entry for entry, _ in hits}
+    if is_path:
+        without = os.pathsep.join(e for e in value.split(os.pathsep) if e not in drop)
+        for entry, prefix in hits:
+            if prefix not in _sdk_dirs_at(prefix) and _tool_only_here(entry, value, without):
+                drop.discard(entry)
+    return os.pathsep.join(e for e in value.split(os.pathsep) if e not in drop)
 
 
 @contextmanager
-def scratch_home(root: Path, leaf: str, pid: int, *, enabled: bool) -> Iterator[Path | None]:
+def scratch_home(
+    root: Path, leaf: str, pid: int, *, enabled: bool, on_degraded: Callable[[str], None] | None = None
+) -> Iterator[Path | None]:
     """Create the scratch home and delete it on every exit. Yields `None` when
     disabled (`--dry-run`: nothing is spawned) or when it cannot be created --
-    west then runs un-isolated, exactly as before tan-cli#1552, and the
-    post-hoc [`reuse_warning`] still catches a reused SDK."""
+    `on_degraded` is then called once, and west still runs with the pointer and
+    PATH scrubbing of [`isolated_env`] but without a private HOME."""
     home = scratch_home_path(root, leaf, pid)
     created = False
     if enabled:
         try:
             home.mkdir(parents=True, exist_ok=True)
             created = True
-        except OSError:
-            pass
+        except OSError as err:
+            if on_degraded is not None:
+                on_degraded(
+                    f"cannot create {home} ({err}); running west sdk install without a "
+                    f"private HOME, so an SDK under your home may be reused"
+                )
     try:
         yield home if created else None
     finally:
@@ -98,10 +164,10 @@ def scratch_home(root: Path, leaf: str, pid: int, *, enabled: bool) -> Iterator[
             shutil.rmtree(home, ignore_errors=True)
 
 
-def _real_netrc(real_home: str | None) -> str | None:
+def _real_file(real_home: str | None, *names: str) -> str | None:
     if not real_home:
         return None
-    for name in (".netrc", "_netrc"):
+    for name in names:
         candidate = Path(real_home) / name
         if candidate.is_file():
             return str(candidate)
@@ -113,66 +179,79 @@ def isolated_env(
     base_extra: dict[str, str] | None,
     *,
     real_home: str | None,
-    environ: dict[str, str] | os._Environ,
+    environ: Mapping[str, str],
 ) -> dict[str, str] | None:
     """`extra_env` for the west call: the caller's own overlay (the staged
-    `NETRC`) plus a scratch home.
+    `NETRC`), SDK-pointer scrubbing, and -- when `home` is given -- a scratch
+    home. `None` when there is nothing to overlay.
 
     `HOME` is what CMake's `$ENV{HOME}` reads; `USERPROFILE` is what Python's
-    `expanduser` and `setup.sh`-style tooling read on Windows, where `HOME` is
-    usually unset. Both are set on every platform -- harmless where unused.
+    `expanduser` reads on Windows, where `HOME` is usually unset. Both are set
+    on every platform -- harmless where unused.
 
-    A staged credential keeps working unchanged: `requests` reads `$NETRC`, not
-    `~/.netrc`. When none is staged, the user's own netrc (hidden by the
-    scratch home) is pointed at explicitly so an authenticated setup that
-    worked before still does.
+    What the scratch home hides that west still needs is handed back
+    explicitly: the staged credential keeps working (`requests` reads
+    `$NETRC`); with none staged the user's own `~/.netrc` is pointed at; a
+    `west` that is not the workspace venv's (`pip install --user`) still
+    imports because `PYTHONUSERBASE` is the REAL user base; and the user's
+    `~/.westconfig` is kept through `WEST_CONFIG_GLOBAL`.
+
+    SDK scrubbing (pointer variables, PATH / CMAKE_PREFIX_PATH entries that
+    lead CMake to an SDK) applies with or without a scratch home: measured
+    with the real `listsdk.cmake`, each of those finds an SDK on its own.
     """
-    if home is None:
-        return base_extra
     env = dict(base_extra or {})
-    env["HOME"] = env["USERPROFILE"] = str(home)
-    # The scratch home hides `$HOME` prefixes and the file registry, but an
-    # SDK exported in the environment (or put on PATH, as the SDK's own
-    # installer advises) is found just the same -- measured with `west sdk
-    # list`: either one alone still lists the SDK.
     for name in _SDK_POINTER_VARS:
         if environ.get(name):
             env[name] = ""
-    for name in _SDK_PREFIX_LIST_VARS:
+    for name in ("PATH", "CMAKE_PREFIX_PATH"):
         current = environ.get(name)
         if current:
-            cleaned = _without_sdk_entries(current, is_bin=name == "PATH")
+            cleaned = _cleaned_path(current, is_path=name == "PATH")
             if cleaned != current:
                 env[name] = cleaned
-    if "NETRC" not in env and not environ.get("NETRC"):
-        netrc = _real_netrc(real_home)
-        if netrc is not None:
-            env["NETRC"] = netrc
-    return env
+    if home is not None:
+        env["HOME"] = env["USERPROFILE"] = str(home)
+        if not environ.get("PYTHONUSERBASE"):
+            env["PYTHONUSERBASE"] = site.getuserbase()
+        if "NETRC" not in env and not environ.get("NETRC"):
+            netrc = _real_file(real_home, ".netrc", "_netrc")
+            if netrc is not None:
+                env["NETRC"] = netrc
+        if not environ.get("WEST_CONFIG_GLOBAL"):
+            west_config = _real_file(real_home, ".westconfig")
+            if west_config is not None:
+                env["WEST_CONFIG_GLOBAL"] = west_config
+    return env or None
 
 
-def reused_sdk_candidates(version: str, real_home: str | None) -> list[str]:
-    """Existing `zephyr-sdk-<version>` directories in the prefixes CMake scans,
-    for naming the likely culprit. Registry-only (HKCU / file registry)
-    reuse cannot be located from here."""
+def reused_sdk_candidates(version: str, real_home: str | None, environ: Mapping[str, str]) -> list[str]:
+    """Existing SDK directories of `version` in every place CMake searches:
+    the fixed prefixes, the home prefixes, and the PATH / CMAKE_PREFIX_PATH
+    derived ones. Registry-only reuse cannot be located from here."""
     prefixes = [Path(p) for p in _FIXED_PREFIXES]
     if real_home:
         prefixes += [Path(real_home) / rel if rel else Path(real_home) for rel in _HOME_PREFIXES]
+    for name in ("PATH", "CMAKE_PREFIX_PATH"):
+        prefixes += [p for _, p in _prefixes_of(environ.get(name, ""), is_path=name == "PATH")]
     found: list[str] = []
     for prefix in prefixes:
-        candidate = prefix / f"zephyr-sdk-{version}"
-        try:
-            if (candidate / "sdk_version").is_file() and str(candidate) not in found:
-                found.append(str(candidate))
-        except OSError:
-            continue
+        for sdk in _sdk_like_dirs(prefix):
+            try:
+                text = (sdk / toolchain_provision.SDK_VERSION_FILE_RELPATH).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if text.strip() == version and str(sdk) not in found:
+                found.append(str(sdk))
     return found
 
 
-def reuse_warning(version: str, tmp_dir: Path, real_home: str | None) -> str:
+def reuse_warning(
+    version: str, tmp_dir: Path, real_home: str | None, environ: Mapping[str, str]
+) -> str:
     """The `toolchain-install` text for "west exited 0 but installed nothing
     into `tmp_dir`" -- west very likely reused an SDK it already knew about."""
-    found = reused_sdk_candidates(version, real_home)
+    found = reused_sdk_candidates(version, real_home, environ)
     named = (
         "; the likely one is " + ", ".join(found)
         if found
