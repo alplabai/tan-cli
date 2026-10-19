@@ -1715,8 +1715,6 @@ def _live_workspace(tmp_path: Path, *, zephyr_version: str = "4.4.1") -> tuple[P
     return sdk, ws
 
 
-
-
 def test_workspace_flag_still_relocates_when_no_workspace_depends_on_the_checkout(tmp_path):
     """Non-vacuity for the refusal above: `--workspace` is not being disabled,
     only stopped from orphaning a LIVE workspace. The same fixture minus the
@@ -1736,8 +1734,6 @@ def test_workspace_flag_still_relocates_when_no_workspace_depends_on_the_checkou
     assert not sdk.exists()
 
 
-
-
 def _venv_without_pip(root: Path) -> Path:
     """A REAL venv whose interpreter runs and whose `pip` is absent -- `uv
     venv`'s default shape, which is what tan-cli#390 was reported against,
@@ -1749,12 +1745,6 @@ def _venv_without_pip(root: Path) -> Path:
         check=True, capture_output=True,
     )
     return venv
-
-
-
-
-
-
 
 
 def test_find_enclosing_west_walks_ancestors_never_the_start_itself(tmp_path):
@@ -2235,7 +2225,7 @@ def test_a_dry_run_writes_nothing_and_reports_every_step_it_would_have_run(tmp_p
     assert planned[-1].endswith(f"-m pip install -q -e {sdk}")
 
 
-def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp_path):
+def test_a_dry_run_with_a_toolchain_manifest_plans_the_pinned_bundle_download(tmp_path):
     """tan-cli#990 review MAJOR: every one of `toolchain_phase`'s own 15
     tests calls it DIRECTLY (`test_bootstrap_toolchain_phase.py`), never
     through `_run`/`run_tan` -- so deleting the ONE call site that wires it
@@ -2243,9 +2233,10 @@ def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp
     sdk_root, venv, is_windows=is_windows)` line) left the whole suite
     green. This is the missing end-to-end assertion the review asked for:
     a REAL `tan bootstrap --dry-run` subprocess, with a real
-    `metadata/toolchains.json` on disk, must plan a `west sdk install`
-    command -- not a stubbed call into `toolchain_phase` that could still
-    pass with the wiring cut.
+    `metadata/toolchains.json` on disk, must plan the pinned SDK bundle
+    download -- not a stubbed call into `toolchain_phase` that could still
+    pass with the wiring cut. Since tan-cli#1556 that is tan's own download,
+    not a `west sdk install` command.
     """
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     # This gate runs on ubuntu/windows/macos-latest (ci.yml): the manifest
@@ -2287,71 +2278,10 @@ def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp
     assert env["exitCode"] == 0
 
     planned = env["data"]["plannedCommands"]
-    install_cmds = [
-        p for p in planned if "sdk" in p.split() and "install" in p.split()
-    ]
-    assert len(install_cmds) == 1, planned
-    assert "--no-gnu-toolchains" in install_cmds[0]
-    assert "--version 1.0.1" in install_cmds[0]
-    # tan-cli#1176: the published plan is what a customer copies and runs by
-    # hand, so the flag that makes the command work on a host without
-    # `file(1)` has to be visible here too, not only in the spawned argv.
-    assert "--no-hosttools" in install_cmds[0]
-
-
-def test_a_dry_run_never_puts_the_github_token_in_the_envelope(tmp_path):
-    """tan-cli#1143, end to end through a REAL `tan bootstrap` subprocess:
-    with a GitHub credential bound in the environment, the sentinel value
-    must appear nowhere in the process's whole output -- not in
-    `data.plannedCommands`, not in an issue message, not on stderr.
-
-    `--dry-run` is the sharp end of this. It is the ONE mode whose entire
-    product is the argv list tan would have spawned, published verbatim in
-    the envelope, so an implementation that reached for west's
-    `--personal-access-token` flag leaks here with no child process, no
-    network and no failure needed. The grep is over `stdout + stderr`
-    together rather than the parsed envelope, so a leak into a progress line
-    fails this too.
-    """
-    sentinel = "ghp_TANCLI1143SENTINELdoNotLeakThisValue"
-    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
-    import platform as _platform
-
-    from tan.core import toolchain_provision as _tp
-
-    host_key = _tp.toolchain_host_key(sys.platform, _platform.machine())
-    assert isinstance(host_key, str), host_key
-    (sdk / "metadata" / "toolchains.json").write_text(
-        json.dumps(
-            {
-                "zephyrSdk": {
-                    "version": "1.0.1",
-                    "baseUrl": "https://example.invalid/",
-                    "artifacts": [
-                        {
-                            "host": host_key, "component": "minimal-sdk",
-                            "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
-                        },
-                    ],
-                },
-                "measuredFootprint": {"extractedBytes": {"wholeSdk": 4096}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    proc = run_tan(
-        "bootstrap", "--dry-run", "--format", "json",
-        "--sdk-root", str(sdk), cwd=sdk.parent,
-        env_extra={name: sentinel for name in _tp.SDK_TOKEN_ENV_VARS},
-    )
-    env = envelope(proc)
-    assert env["exitCode"] == 0
-    # The plan really did reach the SDK-install step -- otherwise "no leak"
-    # would be a statement about a command that was never planned.
-    planned = env["data"]["plannedCommands"]
-    assert any("sdk" in p.split() and "install" in p.split() for p in planned), planned
-    assert sentinel not in proc.stdout + proc.stderr
+    downloads = [p for p in planned if p.startswith("# tan downloads https://example.invalid/x.tar.xz")]
+    assert len(downloads) == 1, planned
+    assert "a" * 64 in downloads[0]
+    assert not [p for p in planned if "sdk" in p.split() and "install" in p.split()], planned
 
 
 def test_plannedcommands_appears_only_under_dry_run(tmp_path):

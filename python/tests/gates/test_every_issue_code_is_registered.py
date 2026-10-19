@@ -802,7 +802,12 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # 42 = 34 + 7 (#1496) + 1 (#1503, merged from dev).
         # 43 since tan-cli#1552: `_west_reused_an_existing_sdk` adds one
         # `log.warn("toolchain-install", ...)`, an already-registered code.
-        expected_calls=43,
+        # 38 since tan-cli#1556: tan installs the minimal bundle itself, so the
+        # west failure warn, the reuse refusal, the post-west sum re-check, and
+        # all three `sdk-credential-*` warns are gone (codes retired from
+        # contract/issue-codes.json, pre-consumer); the two pinned installs now
+        # share `_report_fetch_failure`'s four warns plus one row-count refusal.
+        expected_calls=38,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were

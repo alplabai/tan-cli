@@ -98,4 +98,4 @@ occurred in practice. Promote it to `frozen` once a real consumer binds to it,
 filling in the consumer and effect fields as required by the registry policy.
 
 See also [toolchain-archive-verification.md](toolchain-archive-verification.md)
-for what `west sdk install` does and does not checksum.
+for what `tan bootstrap` checksums and what its stamp means.

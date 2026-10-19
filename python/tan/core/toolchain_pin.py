@@ -4,17 +4,15 @@ against the release's own `sha256.sum` (tan-cli#1496).
 
 What is and is NOT verified, stated once (every message and doc defers to this):
 
-* `west sdk install` downloads and checks ONLY the *minimal SDK bundle* against the
-  release's `sha256.sum` (Zephyr `scripts/west_commands/sdk.py`,
-  `download_and_extract`). It then runs the bundle's `setup.sh`/`setup.cmd`, which
-  fetches the toolchain archive itself with `wget` and checks nothing.
-* So tan (a) compares the pins with the sum BEFORE west runs and again AFTER it
-  (the sum must not have changed between tan's read and west's), which proves the
-  minimal bundle west accepted matches alp-sdk's pin as far as the sum can show,
-  and (b) downloads the toolchain archive itself, hashing it against the alp-sdk
-  pin (`tan.commands.bootstrap_toolchain_fetch`), because west does not.
-* tan never holds the minimal bundle's bytes (west deletes them), so that bundle is
-  verified only transitively, through the sum. That is the residual trust.
+* tan downloads BOTH pinned archives itself -- the SDK minimal bundle
+  (tan-cli#1556; `west sdk install` used to fetch it) and the toolchain archive
+  (tan-cli#1496; the SDK's `setup.sh` used to fetch it with `wget` and check
+  nothing) -- and hashes each against its alp-sdk pin while it streams
+  (`tan.commands.bootstrap_toolchain_fetch`). That hash is the integrity check.
+* Before downloading, tan also compares the pins with the release's own sum, so a
+  pin that disagrees with what upstream publishes is refused up front with both
+  hashes named, instead of surfacing as a bare download mismatch.
+* Nothing is re-hashed from disk after install. That is the residual trust.
 
 The sum-file parser accepts a strict SUBSET of what west matches and refuses
 everything else (fail-closed). West does `re.split(r"\s+", line)` -> `{t[1]: t[0]}`
@@ -33,7 +31,7 @@ from dataclasses import dataclass
 
 from tan.core.toolchain_provision import ToolchainArtifact, ToolchainManifest
 
-#: The file west reads, next to the archives, under the manifest's `baseUrl`.
+#: The release's own checksum file, next to the archives, under the manifest's `baseUrl`.
 SUM_FILENAME = "sha256.sum"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -104,7 +102,7 @@ def refusal_message(findings: tuple[PinFinding, ...], url: str, *, when: str = "
     lines = [
         f"cannot acquire the cross toolchain: the release's {SUM_FILENAME} ({url}) "
         f"disagrees with the sha256 alp-sdk pins in metadata/toolchains.json "
-        f"({when} `west sdk install`), so the install is not trusted:"
+        f"({when}), so the install is not trusted:"
     ]
     for f in findings:
         got = f.published if f.published is not None else "no entry for this file"

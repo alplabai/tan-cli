@@ -641,21 +641,6 @@ jobs:
 
       - name: tan bootstrap (venv + west workspace + SDK python deps)
         working-directory: release-workspace
-        env:
-          # tan-cli#1163, the third site. Same asymmetry the other two had, and
-          # the sharpest instance of it: the printed-remedy step immediately
-          # below already carries `GH_TOKEN` -- it runs unconditionally on
-          # every full leg, under the same `if:` as this one, because it is
-          # what a customer who followed `tan doctor`'s printed remedy does --
-          # while this step, the real download, ran anonymous. A 403 on
-          # someone else's traffic raises `bootstrap.toolchain-install`, which
-          # is WORKSPACE_BLOCKING (`bootstrap_cmd.py:245-247`), so `take_issues`
-          # escalates it to `severity: "error"` and `ok:false` and this step's
-          # own `if not e.get("ok")` exits 1 -- reddening the pre-release
-          # combination gate for a reason that has nothing to do with the
-          # release. `github.token` rather than `secrets.GITHUB_TOKEN` to match
-          # the sibling step below; identical value.
-          TAN_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # stderr is captured AND echoed (getting-started.yml's own bootstrap
@@ -713,13 +698,12 @@ jobs:
           # tan-cli#1185: the credential travels in a netrc, not in argv. A flag
           # lands the value in the host process table for the whole
           # multi-minute download, readable by anything else executing in this
-          # job -- the reason `tan bootstrap` hands the same token to the same
-          # `west` out of band (tan-cli#1143,
-          # `bootstrap_cmd._stage_sdk_credential`) rather than on a flag.
+          # job -- which is why no site in this repo puts a credential on a
+          # flag.
           # `west sdk install` reads no credential env var of its own (Zephyr
           # v4.4.1 `scripts/west_commands/sdk.py`), but its GitHub call goes
-          # through `requests`, which reads a netrc path from $NETRC. Same
-          # one-machine document tan writes (`toolchain_provision.netrc_text`).
+          # through `requests`, which reads a netrc path from $NETRC, so this
+          # step stages one itself (tan stages none since tan-cli#1556).
           netrc_dir="$(mktemp -d)"
           # Removed on EVERY exit path, including a failing `west` under
           # `set -e`. Under $TMPDIR, never inside the repo working tree.

@@ -1386,9 +1386,9 @@ def toolchain_check(sdk_root: str | None) -> Check:
         return Check(
             "toolchain", "pass",
             f"arm-zephyr-eabi {manifest.version} installed at {store_dir}; version and "
-            f"compiler were checked at install, but "
-            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}"
-            + ("." if stamp is not None and stamp.pin_checked else " (this install predates the check)."),
+            f"compiler were checked at install. Provenance: "
+            f"{toolchain_provision.stamp_provenance(stamp)}; "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}.",
             scope="project",
         )
     host_root = _host_toolchain_matching_pin(manifest)
