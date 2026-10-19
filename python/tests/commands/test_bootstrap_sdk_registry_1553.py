@@ -29,15 +29,14 @@ from tan.commands import bootstrap_sdk_registry as reg
 from tan.core import sdk_registry as core_reg
 from tan.core import toolchain_provision as tp
 from tests.commands.test_bootstrap_toolchain_phase import (
-    _fake_west_sdk_install_writes,
-    _install_dir_index,
     _make_sdk_with_toolchains,
+    _no_spawns,  # noqa: F401 -- autouse fixture
     _point_home_at,
     _small_manifest,
     _stub_compiler_probe,  # noqa: F401 -- autouse fixture
     _stub_release_sum_fetch,  # noqa: F401 -- autouse fixture
-    _stub_toolchain_download,  # noqa: F401 -- autouse fixture
     _workspace,
+    installs,  # noqa: F401 -- autouse fixture
 )
 
 LEAF = tp.store_dir_name("1.0.1")
@@ -67,8 +66,6 @@ def _linux(monkeypatch, tmp_path: Path) -> None:
     # the real one is HKCU, which the dedicated winreg tests below exercise.
     monkeypatch.setattr(reg, "HOST_IS_WINDOWS", False)
     monkeypatch.setattr(reg, "host_registry", _REAL_HOST_REGISTRY)
-    for var in tp.SDK_TOKEN_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +207,6 @@ def test_a_dead_entry_from_an_earlier_run_is_pruned_even_when_nothing_is_install
     _point_home_at(monkeypatch, tmp_path)
     _linux(monkeypatch, tmp_path)
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
-    monkeypatch.setattr(
-        bootstrap_cmd.Runner, "run", _fake_west_sdk_install_writes(_install_dir_index())
-    )
     ws = _workspace(tmp_path)
     bootstrap_cmd.toolchain_phase(
         ws, bootstrap_cmd.Log(json_mode=True), bootstrap_cmd.Runner(json=True), sdk_root, None,
@@ -234,22 +228,13 @@ def test_a_dead_entry_from_an_earlier_run_is_pruned_even_when_nothing_is_install
     assert (registry / _md5(users)).read_text(encoding="utf-8") == users
 
 
-def test_an_entry_the_install_itself_writes_is_pruned_once_it_returns(tmp_path, monkeypatch):
-    """What HKCU gets on Windows: a write the scratch `HOME` cannot redirect.
-    Simulated by a fake west writing into the REAL (test) home's registry."""
+def test_a_fresh_install_writes_no_registry_entry_at_all(tmp_path, monkeypatch):
+    """tan-cli#1556: tan installs the minimal bundle itself and never runs the
+    SDK's `setup -c`, so nothing is registered -- on any OS, HKCU included."""
     _point_home_at(monkeypatch, tmp_path)
     _linux(monkeypatch, tmp_path)
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
-    inner = _fake_west_sdk_install_writes(_install_dir_index())
-    registry = _posix_registry(tmp_path)
 
-    def registering_west(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
-        if "--install-dir" in argv:
-            data = str(Path(argv[_install_dir_index()]) / "cmake")
-            _write_entry(registry, _md5(data), data)
-        return inner(self, argv, cwd=cwd, extra_env=extra_env, tail_lines=tail_lines)
-
-    monkeypatch.setattr(bootstrap_cmd.Runner, "run", registering_west)
     log = bootstrap_cmd.Log(json_mode=True)
     bootstrap_cmd.toolchain_phase(
         _workspace(tmp_path), log, bootstrap_cmd.Runner(json=True), sdk_root, None,
@@ -257,7 +242,7 @@ def test_an_entry_the_install_itself_writes_is_pruned_once_it_returns(tmp_path, 
     )
 
     assert log.blocking() == []
-    assert list(registry.iterdir()) == []
+    assert not _posix_registry(tmp_path).exists()
 
 
 def test_a_dry_run_prunes_nothing(tmp_path, monkeypatch):

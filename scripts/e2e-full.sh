@@ -982,67 +982,9 @@ else
   ESZ=$(wc -c <"$WORK/bsB.err" | tr -d ' ')
   OKVAL=$(jget "$WORK/bsB.out" ok)
   note "bootstrap: exit=$RC ok=$OKVAL stderr=${ESZ}B took $((T1-T0))s"
-  # tan-cli#1169: WHICH quota the toolchain phase just spent, printed as a
-  # fact rather than left to be inferred. A 403 on the anonymous per-IP quota
-  # breaks all three assertions below at once -- exit, `ok`, and 0-byte
-  # stderr -- so without this line the rate limit presents as three
-  # unrelated-looking failures rather than one cause, which is a large part of
-  # why it went unfixed.
-  #
-  # tan itself gives the reader NOTHING here. Its `Authenticating the Zephyr
-  # SDK download with the token in $<var>` line is a `Log.line`, and
-  # `Log.line` prints nothing at all under `--format json`
-  # (`bootstrap_cmd.py:265-268`), while the envelope is deliberately
-  # byte-identical with and without a token. So the harness has to say it.
-  #
-  # The NAME of the variable, never the value -- the rule tan's own messages
-  # follow. The verdict is sound because a token that is present and does NOT
-  # end up authenticating the download always leaves a
-  # `bootstrap.sdk-credential-*` issue on the envelope: `-unstaged` when it
-  # was refused or could not be written into the private netrc, `-unverified`
-  # when `west sdk install` no longer matches the shape that netrc route
-  # depends on (tan-cli#1148, tan-cli#1154). Absence of both, with the
-  # variable set AND the envelope actually read, is the staged-and-passed
-  # path and nothing else -- the `PARSEFAIL:` branch below separates out the
-  # case where it was not read, which is not evidence of anything. `${!v}` is
-  # bash indirect expansion, which this harness already requires elsewhere.
-  SDK_CRED_VAR=NONE
-  for v in TAN_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; do
-    [ -n "${!v:-}" ] || continue
-    SDK_CRED_VAR="$v"; break
-  done
-  #
-  # `PARSEFAIL:` rather than a swallowed `d = {}` (tan-cli#1184 review). An
-  # absent or unparseable `$WORK/bsB.out` -- `tan bootstrap` dying with a
-  # traceback before it writes one, which is exactly what the `ok=NONE` on
-  # the `note` line above is the symptom of -- would otherwise be
-  # INDISTINGUISHABLE from an envelope carrying no credential issue, and the
-  # branch below would print the positive "staged for west sdk install"
-  # assurance from an absence of evidence. The sentinel shape is this file's
-  # own, from `check_bootstrap_refusal` above. The `|| echo` fallback covers
-  # a host with no `python3` at all: an empty capture is neither the codes
-  # nor `NONE`, so it would reach the alarming branch below as a false alarm
-  # with an empty code list.
-  SDK_CRED_ISSUES=$(python3 - "$WORK/bsB.out" <<'PY' || echo "PARSEFAIL:python3 unavailable"
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception as e:
-    print("PARSEFAIL:" + str(e)); raise SystemExit
-codes = [str(i.get("code")) for i in (d.get("issues") or [])
-         if str(i.get("code") or "").startswith("bootstrap.sdk-credential-")]
-print(",".join(codes) if codes else "NONE")
-PY
-)
-  if [ "$SDK_CRED_VAR" = NONE ]; then
-    note "SDK download credential: none of TAN_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN is set -- the release listing went out on the anonymous per-IP quota"
-  elif [ "${SDK_CRED_ISSUES#PARSEFAIL:}" != "$SDK_CRED_ISSUES" ]; then
-    note "SDK download credential: \$$SDK_CRED_VAR was set, but the bootstrap envelope could not be read -- whether it was staged is UNKNOWN (${SDK_CRED_ISSUES})"
-  elif [ "$SDK_CRED_ISSUES" = NONE ]; then
-    note "SDK download credential: \$$SDK_CRED_VAR, staged for west sdk install (no bootstrap.sdk-credential-* issue on the envelope)"
-  else
-    note "SDK download credential: \$$SDK_CRED_VAR did NOT authenticate the download -- $SDK_CRED_ISSUES"
-  fi
+  # tan-cli#1556: the toolchain phase downloads both pinned archives from the
+  # release CDN itself and makes no GitHub API call, so there is no quota or
+  # credential to report here (this replaced the tan-cli#1169 credential note).
   # A host below the EFFECTIVE Python floor is refused CORRECTLY right here
   # (bootstrap.python-too-old) -- tan-cli#757. That is not a defect: measured
   # identical on ubuntu:22.04, debian:12 and debian:11 (all below the 3.12
@@ -1272,35 +1214,27 @@ print(f"zephyrSdk={statuses.get('zephyrSdk')} toolchain={statuses.get('toolchain
 PY
 )
     note "B: doctor reports $PRE_DETAIL -- re-verifying with this step's own install regardless"
-    # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
-    # forwarded into the container for `tan bootstrap` above does not reach
-    # it. `west sdk install` takes a credential from
-    # `--personal-access-token` and from NOTHING else -- it reads no
-    # environment variable of its own (measured at Zephyr v4.4.1,
-    # `scripts/west_commands/sdk.py:473`; `grep environ` over that file
-    # finds only ZEPHYR_BASE and ZEPHYR_SDK_INSTALL_DIR, recorded as
-    # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). So "the environment
-    # now carries a token" covers `tan bootstrap` and covers nothing here.
+    # tan-cli#1169, reworded for tan-cli#1556: this one stays ANONYMOUS,
+    # deliberately. `tan bootstrap` above no longer calls the GitHub API (it
+    # downloads its pinned archives from the release CDN) and reads no token,
+    # so there is no credential in this harness for anything to inherit.
+    # `west sdk install` takes a credential from `--personal-access-token`
+    # and from NOTHING else -- it reads no environment variable of its own
+    # (measured at Zephyr v4.4.1, `scripts/west_commands/sdk.py:473`).
     #
-    # Three reasons not to close that gap in this change:
+    # Two reasons not to authenticate it:
     #
-    #  1. The flag is the one shape tan-cli#1143 exists to forbid. It would
-    #     put the secret in this process's argv -- readable in the process
-    #     table of whatever box this runs on, and this harness runs on
-    #     developer machines (Windows Git Bash and WSL) as well as in an
+    #  1. The flag would put the secret in this process's argv -- readable in
+    #     the process table of whatever box this runs on, and this harness runs
+    #     on developer machines (Windows Git Bash and WSL) as well as in an
     #     ephemeral `--rm` container.
-    #  2. The netrc route tan uses instead is not a one-liner: a 0600 file
-    #     in a 0700 scratch directory, discarded in a `finally` on every
-    #     exit path, plus a sweep for a previous crash's leftovers. Hand-
-    #     rolling that in bash is a second place a secret touches disk, with
-    #     none of those guarantees.
-    #  3. This step exists to run the command `tan doctor` PRINTS, verbatim,
+    #  2. This step exists to run the command `tan doctor` PRINTS, verbatim,
     #     the way a customer would (`zephyr_sdk_install_command`,
     #     `doctor_cmd.py:1158`). A customer on a home IP has their own
     #     unauthenticated quota; authenticating it here would stop measuring
     #     the shape under test. `getting-started.yml`'s own manual
-    #     `west sdk install` makes the opposite trade and says so beside the
-    #     flag -- that step is a retry loop whose subject is the toolchain
+    #     `west sdk install` makes the opposite trade (a netrc it stages
+    #     itself) -- that step is a retry loop whose subject is the toolchain
     #     arriving, not the customer's command.
     #
     # What that leaves standing, named rather than glossed: this download can

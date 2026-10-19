@@ -390,28 +390,6 @@ jobs:
       # anyway.
       - name: tan bootstrap (venv + west workspace + SDK python deps)
         working-directory: alp-workspace
-        env:
-          # tan-cli#1163. `tan bootstrap`'s final phase lists the Zephyr SDK
-          # releases through the GitHub API, whose anonymous quota is counted
-          # PER SOURCE IP and shared across every hosted runner in the region --
-          # so it is exhausted by traffic that is not ours, and the job dies
-          # with `403 API rate limit exceeded` for a reason unrelated to the
-          # change under test. Measured three times in one day on PRs touching
-          # neither bootstrap nor the SDK.
-          #
-          # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
-          # (tan-cli#840's probe, and the manual `west sdk install` retry):
-          # the probe invokes `gh`, which reads GH_TOKEN, and the west retry
-          # reads GH_TOKEN itself to stage a netrc for `west` -- since
-          # tan-cli#1185 no step in this repo hands a credential to a tool on
-          # a flag. This step invokes
-          # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
-          # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
-          # and the tan-specific name cannot change `gh`'s ambient behaviour
-          # inside this step. tan passes it to `west sdk install` out of band,
-          # so it reaches no argv, log, `--dry-run` plan or envelope
-          # (tan-cli#1143). Listing public releases needs no scopes.
-          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # stderr is captured AND echoed: in `--format json` the envelope is the
@@ -591,17 +569,15 @@ jobs:
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           python3 "${GITHUB_WORKSPACE}/python/scripts/sdk_release_list_probe.py" --version "${version}"
 
-      # tan-cli#1163: "tan does not run this itself" was true when written and
-      # is not now -- `tan bootstrap` HAS run `west sdk install` since ADR 0021
-      # Lane 1 P1 / tan-cli#474 (`bootstrap_cmd.py:3788` -> `toolchain_phase`
-      # -> `_acquire_toolchain`), unless `--no-toolchain`/`--no-west`. The
-      # bootstrap step above depends on that phase running, so the two comments
-      # contradicted each other 200 lines apart. (`build_readiness.rs` is the
-      # frozen Rust oracle, not a live code path.)
+      # `tan bootstrap` no longer runs `west sdk install` (tan-cli#1556): its
+      # toolchain phase downloads the pinned minimal SDK bundle and the
+      # arm-zephyr-eabi archive itself, hashed against alp-sdk's pin, unless
+      # `--no-toolchain`/`--no-west`. So this step is the ONLY place in the job
+      # that runs west's installer.
       #
-      # This step still earns its keep for the reason the rest of the sentence
-      # gives: `tan doctor` prints this exact command as its `fix` string, and
-      # running it verbatim here is the only way the printed remedy is tested.
+      # It still earns its keep: `tan doctor` prints this exact command as its
+      # `fix` string, and running it verbatim here is the only way the printed
+      # remedy is tested.
       #
       # The version comes from the SDK's own metadata/toolchains.json, the same
       # read parity.yml's seam2 does and the same file
@@ -645,11 +621,9 @@ jobs:
           # tan-cli#1185: this runner's credential travels in a netrc, NOT on
           # `--personal-access-token`. A flag lands the value in the host
           # process table for the whole multi-minute download, readable by
-          # anything else executing in this job -- which is exactly why `tan
-          # bootstrap` hands the same token to the same `west` out of band
-          # (tan-cli#1143, `bootstrap_cmd._stage_sdk_credential`) instead of on
-          # a flag. This step was the last site in the repo doing the opposite,
-          # and a workflow contradicting the invariant is what the next author
+          # anything else executing in this job -- which is why no site in this
+          # repo puts a credential on a flag. This step was the last site doing
+          # the opposite, and a workflow contradicting the invariant is what the next author
           # copies; the next copy may not be a run-scoped `secrets.GITHUB_TOKEN`.
           #
           # It also makes the step test the remedy more exactly. Authentication
@@ -660,11 +634,11 @@ jobs:
           #
           # Why a netrc reaches west: `west sdk install` reads a credential from
           # that flag and from NO environment variable of its own (Zephyr v4.4.1
-          # `scripts/west_commands/sdk.py`; tan pins the same fact in
-          # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`), but its GitHub call
+          # `scripts/west_commands/sdk.py`), but its GitHub call
           # goes through `requests`, which reads a netrc path from $NETRC and
           # applies it. Same one-machine document tan writes
-          # (`toolchain_provision.netrc_text`): api.github.com / x-access-token.
+          # (api.github.com / x-access-token), staged by this step itself --
+          # tan stages no netrc since tan-cli#1556.
           netrc_dir="$(mktemp -d)"
           # Removed on EVERY exit path -- success, an exhausted retry, the
           # `exit 1` below, or `set -e` firing anywhere in between. Under
