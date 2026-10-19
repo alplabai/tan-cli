@@ -18,6 +18,9 @@ WINDOWS_SUBKEY = r"Software\Kitware\CMake\Packages\Zephyr-sdk"
 #: Which registry this host has. Module-level so a test can pin it.
 HOST_IS_WINDOWS = os.name == "nt"
 
+#: `EnumValue`'s end-of-list error; any other error is a real failure.
+_ERROR_NO_MORE_ITEMS = 259
+
 #: The same registry on POSIX, relative to the home directory.
 POSIX_RELPATH = (".cmake", "packages", "Zephyr-sdk")
 
@@ -48,7 +51,7 @@ class PosixRegistry:
         return entries
 
     def remove(self, name: str) -> None:
-        (self.directory / name).unlink()
+        (self.directory / name).unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -68,8 +71,10 @@ class WindowsRegistry:
             while True:
                 try:
                     name, data, kind = winreg.EnumValue(key, index)
-                except OSError:  # ERROR_NO_MORE_ITEMS
-                    break
+                except OSError as err:
+                    if getattr(err, "winerror", None) == _ERROR_NO_MORE_ITEMS:
+                        break
+                    raise
                 index += 1
                 if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) and isinstance(data, str):
                     entries.append((name, data))
@@ -78,10 +83,13 @@ class WindowsRegistry:
     def remove(self, name: str) -> None:
         import winreg  # noqa: PLC0415 -- Windows-only module
 
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, self.subkey, 0, winreg.KEY_SET_VALUE
-        ) as key:
-            winreg.DeleteValue(key, name)
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, self.subkey, 0, winreg.KEY_SET_VALUE
+            ) as key:
+                winreg.DeleteValue(key, name)
+        except FileNotFoundError:
+            return  # already gone -- what removing it was for
 
 
 def host_registry() -> Registry:
@@ -101,9 +109,9 @@ class PruneOutcome:
 def prune_tan_tmp_registrations(
     registry: Registry, root: Path, *, case_insensitive: bool
 ) -> PruneOutcome:
-    """Remove every entry pointing at a tan `.tmp-*` directory under `root`.
-    Never raises: every failure is returned in `failed` for the caller to
-    report."""
+    """Remove every entry pointing at a tan `.tmp-*` directory under `root`
+    (`tan.core.sdk_registry`). Never raises: every failure is returned in
+    `failed` for the caller to report."""
     try:
         entries = registry.list_entries()
     except OSError as err:
@@ -111,7 +119,7 @@ def prune_tan_tmp_registrations(
     removed: list[str] = []
     failed: list[str] = []
     for name, data in entries:
-        if not is_tan_tmp_registration(data, str(root), case_insensitive=case_insensitive):
+        if not is_tan_tmp_registration(name, data, str(root), case_insensitive=case_insensitive):
             continue
         try:
             registry.remove(name)

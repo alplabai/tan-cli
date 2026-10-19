@@ -2141,7 +2141,8 @@ def _prune_tan_registrations(log: Log, root: Path) -> None:
     """tan-cli#1553: drop every CMake package-registry entry that points at
     one of tan's own `.tmp-*` install dirs (never a user's own entry -- see
     `tan.core.sdk_registry`). Best-effort and non-blocking: a stale entry only
-    misleads a `west build` outside tan, so a failure is reported, not fatal.
+    misleads a `west build` outside tan, so a failure is reported as a
+    `log.line`, not fatal -- which `--format json` does not carry.
     The registry is the HOST's, so the backend follows the host, not the
     workspace's `is_windows`."""
     from tan.commands import bootstrap_sdk_registry as registry  # noqa: PLC0415

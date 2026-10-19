@@ -7,15 +7,17 @@ the `.tmp-*` directory it installed to in CMake's user package registry --
 entry is dead. #1552's scratch `HOME` stops new POSIX entries; nothing
 redirects HKCU, and entries from runs before #1552 are still on disk.
 
-tan now prunes every registration whose path is one of ITS OWN `.tmp-*`
-directories, and nothing else: the value name is the MD5 of the path, so the
-user's own entries never collide with these and are never touched.
+tan now prunes a registration only when its path is exactly one of ITS OWN
+`<root>/zephyr-sdk-*.tmp-*/cmake` directories and its name is the MD5 of that
+path -- the two facts `zephyr_sdk_export.cmake` leaves -- and nothing else.
 
 The real `winreg` backend is exercised on `windows-latest` against a
 throwaway key; everywhere else the POSIX backend runs against `tmp_path`.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -40,6 +42,13 @@ from tests.commands.test_bootstrap_toolchain_phase import (
 
 LEAF = tp.store_dir_name("1.0.1")
 
+#: Captured before the suite-wide autouse stub (tests/conftest.py) replaces it.
+_REAL_HOST_REGISTRY = reg.host_registry
+
+
+def _md5(data: str) -> str:
+    return hashlib.md5(data.encode("utf-8")).hexdigest()
+
 
 def _root(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".alp" / "toolchains"
@@ -57,6 +66,7 @@ def _linux(monkeypatch, tmp_path: Path) -> None:
     # The POSIX backend under the test home on every host -- on windows-latest
     # the real one is HKCU, which the dedicated winreg tests below exercise.
     monkeypatch.setattr(reg, "HOST_IS_WINDOWS", False)
+    monkeypatch.setattr(reg, "host_registry", _REAL_HOST_REGISTRY)
     for var in tp.SDK_TOKEN_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
 
@@ -78,20 +88,47 @@ def _linux(monkeypatch, tmp_path: Path) -> None:
         ("/elsewhere/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1/cmake", False),
         ("/r/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1", False),
         ("/r/sub/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1/cmake", False),
+        # `.tmp-` with nothing after it, or not after a `zephyr-sdk-` head.
+        ("/r/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-/cmake", False),
+        ("/r/mine.tmp-1/cmake", False),
+        ("/r/backup-zephyr-sdk-1.0.1.tmp-1/cmake", False),
         ("", False),
     ],
 )
 def test_only_tans_own_tmp_dirs_count_as_its_registrations(data, expected):
-    assert core_reg.is_tan_tmp_registration(data, "/r", case_insensitive=False) is expected
+    assert core_reg.is_tan_tmp_registration(
+        _md5(data), data, "/r", case_insensitive=False
+    ) is expected
+
+
+def test_an_entry_whose_name_is_not_the_md5_of_its_data_is_never_tans():
+    """`zephyr_sdk_export.cmake` names every entry MD5(path); anything else was
+    not written by it, whatever its path says."""
+    data = "/r/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1/cmake"
+
+    assert not core_reg.is_tan_tmp_registration("0" * 32, data, "/r", case_insensitive=False)
+
+
+def test_a_root_behind_a_symlink_matches_the_resolved_path_cmake_may_record(tmp_path):
+    real = tmp_path / "real-root"
+    real.mkdir()
+    link = tmp_path / "link-root"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a directory symlink")
+    data = str(Path(os.path.realpath(real)) / f"{LEAF}.tmp-3" / "cmake")
+
+    assert core_reg.is_tan_tmp_registration(_md5(data), data, str(link), case_insensitive=False)
 
 
 def test_a_windows_registration_matches_regardless_of_case_and_separator():
     data = "c:/tools/.alp/TOOLCHAINS/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-7/cmake"
 
-    assert core_reg.is_tan_tmp_registration(data, "C:\\tools\\.alp\\toolchains", case_insensitive=True)
-    assert not core_reg.is_tan_tmp_registration(
-        data, "C:\\tools\\.alp\\toolchains", case_insensitive=False
-    )
+    root = "C:\\tools\\.alp\\toolchains"
+
+    assert core_reg.is_tan_tmp_registration(_md5(data).upper(), data, root, case_insensitive=True)
+    assert not core_reg.is_tan_tmp_registration(_md5(data), data, root, case_insensitive=False)
 
 
 def test_another_pins_tmp_dir_is_also_tans_own():
@@ -99,7 +136,7 @@ def test_another_pins_tmp_dir_is_also_tans_own():
     root, and its registration is just as dead."""
     data = "/r/zephyr-sdk-0.17.4-arm-zephyr-eabi.tmp-5/cmake"
 
-    assert core_reg.is_tan_tmp_registration(data, "/r", case_insensitive=False)
+    assert core_reg.is_tan_tmp_registration(_md5(data), data, "/r", case_insensitive=False)
 
 
 # ---------------------------------------------------------------------------
@@ -124,21 +161,20 @@ class _FakeRegistry:
 def test_pruning_removes_tans_entries_and_keeps_the_users():
     ours = "C:\\tools\\.alp\\toolchains\\zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-9576\\cmake"
     theirs = "C:\\tools\\zephyr-sdk-1.0.1\\cmake"
-    fake = _FakeRegistry({"aaa": ours, "bbb": theirs})
+    fake = _FakeRegistry({_md5(ours): ours, _md5(theirs): theirs})
 
     outcome = reg.prune_tan_tmp_registrations(
         fake, Path("C:/tools/.alp/toolchains"), case_insensitive=True
     )
 
-    assert fake.entries == {"bbb": theirs}
+    assert fake.entries == {_md5(theirs): theirs}
     assert outcome.removed == (ours,)
     assert outcome.failed == ()
 
 
 def test_a_removal_that_fails_is_reported_not_raised():
-    fake = _FakeRegistry(
-        {"aaa": "/r/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1/cmake"}, fail_remove=True
-    )
+    ours = "/r/zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-1/cmake"
+    fake = _FakeRegistry({_md5(ours): ours}, fail_remove=True)
 
     outcome = reg.prune_tan_tmp_registrations(fake, Path("/r"), case_insensitive=False)
 
@@ -185,8 +221,8 @@ def test_a_dead_entry_from_an_earlier_run_is_pruned_even_when_nothing_is_install
     registry = _posix_registry(tmp_path)
     dead = str(_root(tmp_path) / f"{LEAF}.tmp-9576" / "cmake")
     users = str(tmp_path / "zephyr-sdk-1.0.1" / "cmake")
-    _write_entry(registry, "53861e69", dead)
-    _write_entry(registry, "e2605f1c", users)
+    _write_entry(registry, _md5(dead), dead)
+    _write_entry(registry, _md5(users), users)
 
     log = bootstrap_cmd.Log(json_mode=True)
     bootstrap_cmd.toolchain_phase(
@@ -194,8 +230,8 @@ def test_a_dead_entry_from_an_earlier_run_is_pruned_even_when_nothing_is_install
     )
 
     assert log.blocking() == []
-    assert sorted(p.name for p in registry.iterdir()) == ["e2605f1c"]
-    assert (registry / "e2605f1c").read_text(encoding="utf-8") == users
+    assert sorted(p.name for p in registry.iterdir()) == [_md5(users)]
+    assert (registry / _md5(users)).read_text(encoding="utf-8") == users
 
 
 def test_an_entry_the_install_itself_writes_is_pruned_once_it_returns(tmp_path, monkeypatch):
@@ -209,7 +245,8 @@ def test_an_entry_the_install_itself_writes_is_pruned_once_it_returns(tmp_path, 
 
     def registering_west(self, argv, cwd=None, extra_env=None, tail_lines=4, *, isolated=False):
         if "--install-dir" in argv:
-            _write_entry(registry, "deadbeef", str(Path(argv[_install_dir_index()]) / "cmake"))
+            data = str(Path(argv[_install_dir_index()]) / "cmake")
+            _write_entry(registry, _md5(data), data)
         return inner(self, argv, cwd=cwd, extra_env=extra_env, tail_lines=tail_lines)
 
     monkeypatch.setattr(bootstrap_cmd.Runner, "run", registering_west)
@@ -228,14 +265,15 @@ def test_a_dry_run_prunes_nothing(tmp_path, monkeypatch):
     _linux(monkeypatch, tmp_path)
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
     registry = _posix_registry(tmp_path)
-    _write_entry(registry, "53861e69", str(_root(tmp_path) / f"{LEAF}.tmp-1" / "cmake"))
+    data = str(_root(tmp_path) / f"{LEAF}.tmp-1" / "cmake")
+    _write_entry(registry, _md5(data), data)
 
     bootstrap_cmd.toolchain_phase(
         _workspace(tmp_path), bootstrap_cmd.Log(json_mode=True),
         bootstrap_cmd.Runner(json=True, dry_run=True), sdk_root, None, is_windows=False,
     )
 
-    assert [p.name for p in registry.iterdir()] == ["53861e69"]
+    assert [p.name for p in registry.iterdir()] == [_md5(data)]
 
 
 def test_a_missing_posix_registry_is_an_empty_one(tmp_path):
@@ -259,15 +297,15 @@ def test_the_windows_backend_prunes_a_real_hkcu_value(tmp_path):
     ours = str(root / f"{LEAF}.tmp-42" / "cmake")
     theirs = str(tmp_path / "zephyr-sdk-1.0.1" / "cmake")
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, subkey) as key:
-        winreg.SetValueEx(key, "a" * 32, 0, winreg.REG_SZ, ours)
-        winreg.SetValueEx(key, "b" * 32, 0, winreg.REG_SZ, theirs)
+        winreg.SetValueEx(key, _md5(ours), 0, winreg.REG_SZ, ours)
+        winreg.SetValueEx(key, _md5(theirs), 0, winreg.REG_SZ, theirs)
     try:
         backend = reg.WindowsRegistry(subkey)
 
         outcome = reg.prune_tan_tmp_registrations(backend, root, case_insensitive=True)
 
         assert outcome.removed == (ours,)
-        assert backend.list_entries() == [("b" * 32, theirs)]
+        assert backend.list_entries() == [(_md5(theirs), theirs)]
     finally:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, subkey)
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, parent)
