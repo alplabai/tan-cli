@@ -2137,6 +2137,28 @@ def _run_isolated_west_sdk_install(
         isolation.discard_scratch_home(home)
 
 
+def _prune_tan_registrations(log: Log, root: Path) -> None:
+    """tan-cli#1553: drop every CMake package-registry entry that points at
+    one of tan's own `.tmp-*` install dirs (never a user's own entry -- see
+    `tan.core.sdk_registry`). Best-effort and non-blocking: a stale entry only
+    misleads a `west build` outside tan, so a failure is reported as a
+    `log.line`, not fatal -- which `--format json` does not carry.
+    The registry is the HOST's, so the backend follows the host, not the
+    workspace's `is_windows`."""
+    from tan.commands import bootstrap_sdk_registry as registry  # noqa: PLC0415
+
+    outcome = registry.prune_tan_tmp_registrations(
+        registry.host_registry(), root, case_insensitive=registry.HOST_IS_WINDOWS
+    )
+    if outcome.removed:
+        log.line(
+            "Removed CMake package-registry entries for tan's temporary install dirs: "
+            + ", ".join(outcome.removed)
+        )
+    for failure in outcome.failed:
+        log.line(f"Could not remove a stale CMake package-registry entry: {failure}")
+
+
 def _west_reused_an_existing_sdk(
     log: Log, manifest: toolchain_provision.ToolchainManifest, tmp_dir: Path
 ) -> bool:
@@ -2337,6 +2359,9 @@ def toolchain_phase(
         # something would leave a stale credential on disk for as long as the
         # pin held (tan-cli#1148 review).
         _reclaim_sdk_credential_wreckage(root)
+        # tan-cli#1553: here for the same reason -- a dead registration left
+        # by an earlier run must be cleared on the already-installed path too.
+        _prune_tan_registrations(log, root)
     # A stamp alone is not enough: the compiler under it may have been deleted
     # since (tan-cli#1483), and then the install must be repaired, not skipped.
     if toolchain_provision.stamp_matches_pin(
@@ -2395,10 +2420,16 @@ def toolchain_phase(
                 return
 
     west = str(venv.west) if venv is not None else "west"
-    _acquire_toolchain(
-        ws, log, runner, manifest, root, leaf, store_dir,
-        root_adopted=root_adopted, west=west, is_windows=is_windows,
-    )
+    try:
+        _acquire_toolchain(
+            ws, log, runner, manifest, root, leaf, store_dir,
+            root_adopted=root_adopted, west=west, is_windows=is_windows,
+        )
+    finally:
+        if not runner.dry_run:
+            # tan-cli#1553: the entry this run's `setup.cmd -c` wrote to HKCU,
+            # which #1552's scratch HOME cannot redirect.
+            _prune_tan_registrations(log, root)
 
 
 # ---------------------------------------------------------------------------

@@ -38,8 +38,9 @@ What stays visible: the system prefixes, a `PATH` prefix that merely CONTAINS
 a `zephyr-sdk*` directory (`~/bin` for `~/zephyr-sdk-*`; dropping
 `~/.local/bin` or `/usr/local/bin` would drop `cmake` and `python`), cmake's
 own install prefix, and on Windows the HKCU registry, which no environment
-variable redirects -- `setup.cmd -c` still writes its `.tmp-*` entry there.
-A reuse through those is reported by [`reused_sdk_message`].
+variable redirects -- `setup.cmd -c` still writes its `.tmp-*` entry there,
+and `tan.core.sdk_registry` (tan-cli#1553) prunes it once the install
+returns. A reuse through those is reported by [`reused_sdk_message`].
 
 The scratch `HOME` also hides west's global config (`~/.westconfig`) and moves
 Python's user site; the workspace venv's `west` reads neither for this command.
