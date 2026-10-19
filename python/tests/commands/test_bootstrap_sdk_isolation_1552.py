@@ -114,13 +114,81 @@ def test_a_degraded_scratch_home_says_so(tmp_path):
     assert len(said) == 1
 
 
-def test_the_real_python_user_base_and_west_config_survive_the_scratch_home(tmp_path):
+def test_the_real_west_config_survives_the_scratch_home(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     (real / ".westconfig").write_text("[x]\n", encoding="utf-8")
     env = iso.isolated_env(tmp_path / "h", None, real_home=str(real), environ={})
-    assert env["PYTHONUSERBASE"] and not env["PYTHONUSERBASE"].startswith(str(tmp_path / "h"))
     assert env["WEST_CONFIG_GLOBAL"] == str(real / ".westconfig")
+    assert "PYTHONUSERBASE" not in env
+
+
+def test_a_given_user_base_is_passed_through_and_none_sets_nothing(tmp_path):
+    env = iso.isolated_env(tmp_path / "h", None, real_home=None, environ={}, user_base="/ub")
+    assert env["PYTHONUSERBASE"] == "/ub"
+    env = iso.isolated_env(tmp_path / "h", None, real_home=None, environ={}, user_base=None)
+    assert "PYTHONUSERBASE" not in env
+
+
+def _script(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="shebang launchers")
+
+
+def test_a_workspace_venv_west_needs_no_user_base_and_spawns_nothing(tmp_path):
+    said: list[str] = []
+    west = str(tmp_path / ".venv" / "bin" / "west")
+    assert iso.user_base_for(west, {}, said.append, enabled=True) is None
+    assert said == []
+
+
+@posix_only
+def test_a_bare_path_west_gets_the_user_base_of_its_own_interpreter(tmp_path):
+    py = _script(tmp_path / "py", "#!/bin/sh\necho /fake/user/base\n")
+    _script(tmp_path / "west", f"#!{py}\n")
+    said: list[str] = []
+    base = iso.user_base_for("west", {"PATH": str(tmp_path)}, said.append, enabled=True)
+    assert base == "/fake/user/base"
+    assert said == []
+
+
+@posix_only
+def test_an_env_shebang_is_resolved_through_path(tmp_path):
+    _script(tmp_path / "pyx", "#!/bin/sh\necho /via/env\n")
+    _script(tmp_path / "west", "#!/usr/bin/env pyx\n")
+    assert iso.user_base_for("west", {"PATH": str(tmp_path)}, lambda _m: None, enabled=True) == "/via/env"
+
+
+def test_an_undeterminable_west_interpreter_sets_nothing_and_says_so(tmp_path):
+    said: list[str] = []
+    assert iso.user_base_for("west", {"PATH": str(tmp_path)}, said.append, enabled=True) is None
+    assert len(said) == 1 and "PYTHONUSERBASE" in said[0]
+
+
+def test_a_dry_run_resolves_nothing(tmp_path):
+    said: list[str] = []
+    assert iso.user_base_for("west", {"PATH": str(tmp_path)}, said.append, enabled=False) is None
+    assert said == []
+
+
+def test_the_sdk_pointer_variables_are_blanked_in_the_env(tmp_path):
+    env = iso.isolated_env(
+        tmp_path / "h", None, real_home=None,
+        environ={"ZEPHYR_SDK_INSTALL_DIR": "/a", "Zephyr-sdk_DIR": "/b", "Zephyr-sdk_ROOT": "/c"},
+    )
+    assert (env["ZEPHYR_SDK_INSTALL_DIR"], env["Zephyr-sdk_DIR"], env["Zephyr-sdk_ROOT"]) == ("", "", "")
+
+
+def test_the_reuse_warning_names_the_prefix_the_sdk_was_found_under(tmp_path):
+    _make_sdk(tmp_path / "elsewhere")
+    msg = iso.reuse_warning(
+        "1.0.1", tmp_path / "t", None, {"PATH": str(tmp_path / "elsewhere" / "bin")}
+    )
+    assert f"out of {tmp_path / 'elsewhere'}" in msg
 
 
 def test_the_reuse_warning_names_an_sdk_found_through_path_and_prefix_path(tmp_path):
@@ -193,10 +261,11 @@ def test_real_listsdk_does_not_see_the_users_sdk_under_the_isolated_env(tmp_path
     if scenario != "prefix-path-parent":
         environ.setdefault("HOME", str(real))
 
-    # Without isolation the SDK is visible in every scenario but install-dir-env
-    # (which west, not cmake, reads) -- so the assertion below is not vacuous.
-    if scenario != "install-dir-env":
-        assert "zephyr-sdk-1.0.1" in _listsdk(zephyr, environ)
+    # Without isolation the SDK is visible in EVERY scenario (the install-dir one
+    # included, via HOME=real) -- so the assertion below is not vacuous. listsdk
+    # in LIST mode never reads ZEPHYR_SDK_INSTALL_DIR; west does, and the
+    # blanking of that variable is covered by a unit test on the env instead.
+    assert "zephyr-sdk-1.0.1" in _listsdk(zephyr, environ)
 
     overlay = iso.isolated_env(scratch, None, real_home=str(real), environ=environ)
     isolated = {**environ, **overlay}

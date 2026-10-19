@@ -915,7 +915,8 @@ def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path
     """tan-cli#1143 acceptance: with no token in the environment the download
     path is what it was -- nothing staged and no netrc; the only extra env is
     the tan-cli#1552 scratch home and what keeps west working under it
-    (`HOME`, `USERPROFILE`, `PYTHONUSERBASE`). A `NETRC` appears only when the
+    (`HOME`, `USERPROFILE`; no `PYTHONUSERBASE`, because the workspace venv's
+    west needs no user site). A `NETRC` appears only when the
     user has a `~/.netrc` of their own, which this setup has none of."""
     for var in (
         "NETRC", "PYTHONUSERBASE", "WEST_CONFIG_GLOBAL", "CMAKE_PREFIX_PATH",
@@ -927,7 +928,7 @@ def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path
     _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
 
     assert "netrc_path" not in seen
-    assert [set(env) for env in seen["extra_env"]] == [{"HOME", "USERPROFILE", "PYTHONUSERBASE"}] * 3
+    assert [set(env) for env in seen["extra_env"]] == [{"HOME", "USERPROFILE"}] * 3
     expected = tp.west_sdk_install_argv(
         "west", version="1.0.1", install_dir=seen["argv"][0][_install_dir_index()]
     )

@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import site
+import subprocess
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
 from tan.core import toolchain_provision
+from tan.core.subprocess_env import spawn_env
 
 #: Where a scratch home lives, under the toolchain root. Matches
 #: `toolchain_provision.wreckage_glob_pattern(leaf)` (`<leaf>.tmp-*`), so a
@@ -180,6 +181,7 @@ def isolated_env(
     *,
     real_home: str | None,
     environ: Mapping[str, str],
+    user_base: str | None = None,
 ) -> dict[str, str] | None:
     """`extra_env` for the west call: the caller's own overlay (the staged
     `NETRC`), SDK-pointer scrubbing, and -- when `home` is given -- a scratch
@@ -193,7 +195,9 @@ def isolated_env(
     explicitly: the staged credential keeps working (`requests` reads
     `$NETRC`); with none staged the user's own `~/.netrc` is pointed at; a
     `west` that is not the workspace venv's (`pip install --user`) still
-    imports because `PYTHONUSERBASE` is the REAL user base; and the user's
+    imports because `PYTHONUSERBASE` is that interpreter's REAL user base
+    (`user_base`, from [`user_base_for`]; never tan's own, which differs by
+    Python version on macOS framework builds); and the user's
     `~/.westconfig` is kept through `WEST_CONFIG_GLOBAL`.
 
     SDK scrubbing (pointer variables, PATH / CMAKE_PREFIX_PATH entries that
@@ -212,8 +216,8 @@ def isolated_env(
                 env[name] = cleaned
     if home is not None:
         env["HOME"] = env["USERPROFILE"] = str(home)
-        if not environ.get("PYTHONUSERBASE"):
-            env["PYTHONUSERBASE"] = site.getuserbase()
+        if user_base and not environ.get("PYTHONUSERBASE"):
+            env["PYTHONUSERBASE"] = user_base
         if "NETRC" not in env and not environ.get("NETRC"):
             netrc = _real_file(real_home, ".netrc", "_netrc")
             if netrc is not None:
@@ -223,6 +227,61 @@ def isolated_env(
             if west_config is not None:
                 env["WEST_CONFIG_GLOBAL"] = west_config
     return env or None
+
+
+def _launcher_interpreter(west: str, path: str | None) -> str | None:
+    """The interpreter a `west` launcher script runs under, from its shebang
+    (`#!/py` or `#!/usr/bin/env py`); `None` for a binary launcher or anything
+    unreadable."""
+    launcher = shutil.which(west, path=path)
+    if launcher is None:
+        return None
+    try:
+        with open(launcher, "rb") as handle:
+            first = handle.readline(512).decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    if not first.startswith("#!"):
+        return None
+    parts = first[2:].split()
+    if parts and os.path.basename(parts[0]) == "env":
+        parts = [p for p in parts[1:] if not p.startswith("-")]
+        return shutil.which(parts[0], path=path) if parts else None
+    return parts[0] if parts else None
+
+
+def user_base_for(
+    west: str, environ: Mapping[str, str], say: Callable[[str], None], *, enabled: bool
+) -> str | None:
+    """`PYTHONUSERBASE` for a west that is NOT the workspace venv's.
+
+    The scratch HOME hides `~/.local` (or `~/Library/Python/<ver>`), where a
+    `pip install --user` west keeps its packages. That location depends on the
+    interpreter that runs west, so it is asked of west's OWN interpreter (its
+    launcher's shebang) with the real environment -- tan's `site.getuserbase()`
+    would be the wrong answer whenever the two Pythons differ. A workspace venv
+    west (an absolute path) never reads the user site, so nothing is set. When
+    the interpreter cannot be determined nothing is set and `say` explains.
+    """
+    if not enabled or os.path.isabs(west):
+        return None
+    python = _launcher_interpreter(west, environ.get("PATH"))
+    if python is not None:
+        try:
+            out = subprocess.run(
+                [python, "-c", "import site;print(site.getuserbase())"],
+                capture_output=True, text=True, timeout=30, check=False, env=spawn_env(base=environ),
+            )
+            base = out.stdout.strip()
+            if out.returncode == 0 and base:
+                return base
+        except (OSError, subprocess.SubprocessError):
+            pass
+    say(
+        f"could not tell which Python runs {west}, so PYTHONUSERBASE is left unset; a "
+        f"`pip install --user` west may fail to import under the scratch home"
+    )
+    return None
 
 
 def reused_sdk_candidates(version: str, real_home: str | None, environ: Mapping[str, str]) -> list[str]:
@@ -252,6 +311,11 @@ def reuse_warning(
     """The `toolchain-install` text for "west exited 0 but installed nothing
     into `tmp_dir`" -- west very likely reused an SDK it already knew about."""
     found = reused_sdk_candidates(version, real_home, environ)
+    where = (
+        ", ".join(sorted({str(Path(f).parent) for f in found}))
+        if found
+        else "/usr, /usr/local, /opt, $HOME, $HOME/.local, $HOME/.local/opt and $HOME/bin"
+    )
     named = (
         "; the likely one is " + ", ".join(found)
         if found
@@ -263,8 +327,7 @@ def reuse_warning(
         f"likely printed \"Zephyr SDK version {version} is already installed at <path>. "
         f"Using it.\" and ignored --install-dir, because another Zephyr SDK {version} "
         f"is visible to CMake's package discovery{named}. Removing the scratch "
-        f"directory will not help. Move or rename that SDK out of /usr, /usr/local, "
-        f"/opt, $HOME, $HOME/.local, $HOME/.local/opt and $HOME/bin, or delete its "
+        f"directory will not help. Move or rename that SDK out of {where}, or delete its "
         f"entry from the CMake user package registry (~/.cmake/packages/Zephyr-sdk/, "
         f"or HKEY_CURRENT_USER\\Software\\Kitware\\CMake\\Packages\\Zephyr-sdk on "
         f"Windows), then re-run `tan bootstrap`."

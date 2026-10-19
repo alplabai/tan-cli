@@ -2160,6 +2160,9 @@ def _acquire_toolchain(
                     credential.extra_env if credential is not None else None,
                     real_home=real_home,
                     environ=os.environ,
+                    user_base=isolation.user_base_for(
+                        west, os.environ, log.line, enabled=not runner.dry_run
+                    ),
                 ),
             )
     finally:
