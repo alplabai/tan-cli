@@ -197,19 +197,21 @@ What those commands do:
    unaffected, and `native_sim` builds never need a cross toolchain at all).
    What the phase verifies (tan-cli#1496, tan-cli#1556): `tan` downloads both
    pinned archives itself -- the SDK's minimal bundle and the
-   `arm-zephyr-eabi` toolchain -- and hashes each against alp-sdk's sha256
-   pin (`metadata/toolchains.json`) while it streams. Before downloading it
-   also compares those pins with the release's own `sha256.sum`, so a pin
-   upstream no longer publishes is refused up front with both hashes named.
-   Nothing is re-hashed from disk afterwards. A mismatch, an ambiguous or
-   duplicated sum entry, or a sum or archive that cannot be fetched (offline,
-   a SOCKS proxy) refuses with `bootstrap.toolchain-pin-mismatch` or
-   `bootstrap.toolchain-pin-unverified` and stamps nothing; a pinned archive
-   upstream does not serve (HTTP 404/410) refuses with `bootstrap.toolchain-install`
-   and is not retried. The stamp records what was checked: an install by a
-   `tan` before tan-cli#1556 is reported as having had only its toolchain
-   archive pin-checked, and one before tan-cli#1496 as never compared with
-   the pin.
+   `arm-zephyr-eabi` toolchain -- and hashes each against alp-sdk's sha256 pin
+   (`metadata/toolchains.json`) while it streams. Nothing is re-hashed from
+   disk afterwards. A hash mismatch refuses with
+   `bootstrap.toolchain-pin-mismatch` -- and only then does `tan` read the
+   release's own `sha256.sum`, to say what it is consistent with (an upstream
+   republish, or bytes changed in transit) -- as evidence to check on the
+   release page, never as a reason to move the pin (tan-cli#1559); the sum
+   never blocks an
+   install on its own. An archive that cannot be fetched (offline, a SOCKS
+   proxy) refuses with `bootstrap.toolchain-pin-unverified`; both stamp
+   nothing; a pinned archive upstream does not serve (HTTP 404/410) refuses
+   with `bootstrap.toolchain-install` and is not retried. The stamp records
+   what was checked: an install by a `tan` before tan-cli#1556 is reported as
+   having had only its toolchain archive pin-checked, and one before
+   tan-cli#1496 as never compared with the pin.
    `tan` no longer runs `west sdk install` for this. West ignored
    `--install-dir` whenever CMake could find the pinned SDK version anywhere
    it searches (your home directory, a `bin` directory on `PATH`, the CMake

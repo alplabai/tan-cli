@@ -70,6 +70,10 @@ class FetchOutcome:
     #: | "install" (downloaded and matched, but could not be extracted/placed).
     kind: str
     message: str = ""
+    #: The sha256 actually downloaded, on a hash "mismatch" (not on an
+    #: over-size one) -- what `toolchain_pin.mismatch_diagnosis` compares the
+    #: release sum against.
+    got_sha256: str = ""
 
 
 def _single(artifacts: tuple[ToolchainArtifact, ...], component: str) -> ToolchainArtifact | None:
@@ -145,7 +149,8 @@ def _download(url: str, dest: Path, art: ToolchainArtifact) -> FetchOutcome:
         return FetchOutcome(
             "mismatch",
             f"{art.filename} downloaded from {url} has sha256 {got}, but alp-sdk pins "
-            f"{art.sha256} (a proxy rewriting the download gives the same symptom)",
+            f"{art.sha256}",
+            got_sha256=got,
         )
     return FetchOutcome("ok")
 

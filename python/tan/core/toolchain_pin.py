@@ -9,9 +9,11 @@ What is and is NOT verified, stated once (every message and doc defers to this):
   (tan-cli#1496; the SDK's `setup.sh` used to fetch it with `wget` and check
   nothing) -- and hashes each against its alp-sdk pin while it streams
   (`tan.commands.bootstrap_toolchain_fetch`). That hash is the integrity check.
-* Before downloading, tan also compares the pins with the release's own sum, so a
-  pin that disagrees with what upstream publishes is refused up front with both
-  hashes named, instead of surfacing as a bare download mismatch.
+* The release's own `sha256.sum` is NOT a gate (tan-cli#1559): it lives under
+  the same `baseUrl` as the archives, so it adds no integrity the pin does not
+  already give. It is fetched only after a hash mismatch, to tell the reader
+  which kind it was ([`mismatch_diagnosis`]); an unreachable sum never blocks
+  an install whose archives hashed to the pin.
 * Nothing is re-hashed from disk after install. That is the residual trust.
 
 The sum-file parser accepts a strict SUBSET of what west matches and refuses
@@ -98,18 +100,46 @@ def pin_findings(
     return tuple(out)
 
 
-def refusal_message(findings: tuple[PinFinding, ...], url: str, *, when: str = "before") -> str:
-    lines = [
-        f"cannot acquire the cross toolchain: the release's {SUM_FILENAME} ({url}) "
-        f"disagrees with the sha256 alp-sdk pins in metadata/toolchains.json "
-        f"({when}), so the install is not trusted:"
-    ]
-    for f in findings:
-        got = f.published if f.published is not None else "no entry for this file"
-        extra = f" [{f.problem}]" if f.problem else ""
-        lines.append(f"  {f.artifact.filename}: pinned {f.artifact.sha256}, published {got}{extra}")
-    lines.append(
-        "The upstream archive may have been replaced after alp-sdk pinned it. Do not "
-        "bypass this; update the pin in alp-sdk only after the new archive is reviewed."
+def mismatch_diagnosis(
+    art: ToolchainArtifact, got: str | None, sum_text: str | None, why: str
+) -> str:
+    """Which way a pin mismatch most likely happened, read off the release's
+    own sum (tan-cli#1559) -- fetched ONLY after a mismatch, never as a gate:
+    the archive's hash against the pin is the whole integrity check, and the
+    sum lives under the same `baseUrl`, so it can explain a refusal but never
+    excuse or cause one.
+
+    Worded as EVIDENCE, never as a verdict: the sum arrives over the same
+    channel that just delivered bad bytes, so whoever rewrote the archive could
+    rewrite it too. Nothing here may read as permission to move the pin.
+
+    `got` is the downloaded sha256, or `None` when the download was refused
+    for exceeding the pinned size before it could be hashed. `sum_text` is
+    `None` when the sum could not be fetched (`why` says why); the refusal
+    stands either way."""
+    caveat = "Confirm on the release page before touching the pin."
+    if sum_text is None:
+        return f"The release {SUM_FILENAME} could not be fetched to explain this ({why})."
+    found = pin_findings((art,), parse_sum_file(sum_text))
+    if found and found[0].problem is not None:
+        return f"The release {SUM_FILENAME} served here is ambiguous for this file ({found[0].problem})."
+    listed = found[0].published if found else art.sha256.strip().lower()
+    if listed is None:
+        return f"The release {SUM_FILENAME} served here has no entry for this file."
+    if listed == art.sha256.strip().lower():
+        return (
+            f"The release {SUM_FILENAME} served here still lists the pinned hash -- "
+            f"consistent with the bytes changing in transit (a TLS-intercepting "
+            f"proxy, a corrupted mirror or CDN copy). {caveat}"
+        )
+    if got is not None and listed == got:
+        return (
+            f"The release {SUM_FILENAME} served here lists the hash that was "
+            f"downloaded -- consistent with upstream republishing this archive after "
+            f"alp-sdk pinned it, but this sum came over the same channel. {caveat}"
+        )
+    return (
+        f"The release {SUM_FILENAME} served here lists {listed}, which is not the pin"
+        + ("" if got is None else " and not what was downloaded")
+        + f". {caveat}"
     )
-    return "\n".join(lines)

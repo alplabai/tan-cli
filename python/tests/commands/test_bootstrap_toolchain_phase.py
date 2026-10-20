@@ -151,9 +151,9 @@ def _stub_compiler_probe(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_release_sum_fetch(monkeypatch):
-    """tan-cli#1496: the pre-download pin check fetches the release
-    `sha256.sum`. Hermetic here: a sum that agrees with `_small_manifest`'s
-    pins (the dedicated cases live in test_bootstrap_toolchain_pin.py)."""
+    """tan-cli#1559: the release `sha256.sum` is fetched only to explain a hash
+    mismatch. Hermetic here: a sum that agrees with `_small_manifest`'s pins
+    (the dedicated cases live in test_bootstrap_toolchain_pin.py)."""
     from tan.commands import bootstrap_toolchain_pin
 
     monkeypatch.setattr(
@@ -604,7 +604,7 @@ def test_dry_run_plans_every_download_and_writes_nothing(tmp_path, monkeypatch, 
 
     assert log.blocking() == []
     planned = [" ".join(argv) for argv in runner.planned]
-    assert any("sha256.sum" in line for line in planned)
+    assert not any("sha256.sum" in line for line in planned)  # tan-cli#1559
     assert any("x.tar.xz" in line and "a" * 64 in line for line in planned)
     assert any("y.tar.xz" in line and "b" * 64 in line for line in planned)
     assert not any("west" in line for line in planned)
