@@ -807,7 +807,10 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # all three `sdk-credential-*` warns are gone (codes retired from
         # contract/issue-codes.json, pre-consumer); the two pinned installs now
         # share `_report_fetch_failure`'s four warns plus one row-count refusal.
-        expected_calls=38,
+        # 36 since tan-cli#1559: `_check_release_sum` and its two warns are gone
+        # (the sum is fetched only to explain a mismatch, inside
+        # `_report_fetch_failure`'s existing `toolchain-pin-mismatch` warn).
+        expected_calls=36,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were

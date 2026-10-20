@@ -1583,52 +1583,16 @@ def _host_artifacts(
     return manifest.artifacts_for_host(host_key)
 
 
-def _check_release_sum(log: Log, manifest: toolchain_provision.ToolchainManifest) -> bool:
-    """tan-cli#1496: fetch the release `sha256.sum` and compare alp-sdk's pins with it
-    before downloading anything. `False` when refused (warned, blocking). An
-    unreachable sum file is a refusal, not a pass. What this does and does not
-    prove: see `tan.core.toolchain_pin`."""
-    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
-    from tan.core import toolchain_pin  # noqa: PLC0415
-
-    artifacts = _host_artifacts(manifest)
-    if not artifacts:
-        return True
-    url = toolchain_pin.sum_url(manifest)
-    text, why = fetch_sum_text(url)
-    if text is None:
-        log.warn(
-            "toolchain-pin-unverified",
-            f"cannot acquire the cross toolchain: could not fetch {url} to check the "
-            f"archives against alp-sdk's sha256 pins ({why}). Check "
-            f"ALL_PROXY/HTTPS_PROXY/NO_PROXY or retry on a network that reaches "
-            f"github.com; `--no-toolchain` skips this phase.",
-        )
-        return False
-    findings = toolchain_pin.pin_findings(artifacts, toolchain_pin.parse_sum_file(text))
-    if findings:
-        log.warn(
-            "toolchain-pin-mismatch",
-            toolchain_pin.refusal_message(findings, url, when="before downloading"),
-        )
-        return False
-    return True
-
-
 def _plan_tan_downloads(
     runner: Runner, manifest: toolchain_provision.ToolchainManifest
 ) -> None:
     """--dry-run: tan's OWN network fetches are not subprocess argvs, so list them in
     `plannedCommands` as `# tan downloads ...` lines to keep the preview complete."""
     from tan.commands import bootstrap_toolchain_fetch as fetch  # noqa: PLC0415
-    from tan.core import toolchain_pin  # noqa: PLC0415
 
     artifacts = _host_artifacts(manifest)
     if not artifacts:
         return
-    runner.planned.append(
-        ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), "(compared with alp-sdk's pins)"]
-    )
     for art in (fetch.minimal_sdk_artifact(artifacts), fetch.toolchain_artifact(artifacts)):
         if art is not None:
             runner.planned.append(
@@ -1649,12 +1613,35 @@ def _fetch_with_retries(fetch_one: Callable[[], object]):
     return outcome
 
 
-def _report_fetch_failure(log: Log, root: Path, filename: str, outcome) -> None:
+def _mismatch_diagnosis(
+    manifest: toolchain_provision.ToolchainManifest,
+    art: toolchain_provision.ToolchainArtifact,
+    got: str | None,
+) -> str:
+    """tan-cli#1559: the release `sha256.sum`, fetched only now, after a hash
+    mismatch -- to say which kind of mismatch it was, never to decide it."""
+    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    text, why = fetch_sum_text(toolchain_pin.sum_url(manifest))
+    return toolchain_pin.mismatch_diagnosis(art, got, text, why or "")
+
+
+def _report_fetch_failure(
+    log: Log,
+    root: Path,
+    manifest: toolchain_provision.ToolchainManifest,
+    art: toolchain_provision.ToolchainArtifact,
+    outcome,
+) -> None:
+    filename = art.filename
     if outcome.kind == "mismatch":
+        diagnosis = f" {_mismatch_diagnosis(manifest, art, outcome.got_sha256 or None)}"
         log.warn(
             "toolchain-pin-mismatch",
-            f"cannot acquire the cross toolchain: {outcome.message}. Nothing was stamped. "
-            f"Do not bypass this; update the pin in alp-sdk only after the new archive is reviewed.",
+            f"cannot acquire the cross toolchain: {outcome.message}.{diagnosis} Nothing was "
+            f"stamped. Do not bypass this; update the pin in alp-sdk only after the new "
+            f"archive is reviewed.",
         )
     elif outcome.kind == "unverified":
         log.warn(
@@ -1699,7 +1686,7 @@ def _install_pinned_archive(
     outcome = _fetch_with_retries(lambda: install(art))
     if outcome.kind == "ok":
         return True
-    _report_fetch_failure(log, root, art.filename, outcome)
+    _report_fetch_failure(log, root, manifest, art, outcome)
     return False
 
 
@@ -1763,8 +1750,6 @@ def _acquire_toolchain(
         log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
         return
     _reclaim_toolchain_wreckage(root, leaf)
-    if not _check_release_sum(log, manifest):
-        return
     tmp_dir = root / f"{leaf}{toolchain_provision.TMP_SUFFIX_PREFIX}{os.getpid()}"
     log.line(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "

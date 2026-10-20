@@ -367,7 +367,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#1496: recorded via `Log.warn` in `_check_release_sum` (before anything is downloaded) and `_report_fetch_failure` (an archive tan downloaded -- the SDK minimal bundle or the toolchain -- hashes differently from alp-sdk's pin). The release's `sha256.sum` has no entry for, or a different sha256 than, an artifact alp-sdk pins in `metadata/toolchains.json` (upstream may have swapped the archive and republished the sum). From `_check_release_sum` nothing has been downloaded yet; from `_report_fetch_failure` the archive was downloaded and discarded, never extracted or stamped. A `WORKSPACE_BLOCKING` member. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+      "note": "tan-cli#1496/#1559: recorded via `Log.warn` in `_report_fetch_failure`. An archive tan downloaded -- the SDK minimal bundle or the toolchain -- hashes differently from the sha256 alp-sdk pins in `metadata/toolchains.json` (or is larger than the pinned size). The archive is discarded, never extracted or stamped, and the mismatch is never retried. Only then is the release `sha256.sum` fetched, to say which kind of mismatch it was (upstream republished / altered in transit / neither -- `toolchain_pin.mismatch_diagnosis`); the sum never decides the refusal. A `WORKSPACE_BLOCKING` member. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "bootstrap.toolchain-pin-unverified",
@@ -375,7 +375,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#1496: recorded via `Log.warn` in `_check_release_sum` and `_report_fetch_failure`. The release `sha256.sum`, the SDK minimal bundle or the toolchain archive could not be fetched (offline, DNS, TLS, proxy, HTTP error, oversized body), so the pin comparison could not run. A refusal rather than a warn-and-continue: the install needs the same network. Since tan-cli#1556 both archives are hashed against the pin whatever happens to the sum, so an unreachable sum alone now blocks an install that would have been fully pin-verified; making the sum fetch diagnostic-only is the planned follow-up (tan-cli#1556, PR 3). A `WORKSPACE_BLOCKING` member; `--no-toolchain` skips the phase. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+      "note": "tan-cli#1496/#1559: recorded via `Log.warn` in `_report_fetch_failure`. A pinned archive (the SDK minimal bundle or the toolchain) could not be downloaded after three attempts (offline, DNS, TLS, proxy, a non-404/410 HTTP error, a download past its deadline), so its hash could not be compared with the pin. A refusal rather than a warn-and-continue: stamping an archive whose bytes were never hashed against the pin is the silent pass #1496 closes. Since tan-cli#1559 an unreachable release `sha256.sum` no longer raises this: the sum is only fetched to explain a mismatch. A `WORKSPACE_BLOCKING` member; `--no-toolchain` skips the phase. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "bootstrap.west-patches-failed",

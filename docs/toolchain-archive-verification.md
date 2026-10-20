@@ -5,24 +5,28 @@ sha256 in `metadata/toolchains.json`: the Zephyr SDK *minimal bundle*
 (`sdk_version`, `cmake/`, `setup.sh`/`setup.cmd`) and the `arm-zephyr-eabi`
 toolchain. Since tan-cli#1556 it downloads both itself:
 
-1. It fetches the release's own `sha256.sum` and compares alp-sdk's pins with it
-   before downloading anything. A disagreement refuses with
-   `bootstrap.toolchain-pin-mismatch`, naming both hashes; an unreachable sum
-   refuses with `bootstrap.toolchain-pin-unverified`. The sum parser is
-   fail-closed: it refuses marker-prefixed, path-prefixed, uppercase, duplicate
-   or otherwise ambiguous entries for a pinned file.
-2. It downloads the minimal bundle, hashes it against the pin while streaming,
+1. It downloads the minimal bundle, hashes it against the pin while streaming,
    extracts it into a scratch directory, requires exactly one top-level
    directory, and moves that into place.
-3. It downloads the toolchain archive, hashes it the same way, and extracts it
+2. It downloads the toolchain archive, hashes it the same way, and extracts it
    into `gnu/arm-zephyr-eabi`, the layout the SDK's own `setup.sh -t` produces.
 
 A hash mismatch refuses with `bootstrap.toolchain-pin-mismatch` and is never
-retried. A transport failure refuses with `bootstrap.toolchain-pin-unverified`
-after three attempts. An asset upstream does not serve (HTTP 404/410) refuses
-with `bootstrap.toolchain-install` and is not retried. After that, the phase
-re-reads `sdk_version` and runs `arm-zephyr-eabi-gcc --version` from the new
-tree before moving it into the store and stamping it.
+retried. Only then does tan fetch the release's own `sha256.sum` (tan-cli#1559),
+to say which kind of mismatch it is consistent with: upstream republished the
+archive (the sum lists the downloaded hash), the bytes changed in transit (the
+sum still lists the pin -- a TLS-intercepting proxy, a corrupted mirror), or
+neither. That is evidence to confirm on the release page, never a reason to move
+the pin: the sum arrives over the same channel as the bytes that failed. It
+never decides anything: it lives under the same `baseUrl` as the archives, and
+an unreachable sum leaves the refusal standing, undiagnosed. Its parser is
+fail-closed: marker-prefixed, path-prefixed, uppercase, duplicate or otherwise
+ambiguous entries are reported as ambiguous, not guessed at. A transport failure
+refuses with `bootstrap.toolchain-pin-unverified` after three attempts. An asset
+upstream does not serve (HTTP 404/410) refuses with
+`bootstrap.toolchain-install` and is not retried. After that, the phase re-reads
+`sdk_version` and runs `arm-zephyr-eabi-gcc --version` from the new tree before
+moving it into the store and stamping it.
 
 What remains unverified: nothing is re-hashed from disk after install.
 
