@@ -5,13 +5,67 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.7.1] — Unreleased
+## [0.7.1-rc1] — 2026-10-20
+
+*A **pre-release**: `install.sh`/`install.ps1` and the VS Code extension keep
+installing `v0.7.0`; install this one by hand to test it. It changes how
+`tan bootstrap` installs the Zephyr SDK cross toolchain (tan-cli#1556), so it
+is cut as an rc first. Requires alp-sdk `v0.17.0` or newer, the same floor as
+`v0.7.0`.*
 
 ### Fixed
 
-- `TAN_VERSION` moved to `0.7.1-rc1.dev0` off the published `v0.7.0` tag
-  (tan-cli#770's automated post-release bump).
+- **`tan bootstrap` installs the Zephyr SDK minimal bundle itself instead of
+  running `west sdk install`.** West ignored `--install-dir` whenever CMake could
+  find the pinned SDK version anywhere it searches -- an SDK in your home directory
+  such as `~/zephyr-sdk-<ver>`, a `bin` directory of one on `PATH`, a copy under
+  `/usr`, `/usr/local` or `/opt`, or one registered in the CMake package registry
+  (HKCU on Windows) -- and reused that copy instead, which tan then
+  refused. `tan` now downloads the bundle from the pinned release, hashes it
+  against alp-sdk's sha256 pin (west only checked it against the release's own
+  `sha256.sum`, and tan never saw its bytes), extracts it, and installs it
+  beside the toolchain. Nothing is discovered, nothing is reused, and nothing is
+  written to the CMake package registry on any OS. The toolchain stamp gains
+  `bundlePinChecked`; installs by earlier `tan` versions keep their stamp and
+  are described as having had only their toolchain archive pin-checked. A
+  pinned archive that upstream does not serve (HTTP 404/410) is now reported as
+  such and not retried, rather than as a proxy problem after three attempts
+  (tan-cli#1552, tan-cli#1556).
 
+- **`tan bootstrap` removes the dead CMake package-registry entries earlier
+  versions left behind.** Up to v0.7.0, `west sdk install`'s `setup.sh -c` /
+  `setup.cmd -c` registered the `.tmp-*` directory tan installed into, and tan
+  then moved that directory into its store, so the entry pointed nowhere. Every
+  run now prunes the `Zephyr-sdk` entries whose path is one of tan's own
+  `<toolchain root>/zephyr-sdk-*.tmp-*/cmake` directories --
+  `~/.cmake/packages/Zephyr-sdk/` on Linux and macOS,
+  `HKEY_CURRENT_USER\Software\Kitware\CMake\Packages\Zephyr-sdk` on Windows.
+  Only an entry whose path is exactly one of those directories AND whose name is
+  the MD5 of that path (i.e. `zephyr_sdk_export.cmake` wrote it) is removed; a
+  registration you made yourself is never touched (tan-cli#1553).
+
+### Changed
+
+- **`tan bootstrap` no longer fails when the Zephyr SDK release's `sha256.sum`
+  cannot be fetched.** Both pinned archives are hashed against alp-sdk's pin
+  while they download (tan-cli#1556), so the sum added no integrity -- it lives
+  under the same release URL -- yet an outage of it alone blocked an install
+  that would have been fully pin-verified. The sum is now fetched only after a
+  hash mismatch, to say what it is consistent with (an upstream republish, or
+  bytes changed in transit); the refusal stands either way. A new gate also turns
+  every Zephyr SDK pin move red until the new minimal bundle's `setup.sh` /
+  `setup.cmd` has been read, since tan no longer runs them (tan-cli#1559).
+
+### Removed
+
+- **`tan bootstrap` no longer reads `$TAN_GITHUB_TOKEN`, `$GH_TOKEN` or
+  `$GITHUB_TOKEN`.** They existed only to authenticate the GitHub API release
+  listing `west sdk install` made, which the toolchain phase no longer runs; the
+  pinned archives come from the release CDN, which needs no token. The
+  `bootstrap.sdk-credential-unstaged` and `bootstrap.sdk-credential-unverified`
+  issue codes are retired with them (both were pre-consumer). A private netrc an
+  older `tan` staged and could not clean up is still swept from the toolchain
+  root (tan-cli#1556).
 ## [0.7.0] — 2026-10-13
 
 *`v0.7.0-rc1` (2026-10-10) was published as a GitHub **pre-release**, so
