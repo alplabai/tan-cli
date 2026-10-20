@@ -72,6 +72,8 @@ def test_a_swapped_archive_is_a_mismatch_and_nothing_is_extracted(tmp_path, monk
         "https://example.invalid/", _art(good), tmp_dir, tmp_path / "root", "leaf"
     )
     assert out.kind == "mismatch"
+    # tan-cli#1559: the downloaded hash is what the mismatch diagnosis reads.
+    assert out.got_sha256 == hashlib.sha256(evil).hexdigest()
     assert not (tmp_dir / "gnu").exists()
 
 

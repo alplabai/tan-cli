@@ -99,4 +99,18 @@
 # release containing the floor (tan-cli#1258), so the `.dev0` tail comes off:
 # this tree is what `v0.7.0` will name, and `## [0.7.0]` is dated in the same
 # change, with the 20 post-rc1 `changelog.d/` fragments folded into it.
-TAN_VERSION = "0.7.0"
+#
+# v0.7.0 published 2026-10-13 (tan-cli#770's automated post-release bump): the
+# development line still carried the published tag's exact version, the state
+# `version_check.py --not-released` exists to refuse. TAN_VERSION moves to
+# `0.7.1-rc1.dev0` -- a `.devN` tail on the next pre-release -- which promises
+# neither that release nor that pre-release number, only that both sort above
+# it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.1] — Unreleased`,
+# per `release_target()`.
+#
+# 0.7.1-rc1 RELEASE BUMP (2026-10-20). The `.dev0` tail comes off: this tree is
+# what `v0.7.1-rc1` will name, and `## [0.7.1-rc1]` is dated in the same change
+# with the four `changelog.d/` fragments folded in. A pre-release because
+# tan-cli#1556 replaced how `tan bootstrap` installs the Zephyr SDK; same alp-sdk
+# `v0.17.0` floor as `v0.7.0`.
+TAN_VERSION = "0.7.1-rc1"

@@ -135,8 +135,8 @@ binaries is on `PATH` and names the same `winget` command. It does not wait for
 the Zephyr SDK to be missing first — a host that already has the SDK and no
 7-Zip is exactly the host whose next `west sdk install` dies with
 `Zephyr SDK setup requires '7z'` (tan-cli#736). `tan bootstrap`'s own
-cross-toolchain phase (below) checks for the same thing before it ever runs
-`west sdk install` itself, and refuses cleanly instead of hitting that error.
+cross-toolchain phase (below) extracts the Windows `.7z` archives itself and
+checks for a 7-Zip before downloading anything, refusing cleanly instead.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -195,81 +195,34 @@ What those commands do:
    compiler and re-verifies its stamp rather than reinstalling. Pass
    `--no-toolchain` to skip this phase (the rest of `bootstrap` is
    unaffected, and `native_sim` builds never need a cross toolchain at all).
-   What the phase verifies (tan-cli#1496): `west sdk install` checks only the
-   minimal SDK bundle, against the release `sha256.sum`; the SDK's `setup.sh`
-   then fetches the toolchain archive with no check at all. So `tan` compares
-   alp-sdk's sha256 pins (`metadata/toolchains.json`) with that sum before and
-   after west runs, passes `--no-gnu-toolchains`, and downloads the toolchain
-   archive itself, hashing it against the pin while it streams. The minimal
-   bundle is therefore verified only through the sum (`tan` never holds its
-   bytes), and nothing is re-hashed from disk afterwards. A mismatch, an
-   ambiguous or duplicated sum entry, or a sum or archive that cannot be
-   fetched (offline, a SOCKS proxy) refuses with `bootstrap.toolchain-pin-mismatch`
-   or `bootstrap.toolchain-pin-unverified` and stamps nothing; `--no-toolchain`
-   skips the phase. The stamp records `pinChecked`; a toolchain installed by an
-   older `tan` is kept but reported as never compared with the pin.
-   This phase does **not** need `file` on PATH, on any host: it passes
-   `--no-hosttools` to the underlying `west sdk install` (tan-cli#1176), so
-   the SDK's own host-tools step -- the part that needs `file`, and that dies
-   with "Host tools installation failed" naming nothing without it -- never
-   runs at all. That is deliberate: it is what lets this phase complete on a
-   host carrying only the prerequisites above. What it skips is the SDK's
-   `hosttools/` bundle, so this phase installs no `dtc`, `openocd`, `bossac`
-   or `qemu-system-*`; Zephyr treats `dtc` and `openocd` as optional and a
-   real-silicon build needs neither, but if you want them, run the manual
-   command below WITHOUT `--no-hosttools` (and then you do need `file`).
-   This phase lists the SDK releases through the GitHub API, whose anonymous
-   quota is counted **per source IP** -- so behind a shared office egress, a
-   corporate VPN or a runner pool it can be exhausted by traffic that is not
-   yours, and the download fails with `403 API rate limit exceeded`. Set
-   `$TAN_GITHUB_TOKEN` to authenticate it. The token needs no scopes --
-   listing public releases requires none.
-
-   `tan` also reads `$GH_TOKEN` and `$GITHUB_TOKEN`, in that order behind
-   `$TAN_GITHUB_TOKEN`, so an existing `gh auth login` session or a CI job's
-   own token authenticates the download with nothing new to set. That means
-   an **ambient** `$GH_TOKEN` you set for something else will be used here
-   too; `$TAN_GITHUB_TOKEN` overrides it for `tan` alone, and unsetting all
-   three restores the anonymous download exactly as it was. Every message
-   `tan` prints about this names the **variable**, never its value, and the
-   `bootstrap.sdk-credential-unstaged` warning tells you when a variable was
-   set but not used.
-
-   How the token is handled, since it is a secret:
-
-   - **Environment only, never a flag.** There is deliberately no
-     `--github-token`: a flag value lands in shell history, in the host
-     process table for the whole multi-minute download, and in the argv
-     people paste into bug reports.
-   - **Never an argv element.** `tan` stages it in a private `netrc` and
-     points `west sdk install` at it with `$NETRC`, so it appears in no log,
-     no `--dry-run` plan, no `data.plannedCommands` and no JSON envelope.
-   - **Offered to `api.github.com` and to nothing else.** This is *narrower*
-     than `west sdk install --personal-access-token`, which puts an
-     `Authorization` header on the session: a netrc credential is matched per
-     host, so the release CDN that serves the actual multi-hundred-megabyte
-     archive never sees your token.
-   - **It touches disk.** The staged `netrc` is a real file -- mode `0600`
-     inside a `0700` directory under the toolchain root, deleted when the
-     download returns and swept on the next `tan bootstrap` if a crash
-     skipped that. It is deliberately not under `$TMPDIR`: that sweep
-     identifies what to delete by NAME, and a name is only proof of
-     ownership inside a directory `tan` owns. The sweep also leaves alone
-     anything recent enough to belong to a concurrent `tan bootstrap` --
-     under six hours old — so two `tan` runs at once cannot silently
-     de-authenticate each other.
-   - **It replaces your own `netrc` for that one child.** `$NETRC` has no
-     `~/.netrc` fallback behind it, so an unrelated credential in your own
-     `~/.netrc` is not visible to `west sdk install` while `tan` is
-     authenticating the download. Nothing is set at all when you supply no
-     token.
-   - **`tan` stops claiming it if it cannot verify the route.** The netrc
-     hand-off depends on how the Zephyr in your workspace handles credentials,
-     which `tan` neither owns nor pins. Before printing that it authenticated
-     the download, `tan` checks the `west sdk install` in that workspace still
-     matches what the hand-off was measured against; if it does not, you get a
-     `bootstrap.sdk-credential-unverified` warning naming what to do instead,
-     rather than an assurance that quietly stopped being true.
+   What the phase verifies (tan-cli#1496, tan-cli#1556): `tan` downloads both
+   pinned archives itself -- the SDK's minimal bundle and the
+   `arm-zephyr-eabi` toolchain -- and hashes each against alp-sdk's sha256 pin
+   (`metadata/toolchains.json`) while it streams. Nothing is re-hashed from
+   disk afterwards. A hash mismatch refuses with
+   `bootstrap.toolchain-pin-mismatch` -- and only then does `tan` read the
+   release's own `sha256.sum`, to say what it is consistent with (an upstream
+   republish, or bytes changed in transit) -- as evidence to check on the
+   release page, never as a reason to move the pin (tan-cli#1559); the sum
+   never blocks an
+   install on its own. An archive that cannot be fetched (offline, a SOCKS
+   proxy) refuses with `bootstrap.toolchain-pin-unverified`; both stamp
+   nothing; a pinned archive upstream does not serve (HTTP 404/410) refuses
+   with `bootstrap.toolchain-install` and is not retried. The stamp records
+   what was checked: an install by a `tan` before tan-cli#1556 is reported as
+   having had only its toolchain archive pin-checked, and one before
+   tan-cli#1496 as never compared with the pin.
+   `tan` no longer runs `west sdk install` for this. West ignored
+   `--install-dir` whenever CMake could find the pinned SDK version anywhere
+   it searches (your home directory, a `bin` directory on `PATH`, the CMake
+   package registry), and it registered tan's temporary install directory in
+   that registry. It also listed releases through the rate-limited GitHub
+   API. None of that happens now: the phase needs no GitHub token, writes no
+   CMake package-registry entry, and removes the dead entries older `tan`
+   versions left (tan-cli#1553). It also installs nothing from the SDK's
+   `hosttools/` bundle, so it needs no `file` on PATH; Zephyr treats `dtc`
+   and `openocd` as optional and a real-silicon build needs neither, but if
+   you want them, run the manual command below (and then you do need `file`).
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 

@@ -184,10 +184,9 @@ def test_the_invocation_still_carries_the_flag_under_test():
 def test_the_credential_is_not_passed_in_argv():
     """tan-cli#1185. A credential on a CLI flag lands in the host process
     table for the whole multi-minute download, readable by anything else
-    executing in the job -- the invariant
-    `toolchain_provision.SDK_TOKEN_ENV_VARS` states in its own words and
-    tan-cli#1143 designed `tan bootstrap` around. This step was the last site
-    in the repo contradicting it.
+    executing in the job -- the invariant tan-cli#1143 designed around (tan
+    itself stages no credential since tan-cli#1556). This step was the last
+    site in the repo contradicting it.
 
     Scoped to THIS step; `test_no_credential_in_workflow_argv.py` is the
     repo-wide gate. Comment lines are exempt for the same reason they are
@@ -220,12 +219,11 @@ def test_the_credential_still_reaches_west_through_a_netrc():
     assert re.search(r"^\s*export NETRC=", run, re.M), (
         "the step no longer exports NETRC, so `requests` -- the client `west "
         "sdk install`'s GitHub call goes through -- has no netrc path to read "
-        "and the download is anonymous (tan-cli#1143 "
-        "`toolchain_provision.NETRC_ENV_VAR`)"
+        "and the download is anonymous (tan-cli#1143)"
     )
     assert "machine api.github.com" in run and "login x-access-token" in run, (
-        "the staged netrc is no longer the one-machine document tan writes "
-        "(`toolchain_provision.netrc_text`: api.github.com / x-access-token) "
+        "the staged netrc is no longer the one-machine document "
+        "(api.github.com / x-access-token) "
         "-- a mismatched machine line means `requests` finds no entry and "
         "authenticates nothing"
     )

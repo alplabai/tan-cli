@@ -70,8 +70,8 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -664,9 +664,8 @@ class Runner:
         `clear_zephyr_base`-filtered copy of it) -- see `force_git_long_paths`
         for the one caller that uses it.
 
-        `tail_lines` forwards to `capture_tail` -- 4 for every ordinary
-        caller, wider for `west sdk install` (tan-cli#990 review: see
-        `capture_tail`'s own docstring for why that ONE call needs it).
+        `tail_lines` forwards to `capture_tail` -- 4 unless a caller asks for
+        more (see `capture_tail`'s own docstring).
 
         `isolated` (tan-cli#1331) runs the child from a fresh EMPTY directory
         instead of the inherited cwd. Every `python -m <mod>` puts the cwd on
@@ -1370,11 +1369,9 @@ def _free_disk_bytes(root: Path) -> int | None:
 
 def _augment_with_low_disk_note(root: Path, detail: str) -> str:
     """Append [`toolchain_provision.low_disk_note`] when this volume is
-    critically low RIGHT NOW -- a `west sdk install` failure whose own
-    message says nothing about space (tan-cli's `capture_tail` keeps only
-    the last 4 non-empty lines of a failed child's output, which can cut off
-    a `tar`/`xz` "No space left on device" line sitting above a longer
-    traceback) still gets the hint. Best-effort: `_free_disk_bytes` returning
+    critically low RIGHT NOW -- an extraction or placement failure whose own
+    message says nothing about space (a 7-Zip exit code, a truncated tar
+    error) still gets the hint. Best-effort: `_free_disk_bytes` returning
     `None` (nothing above `root` resolves) leaves `detail` unchanged rather
     than guessing.
     """
@@ -1390,19 +1387,13 @@ def _zephyr_base_path(facts: BootstrapFacts, tokens: Tokens) -> str | None:
     `None` when the manifest declares no such key, or declares it blank.
 
     Never re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key,
-    the envelope's `zephyrBase`, the printed export line and the tripwire below
-    all have to follow it together. One derivation, two callers, so a repoint
-    cannot leave `_data` and `_west_sdk_netrc_drift` reading different trees.
+    the envelope's `zephyrBase` and the printed export line have to follow it.
 
-    **TEXT, not a `Path`** (tan-cli#1170 review). `Path()` normalises, and
-    neither caller wants that: `_data` puts this on the wire, where a declared
-    trailing slash is the manifest's to keep and not tan's to drop, and a blank
-    declaration would become `"."` -- which would send `_west_sdk_netrc_drift`
-    to read `./scripts/west_commands/sdk.py` relative to the process CWD and
-    judge the workspace by whatever unrelated tree it found. Blank is `None`
-    on both counts, so `_data` renders `""` exactly as it does for an absent
-    key and that read cannot happen. No manifest declares it blank today; this
-    is a guard, not a fix.
+    **TEXT, not a `Path`** (tan-cli#1170 review). `Path()` normalises: `_data`
+    puts this on the wire, where a declared trailing slash is the manifest's to
+    keep and not tan's to drop, and a blank declaration would become `"."`.
+    Blank is `None`, so `_data` renders `""` exactly as it does for an absent
+    key. No manifest declares it blank today; this is a guard, not a fix.
     """
     for key, raw in facts.env:
         if key == "ZEPHYR_BASE":
@@ -1411,279 +1402,20 @@ def _zephyr_base_path(facts: BootstrapFacts, tokens: Tokens) -> str | None:
     return None
 
 
-def _west_sdk_netrc_drift(ws: Workspace, var: str, version: str) -> str | None:
-    """The `bootstrap.sdk-credential-unverified` message when this workspace's
-    `west sdk install` no longer matches the shape tan's netrc route was
-    reasoned about -- `None` when it does, or when there is nothing to read.
-
-    **The RUNTIME half of `toolchain_provision.NETRC_ENV_VAR`'s residual-risk
-    note** (tan-cli#1154). Deliberately not a CI gate: `requests` is not a tan
-    dependency and `ci.yml` checks out alp-sdk but never zephyr, so a gate
-    would skip in CI and on every developer box -- a gate that cannot fail.
-    This runs only where the artifact exists, which on the path that matters
-    (a `tan bootstrap` about to spend several minutes on an authenticated
-    download) is always.
-
-    Silent on `OSError`. Refusing to claim authentication needs evidence that
-    the assumption BROKE, and "could not look" is not that -- warning on it
-    would train the reader to ignore the code on the one run where it means
-    something. **Not, as an earlier revision of this docstring claimed,
-    because it "would fire on every `--no-west` workspace"** (tan-cli#1170
-    review): a `--no-west` run never reaches here at all. `toolchain_phase` has
-    exactly one caller and it sits in the `else:` of `elif no_west:`, which
-    logs "Skipping cross-toolchain acquisition (--no-west: ...)" and calls
-    nothing. The cases that DO reach an unreadable `sdk.py` are ordinary and
-    all of them mean "not yet", never "broken": an adopted topdir whose zephyr
-    is not at the `$ZEPHYR_BASE` the manifest declares, a `west update` that
-    part-failed or was interrupted before the zephyr repo landed, and a Zephyr
-    that moved `scripts/west_commands` out from under the path this reads.
-    """
-    base = _zephyr_base_path(ws.facts, Tokens(str(ws.repo_root), str(ws.workspace_dir)))
-    if base is None:
-        return None
-    try:
-        source = (Path(base) / "scripts" / "west_commands" / "sdk.py").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return None
-    if toolchain_provision.west_sdk_netrc_assumptions_hold(source):
-        return None
-    return toolchain_provision.west_sdk_netrc_drift_message(var, version)
-
-
-@dataclass(frozen=True)
-class _SdkCredential:
-    """A GitHub credential staged on disk for ONE `west sdk install` run.
-
-    `source` is the NAME of the environment variable the token came from --
-    the only half of the credential that is ever printed or reported. The
-    secret itself lives in the file `extra_env` points at and in nothing
-    else tan holds.
-    """
-
-    #: The environment variable the token was read from. Safe to print.
-    source: str
-    #: What `Runner.run(extra_env=...)` receives: `NETRC=<path>`, nothing more.
-    extra_env: dict[str, str]
-    #: The private directory `_discard_sdk_credential` must delete afterwards.
-    scratch_dir: Path
-    #: Whether tan could still see the shape the netrc route depends on when
-    #: this was staged -- `False` exactly when this run raised
-    #: `bootstrap.sdk-credential-unverified` (tan-cli#1170). It travels ON the
-    #: credential rather than being recomputed downstream so that no later
-    #: surface can reach a different verdict about the same download than the
-    #: warning the user already read; `toolchain_provision.rate_limit_note`
-    #: is the one consumer.
-    verified: bool = True
-
-
-def _stage_sdk_credential(
-    token: toolchain_provision.SdkToken, root: Path
-) -> _SdkCredential | None:
-    """Write `token` into a private netrc and return the env that points the
-    child's HTTP client at it -- or `None` when the file cannot be written,
-    in which case the download proceeds unauthenticated exactly as it did
-    before tan-cli#1143.
-
-    **Why a file and an env var rather than `--personal-access-token`.**
-    `Runner.run` appends every argv it is given to `self.planned`, which IS
-    `data.plannedCommands` in the JSON envelope and the `--dry-run` output,
-    and a failed child's output is kept by `capture_tail` -- so an argv
-    element is the one shape a secret must never take here. `west sdk
-    install` reads a token from that flag and from no environment variable
-    of its own (Zephyr v4.4.1 `scripts/west_commands/sdk.py:473`), but its
-    GitHub call goes through `requests`, which reads a netrc path from
-    `$NETRC` and applies it unless the call passes `auth=` or the session sets
-    `trust_env=False` -- NOT "whenever the request carries no `Authorization`
-    header", as an earlier revision said; a header does not suppress it, the
-    netrc match overwrites one (`toolchain_provision.NETRC_ENV_VAR`).
-
-    The file is created `O_EXCL` at mode 0600 inside a fresh `mkdtemp`
-    directory (0700), so it can never be read by another user and can never
-    land on a path another process pre-created. Windows honours neither mode,
-    but the toolchain root is inside the calling user's own profile.
-
-    **Under `root`, not `$TMPDIR`** (tan-cli#1148 review): the `finally`
-    that deletes this cannot run on SIGKILL, so the residue needs a sweep,
-    and a sweep is only safe over a directory tan owns -- see
-    `toolchain_provision.netrc_scratch_glob_pattern` for that argument in
-    full, and `_reclaim_sdk_credential_wreckage` for the sweep.
-    """
-    try:
-        scratch_dir = Path(
-            tempfile.mkdtemp(prefix=toolchain_provision.NETRC_SCRATCH_PREFIX, dir=root)
-        )
-    except OSError:
-        return None
-    path = scratch_dir / "netrc"
-    try:
-        with os.fdopen(
-            os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8"
-        ) as handle:
-            handle.write(toolchain_provision.netrc_text(token.value))
-    except OSError:
-        _discard_sdk_credential(scratch_dir)
-        return None
-    return _SdkCredential(
-        token.source, {toolchain_provision.NETRC_ENV_VAR: _native(path)}, scratch_dir
-    )
-
-
-def _discard_sdk_credential(scratch_dir: Path) -> None:
-    """Delete the staged netrc, best-effort and never raising. Called from a
-    `finally`, so no exit path out of the install -- success, failure, retry
-    exhaustion, an exception from `west` itself -- leaves the token on
-    disk."""
-    shutil.rmtree(scratch_dir, ignore_errors=True)
-
-
-def _sdk_credential_seen() -> str | None:
-    """The name of a `SDK_TOKEN_ENV_VARS` variable that HELD something this
-    run did not end up authenticating with -- usable-but-unstageable, or set
-    but unusable. `None` when the environment named no credential at all.
-
-    Read fresh from `os.environ` rather than threaded down from
-    `_sdk_credential`: this is only ever consulted on the failure path, and a
-    second lookup of the same three variables is cheaper than another field
-    on `_SdkCredential` that exists solely to describe its own absence.
-    """
-    token = toolchain_provision.resolve_sdk_token(os.environ)
-    if token is not None:
-        return token.source
-    rejected = toolchain_provision.rejected_sdk_token_vars(os.environ)
-    return rejected[0] if rejected else None
-
-
-def _sdk_credential_is_possibly_live(candidate: Path, now: float) -> bool:
-    """`True` when `candidate` is young enough that another `tan bootstrap`
-    could still be using it -- see `SDK_CREDENTIAL_LIVE_WINDOW_S`, defined
-    below beside the three retry constants it is derived from rather than
-    here, because it is a fact about how long the retry loop can run.
-
-    Anything unreadable counts as LIVE: refusing to delete what cannot be
-    measured is the safe answer for a credential.
-
-    The subtraction is deliberately NOT `abs()`-wrapped: a backwards clock
-    skew (or a file dated into the future) yields a negative age, which
-    compares as "too young to touch". Both fail-safes are pinned --
-    `test_an_unreadable_credential_directory_is_left_alone` and
-    `test_a_credential_with_a_future_mtime_is_kept_not_swept` -- because a
-    fail-safe documented as deliberate and left undriven is indistinguishable
-    from one nobody meant (tan-cli#1148 round 3)."""
-    try:
-        return now - candidate.stat().st_mtime < SDK_CREDENTIAL_LIVE_WINDOW_S
-    except OSError:
-        return True
-
-
 def _reclaim_sdk_credential_wreckage(root: Path) -> None:
-    """Delete any staged credential a PRIOR run left behind, before a new one
-    is written -- the crash-residue half of `_discard_sdk_credential`
-    (tan-cli#1148 review).
-
-    `_discard_sdk_credential` runs in a `finally`, which covers every exit
-    path the interpreter reaches; it does not cover the ones it does not --
-    SIGKILL, the OOM killer, power loss. Without this, one netrc per crash
-    accumulates with nothing ever reclaiming it. Modes make each copy
-    unreadable to other users, but "unreadable secrets pile up forever" is
-    still the wrong steady state for a credential.
-
-    Structured like `_reclaim_toolchain_wreckage` beside it, for the same
-    reason: the naming pattern is the proof of provenance, so this can only
-    ever delete a directory tan created for exactly this purpose, and it
-    never raises.
-
-    ONE deliberate difference from that sibling: this one discriminates on
-    LIVENESS (`SDK_CREDENTIAL_LIVE_WINDOW_S`) and that one does not. The
-    sibling can afford not to -- a concurrent run whose `.tmp-*` install
-    directory is deleted underneath it FAILS LOUDLY, with a `west sdk
-    install` error and a `toolchain-install` warning. Deleting a live netrc
-    produces no error at all: the download simply proceeds anonymous, after
-    the run has already said it was authenticating. Silent is the difference,
-    and it is why the extra check is here and not there.
-    """
-    now = time.time()
+    """Delete any private netrc a tan before tan-cli#1556 staged for `west sdk
+    install` and could not clean up (SIGKILL, power loss). tan stages none any
+    more, so nothing found here can be live; this only stops old secrets
+    lingering under the toolchain root. Never raises."""
     try:
         for candidate in root.glob(toolchain_provision.netrc_scratch_glob_pattern()):
             try:
-                if candidate.is_dir() and not _sdk_credential_is_possibly_live(candidate, now):
+                if candidate.is_dir():
                     shutil.rmtree(candidate)
             except OSError:
                 pass
     except OSError:
         pass
-
-
-def _sdk_credential(
-    ws: Workspace, log: Log, runner: Runner, root: Path, version: str
-) -> _SdkCredential | None:
-    """The staged credential for this `west sdk install`, or `None` when the
-    environment names none -- in which case the download is exactly as
-    unauthenticated as it has always been (tan-cli#1143 acceptance: the
-    no-token path is unchanged).
-
-    Never staged under `--dry-run`: nothing is spawned, so writing a secret
-    to disk would buy nothing, and `data.plannedCommands` must be
-    byte-identical with and without a token in the environment.
-
-    A downgrade to unauthenticated is a `log.warn`, never a `log.line`
-    (tan-cli#1148 review): `Log.line` prints nothing at all in JSON mode, so
-    an extension user got zero signal and was then told by the failure note
-    to set a token they could see was already set. `sdk-credential-unstaged`
-    is deliberately NOT in `WORKSPACE_BLOCKING` -- an unauthenticated
-    download usually still succeeds, and failing a whole workspace over a
-    missed optimisation would be its own defect.
-
-    **Every warning is raised AFTER the staging it describes, never before**
-    (tan-cli#1148 round 2). The refused-variable loop used to run first, so
-    with `TAN_GITHUB_TOKEN` holding a quoted `.env` value and a perfectly
-    good `GH_TOKEN` behind it, a registered issue code went out on the
-    envelope saying the download "will go out unauthenticated" while it went
-    out authenticated on `GH_TOKEN`. A wire surface asserting the opposite of
-    what happened is worse than the silence this warning replaced, so the
-    order here is resolve -> stage -> report, and every message is rendered
-    from the outcome rather than from the intent.
-
-    Every line here names the VARIABLE, never the value.
-    """
-    if runner.dry_run:
-        return None
-    token = toolchain_provision.resolve_sdk_token(os.environ)
-    credential = _stage_sdk_credential(token, root) if token is not None else None
-    for name in toolchain_provision.shadowed_sdk_token_vars(os.environ, token):
-        log.warn(
-            "sdk-credential-unstaged",
-            toolchain_provision.unusable_token_message(
-                name, authenticated_as=credential.source if credential is not None else None
-            ),
-        )
-    if token is not None and credential is None:
-        log.warn(
-            "sdk-credential-unstaged",
-            f"the ${token.source} credential could not be staged for `west sdk "
-            "install`; the Zephyr SDK download will go out unauthenticated.",
-        )
-    if credential is not None:
-        # tan-cli#1154: the claim is made ONLY when tan can still see the shape
-        # the netrc route depends on. An inert credential is worse than an
-        # absent one -- it removes the symptom that would send the reader to
-        # find a token -- so a drifted west downgrades this line to a warning
-        # rather than printing an assurance tan can no longer stand behind.
-        drift = _west_sdk_netrc_drift(ws, token.source, version)
-        if drift is not None:
-            log.warn("sdk-credential-unverified", drift)
-            # tan-cli#1170: recorded ON the credential, not left to be
-            # recomputed later. `rate_limit_note`'s authenticated branch
-            # otherwise tells the same reader, minutes later in the same run,
-            # that "tan already handed this download the credential in
-            # $<var>" -- the assurance this branch just withdrew.
-            credential = replace(credential, verified=False)
-        else:
-            log.line(
-                f"Authenticating the Zephyr SDK download with the token in ${token.source}"
-            )
-    return credential
 
 
 def _reclaim_toolchain_wreckage(root: Path, leaf: str) -> None:
@@ -1715,7 +1447,7 @@ def _read_installed_sdk_version(store_dir: Path) -> str | None:
 def _probe_toolchain_compiler(store_dir: Path, *, is_windows: bool) -> str | None:
     """`arm-zephyr-eabi-gcc --version` run FROM the store -- the one check
     that proves a real, executable compiler landed there, not just a
-    directory tree `west sdk install` happened to create. Returns the
+    directory tree an extraction happened to create. Returns the
     banner's first line, or `None` on ANY failure to run (binary absent,
     unspawnable, non-zero exit, empty output)."""
     gcc = store_dir.joinpath(*toolchain_provision.gcc_binary_relpath(is_windows=is_windows))
@@ -1744,8 +1476,8 @@ def _finish_toolchain_install(
     root_adopted: bool,
     is_windows: bool,
 ) -> None:
-    """`tmp_dir` is the directory `west sdk install --install-dir` just wrote
-    to (its own name never matches an existing sibling, so its move here can
+    """`tmp_dir` is the directory tan just installed both pinned archives into
+    (its own name never matches an existing sibling, so its move here can
     never merge with one). Verify version + a real compiler probe, THEN move
     into place, THEN stamp -- so a directory-exists check can never mistake
     this for done: [`toolchain_provision.stamp_matches_pin`] is the only
@@ -1768,17 +1500,18 @@ def _finish_toolchain_install(
     if installed_version != manifest.version:
         log.warn(
             "toolchain-install",
-            f"west sdk install exited 0, but {_native(tmp_dir)} reports SDK version "
+            f"the SDK minimal bundle installed, but {_native(tmp_dir)} reports SDK version "
             f"{installed_version!r}, not the pinned {manifest.version!r} -- leaving it "
-            f"in place for inspection rather than trusting it. Remove that directory "
-            f"and re-run `tan bootstrap` once you know why they disagree.",
+            f"in place for inspection rather than trusting it (the next `tan bootstrap` "
+            f"reclaims it). Re-running repeats the same install, so find out why they "
+            f"disagree first.",
         )
         return
     triple = _probe_toolchain_compiler(tmp_dir, is_windows=is_windows)
     if triple is None:
         log.warn(
             "toolchain-install",
-            f"west sdk install exited 0 and reports the correct SDK version, but "
+            f"the SDK reports the correct version, but "
             f"arm-zephyr-eabi-gcc did not run from {_native(tmp_dir)} -- NOT moving "
             f"it into place or stamping it as verified (a directory existing is not "
             f"evidence it works). Re-run `tan bootstrap` to retry.",
@@ -1810,7 +1543,9 @@ def _finish_toolchain_install(
         )
         return
     stamp_text = toolchain_provision.render_stamp(
-        toolchain_provision.ToolchainStamp(manifest.version, manifest.digest(), triple, True)
+        toolchain_provision.ToolchainStamp(
+            manifest.version, manifest.digest(), triple, pin_checked=True, bundle_pin_checked=True
+        )
     )
     try:
         atomic_write_text(store_dir / toolchain_provision.STAMP_FILENAME, stamp_text)
@@ -1823,140 +1558,20 @@ def _finish_toolchain_install(
         return
     log.line(
         f"Cross toolchain {manifest.version} installed, version and compiler checked, "
-        f"and stamped: {_native(store_dir)} -- the toolchain archive was hashed against "
-        f"alp-sdk's pin; the minimal SDK bundle was verified by west against the release "
-        f"sha256.sum (which tan compared with the pin), and tan did not see its bytes."
+        f"and stamped: {_native(store_dir)} -- the SDK minimal bundle and the toolchain "
+        f"archive were both hashed against alp-sdk's pin while downloading."
     )
 
 
-#: Retried the same number of times, with the same backoff shape, as
-#: `.github/workflows/getting-started.yml`'s OWN manual `west sdk install`
-#: step already does -- measured flaky in this exact CI, not a guess: its own
-#: comment records BOTH network legs failing independently (`fetch_releases`
-#: hitting GitHub's unauthenticated per-IP rate limit, and the SEPARATE
-#: `setup.sh -t arm-zephyr-eabi` GNU-toolchain fetch failing with no relation
-#: to the first), and this phase's own first real end-to-end CI run hit a
-#: THIRD failure mode in the same family (`tar --xz` extraction inside
-#: west's own temp dir returning exit status 2). **Not asserted to be a
-#: "transient runner hiccup"** -- tan-cli#990 review caught that claim
-#: unproven: `capture_tail`'s old 4-line default discarded the actual
-#: subprocess error line, leaving no evidence either way, and a
-#: byte-identical local extraction of the real released archive (this repo's
-#: own verification, not west's) succeeded cleanly, which only rules out a
-#: broken tar invocation or a corrupt upstream release -- it says nothing
-#: about what happened on that specific runner. `TOOLCHAIN_INSTALL_TAIL_LINES`
-#: below exists so the NEXT occurrence is diagnosable instead of guessed at.
-#: One `west sdk install` attempt is not the reliability bar a fresh
-#: customer's FIRST command should be held to, so the retry stays regardless.
+#: Attempts per pinned archive download, retried on transport failures only
+#: (`_fetch_with_retries`). The same count and backoff shape the manual `west
+#: sdk install` step in `.github/workflows/getting-started.yml` uses, which was
+#: measured flaky in CI on both the release CDN and the extraction.
 TOOLCHAIN_INSTALL_ATTEMPTS = 3
 
 #: Seconds, multiplied by the (1-based) attempt number just finished --
 #: `getting-started.yml`'s own `sleep $((attempt * 15))`.
 TOOLCHAIN_RETRY_BACKOFF_S = 15
-
-#: `Runner.run`'s `tail_lines` for the `west sdk install` call specifically --
-#: see `capture_tail`'s own docstring. Deliberately wider than the 4-line
-#: default every other bootstrap phase still uses; 40 is small next to a
-#: multi-hundred-line traceback but wide enough to keep the real subprocess
-#: stderr line the traceback's closing frames sit on top of.
-TOOLCHAIN_INSTALL_TAIL_LINES = 40
-
-#: A staged credential younger than this is treated as possibly LIVE and is
-#: never reclaimed (tan-cli#1148 round 2). The extension shells `tan`, so two
-#: concurrent `tan bootstrap` runs are not exotic, and without this the
-#: second run's sweep deletes the first run's in-use netrc -- silently
-#: downgrading it to anonymous AFTER it printed "Authenticating the Zephyr
-#: SDK download...". A silent downgrade is the exact shape the rest of this
-#: work exists to remove, so the sweep must not be able to cause one.
-#:
-#: An AGE window rather than a PID liveness probe, deliberately: a PID check
-#: is racy (reuse), is not portable in the same shape across POSIX and
-#: Windows, and answers a harder question than this needs. The lifetime of a
-#: live staged credential is BOUNDED BY CONSTRUCTION -- it is written once
-#: and discarded when `_run_west_sdk_install_with_retries` returns, and that
-#: cannot exceed `TOOLCHAIN_INSTALL_ATTEMPTS` timeouts plus the backoff
-#: between them, because `Runner.run` kills the child at `INSTALL_TIMEOUT_S`.
-#: That worst case is `3 * 3600 + (15 + 30)` = 10,845s; `SAFETY_FACTOR`
-#: doubles it, so the window is **21,690s = 6.03 hours**.
-#:
-#: The doubling is a RULE, not a taste: a bound computed from three constants
-#: that a later PR may retune must not become exact, and mtime granularity, a
-#: laptop suspended mid-download and a slow network filesystem all push the
-#: observed age of a live credential above the arithmetic worst case. Pinned
-#: by `test_the_live_window_keeps_a_real_margin_over_the_worst_case_lifetime`,
-#: which recomputes the worst case independently and requires the factor --
-#: without it the window would equal the worst case exactly and a credential
-#: alive for one second longer than the arithmetic allows would be swept.
-#:
-#: A clock that skews backwards makes `age` negative, which reads as "too
-#: young to touch" -- the safe direction, and pinned by
-#: `test_a_credential_with_a_future_mtime_is_kept_not_swept` (an `abs()`
-#: around the subtraction would sweep it, which is why that test exists).
-#:
-#: Cost of the window: residue from a crash within it survives until the NEXT
-#: `tan bootstrap` after it ages out -- at most 6.03 hours of extra dwell for
-#: a file that is already `0o600`. The sweep runs on every invocation of the
-#: phase, so that is a delay, not a leak.
-#: The margin multiplier above. Named rather than inlined so the rule and the
-#: test that pins it refer to the same number.
-SDK_CREDENTIAL_LIVE_SAFETY_FACTOR = 2
-
-SDK_CREDENTIAL_LIVE_WINDOW_S = SDK_CREDENTIAL_LIVE_SAFETY_FACTOR * (
-    TOOLCHAIN_INSTALL_ATTEMPTS * INSTALL_TIMEOUT_S
-    + TOOLCHAIN_RETRY_BACKOFF_S * TOOLCHAIN_INSTALL_ATTEMPTS * (TOOLCHAIN_INSTALL_ATTEMPTS - 1) // 2
-)
-
-
-def _run_west_sdk_install_with_retries(
-    ws: Workspace, log: Log, runner: Runner, argv: list[str], tmp_dir: Path,
-    *, extra_env: dict[str, str] | None = None,
-) -> str | None:
-    """`runner.run(argv, ...)`, retried up to `TOOLCHAIN_INSTALL_ATTEMPTS`
-    times on ANY failure -- the same blind, unconditional retry policy
-    `getting-started.yml`'s own step already applies ("still fails loudly if
-    the network is genuinely unavailable"); a permanent failure (bad
-    version, no artifact for this host) already returned before this
-    function is ever reached, so everything that gets here is presumptively
-    worth a second try. Returns the LAST attempt's `runner.run` result --
-    `None` on eventual success, the final failure detail otherwise.
-
-    A single call under `--dry-run`: `Runner.run` returns `None` immediately
-    without spawning, so the loop breaks after attempt 1 -- one planned
-    command, not `TOOLCHAIN_INSTALL_ATTEMPTS` copies of it.
-
-    `extra_env` carries the staged GitHub credential (tan-cli#1143), on
-    EVERY attempt: a rate limit is exactly what this loop retries, and an
-    authenticated first attempt falling back to anonymous retries would
-    defeat it.
-    """
-    detail: str | None = None
-    for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
-        if attempt > 1 and not runner.dry_run:
-            # West's OWN internal extraction tempdir is already cleaned up by
-            # its own `tempfile.TemporaryDirectory` context manager on any
-            # exit path; only OUR named sibling can still be sitting there
-            # from a failed attempt (e.g. the SDK component landed but the
-            # LATER `setup.sh -t` toolchain-component fetch failed) -- clear
-            # it before retrying, or `west`'s own `shutil.move` onto an
-            # already-existing `tmp_dir` moves INTO it instead of replacing
-            # it, corrupting the next probe.
-            if _is_dir(tmp_dir):
-                try:
-                    shutil.rmtree(tmp_dir)
-                except OSError:
-                    pass
-            time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
-        detail = runner.run(
-            argv, cwd=ws.workspace_dir, extra_env=extra_env, tail_lines=TOOLCHAIN_INSTALL_TAIL_LINES
-        )
-        if detail is None or runner.dry_run:
-            return detail
-        if attempt < TOOLCHAIN_INSTALL_ATTEMPTS:
-            log.line(
-                f"west sdk install attempt {attempt}/{TOOLCHAIN_INSTALL_ATTEMPTS} "
-                f"failed; retrying"
-            )
-    return detail
 
 
 def _host_artifacts(
@@ -1968,140 +1583,136 @@ def _host_artifacts(
     return manifest.artifacts_for_host(host_key)
 
 
-def _check_release_sum(
-    log: Log, manifest: toolchain_provision.ToolchainManifest, *, when: str
-) -> str | None:
-    """tan-cli#1496: fetch the release `sha256.sum` and compare alp-sdk's pins with it
-    (`when` = "before"/"after" `west sdk install`). Returns the sum text when it agrees,
-    `None` when refused (warned, blocking). An unreachable sum file is a refusal, not a
-    pass. What this does and does not prove: see `tan.core.toolchain_pin`."""
-    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
-    from tan.core import toolchain_pin  # noqa: PLC0415
-
-    artifacts = _host_artifacts(manifest)
-    if not artifacts:
-        return ""
-    url = toolchain_pin.sum_url(manifest)
-    text, why = fetch_sum_text(url)
-    if text is None:
-        log.warn(
-            "toolchain-pin-unverified",
-            f"cannot acquire the cross toolchain: could not fetch {url} to check the "
-            f"archives against alp-sdk's sha256 pins ({why}) {when} `west sdk install`. "
-            f"Check ALL_PROXY/HTTPS_PROXY/NO_PROXY or retry on a network that reaches "
-            f"github.com; `--no-toolchain` skips this phase.",
-        )
-        return None
-    findings = toolchain_pin.pin_findings(artifacts, toolchain_pin.parse_sum_file(text))
-    if findings:
-        log.warn("toolchain-pin-mismatch", toolchain_pin.refusal_message(findings, url, when=when))
-        return None
-    return text
-
-
 def _plan_tan_downloads(
-    runner: Runner,
-    manifest: toolchain_provision.ToolchainManifest,
-    when: str,
-    *,
-    archive: bool = False,
+    runner: Runner, manifest: toolchain_provision.ToolchainManifest
 ) -> None:
     """--dry-run: tan's OWN network fetches are not subprocess argvs, so list them in
     `plannedCommands` as `# tan downloads ...` lines to keep the preview complete."""
-    from tan.commands.bootstrap_toolchain_fetch import toolchain_artifact  # noqa: PLC0415
-    from tan.core import toolchain_pin  # noqa: PLC0415
+    from tan.commands import bootstrap_toolchain_fetch as fetch  # noqa: PLC0415
 
     artifacts = _host_artifacts(manifest)
     if not artifacts:
         return
-    art = toolchain_artifact(artifacts)
-    if not archive:
-        runner.planned.append(
-            ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), f"({when}; compared with alp-sdk's pins)"]
-        )
-        return
-    if art is not None:
-        runner.planned.append(
-            ["#", "tan", "downloads", manifest.base_url.rstrip("/") + "/" + art.filename,
-             f"(sha256 checked against alp-sdk's pin {art.sha256})"]
-        )
-    runner.planned.append(
-        ["#", "tan", "downloads", toolchain_pin.sum_url(manifest), "(re-fetched after west; must be unchanged)"]
-    )
+    for art in (fetch.minimal_sdk_artifact(artifacts), fetch.toolchain_artifact(artifacts)):
+        if art is not None:
+            runner.planned.append(
+                ["#", "tan", "downloads", manifest.base_url.rstrip("/") + "/" + art.filename,
+                 f"(sha256 checked against alp-sdk's pin {art.sha256})"]
+            )
 
 
-def _recheck_release_sum(
-    log: Log, manifest: toolchain_provision.ToolchainManifest, first_text: str
-) -> bool:
-    """After west ran: the sum must be byte-identical to the one tan verified before, so
-    west cannot have been served a different sum than tan was (check-then-use)."""
-    from tan.core.toolchain_pin import SUM_FILENAME  # noqa: PLC0415
-
-    again = _check_release_sum(log, manifest, when="after")
-    if again is None:
-        return False
-    if again != first_text:
-        log.warn(
-            "toolchain-pin-mismatch",
-            f"cannot acquire the cross toolchain: the release {SUM_FILENAME} "
-            f"changed while `west sdk install` ran, so the minimal SDK bundle west "
-            f"verified cannot be tied to the sum tan checked. Nothing was stamped; "
-            f"re-run `tan bootstrap`.",
-        )
-        return False
-    return True
-
-
-def _install_pinned_toolchain(
-    log: Log,
-    manifest: toolchain_provision.ToolchainManifest,
-    tmp_dir: Path,
-    root: Path,
-    leaf: str,
-) -> bool:
-    """West ran with `--no-gnu-toolchains`; fetch the toolchain archive ourselves and hash it
-    against alp-sdk's pin (west's `setup.sh` would fetch it with no check at all)."""
-    from tan.commands import bootstrap_toolchain_fetch as fetch  # noqa: PLC0415
-
-    art = fetch.toolchain_artifact(_host_artifacts(manifest))
-    if art is None:
-        log.warn(
-            "toolchain-install",
-            f"alp-sdk's metadata/toolchains.json lists no single {fetch.TOOLCHAIN_ARTIFACT_COMPONENT} "
-            f"artifact for this host, so the toolchain cannot be fetched and verified.",
-        )
-        return False
-    log.line(f"Downloading {art.filename} and checking its sha256 against alp-sdk's pin")
-    # Same blind retry the west step gets, for transport failures ONLY ("unverified"):
-    # a hash mismatch or an extraction failure is never retried.
+def _fetch_with_retries(fetch_one: Callable[[], object]):
+    """`fetch_one()`, retried on transport failures ONLY ("unverified"): a hash
+    mismatch, a missing release asset or an extraction failure is never retried."""
     for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
         if attempt > 1:
             time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
-        outcome = fetch.install_pinned_toolchain(manifest.base_url, art, tmp_dir, root, leaf)
+        outcome = fetch_one()
         if outcome.kind != "unverified":
             break
-    if outcome.kind == "ok":
-        return True
+    return outcome
+
+
+def _mismatch_diagnosis(
+    manifest: toolchain_provision.ToolchainManifest,
+    art: toolchain_provision.ToolchainArtifact,
+    got: str | None,
+) -> str:
+    """tan-cli#1559: the release `sha256.sum`, fetched only now, after a hash
+    mismatch -- to say which kind of mismatch it was, never to decide it."""
+    from tan.commands.bootstrap_toolchain_pin import fetch_sum_text  # noqa: PLC0415
+    from tan.core import toolchain_pin  # noqa: PLC0415
+
+    text, why = fetch_sum_text(toolchain_pin.sum_url(manifest))
+    return toolchain_pin.mismatch_diagnosis(art, got, text, why or "")
+
+
+def _report_fetch_failure(
+    log: Log,
+    root: Path,
+    manifest: toolchain_provision.ToolchainManifest,
+    art: toolchain_provision.ToolchainArtifact,
+    outcome,
+) -> None:
+    filename = art.filename
     if outcome.kind == "mismatch":
+        diagnosis = f" {_mismatch_diagnosis(manifest, art, outcome.got_sha256 or None)}"
         log.warn(
             "toolchain-pin-mismatch",
-            f"cannot acquire the cross toolchain: {outcome.message}. Nothing was stamped. "
-            f"Do not bypass this; update the pin in alp-sdk only after the new archive is reviewed.",
+            f"cannot acquire the cross toolchain: {outcome.message}.{diagnosis} Nothing was "
+            f"stamped. Do not bypass this; update the pin in alp-sdk only after the new "
+            f"archive is reviewed.",
         )
     elif outcome.kind == "unverified":
         log.warn(
             "toolchain-pin-unverified",
-            f"cannot acquire the cross toolchain: could not download {art.filename} to "
+            f"cannot acquire the cross toolchain: could not download {filename} to "
             f"check it against alp-sdk's pin ({outcome.message}). Check "
             f"ALL_PROXY/HTTPS_PROXY/NO_PROXY or re-run `tan bootstrap`.",
         )
+    elif outcome.kind == "missing":
+        log.warn(
+            "toolchain-install",
+            f"cannot acquire the cross toolchain: {filename} is not published where "
+            f"alp-sdk's metadata/toolchains.json pins it ({outcome.message}) -- the pin "
+            f"names an upstream release asset that does not exist. Re-running will not help.",
+        )
     else:
-        log.warn("toolchain-install", f"cannot acquire the cross toolchain: {outcome.message}")
+        log.warn(
+            "toolchain-install",
+            _augment_with_low_disk_note(root, f"cannot acquire the cross toolchain: {outcome.message}"),
+        )
+
+
+def _install_pinned_archive(
+    log: Log,
+    manifest: toolchain_provision.ToolchainManifest,
+    root: Path,
+    component: str,
+    install: Callable[[toolchain_provision.ToolchainArtifact], object],
+) -> bool:
+    """Select `component`'s single row for this host, download + hash + place it
+    via `install`, and report any failure. `True` only on success."""
+    rows = [a for a in _host_artifacts(manifest) if a.component == component]
+    if len(rows) != 1:
+        log.warn(
+            "toolchain-install",
+            f"alp-sdk's metadata/toolchains.json lists {len(rows)} {component} artifacts "
+            f"for this host, not exactly one, so it cannot be fetched and verified.",
+        )
+        return False
+    art = rows[0]
+    log.line(f"Downloading {art.filename} and checking its sha256 against alp-sdk's pin")
+    outcome = _fetch_with_retries(lambda: install(art))
+    if outcome.kind == "ok":
+        return True
+    _report_fetch_failure(log, root, manifest, art, outcome)
     return False
 
 
+def _prune_tan_registrations(log: Log, root: Path) -> None:
+    """tan-cli#1553: drop every CMake package-registry entry that points at
+    one of tan's own `.tmp-*` install dirs (never a user's own entry -- see
+    `tan.core.sdk_registry`). Best-effort and non-blocking: a stale entry only
+    misleads a `west build` outside tan, so a failure is reported as a
+    `log.line`, not fatal -- which `--format json` does not carry.
+    The registry is the HOST's, so the backend follows the host, not the
+    workspace's `is_windows`."""
+    from tan.commands import bootstrap_sdk_registry as registry  # noqa: PLC0415
+
+    outcome = registry.prune_tan_tmp_registrations(
+        registry.host_registry(), root, case_insensitive=registry.HOST_IS_WINDOWS
+    )
+    if outcome.removed:
+        log.line(
+            "Removed CMake package-registry entries for tan's temporary install dirs: "
+            + ", ".join(outcome.removed)
+        )
+    for failure in outcome.failed:
+        log.line(f"Could not remove a stale CMake package-registry entry: {failure}")
+
+
 def _acquire_toolchain(
-    ws: Workspace,
     log: Log,
     runner: Runner,
     manifest: toolchain_provision.ToolchainManifest,
@@ -2110,109 +1721,50 @@ def _acquire_toolchain(
     store_dir: Path,
     *,
     root_adopted: bool,
-    west: str,
     is_windows: bool,
 ) -> None:
-    """`west sdk install --install-dir <tmp-sibling-of-store_dir>` (retried,
-    see `_run_west_sdk_install_with_retries`), then hand off to
-    `_finish_toolchain_install` for the version/probe/stamp sequence.
+    """tan installs both pinned archives itself into a `<leaf>.tmp-<pid>`
+    sibling of `store_dir` -- the SDK minimal bundle (tan-cli#1556), then the
+    `arm-zephyr-eabi` toolchain into its `gnu/` (tan-cli#1496), each hashed
+    against alp-sdk's pin -- then hands off to `_finish_toolchain_install` for
+    the version/probe/stamp sequence.
 
-    The tmp-sibling IS the atomicity belt ADR 0021 asks for around a tool
-    this code does not control the internals of: a kill mid-`west` run (a
+    No `west sdk install`: west skipped `--install-dir` whenever CMake could
+    find the pinned SDK version anywhere (tan-cli#1552/#1556), registered the
+    `.tmp-*` dir in the CMake package registry (tan-cli#1553), and made the
+    rate-limited GitHub API call. With tan's flags it did nothing else.
+
+    The tmp-sibling is the atomicity belt ADR 0021 asks for: a kill mid-run (a
     laptop sleep, Ctrl-C, an OOM-kill) leaves the `.tmp-*` sibling, never
     `store_dir` itself, so a second `tan bootstrap` can never mistake a
     half-installed toolchain for a working one.
     """
-    if not runner.dry_run:
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError as err:
-            log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
-            return
-        _reclaim_toolchain_wreckage(root, leaf)
-    sum_text: str | None = ""
+    from tan.commands import bootstrap_toolchain_fetch as fetch  # noqa: PLC0415
+
     if runner.dry_run:
-        _plan_tan_downloads(runner, manifest, "before west sdk install")
-    else:
-        sum_text = _check_release_sum(log, manifest, when="before")
-        if sum_text is None:
-            return
+        _plan_tan_downloads(runner, manifest)
+        return
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
+        return
+    _reclaim_toolchain_wreckage(root, leaf)
     tmp_dir = root / f"{leaf}{toolchain_provision.TMP_SUFFIX_PREFIX}{os.getpid()}"
-    argv = toolchain_provision.west_sdk_install_argv(
-        west, version=manifest.version, install_dir=_native(tmp_dir)
-    )
     log.line(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
         f"(this can take several minutes on a slow link)"
     )
-    credential = _sdk_credential(ws, log, runner, root, manifest.version)
-    try:
-        detail = _run_west_sdk_install_with_retries(
-            ws,
-            log,
-            runner,
-            argv,
-            tmp_dir,
-            extra_env=credential.extra_env if credential is not None else None,
-        )
-    finally:
-        if credential is not None:
-            _discard_sdk_credential(credential.scratch_dir)
-    if detail is not None:
-        augmented = toolchain_provision.augment_acquisition_failure(detail)
-        augmented = _augment_with_low_disk_note(root, augmented)
-        # tan-cli#1143, the same shape `_augment_with_low_disk_note` above
-        # already establishes: keep the child's message verbatim and append
-        # the remedy in TAN's vocabulary. West's own rate-limit line names
-        # `--personal-access-token`, a flag on a command the customer never
-        # typed and which `tan bootstrap` does not accept, so the message
-        # they see today points at a lever that does not exist for them.
-        # `credential`, not the resolved token: the question the note has to
-        # answer is whether THIS download was authenticated, and a staging
-        # failure means it was not, however many token variables the
-        # environment carries. `credential_seen` is the second half of that
-        # (tan-cli#1148 review): an environment that HELD a credential tan
-        # could not use must not be told to go and set one.
-        # `verified` (tan-cli#1170) is the third axis: a credential that was
-        # staged and passed but whose transport this run already declined to
-        # vouch for. Without it the authenticated branch renders an assurance
-        # the `sdk-credential-unverified` warning printed above this one has
-        # already withdrawn, and the customer reads two wire surfaces
-        # disagreeing about one download.
-        rate_limited = toolchain_provision.rate_limit_note(
-            augmented,
-            authenticated_as=credential.source if credential is not None else None,
-            credential_seen=_sdk_credential_seen() if credential is None else None,
-            verified=credential.verified if credential is not None else True,
-        )
-        if rate_limited is not None:
-            augmented = f"{augmented} {rate_limited}"
-        # tan-cli#990 review MAJOR: this is the phase's MOST LIKELY failure
-        # (a flaky download/extraction survives the retry) and, until this
-        # fix, the ONLY refusal in this function that named no remedy --
-        # `Log.warn` has no `fix` channel (unlike `doctor_cmd.Check`), so
-        # every other refusal here (7-Zip, disk, adopted root) already
-        # folds its command into the message text itself; this one must
-        # too. Built from `manifest.version` in scope here, never
-        # `doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION` -- that is a SEPARATE,
-        # hardcoded fallback constant that can desync from the pin THIS run
-        # actually resolved.
-        # tan-cli#1520: never prescribe a hand-run `west sdk install -t ...`:
-        # that route's setup.sh fetches the toolchain archive with wget and
-        # no integrity check, so it bypasses the alp-sdk sha256 pin.
-        remedy = (
-            "re-run `tan bootstrap` (it verifies the toolchain archive against "
-            "alp-sdk's sha256 pin; do not install it with a hand-run "
-            "`west sdk install -t`, which downloads it unchecked)."
-        )
-        log.warn("toolchain-install", f"west sdk install failed: {augmented} {remedy}")
+    base_url = manifest.base_url
+    if not _install_pinned_archive(
+        log, manifest, root, fetch.MINIMAL_SDK_COMPONENT,
+        lambda art: fetch.install_pinned_minimal_sdk(base_url, art, tmp_dir, root, leaf),
+    ):
         return
-    if runner.dry_run:
-        _plan_tan_downloads(runner, manifest, "after west sdk install", archive=True)
-        return
-    if not _recheck_release_sum(log, manifest, sum_text or ""):
-        return
-    if not _install_pinned_toolchain(log, manifest, tmp_dir, root, leaf):
+    if not _install_pinned_archive(
+        log, manifest, root, fetch.TOOLCHAIN_ARTIFACT_COMPONENT,
+        lambda art: fetch.install_pinned_toolchain(base_url, art, tmp_dir, root, leaf),
+    ):
         return
     _finish_toolchain_install(
         log, manifest, tmp_dir, store_dir, root_adopted=root_adopted, is_windows=is_windows
@@ -2238,10 +1790,8 @@ def toolchain_phase(
     later, far from this command -- is exactly the failure ADR 0021 exists
     to close.
 
-    `venv` may be `None` (a workspace bootstrapped with `--no-pip --no-west`
-    reaches here only via a caller that already gates on `--no-west`, so in
-    practice this is always a real venv; the fallback to a bare PATH `west`
-    exists only so this function has no unchecked assumption of its own).
+    `ws` and `venv` are unused since tan-cli#1556 (no `west sdk install`); they
+    stay so this phase keeps the signature every sibling phase has.
     """
     # tan-cli#990 review MINOR, considered and kept: a `sdk_root` with no
     # readable `metadata/toolchains.json` at all reports `WORKSPACE_BLOCKING`
@@ -2252,7 +1802,7 @@ def toolchain_phase(
     # means "this workspace cannot do what it was bootstrapped for", and a
     # workspace that cannot even attempt the toolchain acquisition ADR 0021
     # Lane 1 P1 exists for fits that description as much as a failed
-    # `west sdk install` does. The escape hatch is the same one every other
+    # download does. The escape hatch is the same one every other
     # refusal in this phase has: `--no-toolchain` (or `--allow-partial`)
     # skips this phase outright, so an older checkout stays bootstrappable
     # on request, just not silently.
@@ -2283,17 +1833,15 @@ def toolchain_phase(
         # something would leave a stale credential on disk for as long as the
         # pin held (tan-cli#1148 review).
         _reclaim_sdk_credential_wreckage(root)
+        # tan-cli#1553: here for the same reason -- a dead registration left
+        # by an earlier run must be cleared on the already-installed path too.
+        _prune_tan_registrations(log, root)
     # A stamp alone is not enough: the compiler under it may have been deleted
     # since (tan-cli#1483), and then the install must be repaired, not skipped.
     if toolchain_provision.stamp_matches_pin(
         _read_toolchain_stamp(store_dir), manifest
     ) and toolchain_provision.store_compiler_present(store_dir, is_windows=is_windows):
-        checked = _read_toolchain_stamp(store_dir)
-        provenance = (
-            "toolchain archive hashed against the alp-sdk pin at install"
-            if checked is not None and checked.pin_checked
-            else "installed before tan compared archives with the alp-sdk pin, so its archives were never checked against it"
-        )
+        provenance = toolchain_provision.stamp_provenance(_read_toolchain_stamp(store_dir))
         log.line(
             f"Cross toolchain already installed and stamped: {_native(store_dir)} ({provenance})"
         )
@@ -2324,7 +1872,7 @@ def toolchain_phase(
         log.warn(
             "toolchain-install",
             "No 7-Zip (7z, 7za, 7zr, 7zz or 7zzs) on PATH -- tan extracts the .7z "
-            "toolchain archive and `west sdk install` extracts its bundle with it; "
+            "toolchain archive and the SDK minimal bundle with it; "
             "`unar` alone is not enough. Install "
             "it (`tan doctor --fix`, or `winget install -e --id 7zip.7zip`), then "
             "re-run `tan bootstrap`.",
@@ -2340,11 +1888,17 @@ def toolchain_phase(
                 log.warn("toolchain-install", f"cannot acquire the cross toolchain: {refusal}")
                 return
 
-    west = str(venv.west) if venv is not None else "west"
-    _acquire_toolchain(
-        ws, log, runner, manifest, root, leaf, store_dir,
-        root_adopted=root_adopted, west=west, is_windows=is_windows,
-    )
+    try:
+        _acquire_toolchain(
+            log, runner, manifest, root, leaf, store_dir,
+            root_adopted=root_adopted, is_windows=is_windows,
+        )
+    finally:
+        if not runner.dry_run:
+            # tan-cli#1553: belt-and-braces. Since tan-cli#1556 nothing this run
+            # does registers anything, so this only re-checks the residue the
+            # pre-phase prune above already cleared.
+            _prune_tan_registrations(log, root)
 
 
 # ---------------------------------------------------------------------------
@@ -4171,14 +3725,16 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         patches_phase(ws, venv, log, runner, sdk_root)
 
     # ADR 0021 Lane 1 P1 (issue #474): the FINAL phase, deliberately -- it
-    # reads `<sdkRoot>/metadata/toolchains.json` at runtime and needs the west
-    # workspace the west phase (further up) resolved (or reused).
+    # reads `<sdkRoot>/metadata/toolchains.json` at runtime. Since tan-cli#1556
+    # it needs no west workspace, but `--no-west` still skips it: that flag is
+    # how CI and the test suite ask for a fast run with no large download, and
+    # turning the download on under it would change what they cost.
     if no_toolchain:
         log.line("Skipping cross-toolchain acquisition (--no-toolchain)")
     elif no_west:
         log.line(
-            "Skipping cross-toolchain acquisition (--no-west: no west workspace to "
-            "run `west sdk install` from)"
+            "Skipping cross-toolchain acquisition (--no-west skips it too; run "
+            "`tan bootstrap` without --no-west to install the cross toolchain)"
         )
     else:
         toolchain_phase(ws, log, runner, sdk_root, venv, is_windows=is_windows)
