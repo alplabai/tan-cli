@@ -1422,7 +1422,20 @@ from tests.conftest import sdk_root
 #: `scripts/alp_orchestrate/` file moved (`planner_resync.py`: up to date). The
 #: planner oracle re-captured with only `sdkVersion` changed (`0.17.0-rc2` ->
 #: `0.17.0`, all 103 build-plan emits).
-PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no planner source moved since 7584a356
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `84132b98` -> `736aa2f0`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 55d676b98 fix(metadata): itcm console rule wording, AEN801 OPTIGA flags, dac-waveform board, PM wake wording (#2896)
+PINNED_SDK_COMMIT = "736aa2f0844fcc61161ee310d646dfccb020787e"  # alp-sdk v0.17.0 -- no planner source moved since 7584a356
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1470,14 +1483,10 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
-    "kconfig.py": "564c5f51dfa4b5ed4bdf3abbdb00c051c29e26005c32bf4ff1f5073ebe1a7551",
+    "kconfig.py": "5f4b4d3404c0626518bc2b4ae64fb9be69bec92bbc65ef13e49fe8f030eced5e",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "6545d851e8520e576d896608bfebcef74631b320284f50973d4de32e774135aa",
-    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
-    # that refusal: tan's `link_target.apply_link_target` (called at the end of
-    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
