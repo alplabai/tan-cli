@@ -237,7 +237,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
       # tan-cli#907 wired this step in; tan-cli#1057 split the data it
@@ -971,7 +971,7 @@ jobs:
       # THE INTERPRETER POLICY, ceiling half -- see this job's header comment
       # above, parity.yml's seam1 block, and the gate that enforces the pair,
       # python/tests/gates/test_interpreter_policy.py.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x" # ceiling -- NOT the floor every other job pins
       # Reported, not assumed: `"3.x"` resolves on GitHub's schedule, so the
@@ -1036,7 +1036,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
       # Derived, never hardcoded: a pin written here would be a SECOND place to
@@ -1133,7 +1133,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       # PINNED, for the same reason the actions above are: a linter that
