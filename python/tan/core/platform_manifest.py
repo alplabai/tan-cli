@@ -239,7 +239,7 @@ def load_manifest_text(text: str) -> Manifest:
 
     try:
         data = yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 -- SafeLoader subclass
-    except yaml.YAMLError as err:
+    except (yaml.YAMLError, ValueError) as err:  # ValueError: e.g. an over-long int
         raise PlatformError(f"platform manifest is not valid YAML: {err}") from err
     return validate_manifest(data)
 

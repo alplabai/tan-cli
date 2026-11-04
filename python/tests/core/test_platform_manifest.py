@@ -166,3 +166,8 @@ def test_error_message_repr_is_bounded():
     with pytest.raises(pm.PlatformError) as exc:
         pm.parse_version("9" * 10000)
     assert len(str(exc.value)) < 400
+
+
+def test_overlong_int_is_a_platform_error():
+    with pytest.raises(pm.PlatformError):
+        pm.load_manifest_text("platform: " + "9" * 5000 + "\n")
