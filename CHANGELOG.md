@@ -5,6 +5,8 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.8.0] — Unreleased
+
 ## [0.7.1-rc1] — 2026-10-20
 
 *A **pre-release**: `install.sh`/`install.ps1` and the VS Code extension keep

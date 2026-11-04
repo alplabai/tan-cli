@@ -3930,6 +3930,118 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/probe_cmd.py",
       "note": "tan-cli#1406: `tan probe identify` skipped the ITCM corroboration (`mem32 0x0` + `mem32 0x58000000`, bench-proven only from an HE attach) because the target is ambiguous, is not the M55-HE, or the connect banner did not place the attach on the HE access port; `itcmVerdict` is `not-checked`. The message names the reason and the fix (`--core m55_he`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.platform",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`. The `platform` check: warn when an installed component differs from the workspace Alp Platform pin, fail on an unreadable or invalid pin (tan-cli#1571). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.fetch-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): fetching the manifest or the release list failed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.line-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): no GA release of the requested YY.M line exists. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.manifest-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): the manifest failed `alp-platform-v1` validation (schema, keys, gpe rule). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.manifest-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): `--manifest FILE` could not be read. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.no-sdk",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): no alp-sdk checkout resolved to anchor the pin on. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.no-workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): no `.west/` workspace above the alp-sdk checkout. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.pin-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): `tan platform show` found an invalid workspace pin. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.sdk-off-manifest",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): the checked-out alp-sdk differs from the pinned version; the next step names the version. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.tan-off-manifest",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): this tan differs from the pinned version; tan never updates itself. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.unknown-subcommand",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): the verb is not use, show or clear. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.version-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): the version is not `YY.M.MICRO[-rcN]` (a zero-padded month names the unpadded form). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.version-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): `use` needs a version/line or `--manifest`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform` (tan-cli#1571): the pin could not be written or removed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

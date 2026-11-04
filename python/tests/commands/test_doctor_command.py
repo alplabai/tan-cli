@@ -3536,7 +3536,8 @@ def test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspace
     names = [c.name for c in checks]
     assert names[0] == "sdk"
     assert names[1] == "boardYaml"
-    assert names[2] == "workspace"
+    assert names[2] == "platform"  # tan-cli#1571
+    assert names[3] == "workspace"
     assert next(c for c in checks if c.name == "sdk").status == "fail"
     assert next(c for c in checks if c.name == "workspace").status == "fail"
 

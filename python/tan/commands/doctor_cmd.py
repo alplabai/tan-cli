@@ -168,6 +168,8 @@ from tan.core.bootstrap import (
     reported_missing,
     select_linux_install,
 )
+from tan.commands.platform_doctor import pin_and_installed
+from tan.core.platform_manifest import platform_report
 from tan.core.consent import can_prompt
 from tan.core import devicetree_lint
 from tan.core.doctor_git import (
@@ -2631,6 +2633,12 @@ def _read_sdk_version(root: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def platform_check(sdk_root: str | None) -> Check:
+    status, detail = platform_report(*pin_and_installed(sdk_root))[1:]
+    fix = {"warn": "tan platform use <line>", "fail": "tan platform clear"}.get(status)
+    return Check("platform", status, detail, fix, scope="project")
+
+
 def summarise(checks: list[Check]) -> dict[str, int]:
     """`pass`/`warn`/`fail` counts. `unknown` lands in NONE of them, so
     `sum(summary.values())` can be smaller than `len(checks)` -- deliberate, and
@@ -4111,6 +4119,7 @@ def _collect(
     )
     if libraries is not None:
         _add(libraries)
+    _add(platform_check(sdk_root))
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
@@ -4690,6 +4699,7 @@ def doctor(
             "checks": [c.as_dict() for c in checks],
             "nextSteps": next_steps(checks),
             "missingPrerequisites": missing_prerequisites,
+            "platform": platform_report(*pin_and_installed(sdk_root))[0],
         }
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as
