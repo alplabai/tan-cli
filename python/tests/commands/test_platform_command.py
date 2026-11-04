@@ -165,3 +165,163 @@ def test_doctor_pin_match_mismatch_and_invalid(ws):
     pin.write_text("schema: bogus\n")
     data, check = _doctor(ws)
     assert check["status"] == "fail" and data["platform"] is None
+
+
+# -- tan platform list ----------------------------------------------------------
+
+RELEASES = [
+    {"tag_name": "platform-v26.11.0", "published_at": "2026-11-20T10:00:00Z"},
+    {"tag_name": "platform-v26.11.2", "published_at": "2026-12-01T10:00:00Z"},
+    {"tag_name": "platform-v27.1.0-rc1", "published_at": "2027-01-10T10:00:00Z"},
+    {"tag_name": "platform-v27.1.0", "published_at": "2027-01-20T10:00:00Z"},
+    {"tag_name": "platform-v27.01.0", "published_at": "2027-01-21T10:00:00Z"},
+    {"tag_name": "v0.1.0", "published_at": "2026-01-01T10:00:00Z"},
+]
+
+
+def _list(ws, monkeypatch, *args, releases=RELEASES, err=None):
+    monkeypatch.setattr(platform_fetch, "list_releases", lambda: (None, err) if err else (releases, None))
+    return run(ws, "list", *args)
+
+
+def test_list_newest_first_without_rc_and_skips_unparsable_tags(ws, monkeypatch):
+    code, env = _list(ws, monkeypatch)
+    assert code == 0
+    assert env["data"]["releases"] == [
+        {"version": "27.1.0", "line": "27.1", "prerelease": False, "published": "2027-01-20"},
+        {"version": "26.11.2", "line": "26.11", "prerelease": False, "published": "2026-12-01"},
+        {"version": "26.11.0", "line": "26.11", "prerelease": False, "published": "2026-11-20"},
+    ]
+    assert env["data"]["pinned"] is None
+
+
+def test_list_include_rc_orders_rc_before_its_ga(ws, monkeypatch):
+    _, env = _list(ws, monkeypatch, "--include-rc")
+    assert [r["version"] for r in env["data"]["releases"]][:2] == ["27.1.0", "27.1.0-rc1"]
+    assert env["data"]["releases"][1]["prerelease"] is True
+
+
+def test_list_marks_the_pinned_version(ws, monkeypatch):
+    local = ws / "m.yaml"
+    local.write_bytes(_manifest_bytes(sdk="0.18.0"))
+    run(ws, "use", "--manifest", str(local))
+    _, env = _list(ws, monkeypatch)
+    assert env["data"]["pinned"] == "27.2.0"
+
+
+def test_list_network_error_is_an_envelope(ws, monkeypatch):
+    code, env = _list(ws, monkeypatch, err="offline")
+    assert code == 1 and env["issues"][0]["code"] == "platform.list-failed"
+    assert env["data"] == {"releases": [], "pinned": None}
+
+
+def test_fetch_403_404_mention_github_token(monkeypatch):
+    import urllib.error
+
+    class Opener:
+        def open(self, *a, **k):
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("tan.commands.sdk_cmd._releases_opener", lambda proxy: Opener())
+    releases, err = platform_fetch.list_releases()
+    assert releases is None and "GITHUB_TOKEN" in err
+
+
+# -- review follow-ups ---------------------------------------------------------
+
+
+def test_use_line_refuses_a_manifest_naming_another_version(ws, monkeypatch):
+    monkeypatch.setattr(platform_fetch, "list_release_tags", lambda: (["platform-v27.2.1"], None))
+    monkeypatch.setattr(
+        platform_fetch, "fetch_manifest", lambda url: (_manifest_bytes(sdk="0.18.0"), None)
+    )  # names 27.2.0, not the resolved 27.2.1
+    code, env = run(ws, "use", "27.2")
+    assert code == 2 and env["issues"][0]["code"] == "platform.manifest-invalid"
+    assert not (ws / ".alp" / "platform.yaml").exists()
+
+
+def test_use_full_version_refuses_a_manifest_naming_another_version(ws, monkeypatch):
+    monkeypatch.setattr(
+        platform_fetch, "fetch_manifest", lambda url: (_manifest_bytes(sdk="0.18.0"), None)
+    )
+    code, env = run(ws, "use", "27.2.5")
+    assert code == 2 and env["issues"][0]["code"] == "platform.manifest-invalid"
+
+
+def test_show_and_doctor_report_an_unreadable_pin_with_the_real_error(ws):
+    pin = ws / ".alp" / "platform.yaml"
+    pin.parent.mkdir()
+    pin.write_bytes(_manifest_bytes())
+    pin.chmod(0)
+    try:
+        if _readable(pin):
+            pytest.skip("cannot make the pin unreadable here (root or Windows)")
+        code, env = run(ws, "show")
+        assert code == 2 and env["issues"][0]["code"] == "platform.pin-invalid"
+        assert "cannot be read" in env["issues"][0]["message"]
+        data, check = _doctor(ws)
+        assert check["status"] == "fail" and "cannot be read" in check["detail"]
+        assert data["platform"] is None
+    finally:
+        pin.chmod(0o600)
+
+
+def _readable(path) -> bool:
+    try:
+        path.read_bytes()
+    except OSError:
+        return False
+    return True
+
+
+class _Capture:
+    def __init__(self):
+        self.request = None
+
+    def open(self, request, timeout=None):
+        import io
+
+        self.request = request
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return Resp(b"{}")
+
+
+@pytest.mark.parametrize(
+    ("url", "expect_token"),
+    [
+        ("https://github.com/alplabai/alp-platform/releases/download/x/platform.yaml", True),
+        ("https://api.github.com/repos/alplabai/alp-platform/releases", True),
+        ("https://objects.githubusercontent.com/x", False),
+    ],
+)
+def test_github_token_is_unredirected_and_host_scoped(monkeypatch, url, expect_token):
+    cap = _Capture()
+    monkeypatch.setattr("tan.commands.sdk_cmd._releases_opener", lambda proxy: cap)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    platform_fetch._get(url, "x/y", 1000)
+    # `headers` is what urllib copies onto a redirect; the token must not be there.
+    assert "Authorization" not in cap.request.headers
+    has = cap.request.unredirected_hdrs.get("Authorization") == "Bearer tok"
+    assert has is expect_token
+
+
+def test_oversize_response_is_refused(monkeypatch):
+    class Big(_Capture):
+        def open(self, request, timeout=None):
+            resp = super().open(request, timeout)
+            resp.seek(0)
+            resp.truncate()
+            resp.write(b"x" * 50)
+            resp.seek(0)
+            return resp
+
+    monkeypatch.setattr("tan.commands.sdk_cmd._releases_opener", lambda proxy: Big())
+    body, err = platform_fetch._get("https://api.github.com/x", "x/y", 10)
+    assert body is None and "larger than 10 bytes" in err

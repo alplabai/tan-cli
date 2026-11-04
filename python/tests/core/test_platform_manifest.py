@@ -171,3 +171,25 @@ def test_error_message_repr_is_bounded():
 def test_overlong_int_is_a_platform_error():
     with pytest.raises(pm.PlatformError):
         pm.load_manifest_text("platform: " + "9" * 5000 + "\n")
+
+
+def test_deeply_nested_yaml_is_a_manifest_error_not_a_crash():
+    with pytest.raises(PlatformError, match="nested too deeply|not valid YAML"):
+        load_manifest_text("x: " + "[" * 20000)
+
+
+@pytest.mark.parametrize("bad", ["27.2.0\n", "27.2\n", "２７.2.0", "27.2.0-rc1\n"])
+def test_trailing_newline_and_non_ascii_digits_refused(bad):
+    from tan.core.platform_manifest import parse_line
+
+    with pytest.raises(PlatformError):
+        parse_version(bad)
+    assert parse_line(bad) is None
+
+
+def test_padded_hint_only_for_a_real_month():
+    with pytest.raises(PlatformError, match="zero-padded"):
+        parse_version("27.09.0")
+    with pytest.raises(PlatformError) as err:
+        parse_version("27.00.0")
+    assert "zero-padded" not in str(err.value)

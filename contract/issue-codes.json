@@ -4042,6 +4042,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/platform_cmd.py",
       "note": "`tan platform` (tan-cli#1571): the pin could not be written or removed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "platform.list-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/platform_cmd.py",
+      "note": "`tan platform list` (tan-cli#1572): the releases API call failed; a 403/404 names the GITHUB_TOKEN read access a private repository needs. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     }
   ]
 }

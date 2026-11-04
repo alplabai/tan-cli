@@ -38,12 +38,12 @@ _TOP_KEYS = frozenset(
 _REQUIRED_TOP = _TOP_KEYS - {"bench_evidence"}
 _RECORDED_KEYS = ("zephyr", "hal_alif", "yocto", "renesas_bsp", "renesas_ai_sdk")
 
-_VERSION_RE = re.compile(r"^(\d{2})\.([1-9]|1[0-2])\.(0|[1-9]\d*)(-rc[1-9]\d*)?$")
-_PADDED_RE = re.compile(r"^(\d{2})\.0(\d)(\.|$)")
-_LINE_RE = re.compile(r"^(\d{2})\.([1-9]|1[0-2])$")
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
-_HW_REV_RE = re.compile(r"^[0-9]{4}-r[1-9][0-9]*$")
-_GPE_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+_VERSION_RE = re.compile(r"^(\d{2})\.([1-9]|1[0-2])\.(0|[1-9]\d*)(-rc[1-9]\d*)?$", re.ASCII)
+_PADDED_RE = re.compile(r"^(\d{2})\.0([1-9])(\.|$)", re.ASCII)
+_LINE_RE = re.compile(r"^(\d{2})\.([1-9]|1[0-2])$", re.ASCII)
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$", re.ASCII)
+_HW_REV_RE = re.compile(r"^[0-9]{4}-r[1-9][0-9]*$", re.ASCII)
+_GPE_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$", re.ASCII)
 
 
 class PlatformError(ValueError):
@@ -77,7 +77,7 @@ class PlatformVersion:
 def parse_version(text: str) -> PlatformVersion:
     """`YY.M.MICRO[-rcN]`, month never zero-padded. A padded month is refused
     with the unpadded spelling named, never silently normalised."""
-    m = _VERSION_RE.match(text)
+    m = _VERSION_RE.fullmatch(text)
     if m is None:
         padded = _PADDED_RE.match(text)
         if padded is not None:
@@ -96,11 +96,11 @@ def parse_version(text: str) -> PlatformVersion:
 
 def parse_line(text: str) -> str | None:
     """`YY.M` -> itself when it is a valid bare line, else `None`."""
-    return text if _LINE_RE.match(text) else None
+    return text if _LINE_RE.fullmatch(text) else None
 
 
 def parse_gpe(text: str, what: str) -> tuple[int, ...]:
-    if not isinstance(text, str) or not _GPE_RE.match(text):
+    if not isinstance(text, str) or not _GPE_RE.fullmatch(text):
         raise PlatformError(f"{what} {_show(text)} must be four dot-separated integers (A.B.C.D).")
     return tuple(int(p) for p in text.split("."))
 
@@ -123,6 +123,32 @@ def latest_ga_for_line(line: str, release_tags: list[str]) -> PlatformVersion | 
         if v.rc is None and v.line == line and (best is None or best < v):
             best = v
     return best
+
+
+def releases_listing(releases: list[dict], include_rc: bool) -> list[dict[str, Any]]:
+    """Published `platform-v<version>` releases, newest first (so grouped by
+    line). Tags off the section 1 grammar are skipped; `-rcN` only with
+    `include_rc`."""
+    rows: list[tuple[PlatformVersion, dict[str, Any]]] = []
+    for rel in releases:
+        tag = str(rel.get("tag_name", ""))
+        if not tag.startswith("platform-v"):
+            continue
+        try:
+            v = parse_version(tag[len("platform-v") :])
+        except PlatformError:
+            continue
+        if v.rc is not None and not include_rc:
+            continue
+        published = rel.get("published_at")
+        rows.append((v, {
+            "version": str(v),
+            "line": v.line,
+            "prerelease": v.rc is not None,
+            "published": published[:10] if isinstance(published, str) else None,
+        }))
+    rows.sort(key=lambda r: r[0].sort_key(), reverse=True)
+    return [r[1] for r in rows]
 
 
 @dataclass(frozen=True)
@@ -170,7 +196,7 @@ def validate_manifest(data: Any) -> Manifest:
     for hw in data["validated_hw"]:
         rev = hw.get("rev") if isinstance(hw, dict) else None
         if not isinstance(hw.get("som") if isinstance(hw, dict) else None, str) or not (
-            isinstance(rev, str) and _HW_REV_RE.match(rev)
+            isinstance(rev, str) and _HW_REV_RE.fullmatch(rev)
         ):
             raise PlatformError(
                 f"validated_hw entry {_show(hw)} needs a som and a rev like '2626-r2' "
@@ -188,7 +214,7 @@ def _check_components(comps: Any) -> None:
     for name in COMPONENTS:
         entry = comps[name]
         ver = entry.get("version") if isinstance(entry, dict) else None
-        if not isinstance(ver, str) or not _SEMVER_RE.match(ver):
+        if not isinstance(ver, str) or not _SEMVER_RE.fullmatch(ver):
             raise PlatformError(
                 f"components.{name}.version {_show(ver)} must be a SemVer string X.Y.Z[-pre] "
                 "with no leading 'v'."
@@ -209,7 +235,7 @@ def _is_iso_date(text: str) -> bool:
         datetime.date.fromisoformat(text)
     except ValueError:
         return False
-    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text, re.ASCII))
 
 
 #: A real manifest is about 1 KiB; anything far larger is not one.
@@ -239,6 +265,8 @@ def load_manifest_text(text: str) -> Manifest:
 
     try:
         data = yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 -- SafeLoader subclass
+    except RecursionError as err:  # deeply nested flow collections
+        raise PlatformError("platform manifest is nested too deeply.") from err
     except (yaml.YAMLError, ValueError) as err:  # ValueError: e.g. an over-long int
         raise PlatformError(f"platform manifest is not valid YAML: {err}") from err
     return validate_manifest(data)

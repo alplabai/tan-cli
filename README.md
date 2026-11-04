@@ -455,9 +455,16 @@ to two months. Pinning is optional; a workspace without a pin behaves as before.
 tan platform use 26.11         # latest GA MICRO of the 26.11 line
 tan platform use 26.11.1       # an exact release (an -rcN is named in full)
 tan platform use --manifest ./platform.yaml   # a local file, no network
+tan platform list              # published releases, newest first (--include-rc for pre-releases)
 tan platform show              # the pinned platform and each component's status
 tan platform clear             # remove the pin
 ```
+
+`list` prints the published releases of `alplabai/alp-platform`, newest first and
+grouped by line, marking the pinned one; with `--format json`, `data` is
+`{"releases": [{"version", "line", "prerelease", "published"}], "pinned": <version or null>}`.
+A 403 or 404 while that repository is private means a `GITHUB_TOKEN` with read
+access is needed.
 
 `use` validates the manifest, then writes it byte-for-byte to
 `<west topdir>/.alp/platform.yaml` (`<west topdir>` is the directory holding

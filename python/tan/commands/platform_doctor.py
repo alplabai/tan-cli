@@ -3,7 +3,7 @@
 component versions tan can actually know (tan-cli#1571)."""
 from __future__ import annotations
 
-from tan.core.platform_manifest import pin_path_for_sdk
+from tan.core.platform_manifest import pin_path_for_sdk, platform_report
 
 
 def installed_versions(sdk_root: str) -> dict[str, str | None]:
@@ -13,16 +13,16 @@ def installed_versions(sdk_root: str) -> dict[str, str | None]:
     return {"alp-sdk": check_sdk_readiness(sdk_root).get("version"), "tan-cli": TAN_VERSION}
 
 
-def pin_and_installed(sdk_root: str | None) -> tuple[bytes | None, dict[str, str | None]]:
-    """The pin's bytes (`None`: no pin, or no SDK to anchor the lookup on) and
-    the installed versions. An unreadable pin comes back as bytes that fail
-    validation, so it reports as an invalid pin rather than "no pin"."""
+def pin_report(sdk_root: str | None) -> tuple[dict | None, str, str]:
+    """`(data.platform, status, detail)` for the workspace pin (`None` data and
+    `pass` when there is none, or no SDK to anchor the lookup on). An
+    unreadable pin is a `fail` carrying the real OS error."""
     if sdk_root is None:
-        return None, {}
+        return platform_report(None, {})
     try:
         pin_bytes: bytes | None = pin_path_for_sdk(sdk_root).read_bytes()
     except FileNotFoundError:
         pin_bytes = None
     except OSError as err:
-        pin_bytes = f"unreadable: {err}".encode()
-    return pin_bytes, installed_versions(sdk_root)
+        return None, "fail", f"the workspace platform pin cannot be read: {err}"
+    return platform_report(pin_bytes, installed_versions(sdk_root))
