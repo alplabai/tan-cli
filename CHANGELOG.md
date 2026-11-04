@@ -5,12 +5,13 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.7.2] — Unreleased
+## [0.8.0] — Unreleased
 
 ### Fixed
 
-- `TAN_VERSION` moved to `0.7.2-rc1.dev0` off the published `v0.7.1` tag
-  (tan-cli#770's automated post-release bump).
+- `TAN_VERSION` moved to `0.8.0-rc1.dev0` off the published `v0.7.1` tag
+  (tan-cli#770's automated post-release bump, raised from `0.7.2` to `0.8.0`
+  because `tan platform` is a new command).
 
 ## [0.7.1] — 2026-11-04
 

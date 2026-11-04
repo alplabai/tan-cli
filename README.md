@@ -440,6 +440,48 @@ cache root, unless `--force`). `tan sdk install` and
 `tan sdk switch` are not implemented yet, so clone the SDK yourself and use
 `--sdk-root` or let `tan init` write the project pin.
 
+## Alp Platform releases
+
+An Alp Platform release (`Alp Platform 26.11`, full version `26.11.0`) is a
+dated, bench-validated set of component versions: alp-sdk, tan-cli,
+alp-sdk-vscode and the GD32 and CC3501E bridge firmware. Each is defined by one
+`platform.yaml` (schema `alp-platform-v1`) published as a release asset of
+`alplabai/alp-platform`. Versions are `YY.M.MICRO[-rcN]` with the month never
+zero-padded: `27.2.0` is accepted, `27.02.0` is refused and the message names
+`27.2.0`. The first line is 26.11 (November 2026); a new line ships every one
+to two months. Pinning is optional; a workspace without a pin behaves as before.
+
+```sh
+tan platform use 26.11         # latest GA MICRO of the 26.11 line
+tan platform use 26.11.1       # an exact release (an -rcN is named in full)
+tan platform use --manifest ./platform.yaml   # a local file, no network
+tan platform list              # published releases, newest first (--include-rc for pre-releases)
+tan platform show              # the pinned platform and each component's status
+tan platform clear             # remove the pin
+```
+
+`list` prints the published releases of `alplabai/alp-platform`, newest first and
+grouped by line, marking the pinned one; with `--format json`, `data` is
+`{"releases": [{"version", "line", "prerelease", "published"}], "pinned": <version or null>}`.
+A 403 or 404 while that repository is private means a `GITHUB_TOKEN` with read
+access is needed.
+
+`use` validates the manifest, then writes it byte-for-byte to
+`<west topdir>/.alp/platform.yaml` (`<west topdir>` is the directory holding
+`.west/`). It refuses an unknown `schema`, unknown top-level keys, and a
+CC3501E `gpe_stamp` at or below its `gpe_floor` (flashing such a stamp
+permanently bricks the bridge). `GITHUB_TOKEN`, when set, is sent with the
+GitHub requests. `use` never writes firmware to a board, and never updates tan
+itself: tan has no SDK-switching mechanism yet, so when the pinned alp-sdk
+differs from the checkout, it reports the version to check out
+(`git checkout v<version>`, then `tan bootstrap`) as a next step, and reports a
+tan mismatch as a warning (`platform.tan-off-manifest`).
+
+`tan doctor` reports the pin as `data.platform` (`null` when there is no pin)
+and a `platform` check: `warn` when a component whose installed version tan can
+read (alp-sdk, tan-cli) differs from the pin, `fail` when the pin is
+unreadable or invalid. The other components report `status: "unknown"`.
+
 ## Automation and JSON output
 
 Add `--format json` for machine-readable output:

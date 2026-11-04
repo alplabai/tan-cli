@@ -1040,8 +1040,8 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        # 84 (tan-cli#1498): three adopted-root toolchain-check arms, no new code.
-        expected_calls=84,
+        # 85 (tan-cli#1571): the `platform` check.
+        expected_calls=85,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
