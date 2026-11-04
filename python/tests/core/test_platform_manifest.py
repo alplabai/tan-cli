@@ -7,6 +7,7 @@ import copy
 
 import pytest
 
+import tan.core.platform_manifest as pm
 from tan.core.platform_manifest import (
     PlatformError,
     latest_ga_for_line,
@@ -148,3 +149,20 @@ def test_load_manifest_text_rejects_non_yaml():
 def test_validated_hw_rev_must_be_the_composed_form(rev):
     with pytest.raises(PlatformError, match="validated_hw"):
         validate_manifest(manifest(validated_hw=[{"som": "E1M-AEN801", "rev": rev}]))
+
+
+def test_yaml_alias_refused():
+    text = "a: &x [1, 2]\nb: *x\n"
+    with pytest.raises(pm.PlatformError, match="alias"):
+        pm.load_manifest_text(text)
+
+
+def test_oversized_manifest_refused():
+    with pytest.raises(pm.PlatformError, match="larger than"):
+        pm.load_manifest_text("x: " + "y" * (pm.MAX_MANIFEST_BYTES + 1))
+
+
+def test_error_message_repr_is_bounded():
+    with pytest.raises(pm.PlatformError) as exc:
+        pm.parse_version("9" * 10000)
+    assert len(str(exc.value)) < 400

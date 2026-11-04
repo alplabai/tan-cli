@@ -12,9 +12,14 @@ from __future__ import annotations
 import datetime
 import hashlib
 import re
+import reprlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_REPR = reprlib.Repr()
+_REPR.maxstring = 80
+_REPR.maxother = 80
 
 SCHEMA = "alp-platform-v1"
 REPO = "alplabai/alp-platform"
@@ -78,11 +83,11 @@ def parse_version(text: str) -> PlatformVersion:
         if padded is not None:
             fixed = f"{padded.group(1)}.{padded.group(2)}{text[padded.end(2):]}"
             raise PlatformError(
-                f"platform version {text!r} has a zero-padded month; "
+                f"platform version {_show(text)} has a zero-padded month; "
                 f"write it unpadded: {fixed!r}."
             )
         raise PlatformError(
-            f"platform version {text!r} is not YY.M.MICRO[-rcN] "
+            f"platform version {_show(text)} is not YY.M.MICRO[-rcN] "
             "(two-digit year, month 1-12 without zero padding, e.g. 27.2.0)."
         )
     rc = int(m.group(4)[3:]) if m.group(4) else None
@@ -96,7 +101,7 @@ def parse_line(text: str) -> str | None:
 
 def parse_gpe(text: str, what: str) -> tuple[int, ...]:
     if not isinstance(text, str) or not _GPE_RE.match(text):
-        raise PlatformError(f"{what} {text!r} must be four dot-separated integers (A.B.C.D).")
+        raise PlatformError(f"{what} {_show(text)} must be four dot-separated integers (A.B.C.D).")
     return tuple(int(p) for p in text.split("."))
 
 
@@ -139,7 +144,7 @@ def validate_manifest(data: Any) -> Manifest:
     schema = data.get("schema")
     if schema != SCHEMA:
         raise PlatformError(
-            f"unsupported platform manifest schema {schema!r}; this tan supports {SCHEMA!r}."
+            f"unsupported platform manifest schema {_show(schema)}; this tan supports {SCHEMA!r}."
         )
     unknown = sorted(str(k) for k in data if k not in _TOP_KEYS)
     if unknown:
@@ -149,13 +154,13 @@ def validate_manifest(data: Any) -> Manifest:
         raise PlatformError(f"platform manifest is missing required key(s): {', '.join(missing)}.")
     platform = data["platform"]
     if not isinstance(platform, str):
-        raise PlatformError(f"platform must be a quoted-safe string like 27.2.0, got {platform!r}.")
+        raise PlatformError(f"platform must be a quoted-safe string like 27.2.0, got {_show(platform)}.")
     version = parse_version(platform)
     released = data["released"]
     if isinstance(released, datetime.date):
         pass
     elif not (isinstance(released, str) and _is_iso_date(released)):
-        raise PlatformError(f"released must be an ISO date (YYYY-MM-DD), got {released!r}.")
+        raise PlatformError(f"released must be an ISO date (YYYY-MM-DD), got {_show(released)}.")
     comps = data["components"]
     _check_components(comps)
     if not isinstance(data["recorded"], dict) or not all(k in data["recorded"] for k in _RECORDED_KEYS):
@@ -168,7 +173,7 @@ def validate_manifest(data: Any) -> Manifest:
             isinstance(rev, str) and _HW_REV_RE.match(rev)
         ):
             raise PlatformError(
-                f"validated_hw entry {hw!r} needs a som and a rev like '2626-r2' "
+                f"validated_hw entry {_show(hw)} needs a som and a rev like '2626-r2' "
                 "(<board_datecode>-<rev key>, as in the module EEPROM hw_rev)."
             )
     bench = data.get("bench_evidence")
@@ -185,7 +190,7 @@ def _check_components(comps: Any) -> None:
         ver = entry.get("version") if isinstance(entry, dict) else None
         if not isinstance(ver, str) or not _SEMVER_RE.match(ver):
             raise PlatformError(
-                f"components.{name}.version {ver!r} must be a SemVer string X.Y.Z[-pre] "
+                f"components.{name}.version {_show(ver)} must be a SemVer string X.Y.Z[-pre] "
                 "with no leading 'v'."
             )
     cc = comps["cc3501e-bridge-firmware"]
@@ -207,11 +212,33 @@ def _is_iso_date(text: str) -> bool:
     return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
 
 
+#: A real manifest is about 1 KiB; anything far larger is not one.
+MAX_MANIFEST_BYTES = 64 * 1024
+
+
+def _show(value: Any) -> str:
+    """Bounded repr for error messages: manifest values come from the network,
+    and an unbounded repr of a crafted value can be enormous."""
+    return _REPR.repr(value)
+
+
 def load_manifest_text(text: str) -> Manifest:
     import yaml  # noqa: PLC0415
 
+    if len(text.encode("utf-8", "replace")) > MAX_MANIFEST_BYTES:
+        raise PlatformError(f"platform manifest is larger than {MAX_MANIFEST_BYTES} bytes; refusing it.")
+
+    class _NoAliasLoader(yaml.SafeLoader):
+        """A manifest has no use for YAML anchors/aliases; refusing them
+        removes alias-amplification ("billion laughs") inputs outright."""
+
+        def compose_node(self, parent, index):  # type: ignore[override]
+            if self.check_event(yaml.AliasEvent):
+                raise PlatformError("platform manifest uses a YAML alias; aliases are not allowed.")
+            return super().compose_node(parent, index)
+
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 -- SafeLoader subclass
     except yaml.YAMLError as err:
         raise PlatformError(f"platform manifest is not valid YAML: {err}") from err
     return validate_manifest(data)
