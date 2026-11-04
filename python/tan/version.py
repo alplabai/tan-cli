@@ -121,4 +121,8 @@
 # promises neither that release nor that pre-release number, only that both
 # sort above it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.1] —
 # Unreleased`, per `release_target()`.
-TAN_VERSION = "0.7.1-rc2.dev0"
+#
+# v0.7.1 (2026-11-04): v0.7.1-rc1 promoted to the stable channel with no code
+# changes; the automated post-release `.dev0` line is dropped. Same alp-sdk
+# `v0.17.0` floor.
+TAN_VERSION = "0.7.1"
