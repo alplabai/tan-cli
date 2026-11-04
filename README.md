@@ -442,17 +442,18 @@ cache root, unless `--force`). `tan sdk install` and
 
 ## Alp Platform releases
 
-An Alp Platform release (`Alp Platform 27.2`, full version `27.2.0`) is a
+An Alp Platform release (`Alp Platform 26.11`, full version `26.11.0`) is a
 dated, bench-validated set of component versions: alp-sdk, tan-cli,
 alp-sdk-vscode and the GD32 and CC3501E bridge firmware. Each is defined by one
 `platform.yaml` (schema `alp-platform-v1`) published as a release asset of
 `alplabai/alp-platform`. Versions are `YY.M.MICRO[-rcN]` with the month never
 zero-padded: `27.2.0` is accepted, `27.02.0` is refused and the message names
-`27.2.0`. Pinning is optional; a workspace without a pin behaves as before.
+`27.2.0`. The first line is 26.11 (November 2026); a new line ships every one
+to two months. Pinning is optional; a workspace without a pin behaves as before.
 
 ```sh
-tan platform use 27.2          # latest GA MICRO of the 27.2 line
-tan platform use 27.2.1        # an exact release (an -rcN is named in full)
+tan platform use 26.11         # latest GA MICRO of the 26.11 line
+tan platform use 26.11.1       # an exact release (an -rcN is named in full)
 tan platform use --manifest ./platform.yaml   # a local file, no network
 tan platform show              # the pinned platform and each component's status
 tan platform clear             # remove the pin
