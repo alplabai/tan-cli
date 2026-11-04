@@ -5,6 +5,23 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.7.1] — 2026-11-04
+
+*`v0.7.1-rc1` promoted to the stable channel: `install.sh`/`install.ps1` and the
+VS Code extension now install this release. No code changes since `v0.7.1-rc1`;
+its entry below lists everything 0.7.1 contains. Requires alp-sdk `v0.17.0` or
+newer, the same floor as `v0.7.0`.*
+
+### Fixed
+
+- **`tan bootstrap` on a host that already has a Zephyr SDK** — since
+  `v0.7.1-rc1` tan installs the pinned minimal bundle itself instead of running
+  `west sdk install`, which is the code path the `SDK version None` /
+  `INCOMPLETE` report in tan-cli#1567 came from (tan-cli#1552, tan-cli#1556).
+  Verified on a clean Linux home directory: SDK 1.0.1 and the
+  `arm-zephyr-eabi` toolchain installed, both archives hashed against alp-sdk's
+  pin, toolchain stamped.
+
 ## [0.7.1-rc1] — 2026-10-20
 
 *A **pre-release**: `install.sh`/`install.ps1` and the VS Code extension keep
