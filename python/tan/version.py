@@ -133,4 +133,7 @@
 # neither that release nor that pre-release number, only that both sort above
 # it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.2] — Unreleased`,
 # per `release_target()`.
-TAN_VERSION = "0.7.2-rc1.dev0"
+#
+# `tan platform` (tan-cli#1571) is a new command, so the next release is a
+# minor: the development line moves from `0.7.2-rc1.dev0` to `0.8.0-rc1.dev0`.
+TAN_VERSION = "0.8.0-rc1.dev0"
