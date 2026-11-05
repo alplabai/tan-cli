@@ -136,4 +136,9 @@
 #
 # `tan platform` (tan-cli#1571) is a new command, so the next release is a
 # minor: the development line moves from `0.7.2-rc1.dev0` to `0.8.0-rc1.dev0`.
-TAN_VERSION = "0.8.0-rc1.dev0"
+#
+# v0.8.0 (2026-11-05): released as a stable minor without an rc. The only
+# change since v0.7.1 is the additive `tan platform` command and the platform
+# report in `tan doctor` (tan-cli#1571); no existing command changes behaviour.
+# Same alp-sdk `v0.17.0` floor.
+TAN_VERSION = "0.8.0"
