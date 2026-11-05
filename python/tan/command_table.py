@@ -162,6 +162,12 @@ def _load_pinmux() -> Loaded:
     return pinmux, None
 
 
+def _load_platform() -> Loaded:
+    from tan.commands.platform_cmd import platform  # noqa: PLC0415
+
+    return platform, None
+
+
 def _load_presets() -> Loaded:
     from tan.commands.presets_cmd import presets  # noqa: PLC0415
 
@@ -251,6 +257,7 @@ COMMAND_TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("monitor", "Hardware", _load_monitor),
     CommandSpec("new-som", "Inspect & author", _load_new_som),
     CommandSpec("pinmux", "Inspect & author", _load_pinmux),
+    CommandSpec("platform", "Setup", _load_platform),
     CommandSpec("presets", "Start a project", _load_presets),
     CommandSpec("probe", "Hardware", _load_probe),
     CommandSpec("reset", "Hardware", _load_reset),

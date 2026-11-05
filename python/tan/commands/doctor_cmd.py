@@ -168,6 +168,7 @@ from tan.core.bootstrap import (
     reported_missing,
     select_linux_install,
 )
+from tan.commands.platform_doctor import pin_report
 from tan.core.consent import can_prompt
 from tan.core import devicetree_lint
 from tan.core.doctor_git import (
@@ -2631,6 +2632,12 @@ def _read_sdk_version(root: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def platform_check(report: tuple[dict | None, str, str]) -> Check:
+    status, detail = report[1:]
+    fix = {"warn": "tan platform use <line>", "fail": "tan platform clear"}.get(status)
+    return Check("platform", status, detail, fix, scope="project")
+
+
 def summarise(checks: list[Check]) -> dict[str, int]:
     """`pass`/`warn`/`fail` counts. `unknown` lands in NONE of them, so
     `sum(summary.values())` can be smaller than `len(checks)` -- deliberate, and
@@ -3955,6 +3962,7 @@ def _collect(
     workspace_root: str = ".",
     sdk_tier: str | None = None,
     broken_global_default: str | None = None,
+    platform_result: tuple[dict | None, str, str] | None = None,
     on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
     """Every probe, in report order. `probe`/`on_path`/`_read_text` are the
@@ -4111,6 +4119,7 @@ def _collect(
     )
     if libraries is not None:
         _add(libraries)
+    _add(platform_check(platform_result if platform_result is not None else pin_report(sdk_root)))
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
@@ -4609,6 +4618,7 @@ def doctor(
             """
             _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
 
+        platform_result = pin_report(sdk_root)
         checks = _collect(
             sdk_root,
             build=build,
@@ -4617,6 +4627,7 @@ def doctor(
             workspace_root=str(workspace_root),
             sdk_tier=sdk_tier,
             broken_global_default=broken_global_default,
+            platform_result=platform_result,
             on_check=_print_check if stream else None,
         )
         # tan-cli#91 / ADR 0021: `--fix` only ever RUNS anything when a human
@@ -4690,6 +4701,7 @@ def doctor(
             "checks": [c.as_dict() for c in checks],
             "nextSteps": next_steps(checks),
             "missingPrerequisites": missing_prerequisites,
+            "platform": platform_result[0],
         }
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as

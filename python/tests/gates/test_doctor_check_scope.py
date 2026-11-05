@@ -92,6 +92,7 @@ _PINNED_SCOPES = {
     "venvProvenance": "project",
     "westResolved": "project",
     "workspace": "project",
+    "platform": "project",
     "zephyrVersion": "project",
     "zephyrWorkspace": "project",
     "workspacePatches": "project",

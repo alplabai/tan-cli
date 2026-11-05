@@ -114,6 +114,14 @@
     "screen exists for. `licence` keeps alp-sdk's own British spelling: same",
     "fact, same name, no rename.",
     "",
+    "`platform` (tan-cli#1571, additive) is `null` when the workspace has no",
+    "Alp Platform pin (or the pin is invalid -- the `platform` check then",
+    "fails), else the object under `items` (same `{nullable, items}`",
+    "meta-descriptor as `missingPrerequisites`): `version`/`line`/",
+    "`manifestSha256` and `components`, an array of the one example shape",
+    "shown, always five entries, whose `status` is `match`, `mismatch` or",
+    "`unknown`.",
+    "",
     "Renaming or dropping a key here is the same breaking wire change",
     "`contract/README.md`'s frozen-issue-code rule describes for `issues[].code`:",
     "bump the CLI MAJOR/MINOR, record it in CHANGELOG.md, and open the",
@@ -169,6 +177,22 @@
         "sizeBytes": "int|null"
       }
     },
-    "nextSteps": ["string"]
+    "nextSteps": ["string"],
+    "platform": {
+      "nullable": true,
+      "items": {
+        "version": "string",
+        "line": "string",
+        "manifestSha256": "string",
+        "components": [
+          {
+            "name": "string",
+            "pinned": "string",
+            "installed": "string|null",
+            "status": "string"
+          }
+        ]
+      }
+    }
   }
 }

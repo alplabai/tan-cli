@@ -163,6 +163,12 @@ RELEASES: dict[str, tuple[str, ...]] = {
         "tan-x86_64-pc-windows-msvc.zip",
         "tan-x86_64-unknown-linux-gnu.tar.gz",
     ),
+    "v0.7.1": (
+        "tan-aarch64-apple-darwin.tar.gz",
+        "tan-x86_64-apple-darwin.tar.gz",
+        "tan-x86_64-pc-windows-msvc.zip",
+        "tan-x86_64-unknown-linux-gnu.tar.gz",
+    ),
 }
 
 #: What the fixture's POSIX executable prints, so a test can tell the payload

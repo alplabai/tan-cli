@@ -125,4 +125,20 @@
 # v0.7.1 (2026-11-04): v0.7.1-rc1 promoted to the stable channel with no code
 # changes; the automated post-release `.dev0` line is dropped. Same alp-sdk
 # `v0.17.0` floor.
-TAN_VERSION = "0.7.1"
+#
+# v0.7.1 published 2026-11-04 (tan-cli#770's automated post-release bump): the
+# development line still carried the published tag's exact version, the state
+# `version_check.py --not-released` exists to refuse. TAN_VERSION moves to
+# `0.7.2-rc1.dev0` -- a `.devN` tail on the next pre-release -- which promises
+# neither that release nor that pre-release number, only that both sort above
+# it in SemVer and PEP 440 alike. CHANGELOG home is `## [0.7.2] — Unreleased`,
+# per `release_target()`.
+#
+# `tan platform` (tan-cli#1571) is a new command, so the next release is a
+# minor: the development line moves from `0.7.2-rc1.dev0` to `0.8.0-rc1.dev0`.
+#
+# v0.8.0 (2026-11-05): released as a stable minor without an rc. The only
+# change since v0.7.1 is the additive `tan platform` command and the platform
+# report in `tan doctor` (tan-cli#1571); no existing command changes behaviour.
+# Same alp-sdk `v0.17.0` floor.
+TAN_VERSION = "0.8.0"
