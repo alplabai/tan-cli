@@ -5,13 +5,30 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.8.0] — Unreleased
+## [0.8.0] — 2026-11-05
 
-### Fixed
+*Adds `tan platform`, which pins a workspace to an Alp Platform release (the
+CalVer umbrella that names one tested set of tan, alp-sdk, the VS Code
+extension and the bridge firmware). Nothing else changes for a workspace that
+is not pinned. Requires alp-sdk `v0.17.0` or newer, the same floor as `v0.7.0`.*
 
-- `TAN_VERSION` moved to `0.8.0-rc1.dev0` off the published `v0.7.1` tag
-  (tan-cli#770's automated post-release bump, raised from `0.7.2` to `0.8.0`
-  because `tan platform` is a new command).
+### Added
+
+- **`tan platform use|show|clear` pins a workspace to an Alp Platform release, and `tan doctor` reports it.**
+  `tan platform use <YY.M[.MICRO]>` (or `--manifest FILE`) validates the
+  `alp-platform-v1` manifest -- unknown schema or top-level keys, a zero-padded month
+  (`27.02.0`, the message names `27.2.0`), and a CC3501E `gpe_stamp` at or below
+  `gpe_floor` (which permanently bricks the bridge) are refused -- and writes it
+  byte-for-byte to `<west topdir>/.alp/platform.yaml`. It never flashes firmware and never
+  updates tan; an alp-sdk or tan version that differs from the pin is reported
+  (`platform.sdk-off-manifest`, `platform.tan-off-manifest`). `tan doctor` gains
+  `data.platform` (null when unpinned) and a `platform` check, pinned in
+  `contract/doctor-data-keys.json`.
+- **`tan platform list [--include-rc]` lists the published Alp Platform releases.**
+  Newest first, grouped by line, with the pinned version marked
+  (`data: {"releases": [{"version", "line", "prerelease", "published"}], "pinned"}`),
+  for the VS Code release picker. A network failure is `platform.list-failed`; a 403 or
+  404 names the `GITHUB_TOKEN` read access a private repository needs.
 
 ## [0.7.1] — 2026-11-04
 

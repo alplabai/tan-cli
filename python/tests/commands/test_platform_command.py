@@ -33,10 +33,12 @@ def ws(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _manifest_bytes(**sdk_ver) -> bytes:
+def _manifest_bytes(sdk=None, tan=None) -> bytes:
     data = copy.deepcopy(GOOD)
-    if sdk_ver:
-        data["components"]["alp-sdk"]["version"] = sdk_ver["sdk"]
+    if sdk:
+        data["components"]["alp-sdk"]["version"] = sdk
+    if tan:
+        data["components"]["tan-cli"]["version"] = tan
     return b"# comment kept byte-for-byte\n" + yaml.safe_dump(data).encode()
 
 
@@ -67,12 +69,14 @@ def test_use_manifest_writes_pin_byte_for_byte_and_show_clear(ws):
 
 def test_use_reports_sdk_mismatch_as_next_step_not_failure(ws):
     local = ws / "m.yaml"
-    local.write_bytes(_manifest_bytes(sdk="0.19.0"))
+    # A tan pin that can never equal this build's TAN_VERSION, so the test
+    # does not start failing the day TAN_VERSION reaches the fixture's value.
+    local.write_bytes(_manifest_bytes(sdk="0.19.0", tan="0.0.1"))
     code, env = run(ws, "use", "--manifest", str(local))
     assert code == 0
     assert "v0.19.0" in env["data"]["nextSteps"][0]
     assert any(i["code"] == "platform.sdk-off-manifest" for i in env["issues"])
-    # tan itself is reported (0.8.0 pinned vs this build), never updated.
+    # tan itself is reported (0.0.1 pinned vs this build), never updated.
     assert any(i["code"] == "platform.tan-off-manifest" for i in env["issues"])
 
 
