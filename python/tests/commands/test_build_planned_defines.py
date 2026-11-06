@@ -10,7 +10,9 @@ import pytest
 from tan.core.plain_zephyr_plan import plain_zephyr_plan
 from tan.core.user_defines import (
     UserDefineError,
+    apply_core_defines,
     apply_user_defines,
+    parse_core_defines,
     user_defines_problem,
 )
 from tests.commands.test_build_command import envelope_of, run_tan
@@ -313,3 +315,28 @@ def test_wipe_refused_for_symlinked_build_dir(world):
     msgs = [i["message"] for i in env["issues"] if i["code"] == "build.configure-cache-stale"]
     assert msgs and "symlink" in msgs[0] and "Errno" not in msgs[0]
     assert (real / "CMakeCache.txt").exists()
+
+
+def test_core_defines_apply_to_their_own_slice_only():
+    per, bad = parse_core_defines(["rtss_hp:SHIELD=a", "rtss_he:SHIELD=b", "rtss_he:X:STRING=1"])
+    assert bad is None
+    text = apply_core_defines(_plan(second=True), per)
+    assert "-DSHIELD=b" in _args(text, 0) and "-DX:STRING=1" in _args(text, 0)
+    assert "-DSHIELD=a" in _args(text, 1) and "-DSHIELD=b" not in _args(text, 1)
+
+
+def test_core_defines_refusals():
+    assert parse_core_defines(["SHIELD=a"])[1][0] == "build.invalid-argument"
+    assert parse_core_defines(["rtss_he:BOARD=x"])[1][0] == "build.define-reserved"
+    with pytest.raises(UserDefineError):
+        apply_core_defines(_plan(), {"nope": ["-DA=1"]})
+
+
+@posix_only
+def test_cli_core_define_reaches_west_and_envelope(world):
+    env = envelope_of(_run(world, "--core-define", "rtss_he:SHIELD=s"))
+    assert env["exitCode"] == 0, env["issues"]
+    assert "-DSHIELD=s" in _west_argv(world)
+    assert env["data"]["coreDefines"] == {"rtss_he": ["-DSHIELD=s"]}
+    env = envelope_of(_run(world, "--core-define", "nope:A=1"))
+    assert env["exitCode"] == 2

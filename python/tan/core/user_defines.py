@@ -124,6 +124,52 @@ def apply_user_defines(
     return json.dumps(plan, indent=2), [s["coreId"] for s in targets]
 
 
+def parse_core_defines(items: list[str]) -> tuple[dict[str, list[str]], tuple[str, str] | None]:
+    """`--core-define CORE:NAME=VALUE` items -> `{coreId: [-DNAME=VALUE, ...]}`,
+    or `({}, (code, message))` for the first malformed/refused one (tan-cli#1579).
+    Split at the FIRST `:`, so a CMake type (`CORE:NAME:STRING=v`) survives."""
+    from tan.core.plain_zephyr_plan import normalise_defines
+
+    out: dict[str, list[str]] = {}
+    for item in items:
+        core, sep, rest = item.partition(":")
+        if not sep or not re.fullmatch(r"[A-Za-z0-9_]+", core) or not rest:
+            return {}, (
+                "build.invalid-argument",
+                f"`--core-define {item!r}` is not `CORE:NAME=VALUE` (CORE is a slice coreId).",
+            )
+        norm, err = normalise_defines([rest])
+        if err is not None:
+            return {}, ("build.invalid-argument", err)
+        bad = user_defines_problem(norm)
+        if bad is not None:
+            return {}, bad
+        out.setdefault(core, []).extend(norm)
+    return out, None
+
+
+def apply_core_defines(plan_text: str, per_core: dict[str, list[str]]) -> str:
+    """The plan text with each core's own defines spliced into THAT slice only
+    (after any plain `-D`). Raises [`UserDefineError`] for a core that is not a
+    Zephyr slice of the plan."""
+    plan = json.loads(plan_text)
+    zephyr = {
+        s["coreId"]: s
+        for s in plan.get("slices", [])
+        if s.get("backend") == "zephyr" and isinstance(s.get("command"), dict)
+    }
+    missing = [c for c in per_core if c not in zephyr]
+    if missing:
+        raise UserDefineError(
+            "build.invalid-argument",
+            f"`--core-define {', '.join(missing)}` is not a Zephyr slice of this plan "
+            f"(Zephyr slices: {', '.join(sorted(zephyr)) or 'none'}).",
+        )
+    for c, defs in per_core.items():
+        zephyr[c]["command"]["args"] = _apply_to_args(zephyr[c]["command"]["args"], defs)
+    return json.dumps(plan, indent=2)
+
+
 def define_pairs(defines: list[str]) -> list[str]:
     """`NAME=VALUE` (or bare `NAME`) lines for normalised `-D` args -- the unit
     the per-slice stamp records."""
