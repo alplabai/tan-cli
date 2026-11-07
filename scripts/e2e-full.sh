@@ -274,8 +274,17 @@ print(v if v is not None else 'NONE')" "$1" "$2" 2>/dev/null || echo NONE; }
 # wrong place when the envelope also disagreed with itself. RC is exported.
 jrun() {
   local label="$1" expect="$2"; shift 2
+  "$TAN" "$@" >"$WORK/$label.out" 2>"$WORK/$label.err"; RC=$?
+  jscore "$label" "$expect"
+}
+
+# The scoring half of `jrun`, over a capture already in `$WORK/<label>.{out,err}`
+# with its exit status in `$RC` -- split out so a caller that has to retry the
+# command (`sdklist_canary`) scores the attempt it kept instead of running the
+# command once more.
+jscore() {
+  local label="$1" expect="$2"
   local o="$WORK/$label.out" e="$WORK/$label.err"
-  "$TAN" "$@" >"$o" 2>"$e"; RC=$?
   local esz; esz=$(wc -c <"$e" | tr -d ' ')
   local why="" env_rc env_ok
   [ "$esz" -eq 0 ] || why="stderr $esz bytes"
@@ -415,6 +424,49 @@ for index, issue in enumerate(issues):
 PY
 }
 
+# `sdk list --online` against the REAL GitHub API: the #304 CA canary.
+#
+# The one failure that does not score red is GitHub's ANONYMOUS rate limit: an
+# `sdk.fetch-failed` issue whose message carries both `403` and `rate limit`.
+# That quota is 60 requests/hour per SOURCE IP, shared with every tenant on the
+# runner pool, so it says nothing about the freeze -- tan-cli#1570 was exactly
+# that (one red night, the four after it green, nothing changed). It is retried
+# with backoff first, then reported as a workflow warning naming what did not
+# run. Every other failure, a CA regression (`CERTIFICATE_VERIFY_FAILED`, the
+# #304 shape) included, is still scored by `jscore` and still fails. The same
+# narrow exclusion `clean_host_smoke.py:assert_sdk_list_online` has applied in
+# clean-host.yml since PR #303; no token is the fix, for the reason recorded
+# there (`tan` sends none for this call).
+sdklist_rate_limited() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+try:
+    issues = json.load(open(sys.argv[1])).get("issues") or []
+except Exception:
+    sys.exit(1)
+for issue in issues:
+    message = str(issue.get("message", "")).lower() if isinstance(issue, dict) else ""
+    if issue.get("code") == "sdk.fetch-failed" and "403" in message and "rate limit" in message:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+sdklist_canary() {
+  local attempt delay="${SDKLIST_RETRY_DELAY_S:-20}"
+  for attempt in 1 2 3; do
+    "$TAN" sdk list --online --format json >"$WORK/sdklist.out" 2>"$WORK/sdklist.err"; RC=$?
+    [ "$RC" -ne 0 ] && sdklist_rate_limited "$WORK/sdklist.out" || break
+    [ "$attempt" -lt 3 ] && sleep $((attempt * delay))
+  done
+  if [ "$RC" -ne 0 ] && sdklist_rate_limited "$WORK/sdklist.out"; then
+    echo "::warning::sdk list --online: GitHub's anonymous API rate limit was exhausted after 3 attempts (HTTP 403). The CA-trust canary (tan-cli#304) did NOT run -- the shared per-IP runner quota, not a defect in the freeze."
+    note "sdklist: NOT RUN -- anonymous GitHub API rate limit (HTTP 403) after 3 attempts; not scored"
+    return 0
+  fi
+  jscore sdklist 0
+}
+
 ########################  FRESH HOST  ########################
 echo; echo "############ FRESH HOST ############"
 
@@ -428,8 +480,9 @@ jrun doctor any doctor --format json
 
 hdr "sdk list --online (real HTTPS, the #304 CA canary)"
 # Hard 0: reaching the release index over real TLS is the #304 CA canary and
-# has exactly one correct answer on every host. `jrun` now owns the assertion.
-jrun sdklist 0 sdk list --online --format json
+# has exactly one correct answer on every host -- except GitHub's anonymous
+# per-IP rate limit, which `sdklist_canary` retries and then only warns on.
+sdklist_canary
 
 hdr "clone alp-sdk (quickstart layout)"
 # tan-cli#358: the SDK revision is EXPLICIT and RECORDED. An unpinned shallow
