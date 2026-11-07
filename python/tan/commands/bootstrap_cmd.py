@@ -3501,13 +3501,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             previous_project_pin, project_pin_root = _relocate_project_pin(
                 active_tier, root, old_project.root, sdk_root, dry_run
             )
-            # tan-cli#1547: only the pin THIS run resolved through is rewritten
-            # above. Any other project whose `.alp/sdk-path` names the vacated
-            # checkout (e.g. one `tan init --sdk-root` pinned, bootstrapped from
-            # its parent directory) is now stranded on `globalDefault` with only
-            # `sdk.project-pin-unresolved` to say so, far from the command that
-            # broke it. tan keeps no list of the projects pinning a checkout, so
-            # name the vacated path and the repair instead of staying silent.
+            # tan-cli#1547: any OTHER project pinning the vacated checkout is now
+            # stranded on `globalDefault`; tan keeps no list of them, so say so.
             whose = (
                 "this project's .alp/sdk-path was updated, but any other project"
                 if active_tier == "projectPin"
