@@ -61,8 +61,9 @@ def test_override_resolves_the_sibling_skus_preset(tmp_path: Path) -> None:
 
 def test_override_drives_sku_derived_refusals(tmp_path: Path) -> None:
     """The override is applied BEFORE every SKU-derived check, so a
-    security block valid on the declared SKU is judged against the
-    overriding one (here: OPTIGA is fitted on AEN401, DNP on AEN801)."""
+    security block is judged against the overriding SKU, not the declared
+    one (here: OPTIGA is DNP on every AEN SKU, and the refusal names whichever
+    SKU is in force)."""
     from tan.planner import load_board_yaml
     from tan.planner.models import OrchestratorError
 
@@ -79,6 +80,7 @@ def test_override_drives_sku_derived_refusals(tmp_path: Path) -> None:
             attestation_root: optiga_trust_m
             tfm: true
     """)
-    load_board_yaml(path)
+    with pytest.raises(OrchestratorError, match="not assembled on SoM E1M-AEN401"):
+        load_board_yaml(path)
     with pytest.raises(OrchestratorError, match="not assembled on SoM E1M-AEN801"):
         load_board_yaml(path, sku="E1M-AEN801")

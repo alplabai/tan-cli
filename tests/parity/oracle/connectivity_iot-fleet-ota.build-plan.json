@@ -51,7 +51,8 @@
           "--sysbuild",
           "--",
           "-DPython3_EXECUTABLE=/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
+          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf",
+          "-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"/srv/alp-sdk/keys/mcuboot_shared_dev_ecdsa_p256.pem\""
         ],
         "cwd": "build/m55_he-zephyr"
       },
@@ -106,7 +107,8 @@
           "--sysbuild",
           "--",
           "-DPython3_EXECUTABLE=/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
+          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf",
+          "-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"/srv/alp-sdk/keys/mcuboot_shared_dev_ecdsa_p256.pem\""
         ],
         "cwd": "build/m55_hp-zephyr"
       },

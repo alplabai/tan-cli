@@ -988,7 +988,12 @@ env:
   # `pinctrl_som_power` group; the planner oracle was re-captured and is
   # byte-identical (the oracle modes do not render the Zephyr board); scaffold
   # parity is 10/10 unchanged.
-  PINNED_SDK_TAG: 84132b98a53a9f0e5ef9e7622a38c6d637439873
+  # `84132b98a` -> `65583f78a` (alp-sdk `dev`, tan-cli#1569, alp-sdk#3033's
+  # SDK-anchored signing key): the same lockstep sites move together. Unlike the
+  # last few re-syncs this one moved scaffold inputs, so the vendored tree was
+  # re-vendored (`scaffold_byte_parity.py` 10/10), the planner oracle re-captured
+  # in full (735 emits), and the seam1 oracle re-vendored from alp-sdk's copies.
+  PINNED_SDK_TAG: 65583f78a6f93743235b56f0723cb36df7cc0df0
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1319,7 +1324,7 @@ env:
   # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: 84132b98a53a9f0e5ef9e7622a38c6d637439873
+  PINNED_PLANNER_ORACLE_SDK_REF: 65583f78a6f93743235b56f0723cb36df7cc0df0
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

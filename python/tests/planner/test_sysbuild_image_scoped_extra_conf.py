@@ -63,6 +63,9 @@ def _zephyr_slice(tmp_path: Path, body: str, name: str) -> dict:
     from tan.planner import load_board_yaml
     from tan.planner.buildplan import emit_build_plan
 
+    # The planner refuses a signing key that is not a file (alp-sdk#2950).
+    (tmp_path / "keys").mkdir(exist_ok=True)
+    (tmp_path / "keys" / "dev_rsa.pem").write_text("pem", encoding="utf-8")
     path = tmp_path / name
     path.write_text(textwrap.dedent(body).lstrip("\n"), encoding="utf-8")
     plan = json.loads(emit_build_plan(
@@ -78,6 +81,10 @@ def test_sysbuild_slice_carries_the_image_scoped_extra_conf_file(
     args = z["command"]["args"]
 
     assert "--sysbuild" in args
+    # The board.yaml-relative key rides as an anchored -D after the conf file.
+    assert args[-2].startswith("-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=")
+    assert "${PROJECT_ROOT}/keys/dev_rsa.pem" in args[-2]
+    args = args[:-2] + args[-1:]
     assert args[-4:-1] == [
         "--",
         "-DPython3_EXECUTABLE=${PYTHON}",

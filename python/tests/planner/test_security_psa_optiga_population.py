@@ -80,11 +80,39 @@ def test_optiga_attestation_root_refused_where_the_part_is_dnp(
 def test_optiga_attestation_root_accepted_where_the_part_is_fitted(
     tmp_path: Path,
 ) -> None:
-    """E1M-AEN401 fits OPTIGA -- the attestation root still loads."""
+    """E1M-V2N101 fits OPTIGA (no `assembled: false`) -- the attestation root
+    still loads. No E1M-AEN SKU does: every AEN shares one PCB on which IC1
+    is DNP (alp-sdk#2958), so the accept path lives on the V2N."""
     from tan.planner import load_board_yaml
 
-    project = load_board_yaml(_write_board(tmp_path, "E1M-AEN401"))
-    assert project.sku == "E1M-AEN401"
+    path = tmp_path / "board.yaml"
+    path.write_text(textwrap.dedent("""
+        name: test-v2n101-optiga
+        som:
+          sku: E1M-V2N101
+        cores:
+          m33_sm:
+            os: zephyr
+            app: ./m33_sm
+        security:
+          psa:
+            attestation_root: optiga_trust_m
+            tfm: true
+    """).lstrip("\n"), encoding="utf-8")
+    assert load_board_yaml(path).sku == "E1M-V2N101"
+
+
+@pytest.mark.parametrize("sku", ["E1M-AEN301", "E1M-AEN401"])
+def test_optiga_attestation_root_refused_on_every_aen_sku(
+    tmp_path: Path, sku: str,
+) -> None:
+    """alp-sdk#2958: the OPTIGA is DNP on the shared AEN PCB, so the refusal
+    is not specific to E1M-AEN801."""
+    from tan.planner import load_board_yaml
+    from tan.planner.models import OrchestratorError
+
+    with pytest.raises(OrchestratorError, match=f"not assembled on SoM {sku}"):
+        load_board_yaml(_write_board(tmp_path, sku))
 
 
 @pytest.mark.parametrize(

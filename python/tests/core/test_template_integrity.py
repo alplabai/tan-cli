@@ -673,6 +673,35 @@ _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     # legitimate pointer, not a substitution gap; verified by diffing the
     # planned content, not assumed from the naming.
     ("edge-ai-starter", "E1M-AEN803", "E1M-V2M101"): 2,
+    # tan-cli#1569 (the 65583f78a re-vendor): the `edge-ai` README `deepx_v2m_note`
+    # DELIBERATE_EDITS entry is RETIRED -- alp-sdk's emit now says it, naming all
+    # three SKUs per family once ("...E1M-V2M101/E1M-V2M102/E1M-V2M103 -- not on
+    # E1M-V2N101/E1M-V2N102/E1M-V2N103..."). The AEN trees keep the one
+    # board.yaml correction (E1M-V2M101, counted above), so E1M-V2M103/E1M-V2N103
+    # are first-ever 1-mention siblings for every AEN tree, and E1M-AEN803 -- whose
+    # tree used to carry only the correction text -- now sees the whole sentence.
+    # Verified by dumping each planned README.md, not assumed.
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2N103"): 1,
+    # tan-cli#1569: `multicore-mailbox`'s `board.yaml` comment names the SoM
+    # preset files of BOTH E1M-AEN801 and E1M-AEN803 (the shared `sram_ipc`
+    # carve-out row) -- a real cross-reference, not a substitution gap.
+    ("multicore-mailbox", "E1M-AEN801", "E1M-AEN803"): 1,
     # tan-cli#1292 (review of tan-cli#1291; alp-sdk#2281 adds
     # E1M-V2M103/E1M-V2N103 to the SKU catalogue, and the re-vendor at
     # `79c834e65` widens the SKU-neutral DEEPX sentence to name all THREE
