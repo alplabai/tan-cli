@@ -49,9 +49,6 @@ cameras:
 BOOT = """
 boot:
   method: mcuboot
-  signing:
-    algorithm: ecdsa_p256
-    key_file: keys/mcuboot_shared_dev_ecdsa_p256.pem
 """
 
 

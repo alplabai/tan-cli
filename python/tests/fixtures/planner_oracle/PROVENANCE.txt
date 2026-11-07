@@ -42,3 +42,12 @@ Two shapes reach it and they are not the same:
 
 The paths in `boardYaml` are `<SDK>`-normalised; see
 `capture_planner_oracle.py` for why, and for the refusal that keeps it true.
+
+PARTIAL RE-CAPTURE (tan-cli#1569). `emits/examples/connectivity/iot-fleet-ota/
+build-plan.json` and `.../production-deployment/build-plan.json` were
+re-captured with `capture_planner_oracle.py` from alp-sdk PR #3033's head
+(1eebeb2c663e846b3c71f23c74037dd45dd77ee6, branch fix/review-zephyr-build-31),
+which passes the SDK-anchored default MCUboot signing key as
+`-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE` and drops the relative key line from the
+sysbuild conf. Every other file stays at the ref above; re-pin the whole set
+on the next planner re-sync once #3033 is on alp-sdk dev.
