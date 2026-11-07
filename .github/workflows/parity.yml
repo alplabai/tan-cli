@@ -1549,7 +1549,7 @@ jobs:
       # `python/tests/gates/test_interpreter_policy.py` enforces the pair
       # (which jobs may float, which must pin, and that the floating full-suite
       # job still selects the whole suite).
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x" # ceiling -- see the policy note above
 
@@ -2282,7 +2282,7 @@ jobs:
       # `tan` under test IS this interpreter now (tan-cli#269 retired the
       # self-contained cargo binary), so a floating newest-3.x would decide
       # what the seam executes.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -2586,7 +2586,7 @@ jobs:
       # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
       # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
       # 3.12.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -3069,7 +3069,7 @@ jobs:
           ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
           path: alp-sdk-planner-oracle
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -3683,7 +3683,7 @@ jobs:
           ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
           path: alp-sdk-planner-oracle
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
