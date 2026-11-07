@@ -48,3 +48,16 @@ no longer declares `boot.signing`. Re-vendored from alp-sdk's own copy with the
 checkout root normalised to /srv/alp-sdk like the rest of this directory; the
 byte diff against alp-sdk's copy is otherwise empty. These two args are the only
 fields touched; every other value is still frozen at 97ad481b.
+
+Hand-reviewed field correction (alp-sdk#3011, build-plan `blocked-ipc-carveout`
+warning, tan-cli#1569 re-vendor): `multicore_rpmsg-aen.build-plan.json`
+`warnings` gained two `blocked-ipc-carveout` entries (coreId `a32_cluster` and
+`m55_hp`) next to the existing `yocto-machine-unbuildable` one. `E1M-AEN801`'s
+only memory_map region matching the `alp_default_rpmsg` ipc entry is
+`mram_main`, which is flash-class and so ineligible as an IPC carve-out, so the
+carve-out is blocked and the planner now says so. Re-vendored from alp-sdk's
+own copies at 65583f78a (`audio_i2s-tone`, `multicore_rpmsg-aen`,
+`connectivity_iot-fleet-ota`) with the checkout root normalised to
+/srv/alp-sdk, the same normalisation as the other fixtures here, so the
+`audio_i2s-tone` and `multicore_rpmsg-aen` diffs also drop a stale host path.
+Every other value is untouched, still frozen at 97ad481b.

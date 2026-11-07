@@ -1422,7 +1422,20 @@ from tests.conftest import sdk_root
 #: `scripts/alp_orchestrate/` file moved (`planner_resync.py`: up to date). The
 #: planner oracle re-captured with only `sdkVersion` changed (`0.17.0-rc2` ->
 #: `0.17.0`, all 103 build-plan emits).
-PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no planner source moved since 7584a356
+#: `84132b98a` -> `65583f78a` (alp-sdk `dev`, v0.18.0 + 42 commits, tan-cli#1569):
+#: eight mirrored files moved (`buildplan.py`, `carveout.py`, `headers.py`,
+#: `kconfig.py`, `loader.py`, `orchestrator.py`, `partition.py`, `secure.py`).
+#: `planner_resync.py` 3-way merged five cleanly; `orchestrator.py` and
+#: `secure.py` (alp-sdk#3033's sysbuild signing-key change) had already been
+#: ported by this same PR, so their merge was a no-op; `loader.py`'s only delta
+#: is a comment (the AEN OPTIGA DNP wording, alp-sdk#2958/#2990), applied by hand
+#: because the bot's merge read tan's own rewording of that line as a conflict.
+#: Behavioural: alp-sdk#3033 (SDK-anchored default MCUboot signing key), #3011
+#: (blocked IPC carve-out warning, unresolved-aperture refusal, OTA west module),
+#: #3046/#2953/#2952 (storage-mounts PARTITION_ID, unrooted --build-root refusal,
+#: RZ/V2N SoC profile default). Planner oracle fully re-captured at this commit
+#: (735 emits over 105 boards) and the scaffold re-vendored (10/10).
+PINNED_SDK_COMMIT = "65583f78a6f93743235b56f0723cb36df7cc0df0"  # alp-sdk dev (v0.18.0 + 42) -- tan-cli#1569 re-sync
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1464,31 +1477,27 @@ PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "c75159718e19d13c64618e6fbe2f475265fa0a9bf727b85cadb4102e80c42d83",
     "aperture.py": "2484931ad03a8f2e72d4f70d860a5b543bde66f1e0bcf10b6db98ecfd999a7fb",
-    "buildplan.py": "17bca79ceeae97f5d2b02a437b181235891eafa661f0693235a99bb2bcacbe7c",
+    "buildplan.py": "359c04c93bdbf7c38199acf886d4facc1d2aac28890cc91825d191690c44b8f1",
     "camera_owner.py": "61995f755650ccb1855ef2ea764c1df86925b5337be6eb747da9e248d591801d",
     "cameras.py": "0e90fcb270a59c24d46c0303319b72f782973b37ea32b50cc98eccadeefc90f5",
-    "carveout.py": "aa3b6d9ef8bafcd7ffe94f2ff1a591b44c8296c3a794f33007883ac963c8c863",
+    "carveout.py": "92f48ed55a469120c4a434efd62d25b6307e02438e5d35d6b7950a45234d6371",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
-    "headers.py": "8fdfde5abdd9b8eafbc71e180f3c7843f5f6ff913b1dc5ef113304c2218ff573",
-    "kconfig.py": "564c5f51dfa4b5ed4bdf3abbdb00c051c29e26005c32bf4ff1f5073ebe1a7551",
+    "headers.py": "243de94b61177571831aadb1fbdeed8888568a89d18ec6d96ae94d12b2a1cb97",
+    "kconfig.py": "790f180661b83f6dbf635b00c4f0e238535e014c6172bf62d976e1722ae1d2bb",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "6545d851e8520e576d896608bfebcef74631b320284f50973d4de32e774135aa",
-    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
-    # `diagnostics.link` != auto). The re-sync that took it (#1394) did NOT port
-    # that refusal: tan's `link_target.apply_link_target` (called at the end of
-    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
-    "loader.py": "c4b1bfda8d1a8df7dc8eb994887a3a3b8a0d759dcda91fb9a47535db859e22b0",
+    "loader.py": "ce8b207a870780da8541fb1f6989b487dcfb33f6e6b211fb80eeab4c3d3f6f7a",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
-    "orchestrator.py": "d4f6b83d85132a6f5a954104779294dd111771be24028239b7e96caeee1541d7",
+    "orchestrator.py": "98d3b194670c9b07c1d1836bd0a73ad427add96bef31db9cacf4e5e82dd90c25",
     "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
-    "partition.py": "837fb76f6a7fe288c863541c98ddcbf1af5ca206f051922d12db06a8670025d8",
+    "partition.py": "8af0b005703c6c3b7bc15710dcbe5b2a8bc157323b659a2193374174aa9f1164",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "255494c4397912d800ab695a48ff35b9ab9233bc8c5136893cc39488ee6234c3",
-    "secure.py": "f804a5e7419c761698667449f527a920735a691b3864e97ea87fc3bf74a711ff",
+    "secure.py": "d3725750cf20d4bcb9a3f7e5916a08307c3c28a4d6b3c9e4d104be187a68826d",
     "slugs.py": "4e914a71468ec41529a970783f29501d1ec387ad748fc792cb6dfb53b9818adb",
     "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
     "validate.py": "0981ca5a07d5dc5845bbcd13c4f00534285490e52ab2ef8fd8022188b8a850e6",
@@ -2504,7 +2513,18 @@ PINNED_HASHES: dict[str, str] = {
 #: AUDIT `7584a3562` -> `84132b98a` (alp-sdk `v0.17.0`, tan-cli#1258): no hand-port
 #: source moved; hashes unchanged. The range's two `scripts/*.py` edits
 #: (`check_cross_platform.py`, `select_aen_twister.py`) are SDK-only gates.
-HAND_PORT_PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-sdk v0.17.0 -- no hand-port source moved
+#: AUDIT `84132b98a` -> `65583f78a` (tan-cli#1569): two hand-port sources moved,
+#: both ported by hand into the modules the table names.
+#: `scripts/gen_zephyr_board.py` -> `tan/planner/zephyr_board.py`: the AEN
+#: SRAM0 bounds/overlap check for RAM-class `memory_map` rows (`sram_ipc`), the
+#: CMSDK watchdog dtsi include on E4/E8, the `&gpioN` status-okay block for
+#: SoM power-domain pads, and the V2N OpenAMP tail's `ipc0` (`alp,ipc-v2n-rpmsg`)
+#: node replacing `mbox_consumer`. `scripts/alp_project_emit/west_libs.py` ->
+#: `tan/planner/project_emit/west_libs.py`: Mender is now a standalone west
+#: project (`_OTA_PROVIDER_WEST_PROJECTS`), never a `name-allowlist` entry.
+#: Verified, not assumed: the planner oracle re-captured at this commit passes
+#: byte-for-byte against tan's own emit under `tests/parity/`.
+HAND_PORT_PINNED_SDK_COMMIT = "65583f78a6f93743235b56f0723cb36df7cc0df0"  # alp-sdk dev (v0.18.0 + 42) -- tan-cli#1569 hand-ports
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2572,7 +2592,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "84132b98a53a9f0e5ef9e7622a38c6d637439873"  # alp-
 #: is in `HAND_PORT_SOURCES` below; `test_hand_port_tan_side.py`'s
 #: `HAND_PORT_TAN_SIDE` is where their tan files are named.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "d416fcabf1c737b7244918bafab2c570a73efe1de8bafd98ceab1ea7f94bbc3c",
+    "scripts/gen_zephyr_board.py": "5d9399689490341a9213d558b7926ceec8eddc88ccc57dbc0a8fd76adacce077",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
@@ -2582,15 +2602,9 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
     "scripts/alp_project_emit/hw_info.py": "32704dc96f2e07f1dd4e5d409c14340eb6a8169dbb52f6110cfa6501e1ba6b4f",
     "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
-    "scripts/alp_project_emit/west_libs.py": "04c31b53ef9198a08faa2f0c2222a6dfc9fbcbf0ecb6deaafc7e064567354e44",
+    "scripts/alp_project_emit/west_libs.py": "3f23a5f3149c823f246a63117eb4912f05060fad958b231b578b8b73dcb1cbff",
     "scripts/alp_cli/diagnostic_format.py": "4008a7e362c0e3260653c78de377e686387ccdd91618d7cecbc859e21990c45c",
     "scripts/alp_cli/validator.py": "ce44ba907c411f763e39b07c168f959dd4455da20d3ffba9f8c28eaa5a1f810d",
-    # tan-cli#270: `tan validate` runs these four IN-PROCESS now instead of
-    # spawning the SDK's script. `validator.py` above was already pinned for the
-    # two schema helpers `tan/planner/loader.py` copied; it is now ALSO the source
-    # of `tan/core/board_validator{,_schema,_compat}.py`. Byte-identical at
-    # `HAND_PORT_PINNED_SDK_COMMIT` and at alp-sdk `origin/dev` `4c7d2d34`
-    # (the commit the port was cut from; verified by hashing both).
     "scripts/alp_cli/diagnostic.py": "6a96eb120d73640196cefbd30d13e40a515d00d11368e440123594189cd16d96",
     "scripts/alp_cli/yaml_pos.py": "c83580d86a8f2bc575e20b44f4893847a6a08f765774861f2d29a8bd61ae5b74",
     "scripts/validate_board_yaml.py": "91e06880f068447f98a2c68f1ffb4b6da29c18d2fcadfa0232d982e6612557d4",

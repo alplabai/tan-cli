@@ -311,57 +311,6 @@ def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
     )
 
 
-#: tan-cli#814, re-anchored tan-cli#1001 review (blocker): the emit's own
-#: sentence tells the customer to flip `som.sku` to either `E1M-V2M101` or
-#: `E1M-V2M102` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
-#: that is correct (V2N101/V2M101/V2M102 are the same PCB, same
-#: `preset:`/`cores:`/`pins:`, and alp-sdk#1749 made the sentence SKU-neutral
-#: there -- see `deepx_v2m102_scope` in the retirement block comment below),
-#: but here it is a cross-family swap (`alif-ensemble` -> `renesas-rzv2n-
-#: deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:` all pinned to
-#: the Alif module -- measured: `tan validate` refuses with ALP-B007 (board/
-#: family mismatch: `board preset 'e1m-evk' hosts SoM families
-#: ['alif-ensemble'], but E1M-V2M101 is family
-#: 'renesas-rzv2n-deepx'`). alp-sdk#1749's rewording at the 722320a1 re-vendor
-#: made the V2N101 sibling's sentence correct but reintroduced the identical
-#: AEN801 defect in new words -- the anchor below matches the NEW wording, not
-#: the tan-cli#814-era one it replaces. Matches the literal sentence, not a
-#: paraphrase, so an unrelated README edit still fails this gate.
-#:
-#: `_EMITTED` re-anchored again for the `79c834e65` re-vendor (review of
-#: tan-cli#1291): alp-sdk#2281 adds `E1M-V2M103`/`E1M-V2N103` to the SKU
-#: catalogue, and the emit's own sentence lists all three SKUs per family now
-#: ("...`E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103` -- not on
-#: `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`..."). The DELIBERATE correction text
-#: (`_EDGE_AI_AEN801_README_DEEPX_NOTE`, unchanged) is still valid advice --
-#: E1M-AEN801 still cannot flip `som.sku` to any DEEPX SKU without
-#: re-scaffolding, three siblings or two -- so only the `_EMITTED` anchor
-#: (what the un-edit reconstructs) needed to move.
-_EDGE_AI_AEN801_README_DEEPX_NOTE = (
-    "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
-    "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"
-    "`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host\n"
-    "the `renesas-rzv2n-deepx` family) and `tan validate` refuses it."
-)
-_EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED = (
-    "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103`\n"
-    "-- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`, the same PCB without\n"
-    "it. Pick either via\n"
-    "`som.sku` in `board.yaml`."
-)
-
-
-def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
-    """tan-cli#814, re-anchored tan-cli#1001 review: undo the README
-    correction above to recover the emit's own (still-wrong on this SKU)
-    sentence -- alp-sdk's 722320a1 rewording fixed this sentence for the
-    E1M-V2N101 sibling but not for E1M-AEN801, which cannot flip `som.sku`
-    to a DEEPX SKU at all without re-scaffolding."""
-    return text.replace(
-        _EDGE_AI_AEN801_README_DEEPX_NOTE, _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
-    )
-
-
 #: tan-cli#946 (review round on #932/#942): the SAME emit sentence entry 5/6
 #: above rewrites for `E1M-AEN801` is ALSO wrong on the `E1M-V2N101` tree
 #: itself -- just for a different sibling. `E1M-V2N101`/`E1M-V2N102`/
@@ -963,7 +912,7 @@ def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
 #: (a markdown file, so turned into real links rather than named in prose):
 #: both are real alp-sdk directories
 #: (`examples/peripheral-io/gpio-button-led`,
-#: `examples/peripheral-io/i2c-scanner`), pinned at `v0.17.0` per the current
+#: `examples/peripheral-io/i2c-scanner`), pinned at `v0.18.0` per the current
 #: vendor point's `- Ref:`, same as every other cross-repo link this tree
 #: carries. One substitution (both referents sit in the same sentence, turned
 #: into links together), byte-identical between the two SKUs (the per-SKU
@@ -976,11 +925,11 @@ _MINIMAL_README_EXAMPLE_POINTERS_EMITTED = (
 _MINIMAL_README_EXAMPLE_POINTERS_EDITED = (
     "Pin down which one BEFORE moving on to alp-sdk's\n"
     "[`examples/peripheral-io/gpio-button-led`]"
-    "(https://github.com/alplabai/alp-sdk/tree/v0.17.0/"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.18.0/"
     "examples/peripheral-io/gpio-button-led)\n"
     "or\n"
     "[`examples/peripheral-io/i2c-scanner`]"
-    "(https://github.com/alplabai/alp-sdk/tree/v0.17.0/"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.18.0/"
     "examples/peripheral-io/i2c-scanner)\n"
     "-- neither is part of this scaffolded project.\n"
 )
@@ -1027,13 +976,13 @@ def un_edit_iot_prj_conf_fleet_ota_pointer(text: str) -> str:
 #: `multicore-mailbox/E1M-AEN801/board.yaml:30` finding) -- one SKU only
 #: (`multicore-mailbox` ships E1M-AEN801 only).
 _MULTICORE_MAILBOX_BOARD_YAML_E1M_MODULES_POINTER_EMITTED = (
-    "# #1069 gave E1M-AEN801 a real `memory_map:` (metadata/e1m_modules/\n"
-    "# E1M-AEN801.yaml), but this carve-out still resolves `status: blocked`\n"
+    "# (64 KiB of global SRAM0 at 0x023E0000, metadata/e1m_modules/\n"
+    "# E1M-AEN801.yaml / E1M-AEN803.yaml; DFP soc_features.h\n"
 )
 _MULTICORE_MAILBOX_BOARD_YAML_E1M_MODULES_POINTER_EDITED = (
-    "# #1069 gave E1M-AEN801 a real `memory_map:` (alp-sdk's\n"
-    "# metadata/e1m_modules/E1M-AEN801.yaml, not part of this scaffolded\n"
-    "# project), but this carve-out still resolves `status: blocked`\n"
+    "# (64 KiB of global SRAM0 at 0x023E0000, alp-sdk's metadata/e1m_modules/\n"
+    "# E1M-AEN801.yaml / E1M-AEN803.yaml, not part of this scaffolded\n"
+    "# project; DFP soc_features.h\n"
 )
 
 
@@ -1288,7 +1237,7 @@ DELIBERATE_EDITS: dict[
     # half is NOT in this list any more -- tan-cli#1001 review found upstream
     # reintroduced the identical defect in new words on `E1M-AEN801` rather
     # than healing it, so that entry is RE-ANCHORED just below, not retired;
-    # see `un_edit_edge_ai_aen801_readme_deepx_note`'s own comment above.)
+    # its README.md half retired at tan-cli#1569 -- alp-sdk's emit now says it.)
     # Each of the 20 above stopped matching this re-vendor's fresh `--emit
     # scaffold` output verbatim because alp-sdk 722320a1 reworded the
     # surrounding prose, but NOT all for the same reason -- two distinct
@@ -1342,15 +1291,6 @@ DELIBERATE_EDITS: dict[
     # retirements only; tan-cli#1151's seventeen are listed in MANIFEST.md
     # under "Seventeen of `DELIBERATE_EDITS`' prior sixty-two entries
     # retired".
-    ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
-        "tan-cli#814, re-anchored tan-cli#1001 review (blocker): alp-sdk "
-        "722320a1 did not heal this -- it reintroduced the identical defect "
-        "in new words ('Pick either via som.sku in board.yaml', still wrong "
-        "for E1M-AEN801's e1m-evk preset, which does not host the "
-        "renesas-rzv2n-deepx family). Re-anchored on the new sentence "
-        "rather than retired.",
-        un_edit_edge_ai_aen801_readme_deepx_note,
-    ),
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
         "one file over that reinforces it. Both halves of this pair are "
@@ -1840,11 +1780,10 @@ def self_check() -> None:
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
     )
-    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
-    assert (
-        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
-        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
-    )
+    # The README half of the pair RETIRED at tan-cli#1569 (the 65583f78
+    # re-vendor): the emit's own sentence now says a DEEPX path needs a new
+    # project with a V2M `som.sku`, which is what the correction said.
+    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") not in DELIBERATE_EDITS
 
     # tan-cli#924's LAST entry (`pattern_paragraph`) retired at tan-cli#1151
     # (the ff27f179 re-vendor) -- its four siblings
@@ -2131,8 +2070,6 @@ def self_check() -> None:
     for template, sku, path, edit_id, emitted in (
         ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note",
          _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED),
-        ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note",
-         _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED),
     ):
         _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
         reason, _ = DELIBERATE_EDITS[(template, sku, path, edit_id)]
