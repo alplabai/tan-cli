@@ -209,6 +209,15 @@
       "note": "Recorded via `Log::warn` (steps.rs), which applies the same `bootstrap.` prefix on drain as every other bootstrap warning; the literal here is the bare suffix passed in, matching how `yocto-host`'s WARNING sibling (`yocto_mixed_warning`) is emitted the same way."
     },
     {
+      "code": "bootstrap.relocated-pins-stale",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Says that `tan bootstrap` moved an alp-sdk checkout that another project's `.alp/sdk-path` may still name; tan cannot list those projects, so the message names the vacated path and the new one.",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "tan-cli#1547. Fires on every relocation, beside `bootstrap.workspace-relocated` (`would` wording under --dry-run). Only the pin the run itself resolved through (tier `projectPin`) is rewritten (tan-cli#644); any other pin naming the old path falls through to `globalDefault` with `sdk.project-pin-unresolved`."
+    },
+    {
       "code": "bootstrap.workspace-invalid",
       "status": "reserved",
       "severity": "error",
