@@ -3501,6 +3501,22 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             previous_project_pin, project_pin_root = _relocate_project_pin(
                 active_tier, root, old_project.root, sdk_root, dry_run
             )
+            # tan-cli#1547: any OTHER project pinning the vacated checkout is now
+            # stranded on `globalDefault`; tan keeps no list of them, so say so.
+            whose = (
+                "this project's .alp/sdk-path was updated, but any other project"
+                if active_tier == "projectPin"
+                else "any project"
+            )
+            log.warn(
+                "relocated-pins-stale",
+                f"{whose} whose .alp/sdk-path names {_native(old_root)} "
+                f"{'would no longer resolve' if dry_run else 'no longer resolves'} -- "
+                f"tan does not track which projects pin a checkout, so it cannot "
+                f"update them. Such a project falls through to the globalDefault tier "
+                f"(sdk.project-pin-unresolved) until its .alp/sdk-path `sdkPath` is "
+                f"changed to {_native(sdk_root)}.",
+            )
             relocation_undo = RelocationUndo(
                 old_root=old_root,
                 previous_pointer=previous_pointer,

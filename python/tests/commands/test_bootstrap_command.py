@@ -1440,6 +1440,45 @@ def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_
     assert "sdk.project-pin-unresolved" not in codes(later)
 
 
+def test_a_relocation_from_outside_the_project_names_the_pin_it_strands(tmp_path):
+    """tan-cli#1547: `proj/.alp/sdk-path` pins a sibling checkout, and
+    `tan bootstrap --workspace <ws>` runs from their shared PARENT, so it
+    resolves the checkout by discovery, not through the pin, and moves it.
+    The pin cannot be rewritten (tan keeps no list of the projects pinning a
+    checkout), so the project silently drops to `globalDefault` -- the run
+    that broke it must say so, naming the vacated path and the new one."""
+    home = tmp_path / "home"
+    env_extra = {"HOME": str(home), "USERPROFILE": str(home)}
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    proj = sdk.parent / "proj"  # the issue's `t/proj` beside `t/alp-sdk`
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "new-ws"
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--workspace", str(workspace), cwd=sdk.parent, env_extra=env_extra,
+        )
+    )
+    assert env["exitCode"] == 0, env["issues"]
+    assert env["sdk"]["sourceTier"] != "projectPin"
+    assert "bootstrap.workspace-relocated" in codes(env)
+    stale = [i for i in env["issues"] if i["code"] == "bootstrap.relocated-pins-stale"]
+    assert len(stale) == 1, codes(env)
+    assert stale[0]["severity"] == "warning"
+    assert str(sdk) in stale[0]["message"]
+    assert str(workspace / sdk.name) in stale[0]["message"]
+
+    # The stranding itself, unchanged: the project now falls through.
+    later = envelope(run_tan("sdk", "current", "--format", "json", cwd=proj, env_extra=env_extra))
+    assert later["data"]["sourceTier"] == "globalDefault"
+    assert "sdk.project-pin-unresolved" in codes(later)
+
+
 def test_a_relocation_rollback_restores_the_project_pin_it_rewrote(tmp_path):
     """tan-cli#644 review: the project-pin rewrite proven above must roll back
     exactly like the global default pointer already does (tan-cli#284) when a

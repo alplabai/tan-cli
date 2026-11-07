@@ -810,7 +810,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # 36 since tan-cli#1559: `_check_release_sum` and its two warns are gone
         # (the sum is fetched only to explain a mismatch, inside
         # `_report_fetch_failure`'s existing `toolchain-pin-mismatch` warn).
-        expected_calls=36,
+        # 37 since tan-cli#1547: a relocation also warns
+        # `bootstrap.relocated-pins-stale` (registered).
+        expected_calls=37,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
