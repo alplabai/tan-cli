@@ -188,6 +188,7 @@ from tan.core.atoc_guard_messages import (
 )
 from tan.core.global_flags import accept_global_flags
 from tan.core.jlink_probe import (
+    CODE_AMBIGUOUS,
     CODE_NOT_FOUND,
     CODE_VERIFY_FAILED,
     SYSFS_USB_DEVICES,
@@ -2358,6 +2359,9 @@ class _ProbeGuard:
     fresh: bool = False
     #: Temp-file prefix for the guard's own `ShowEmuList` script (`tan probe`: `tan-probe-`).
     script_prefix: str | None = None
+    #: How the J-Link binary was found (`resolve_jlink().source`), for the
+    #: `--probe-usb-path` hint in an ambiguous verdict. `None` where unknown.
+    jlink_source: str | None = None
 
     def env(self) -> dict[str, str] | None:
         """`TAN_PROBE_USB_PATH`, for a wrapper to cross-check its mask."""
@@ -2431,10 +2435,20 @@ def _guard_verdict(
             "nothing about which probe would be opened. Refusing to write.",
             None,
         )
-    return verify_listing(
+    code, msg, isolation = verify_listing(
         guard.selection.serial, guard.selection.usb_path, guard.selection.candidates,
         f"{outcome.stdout}\n{outcome.stderr}",
     )
+    if code == CODE_AMBIGUOUS and guard.selection.usb_path is not None:
+        # tan-cli#1591: the operator already passed --probe-usb-path; say what it needs.
+        origin = f" ({guard.jlink_source})" if guard.jlink_source else ""
+        msg = (
+            f"{msg} tan resolved the J-Link binary `{program}`{origin}, which did not "
+            f"attest isolation to {guard.selection.usb_path}: --probe-usb-path needs a "
+            "masking wrapper first on PATH (or passed as --jlink) that hides the other "
+            "probes and prints TAN_PROBE_ISOLATED_USB_PATH."
+        )
+    return code, msg, isolation
 
 
 _NO_TRUSTED_JLINK = (
@@ -3219,7 +3233,10 @@ def _flash_entry_body(
             # Pinned -> verify the serial. Unpinned on a host that cannot
             # enumerate -> verify there is exactly ONE emulator at all.
             if selection.serial is not None or selection.visible is None:
-                probe_guard = _ProbeGuard(selection, snapshot, ctx.enumerate_probes, probe_echo)
+                probe_guard = _ProbeGuard(
+                    selection, snapshot, ctx.enumerate_probes, probe_echo,
+                    jlink_source=found.source if found else None,
+                )
         if selection is not None and selection.refusal_code is not None:
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {selection.refusal}")
