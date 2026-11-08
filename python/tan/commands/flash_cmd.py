@@ -103,9 +103,6 @@ import typer
 from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
 from tan.core.block_busy import HostFs, unused_device_refusal
 from tan.core.mram_link import CODE_NOT_MRAM_LINKED
-
-#: Host view for the yocto_wic in-use check; tests swap it for a fake.
-YOCTO_WIC_HOST_FS = HostFs()
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
@@ -266,6 +263,9 @@ from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 from tan.core.shapes import is_sdk_root
+
+#: Host view for the yocto_wic in-use check; tests swap it for a fake.
+YOCTO_WIC_HOST_FS = HostFs()
 
 #: `data.schemaVersion` -- the STRING "1", not the integer. Rust serializes it
 #: as `&'static str` and the extension compares it as one.
