@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
+# `bound_sdk_root` binds the real checkout when ALP_SDK_ROOT is set and a
+# synthetic root otherwise, so the two pure tests run on every CI leg.
+from tests.planner._baremetal_support import SDK, bound_sdk_root  # noqa: F401
 
-pytestmark = pytest.mark.skipif(
-    SDK is None, reason="ALP_SDK_ROOT is not set -- tan.planner needs a bound root"
+needs_sdk = pytest.mark.skipif(
+    SDK is None, reason="ALP_SDK_ROOT is not set -- emit tests need a real alp-sdk checkout"
 )
 
 
@@ -34,18 +36,21 @@ def test_storage_partition_is_disabled_for_a_core_outside_accessible_from():
     assert _aen_unowned_partitions([{"name": "storage"}], "hp") == set()
 
 
+@needs_sdk
 def test_e8_he_dts_includes_he_peripherals_and_disables_lptimer0():
     he = _dts("E1M-AEN801", "m55_he")
     assert "#include <alif/ensemble_e8_he_peripherals.dtsi>" in he
     assert "&lptimer0 {\n\tstatus = \"disabled\";\n};" in he
 
 
+@needs_sdk
 def test_e8_hp_dts_has_no_he_peripherals_include():
     hp = _dts("E1M-AEN801", "m55_hp")
     assert "ensemble_e8_he_peripherals.dtsi" not in hp
     assert "&lptimer0 {" in hp
 
 
+@needs_sdk
 def test_v2n_dts_chooses_the_gd32_trng_entropy_node():
     dts = _dts("E1M-V2N101", "m33_sm")
     assert "zephyr,entropy = &gd32_trng;" in dts

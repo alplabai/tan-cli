@@ -1438,12 +1438,18 @@ from tests.conftest import sdk_root
 #: `65583f78a` -> `a70eec741` (alp-sdk `dev`, tan-cli#1585 / #1546): NO mirrored
 #: `scripts/alp_orchestrate/` module moved upstream in the range, so every
 #: `PINNED_HASHES` entry below is byte-for-byte unchanged and only the pin
-#: moves. The range's three commits (#3081 AEN HE-only storage/lptimer0, #3080
-#: V2N GD32 TRNG entropy, #3082 EVK hw_rev r3 routes) touched only the two
-#: hand-port sources audited under `HAND_PORT_PINNED_SDK_COMMIT`. Planner oracle
-#: fully re-captured (735 emits over 105 boards): only 77 AEN
-#: `system-manifest.yaml` files changed (the storage region's narrowed
-#: `accessible_from`), and the scaffold needed no re-vendor (10/10).
+#: moves. The range holds 21 commits; three touch planner sources (#3081 AEN
+#: HE-only storage/lptimer0, #3080 V2N GD32 TRNG entropy, #3082 EVK hw_rev r3
+#: routes), all in the two hand-port sources audited under
+#: `HAND_PORT_PINNED_SDK_COMMIT`. Ruled out: #3085 (`scripts/flash_backends/
+#: yocto_wic.py`, not in the planner; tan's yocto_wic port is a separate PR),
+#: #3095 (an AEN kconfig fragment, `zephyr/kconfigs/vendor-alif-peripherals.
+#: kconfig`), #3091 (Alif lptimer counter driver), and #3082's
+#: `scripts/gen_board_header.py` (tan has no counterpart); the rest are
+#: backends/drivers/Yocto/CI/fuzz/examples. Planner oracle fully re-captured
+#: (735 emits over 105 boards): only 76 AEN `system-manifest.yaml` files
+#: changed (the storage region's narrowed `accessible_from`), and the scaffold
+#: needed no re-vendor (10/10).
 PINNED_SDK_COMMIT = "a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7"  # alp-sdk dev -- tan-cli#1585 re-sync
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,

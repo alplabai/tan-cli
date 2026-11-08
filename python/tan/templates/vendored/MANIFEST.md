@@ -97,8 +97,9 @@ from an un-revendored SDK change.
 
 - **Current vendor point (all templates):** **`a70eec741`**
   (`a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7`, alp-sdk `dev`) — the tan-cli#1585 planner re-sync. No
-  scaffold input moved between `65583f78a` and this commit (`templates/**` and `examples/**` are untouched
-  in the range), so no vendored byte changed; `scaffold_byte_parity.py --sdk <a70eec741>` is rc 0,
+  scaffold input moved between `65583f78a` and this commit (`templates/**` is untouched and the 12
+  `examples/**` files that changed -- `aen-evk-demo`, `aen-lptimer-regcheck`, `aen-power-stop`,
+  `microros-ros2-v2n`, `uart-rx-ringbuf` -- are not scaffold templates or catalog entries), so no vendored byte changed; `scaffold_byte_parity.py --sdk <a70eec741>` is rc 0,
   **10/10**. The pin moved in the same change as every other pin site.
 
 - **Prior vendor point (all templates):** **`65583f78a`**
