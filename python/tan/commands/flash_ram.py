@@ -60,6 +60,7 @@ from tan.core.flash_plan import (
 from tan.core.jlink_binary import resolve_jlink
 from tan.core import ram_watch
 from tan.core.ram_run import (
+    HE_AP_ADDR,
     CODE_CONSOLE_SYMBOL_MISSING,
     CODE_CORE_MISMATCH,
     CODE_CORE_UNCONFIRMED,
@@ -93,6 +94,26 @@ DEFAULT_WAIT_S = 1.5
 HOLD_ENV = "TAN_FLASH_RAM_HOLD"
 #: J-Link's own attach profile for a live core (the script's `JLINK_DEVICE_READ`).
 _DEFAULT_ATTACH_DEVICE = "Cortex-M55"
+
+#: The silicon whose M55-HE access port (0x00300000) is bench-proven (tan-cli#1566).
+#: Only that silicon pins it; any other part keeps J-Link's own AP scan, and the
+#: Core-found check after the attach still guards both.
+_HE_AP_PINNED_SILICON = "alif:ensemble:e8"
+
+
+def _he_ap_pin(ctx: Any) -> int | None:
+    """The HE access port to pin for this RAM-run, or None to let J-Link scan.
+
+    The silicon comes from the SDK metadata for the manifest SKU (the same walk
+    `_load_apertures` does); a RAM-run manifest carries no part-number flash profile."""
+    from tan.commands.build_output import read_sdk_som_and_soc
+
+    metadata_root = os.path.join(ctx.sdk_root, "metadata") if ctx.sdk_root else None
+    if not (metadata_root and ctx.sku and os.path.isdir(metadata_root)):
+        return None
+    walked = read_sdk_som_and_soc(metadata_root, ctx.sku, skipped=[], explain_unsupported=True)
+    silicon = walked[0] if walked else None
+    return HE_AP_ADDR if silicon == _HE_AP_PINNED_SILICON else None
 
 
 def _artefact_pair(path: str) -> tuple[str, str]:
@@ -227,7 +248,7 @@ def _run_ram_entry(
 
     try:
         staged = _stage_image(stack, bin_bytes)
-        pre = preamble(serial, speed, device)
+        pre = preamble(serial, speed, device, ap_addr=_he_ap_pin(ctx))
     except (OSError, FlashPlanError, RamRunError) as err:
         return fail(f"cannot prepare the RAM-run ({err})")
     # `image.base`/`entry` and the console address/size are ints rendered with

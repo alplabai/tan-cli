@@ -1265,3 +1265,72 @@ def test_a_failure_before_the_load_completes_leaves_ram_loaded_absent(tmp_path, 
     rc, data, _issues, _l, _s = _run(tmp_path)
     assert rc == 1
     assert "loaded" not in data["entries"][0].get("ram", {})
+
+
+# --- tan-cli#1566: pin the M55-HE access port on the E8 -----------------------------
+
+_PINNED_HE_BANNER = """J-Link>exec CORESIGHT_AddAP = Index=0 Type=AHB-AP Addr=0x00300000
+J-Link>exec CORESIGHT_SetIndexAHBAPToUse = 0
+J-Link>connect
+Found SW-DP with ID 0x4C013477
+CoreSight SoC-600 or later (DPv3 detected)
+AP map detection skipped. User specified AP map and usage.
+AP[0]: Core found
+CPUID register: 0x411FD220. Implementer code: 0x41 (ARM)
+Found Cortex-M55 r1p0, Little endian.
+"""
+
+
+def test_preamble_pins_the_ap_before_connect():
+    pre = ram_run.preamble(SERIAL, 4000, "Cortex-M55", ap_addr=ram_run.HE_AP_ADDR)
+    pin = ram_run.ap_pin_lines(ram_run.HE_AP_ADDR)
+    assert pin == [
+        "exec CORESIGHT_AddAP = Index=0 Type=AHB-AP Addr=0x00300000",
+        "exec CORESIGHT_SetIndexAHBAPToUse = 0",
+    ]
+    assert pre[-1] == "connect"
+    assert pre[-3:-1] == pin
+    # Without an AP the preamble is unchanged (J-Link's own scan).
+    assert not any("CORESIGHT" in line for line in ram_run.preamble(SERIAL, 4000, "Cortex-M55"))
+
+
+@pytest.mark.parametrize("bad", [-1, 1 << 32, True, "0x00300000"])
+def test_ap_pin_refuses_a_non_32bit_address(bad):
+    with pytest.raises(ram_run.RamRunError):
+        ram_run.ap_pin_lines(bad)
+
+
+def test_a_pinned_attach_is_identified_from_the_echoed_ap_map():
+    attached = ram_run.attached_core(_PINNED_HE_BANNER)
+    assert attached["apAddr"] == "0x00300000"
+    assert ram_run.ap_verdict(attached) == "he"
+    hp = _PINNED_HE_BANNER.replace("Addr=0x00300000", "Addr=0x00200000")
+    assert ram_run.ap_verdict(ram_run.attached_core(hp)) == "hp"
+
+
+@pytest.mark.parametrize(
+    "silicon, expected",
+    [
+        ("alif:ensemble:e8", ram_run.HE_AP_ADDR),
+        ("alif:ensemble:e4", None),
+        (None, None),
+    ],
+)
+def test_only_an_e8_silicon_pins_the_he_ap(monkeypatch, tmp_path, silicon, expected):
+    from types import SimpleNamespace
+
+    from tan.commands import build_output, flash_ram
+
+    (tmp_path / "metadata").mkdir()
+    walked = None if silicon is None else (silicon, "VARIANT", [], 0, [])
+    monkeypatch.setattr(build_output, "read_sdk_som_and_soc", lambda *a, **k: walked)
+    ctx = SimpleNamespace(sdk_root=str(tmp_path), sku="E1M-AEN803")
+    assert flash_ram._he_ap_pin(ctx) == expected
+
+
+def test_no_sdk_metadata_means_no_pin():
+    from types import SimpleNamespace
+
+    from tan.commands import flash_ram
+
+    assert flash_ram._he_ap_pin(SimpleNamespace(sdk_root=None, sku="E1M-AEN803")) is None
