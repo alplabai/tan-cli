@@ -101,6 +101,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 import typer
 
 from tan.commands.flash_mram_guard import mram_link_guard, slot0_address
+from tan.core.block_busy import HostFs, unused_device_refusal
 from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
@@ -262,6 +263,9 @@ from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 from tan.core.shapes import is_sdk_root
+
+#: Host view for the yocto_wic in-use check; tests swap it for a fake.
+YOCTO_WIC_HOST_FS = HostFs()
 
 #: `data.schemaVersion` -- the STRING "1", not the integer. Rust serializes it
 #: as `&'static str` and the extension compares it as one.
@@ -3562,6 +3566,14 @@ def _flash_entry_body(
             if refusal is not None:
                 lines.append(f"  FAIL: {refusal}")
                 return 1, entry(method, "failed", 1, refusal), lines
+            # Mounted / swap / backs the host's root disk: `confirm` alone is
+            # no barrier, so refuse (fails closed when /proc or /sys is unreadable).
+            busy = unused_device_refusal(wic_target, YOCTO_WIC_HOST_FS)
+            if busy is not None:
+                lines.append(f"  FAIL: {busy}")
+                return 1, entry(
+                    method, "failed", 1, busy, issue_code="flash.yocto-wic-target-in-use"
+                ), lines
 
     # tan-cli#609: METHOD-INDEPENDENT, decided by `DPIDR_GUARD_COVERAGE` inside
     # `dpidr_preflight_unarmed` rather than by a single hardcoded method. The
@@ -5020,6 +5032,8 @@ def _run(
                 issues.append(Issue("flash.readback-mismatch", "error", entry.message))
             elif entry.issue_code == "flash.readback-failed":
                 issues.append(Issue("flash.readback-failed", "error", entry.message))
+            elif entry.issue_code == "flash.yocto-wic-target-in-use":
+                issues.append(Issue("flash.yocto-wic-target-in-use", "error", entry.message))
             elif entry.issue_code == "flash.device-config-missing":
                 # tan-cli#1322: a literal `Issue(...)` for the static code gate.
                 issues.append(Issue("flash.device-config-missing", "error", entry.message))
