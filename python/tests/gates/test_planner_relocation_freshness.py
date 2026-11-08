@@ -1435,7 +1435,16 @@ from tests.conftest import sdk_root
 #: #3046/#2953/#2952 (storage-mounts PARTITION_ID, unrooted --build-root refusal,
 #: RZ/V2N SoC profile default). Planner oracle fully re-captured at this commit
 #: (735 emits over 105 boards) and the scaffold re-vendored (10/10).
-PINNED_SDK_COMMIT = "65583f78a6f93743235b56f0723cb36df7cc0df0"  # alp-sdk dev (v0.18.0 + 42) -- tan-cli#1569 re-sync
+#: `65583f78a` -> `a70eec741` (alp-sdk `dev`, tan-cli#1585 / #1546): NO mirrored
+#: `scripts/alp_orchestrate/` module moved upstream in the range, so every
+#: `PINNED_HASHES` entry below is byte-for-byte unchanged and only the pin
+#: moves. The range's three commits (#3081 AEN HE-only storage/lptimer0, #3080
+#: V2N GD32 TRNG entropy, #3082 EVK hw_rev r3 routes) touched only the two
+#: hand-port sources audited under `HAND_PORT_PINNED_SDK_COMMIT`. Planner oracle
+#: fully re-captured (735 emits over 105 boards): only 77 AEN
+#: `system-manifest.yaml` files changed (the storage region's narrowed
+#: `accessible_from`), and the scaffold needed no re-vendor (10/10).
+PINNED_SDK_COMMIT = "a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7"  # alp-sdk dev -- tan-cli#1585 re-sync
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -2524,7 +2533,20 @@ PINNED_HASHES: dict[str, str] = {
 #: project (`_OTA_PROVIDER_WEST_PROJECTS`), never a `name-allowlist` entry.
 #: Verified, not assumed: the planner oracle re-captured at this commit passes
 #: byte-for-byte against tan's own emit under `tests/parity/`.
-HAND_PORT_PINNED_SDK_COMMIT = "65583f78a6f93743235b56f0723cb36df7cc0df0"  # alp-sdk dev (v0.18.0 + 42) -- tan-cli#1569 hand-ports
+#: AUDIT `65583f78a` -> `a70eec741` (tan-cli#1585): two hand-port sources moved,
+#: both ported by hand and each pinned by a test in
+#: `tests/planner/test_resync_alp_sdk_a70eec74.py`.
+#: `scripts/gen_zephyr_board.py` -> `tan/planner/zephyr_board.py`: an AEN
+#: `storage` partition whose `memory_map` region excludes the core
+#: (`accessible_from`) is kept but emitted `status = "disabled"`
+#: (`_aen_unowned_partitions`, only on disjoint-slot0 layouts); E8 boards emit
+#: `&lptimer0 { status = "disabled"; }` (per-app timer); E8 M55-HE boards
+#: include `alif/ensemble_e8_he_peripherals.dtsi`; the V2N CM33 tree chooses
+#: `zephyr,entropy = &gd32_trng` and declares the `alp,gd32-trng` node (#2951).
+#: `scripts/alp_project_emit/dts.py` -> `tan/planner/project_emit/dts.py`:
+#: `_parse_board_macros` drops `#ifdef ALP_<BOARD>_HW_REV_<REV>` ... `#endif`
+#: blocks so only the un-guarded base routes are read.
+HAND_PORT_PINNED_SDK_COMMIT = "a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7"  # alp-sdk dev -- tan-cli#1585 hand-ports
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2592,14 +2614,14 @@ HAND_PORT_PINNED_SDK_COMMIT = "65583f78a6f93743235b56f0723cb36df7cc0df0"  # alp-
 #: is in `HAND_PORT_SOURCES` below; `test_hand_port_tan_side.py`'s
 #: `HAND_PORT_TAN_SIDE` is where their tan files are named.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "5d9399689490341a9213d558b7926ceec8eddc88ccc57dbc0a8fd76adacce077",
+    "scripts/gen_zephyr_board.py": "721bfd0e515ab6606910a8042017f312696ef96932a7f2048a397a1a9985d7ed",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "9e879cbc0b6333af2f1b7febae957dfb1db2b55d3751dd4498f2397651a4fa09",
     "scripts/alp_template.py": "d700c9a7a0039f3fa3b2f0a7d2ce410a647301d3261ee6140118f416b6ea2b35",
     "scripts/alp_project_emit/__init__.py": "e8d8d4ed3ecc3f2fa1b74d4f8f7dd517f2dda3b6739a1c379ed0dfe63a15e16a",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
-    "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
+    "scripts/alp_project_emit/dts.py": "c6f13b84c67f13fba8dfe4a3b4035a14f9e24414f550c9b07954223094e32b48",
     "scripts/alp_project_emit/hw_info.py": "32704dc96f2e07f1dd4e5d409c14340eb6a8169dbb52f6110cfa6501e1ba6b4f",
     "scripts/alp_project_emit/native_sim.py": "e722349beee38bdf90156edf537e2a3bd93a7865bb1a42a18a03e32d84ae42ca",
     "scripts/alp_project_emit/west_libs.py": "3f23a5f3149c823f246a63117eb4912f05060fad958b231b578b8b73dcb1cbff",

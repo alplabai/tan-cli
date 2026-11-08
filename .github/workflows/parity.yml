@@ -993,7 +993,12 @@ env:
   # last few re-syncs this one moved scaffold inputs, so the vendored tree was
   # re-vendored (`scaffold_byte_parity.py` 10/10), the planner oracle re-captured
   # in full (735 emits), and the seam1 oracle re-vendored from alp-sdk's copies.
-  PINNED_SDK_TAG: 65583f78a6f93743235b56f0723cb36df7cc0df0
+  # `65583f78a` -> `a70eec741` (alp-sdk `dev`, tan-cli#1585 / #1546): the same
+  # lockstep sites move together. Two hand-ports (`zephyr_board.py`,
+  # `project_emit/dts.py`), no mirrored-module change; the planner oracle was
+  # re-captured (only AEN `system-manifest.yaml` moved) and scaffold parity is
+  # 10/10 with no re-vendor.
+  PINNED_SDK_TAG: a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1324,7 +1329,7 @@ env:
   # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: 65583f78a6f93743235b56f0723cb36df7cc0df0
+  PINNED_PLANNER_ORACLE_SDK_REF: a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
