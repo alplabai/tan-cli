@@ -95,7 +95,14 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`65583f78a`**
+- **Current vendor point (all templates):** **`a70eec741`**
+  (`a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7`, alp-sdk `dev`) — the tan-cli#1585 planner re-sync. No
+  scaffold input moved between `65583f78a` and this commit (`templates/**` is untouched and the 12
+  `examples/**` files that changed -- `aen-evk-demo`, `aen-lptimer-regcheck`, `aen-power-stop`,
+  `microros-ros2-v2n`, `uart-rx-ringbuf` -- are not scaffold templates or catalog entries), so no vendored byte changed; `scaffold_byte_parity.py --sdk <a70eec741>` is rc 0,
+  **10/10**. The pin moved in the same change as every other pin site.
+
+- **Prior vendor point (all templates):** **`65583f78a`**
   (`65583f78a6f93743235b56f0723cb36df7cc0df0`, alp-sdk `dev`, 42 commits past tag `v0.18.0`) — the
   tan-cli#1569 planner re-sync (the alp-sdk#3033 signing-key fix needed a pin that carries it). Unlike the
   last several re-syncs this one DID move scaffold inputs, so the tree was re-vendored by a 3-way merge
@@ -110,7 +117,7 @@ from an un-revendored SDK change.
   defect, new words). `scaffold_byte_parity.py --sdk <65583f78a>` is rc 0, **10/10**. The pin moved in the
   same change as every other pin site.
 
-- **Prior vendor point (all templates):** **`84132b98a`**
+- **Earlier vendor point (all templates):** **`84132b98a`**
   (`84132b98a53a9f0e5ef9e7622a38c6d637439873`, alp-sdk tag `v0.17.0`) — the stable release
   merge, for tan `0.7.0` (tan-cli#1258). Re-vendored links only: the emit's doc-link renderer
   now renders `blob|tree/v0.17.0/`, so every vendored `v0.17.0-rc2` link (19 files) plus the
@@ -726,8 +733,8 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`65583f78a`** (alp-sdk `dev`, full sha
-  `65583f78a6f93743235b56f0723cb36df7cc0df0`) — the checkout the emit was RUN
+- Commit: **`a70eec741`** (alp-sdk `dev`, full sha
+  `a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
