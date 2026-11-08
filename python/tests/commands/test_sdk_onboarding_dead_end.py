@@ -230,7 +230,6 @@ def test_token_substitution_sdk_root_unresolved_never_recommends_a_refused_subco
         apply_plan_token_substitution(
             plan,
             board_yaml_path="/work/proj/board.yaml",
-            exec_base="/work/proj",
             sdk_root=None,
             python="python3",
             toolchain_root=None,

@@ -28,7 +28,7 @@ from tan.commands import flash_ram as fr
 from tan.commands.build_output import resolve_metadata_sdk_root
 from tan.core import probe_plan as pp
 from tan.core.dp_id import _dp_id_value
-from tan.core.system_manifest import find_manifest
+from tan.core.system_manifest import effective_build_root, find_manifest
 from tan.core.flash_plan import (
     _DEFAULT_JLINK_SPEED,
     FlashPlan,
@@ -141,6 +141,7 @@ def _prepare(
     verb, core, build_root, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes
 ) -> _Run | _Result:
     slices, present, warning, sku = _load_slices(build_root)
+    build_root = effective_build_root(build_root, fc._is_file)
     flash_args, selected_id, ambiguity, note = pp.select_slice(slices, core)
     report: dict[str, Any] = {
         "core": core, "buildRoot": build_root, "writes": False, "manifestPresent": present,
@@ -171,7 +172,7 @@ def _prepare(
         guard = None
         if selection is not None and (selection.serial is not None or selection.visible is None):
             guard = fc._ProbeGuard(selection, snapshot, ctx.enumerate_probes, echo,
-                                   script_prefix=_SCRIPT_PREFIX)
+                                   script_prefix=_SCRIPT_PREFIX, jlink_source=found.source if found else None)
         ap_addr = _he_pin((selected_id or core), project_dir, sku)
         pre, speed, expected = _attach_params(flash_args, report["jlink"], ap_addr)
     except (FlashPlanError, RamRunError) as err:

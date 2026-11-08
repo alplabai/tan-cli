@@ -2439,16 +2439,21 @@ def _guard_verdict(
         guard.selection.serial, guard.selection.usb_path, guard.selection.candidates,
         f"{outcome.stdout}\n{outcome.stderr}",
     )
-    if code == CODE_AMBIGUOUS and guard.selection.usb_path is not None:
-        # tan-cli#1591: the operator already passed --probe-usb-path; say what it needs.
-        origin = f" ({guard.jlink_source})" if guard.jlink_source else ""
-        msg = (
-            f"{msg} tan resolved the J-Link binary `{program}`{origin}, which did not "
-            f"attest isolation to {guard.selection.usb_path}: --probe-usb-path needs a "
-            "masking wrapper first on PATH (or passed as --jlink) that hides the other "
-            "probes and prints TAN_PROBE_ISOLATED_USB_PATH."
-        )
-    return code, msg, isolation
+    return code, _usb_path_hint(code, msg, guard, program), isolation
+
+
+def _usb_path_hint(code: str | None, msg: str | None, guard: _ProbeGuard, program: str) -> str | None:
+    """tan-cli#1591: the operator already passed --probe-usb-path, so an ambiguous
+    verdict also says which J-Link tan ran and what the option needs."""
+    if code != CODE_AMBIGUOUS or guard.selection.usb_path is None:
+        return msg
+    origin = f" ({guard.jlink_source})" if guard.jlink_source else ""
+    return (
+        f"{msg} tan resolved the J-Link binary `{program}`{origin}, which did not "
+        f"attest isolation to {guard.selection.usb_path}: --probe-usb-path needs a "
+        "masking wrapper first on PATH (or passed as --jlink) that hides the other "
+        "probes and prints TAN_PROBE_ISOLATED_USB_PATH."
+    )
 
 
 _NO_TRUSTED_JLINK = (

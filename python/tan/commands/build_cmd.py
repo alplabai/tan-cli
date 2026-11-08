@@ -1361,10 +1361,6 @@ def _build(
         plan, demotions = apply_plan_token_substitution(
             plan,
             board_yaml_path=board_yaml,
-            # tan-cli#1590: `--build-root` only moves the output; a tokened plan's
-            # paths are absolute once substituted, so the guard compares the
-            # project dir (board.yaml's), not wherever the output was sent.
-            exec_base=str(Path(board_yaml).parent) if board_yaml else build_root,
             sdk_root=sdk_root,
             python=build_python.python,
             toolchain_root=toolchain.root,

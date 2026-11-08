@@ -100,7 +100,6 @@ def _apply(tmp_path, doc, board_text=BOARD_WITH, toolchain_root=None):
     out, _ = apply_plan_token_substitution(
         plan,
         board_yaml_path=str(board),
-        exec_base=str(proj).replace("\\", "/"),
         sdk_root=str(tmp_path / "sdk"),
         python="python3",
         toolchain_root=toolchain_root,

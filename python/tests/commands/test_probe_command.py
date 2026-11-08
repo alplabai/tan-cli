@@ -512,4 +512,5 @@ def test_build_root_is_the_dir_above_build_as_for_flash(env, monkeypatch):
     _manifest(env)
     _rc, data, issues, _ = _run(env, "identify", build_root=str(env), core="m55_he")
     assert data["manifestPresent"] is True
+    assert data["buildRoot"] == str(env / "build")  # where the manifest was found, as flash
     assert "probe.no-manifest" not in codes(issues)

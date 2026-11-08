@@ -32,7 +32,6 @@ def test_legacy_plan_is_untouched_no_op():
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root="/opt/alp-sdk",
         python="python3",
         toolchain_root=None,
@@ -42,8 +41,7 @@ def test_legacy_plan_is_untouched_no_op():
 
 
 def test_unknown_plan_path_mode_is_refused_before_any_guard_runs():
-    """A board.yaml/exec_base pair that would ALSO fail the divergence guard
-    -- proving the unknown-mode check short-circuits first."""
+    """An unknown mode is refused before any substitution happens."""
     json = """{
       "schemaVersion": 1, "generatedBy": "g", "planPathMode": "tokened-v2",
       "boardYaml": "/work/proj/examples/foo/board.yaml", "sku": "S", "buildRoot": "build",
@@ -54,7 +52,6 @@ def test_unknown_plan_path_mode_is_refused_before_any_guard_runs():
         apply_plan_token_substitution(
             plan,
             board_yaml_path="/work/proj/examples/foo/board.yaml",
-            exec_base="/work/proj",
             sdk_root="/opt/alp-sdk",
             python="python3",
             toolchain_root=None,
@@ -74,34 +71,11 @@ def test_missing_board_yaml_path_is_refused():
         apply_plan_token_substitution(
             plan,
             board_yaml_path=None,
-            exec_base="/work/proj",
             sdk_root="/opt/alp-sdk",
             python="python3",
             toolchain_root=None,
         )
     assert e.value.code == "build.plan-invalid"
-
-
-def test_project_root_mismatch_is_refused():
-    json = """{
-      "schemaVersion": 1, "generatedBy": "g", "planPathMode": "tokened",
-      "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
-      "slices": [], "sharedArtefacts": [], "warnings": []
-    }"""
-    plan = parse_build_plan(json)
-    # board.yaml lives nested under the workspace root, but the exec base
-    # stays the workspace root itself -- a real PROJECT_ROOT/exec-base split.
-    with pytest.raises(TokenSubstitutionError) as e:
-        apply_plan_token_substitution(
-            plan,
-            board_yaml_path="/work/proj/examples/foo/board.yaml",
-            exec_base="/work/proj",
-            sdk_root="/opt/alp-sdk",
-            python="python3",
-            toolchain_root=None,
-        )
-    assert e.value.code == "build.project-root-mismatch"
-    assert "examples/foo" in e.value.message
 
 
 def test_unresolved_sdk_root_is_refused_not_substituted_empty():
@@ -124,7 +98,6 @@ def test_unresolved_sdk_root_is_refused_not_substituted_empty():
         apply_plan_token_substitution(
             plan,
             board_yaml_path="/work/proj/board.yaml",
-            exec_base="/work/proj",
             sdk_root=None,
             python="python3",
             toolchain_root=None,
@@ -148,7 +121,6 @@ def test_tokened_plan_with_matching_project_root_substitutes(sdk_root):
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root=str(sdk_root),
         python="python3",
         toolchain_root=None,
@@ -178,7 +150,6 @@ def test_slice_confined_toolchain_root_is_demoted_not_a_hard_error(sdk_root):
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root=str(sdk_root),
         python="python3",
         toolchain_root=None,
@@ -205,7 +176,6 @@ def test_leftover_token_after_substitution_is_refused(sdk_root):
         apply_plan_token_substitution(
             plan,
             board_yaml_path="/work/proj/board.yaml",
-            exec_base="/work/proj",
             sdk_root=str(sdk_root),
             python="python3",
             toolchain_root=None,
@@ -227,7 +197,6 @@ def test_missing_git_head_is_no_signal_not_a_hard_error(sdk_root):
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root=str(sdk_root),
         python="python3",
         toolchain_root=None,
@@ -261,7 +230,6 @@ def test_sdk_commit_mismatch_is_refused(sdk_root):
         apply_plan_token_substitution(
             plan,
             board_yaml_path="/work/proj/board.yaml",
-            exec_base="/work/proj",
             sdk_root=str(sdk_root),
             python="python3",
             toolchain_root=None,
@@ -292,7 +260,6 @@ def test_sdk_commit_match_does_not_refuse(sdk_root):
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root=str(sdk_root),
         python="python3",
         toolchain_root=None,
@@ -350,7 +317,6 @@ def test_git_short_head_does_not_attribute_an_enclosing_repos_commit(tmp_path):
     out, demoted = apply_plan_token_substitution(
         plan,
         board_yaml_path="/work/proj/board.yaml",
-        exec_base="/work/proj",
         sdk_root=str(vendored_sdk),
         python="python3",
         toolchain_root=None,
@@ -396,7 +362,6 @@ def _substitute_sysbuild(root: str, sdk_root) -> list[list[str]]:
     out, _ = apply_plan_token_substitution(
         parse_build_plan(_SYSBUILD_PLAN),
         board_yaml_path=f"{root}/board.yaml",
-        exec_base=root,
         sdk_root=str(sdk_root),
         python="python3",
         toolchain_root=None,
