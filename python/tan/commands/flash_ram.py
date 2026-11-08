@@ -101,19 +101,37 @@ _DEFAULT_ATTACH_DEVICE = "Cortex-M55"
 _HE_AP_PINNED_SILICON = "alif:ensemble:e8"
 
 
-def _he_ap_pin(ctx: Any) -> int | None:
-    """The HE access port to pin for this RAM-run, or None to let J-Link scan.
+def core_check_basis(evidence: dict[str, Any]) -> str:
+    """What `ram.coreCheck` rests on: a pinned AP is tan's own address, so the ITCM
+    comparison is the identity evidence; a scanned one is J-Link's finding."""
+    if (evidence.get("ap") or {}).get("apAddrSource") == "pinned":
+        return (
+            "the HE AP 0x00300000 was PINNED before connect (the address is tan's own, not "
+            "discovered); the IDENTITY evidence is the local ITCM 0x0 compared with the HE "
+            "global window 0x58000000 (the HP window is never read)"
+        )
+    return (
+        "DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
+        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE global window "
+        "0x58000000 (the HP window is never read)"
+    )
 
-    The silicon comes from the SDK metadata for the manifest SKU (the same walk
-    `_load_apertures` does); a RAM-run manifest carries no part-number flash profile."""
+
+def he_ap_for(silicon: str | None) -> int | None:
+    """The HE access port to pin for this silicon, or None to let J-Link scan."""
+    return HE_AP_ADDR if silicon == _HE_AP_PINNED_SILICON else None
+
+
+def silicon_for(sdk_root: str | None, sku: str | None) -> str | None:
+    """The silicon of `sku` from the SDK metadata. `tan probe` uses it so its attach
+    pins the AP exactly as `tan flash --ram` does."""
     from tan.commands.build_output import read_sdk_som_and_soc
 
-    metadata_root = os.path.join(ctx.sdk_root, "metadata") if ctx.sdk_root else None
-    if not (metadata_root and ctx.sku and os.path.isdir(metadata_root)):
+    metadata_root = os.path.join(sdk_root, "metadata") if sdk_root else None
+    if not (metadata_root and sku and os.path.isdir(metadata_root)):
         return None
-    walked = read_sdk_som_and_soc(metadata_root, ctx.sku, skipped=[], explain_unsupported=True)
-    silicon = walked[0] if walked else None
-    return HE_AP_ADDR if silicon == _HE_AP_PINNED_SILICON else None
+    walked = read_sdk_som_and_soc(metadata_root, sku, skipped=[], explain_unsupported=True)
+    return walked[0] if walked else None
 
 
 def _artefact_pair(path: str) -> tuple[str, str]:
@@ -201,7 +219,8 @@ def _run_ram_entry(
     except OSError as err:
         return fail(f"cannot read the built image ({err}); expected {elf_path} and {bin_path}")
     try:
-        apertures = _load_apertures(ctx, entry_id)
+        silicon_out: list[str] = []
+        apertures = _load_apertures(ctx, entry_id, silicon_out)
         image = plan_ram_image(
             parse_elf(elf_bytes), bin_bytes, core_id=entry_id, apertures=apertures
         )
@@ -248,7 +267,7 @@ def _run_ram_entry(
 
     try:
         staged = _stage_image(stack, bin_bytes)
-        pre = preamble(serial, speed, device, ap_addr=_he_ap_pin(ctx))
+        pre = preamble(serial, speed, device, ap_addr=he_ap_for(silicon_out[0] if silicon_out else None))
     except (OSError, FlashPlanError, RamRunError) as err:
         return fail(f"cannot prepare the RAM-run ({err})")
     # `image.base`/`entry` and the console address/size are ints rendered with
@@ -378,9 +397,7 @@ def _run_ram_entry(
         verdict, evidence = core_check(check_text)
     report["ram"]["coreCheck"] = {
         "verdict": verdict, **evidence, "assumeHe": bool(ctx.assume_he),
-        "basis": "DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
-        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE global window "
-        "0x58000000 (the HP window is never read)",
+        "basis": core_check_basis(evidence),
         **({"sessionError": bad} if bad else {}),
     }
     report["jlink"]["attachedCore"] = evidence.get("ap")
@@ -549,7 +566,7 @@ def _run_ram_entry(
     )
 
 
-def _load_apertures(ctx: Any, core_id: str) -> Any:
+def _load_apertures(ctx: Any, core_id: str, silicon_out: list[str] | None = None) -> Any:
     """The core's code/data apertures from the SoC metadata of the SDK in use
     (`sram_banks_kb` of the manifest SKU's silicon variant). Refuses -- never guesses a
     size -- when the SDK metadata, the SoM preset or the variant's banks cannot be
@@ -571,7 +588,9 @@ def _load_apertures(ctx: Any, core_id: str) -> Any:
             + (f" ({'; '.join(why)})" if why else "")
             + " -- refusing to guess the TCM sizes"
         )
-    _silicon, silicon_variant, variants, _flash_mb, _cores = walked
+    silicon, silicon_variant, variants, _flash_mb, _cores = walked
+    if silicon_out is not None:
+        silicon_out.append(silicon)  # the one metadata walk also feeds the AP pin
     variant = resolve_variant(silicon_variant, ctx.sku, variants)
     apertures = apertures_for(core_id, sram_banks(variant)) if variant else None
     if apertures is None:

@@ -535,6 +535,9 @@ _AP_CORE_FOUND = re.compile(r"AP\[(\d+)\]:\s*Core found")
 #: A user-specified AP map (`ap_pin_lines`, tan-cli#1566) makes J-Link skip its AP scan,
 #: so no `AP[n] (APAddr ...)` line appears; the address comes from the echoed command.
 _AP_PINNED = re.compile(r"CORESIGHT_AddAP\s*=\s*Index=(\d+)\b[^\n]*?\bAddr=(0x[0-9A-Fa-f]+)")
+#: J-Link's banner line proving it accepted the pinned map; without it the echoed
+#: `CORESIGHT_AddAP` is only what tan SENT, not what J-Link used.
+_AP_MAP_ACCEPTED = re.compile(r"AP map detection skipped|User specified AP map")
 _CPUID = re.compile(r"CPUID register:\s*(0x[0-9A-Fa-f]+)")
 _FOUND = re.compile(r"^Found Cortex-M\S*.*$", re.MULTILINE)
 
@@ -555,8 +558,12 @@ def attached_core(transcript: str) -> dict | None:
     transcript names no Core-found AP. More than one distinct Core-found AP is
     reported as `multiple`."""
     addrs = {int(m.group(1)): m.group(2) for m in _AP_ADDR.finditer(transcript)}
-    for m in _AP_PINNED.finditer(transcript):
-        addrs.setdefault(int(m.group(1)), m.group(2))
+    pinned: set[int] = set()
+    if _AP_MAP_ACCEPTED.search(transcript):
+        for m in _AP_PINNED.finditer(transcript):
+            if int(m.group(1)) not in addrs:
+                addrs[int(m.group(1))] = m.group(2)
+                pinned.add(int(m.group(1)))
     found = [int(m.group(1)) for m in _AP_CORE_FOUND.finditer(transcript)]
     cpuid = _CPUID.search(transcript)
     line = _FOUND.search(transcript)
@@ -571,6 +578,10 @@ def attached_core(transcript: str) -> dict | None:
     }
     if len(ports) > 1:
         out["multiple"] = [addrs.get(p) for p in ports]
+    elif out["apAddr"] is not None:
+        # `pinned`: the address is the one tan wrote, so the HE verdict is true by
+        # construction and the ITCM comparison is the independent identity evidence.
+        out["apAddrSource"] = "pinned" if ports[0] in pinned else "scanned"
     return out
 
 

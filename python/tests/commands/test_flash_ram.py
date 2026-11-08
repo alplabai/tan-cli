@@ -197,7 +197,7 @@ def _setup(tmp_path, monkeypatch, *, elf=None, binary=None, manifest=None, artef
     monkeypatch.setattr(flash_cmd.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         flash_ram, "_load_apertures",
-        lambda _ctx, core: ram_run.apertures_for(core, E8_BANKS),
+        lambda _ctx, core, _silicon_out=None: ram_run.apertures_for(core, E8_BANKS),
     )
     return str(stub)
 
@@ -709,8 +709,8 @@ def test_the_he_ap_with_a_matching_itcm_is_confirmed(tmp_path, monkeypatch):
     check = data["entries"][0]["ram"]["coreCheck"]
     assert check["verdict"] == "he" and check["apVerdict"] == "he" and check["itcmVerdict"] == "match"
     assert check["ap"] == {
-        "coreFoundAp": 3, "apAddr": "0x00300000", "cpuid": "0x411FD220",
-        "found": "Found Cortex-M55 r1p0, Little endian.",
+        "coreFoundAp": 3, "apAddr": "0x00300000", "apAddrSource": "scanned",
+        "cpuid": "0x411FD220", "found": "Found Cortex-M55 r1p0, Little endian.",
     }
     words = check["itcmWords"]
     assert set(words) == {"local0x00000000", "he0x58000000"}  # no HP window
@@ -1303,9 +1303,41 @@ def test_ap_pin_refuses_a_non_32bit_address(bad):
 def test_a_pinned_attach_is_identified_from_the_echoed_ap_map():
     attached = ram_run.attached_core(_PINNED_HE_BANNER)
     assert attached["apAddr"] == "0x00300000"
+    assert attached["apAddrSource"] == "pinned"
     assert ram_run.ap_verdict(attached) == "he"
     hp = _PINNED_HE_BANNER.replace("Addr=0x00300000", "Addr=0x00200000")
     assert ram_run.ap_verdict(ram_run.attached_core(hp)) == "hp"
+
+
+def test_a_pin_J_Link_did_not_acknowledge_is_not_trusted():
+    # tan's echoed command alone proves nothing: no "User specified AP map" banner.
+    rejected = _PINNED_HE_BANNER.replace("AP map detection skipped. User specified AP map and usage.\n", "")
+    attached = ram_run.attached_core(rejected)
+    assert attached["apAddr"] is None and "apAddrSource" not in attached
+    assert ram_run.ap_verdict(attached) == "unidentified"
+
+
+def test_the_pinned_basis_names_the_itcm_read_as_the_identity_evidence(tmp_path, monkeypatch):
+    jl, (rc, data, issues, _l, _s) = _check_run(
+        tmp_path, monkeypatch, _PINNED_HE_BANNER + _dump_itcm()
+    )
+    check = data["entries"][0]["ram"]["coreCheck"]
+    assert rc == 0, (data, issues)
+    assert check["ap"]["apAddrSource"] == "pinned" and check["itcmVerdict"] == "match"
+    assert "PINNED" in check["basis"] and "IDENTITY" in check["basis"]
+    assert "DECISIVE" not in check["basis"]
+
+
+def test_a_pinned_attach_still_refuses_when_the_itcm_disagrees(tmp_path, monkeypatch):
+    out = _PINNED_HE_BANNER + _dump_itcm(he=OTHER_WORDS)
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    check = data["entries"][0]["ram"]["coreCheck"]
+    assert rc != 0 and check["verdict"] == "conflict"
+
+
+def _dump_itcm(local=ITCM_WORDS, he=ITCM_WORDS):
+    fmt = lambda a, w: f"{a:08X} = " + " ".join(f"{x:08X}" for x in w) + "\n"  # noqa: E731
+    return fmt(0, local) + fmt(0x58000000, he) + "Script processing completed.\n"
 
 
 @pytest.mark.parametrize(
@@ -1317,20 +1349,36 @@ def test_a_pinned_attach_is_identified_from_the_echoed_ap_map():
     ],
 )
 def test_only_an_e8_silicon_pins_the_he_ap(monkeypatch, tmp_path, silicon, expected):
-    from types import SimpleNamespace
-
     from tan.commands import build_output, flash_ram
 
     (tmp_path / "metadata").mkdir()
     walked = None if silicon is None else (silicon, "VARIANT", [], 0, [])
     monkeypatch.setattr(build_output, "read_sdk_som_and_soc", lambda *a, **k: walked)
-    ctx = SimpleNamespace(sdk_root=str(tmp_path), sku="E1M-AEN803")
-    assert flash_ram._he_ap_pin(ctx) == expected
+    found = flash_ram.silicon_for(str(tmp_path), "E1M-AEN803")
+    assert flash_ram.he_ap_for(found) == expected
 
 
 def test_no_sdk_metadata_means_no_pin():
-    from types import SimpleNamespace
-
     from tan.commands import flash_ram
 
-    assert flash_ram._he_ap_pin(SimpleNamespace(sdk_root=None, sku="E1M-AEN803")) is None
+    assert flash_ram.silicon_for(None, "E1M-AEN803") is None
+
+
+def test_the_real_loader_reports_the_silicon_from_the_same_walk(tmp_path, monkeypatch):
+    import types
+
+    from tan.commands import build_output
+
+    (tmp_path / "metadata").mkdir()
+    variant = {"order_code": "X", "alp_module_skus": ["S"],
+               "sram_banks_kb": {n: k for n, k in E8_BANKS}}
+    calls = []
+
+    def walk(root, sku, **kw):
+        calls.append(sku)
+        return ("alif:ensemble:e8", "X", [variant], 5.5, [])
+
+    monkeypatch.setattr(build_output, "read_sdk_som_and_soc", walk)
+    out: list[str] = []
+    flash_ram._load_apertures(types.SimpleNamespace(sdk_root=str(tmp_path), sku="S"), "m55_he", out)
+    assert out == ["alif:ensemble:e8"] and calls == ["S"]
