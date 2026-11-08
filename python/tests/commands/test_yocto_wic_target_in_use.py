@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import stat
+import sys
 import types
 
 import pytest
@@ -246,6 +247,11 @@ def test_an_unconfirmed_run_skips_the_guard_and_still_previews(tmp_path, monkeyp
     assert entry.issue_code is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake `dd` on PATH needs a POSIX exec bit; a real yocto_wic "
+    "write is refused on Windows before this gate anyway",
+)
 def test_run_reports_the_refusal_as_issues_code(tmp_path, monkeypatch):
     """Through the REAL Typer callback and `_run`: the envelope carries
     issues[].code == flash.yocto-wic-target-in-use."""
