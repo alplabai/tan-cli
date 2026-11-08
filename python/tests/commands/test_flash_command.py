@@ -2300,6 +2300,20 @@ def test_plan_yocto_wic_refuses_the_traversal_target_with_the_original_wording()
     )
 
 
+@pytest.fixture(autouse=True)
+def _idle_host_for_yocto_wic(monkeypatch):
+    """The real write path asks the host whether the target is in use; these
+    tests are about other behaviour, so give them a host with nothing mounted
+    (never the real /proc, which differs per CI image)."""
+    from tan.core.block_busy import HostFs  # noqa: PLC0415 -- test-only seam
+
+    monkeypatch.setattr(
+        flash_cmd,
+        "YOCTO_WIC_HOST_FS",
+        HostFs(read_text=lambda _p: "", exists=lambda _p: False, isdir=lambda _p: True),
+    )
+
+
 def test_yocto_wic_block_device_refusal_rejects_an_existing_regular_file(tmp_path):
     """tan-cli#487, defect 1's second tier: a regular file that lexically
     lives under a real path (the issue's own `/dev/shm/<name>` shape,
