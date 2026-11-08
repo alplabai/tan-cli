@@ -2118,6 +2118,14 @@
       "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write that landed and cache-verified but whose fresh read-back session could not be run to completion -- the J-Link process failed or timed out, the read-back script could not be built, or there was no readable written region. Nothing was compared, so the write is neither confirmed nor refuted; data.entries[].jlink.readback.reason says why. An error, because a requested confirmation did not happen. A probe-guard refusal before the read-back is reported as its own flash.probe-* code instead. tan-cli#1450: also raised, with the message \"target unreachable (low-power?)\" and jlink.readback.reason set to it, when the read-back could not READ the chip: the session failed with J-Link saying it could not read memory / connect (judged only on output before the reset tail), or NO region came back full-length (a full-length dump that differs is always flash.readback-mismatch). The Flow D read-back is taken inside the write session and a match is reported as verification `insession-readback`; only a matching fresh-session read (run afterwards, see flash.readback-fresh-unconfirmed) upgrades it to `readback-verified` -- a gated debug domain says nothing about what the chip holds, so it is never reported as flash.readback-mismatch and never advises a re-flash. Under --readback the chip is read inside the write session (connect, loadbin, verifybin, h, savebin, reset tail, one exit), so it is read before the new image can boot into STOP and no exit lets the core run between a write and a read (tan-cli#1458). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.yocto-wic-target-in-use",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "EMISSION CONDITION: a real (non-preview) yocto_wic / yocto_wic_to_sd_or_emmc write whose flash_args.target is mounted, active swap, or is (part of) the disk backing a mounted filesystem -- notably the host's root disk -- or whose mount state cannot be read (/proc/self/mountinfo or /sys/dev/block missing: refused, fail closed). Ported from alp-sdk#3085's `_require_unused_device`; the pure check is `tan.core.block_busy.unused_device_refusal`. A mistyped target (`/dev/sda`) would otherwise overwrite the workstation disk, since `confirm` alone is no barrier. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.raw-invalid",
       "status": "reserved",
       "severity": "error",
