@@ -527,8 +527,13 @@ manifest that still declares `flash_method: swd_probe` is refused by name.
 
 ## `tan flash --ram`: is the probe on the HE core? (tan-cli#1354)
 
-A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds, and its
-`Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
+A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds -- except on
+`alif:ensemble:e8`, where tan pins the HE AHB-AP `0x00300000` before `connect`
+(`exec CORESIGHT_AddAP` + `exec CORESIGHT_SetIndexAHBAPToUse`, tan-cli#1566); other silicon
+keeps the scan. `tan probe` pins the same way for `--core m55_he`. A pinned address is tan's
+own, so the AP verdict is true by construction (`ap.apAddrSource` is `pinned`, honoured only
+when J-Link's banner says it used the user-specified AP map); the ITCM read below is then
+the identity check. The `Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
 anything, `--ram` runs one read-only session (`connect`, then three `mem32` reads --
 no halt, no write) and decides from two independent facts:
 

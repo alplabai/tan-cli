@@ -228,8 +228,10 @@ def read_script(pre: Sequence[str], address: int, words: int) -> str:
     return "\n".join([*pre, f"mem32 0x{address:X}, 0x{words:X}", "exit"]) + "\n"
 
 
-def make_preamble(serial: str | None, speed: int, device: str = DEFAULT_DEVICE) -> list[str]:
-    return preamble(serial, speed, device)
+def make_preamble(
+    serial: str | None, speed: int, device: str = DEFAULT_DEVICE, ap_addr: int | None = None
+) -> list[str]:
+    return preamble(serial, speed, device, ap_addr=ap_addr)
 
 
 def script_verbs(script: str) -> list[str]:
