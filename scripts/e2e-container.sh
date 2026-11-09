@@ -82,30 +82,25 @@ else
   exit 2
 fi
 
+# tan-cli#1524: resolve the harness image through the registry mirrors, like
+# every other CI `docker run` of a library image (tan-cli#1471). A bare
+# `docker run ubuntu:24.04` pulls anonymously from Docker Hub and dies on
+# "toomanyrequests" on a shared runner.
+#
+# A locally cached or locally built image needs no registry, and a failed pull
+# (offline host, image no registry has) falls back to the bare ref rather than
+# aborting: `docker run` then reports the real error if it is truly absent.
+if $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
+  RUN_IMAGE=$IMAGE
+else
+  RUN_IMAGE=$(DOCKER="$DOCKER" bash "$HERE/ci/docker-pull.sh" "$IMAGE") || RUN_IMAGE=$IMAGE
+fi
+
 echo "=== isolated e2e: $IMAGE ==="
 echo "  frozen:  $MOUNT_SRC"
 echo "  harness: $HARNESS"
 echo
 
-# tan-cli#1169: `-e TAN_GITHUB_TOKEN` is spelled by NAME, unlike the three
-# `VAR=value` forwards below it, and the difference is the point. `docker run
-# -e NAME` copies the value out of this shell's environment and omits the
-# variable entirely when it is unset -- so the token is never an element of
-# this `docker run`'s argv, never in the runner's process table, and never
-# available to be echoed by a future `set -x` here (there is none today: this
-# script and `e2e-full.sh` both run under `set -uo pipefail`, and neither
-# dumps its environment). The `VAR=${VAR:-default}` shape used for the other
-# three would put the secret in argv, which is exactly the exposure
-# tan-cli#1143 exists to avoid. Safe either way if that pass-through ever
-# changes shape: `resolve_sdk_token` SKIPS a variable that is set but
-# blank, and `rejected_sdk_token_vars` does not report one.
-#
-# `tan bootstrap` inside the container reads TAN_GITHUB_TOKEN first
-# (`SDK_TOKEN_ENV_VARS`, `python/tan/core/toolchain_provision.py:599`) and
-# hands it to `west sdk install` through a private netrc, so it reaches no
-# argv, log or envelope in there either. A developer running this script by
-# hand gets the same treatment by exporting that one name; nothing else is
-# forwarded, so an ambient `$GH_TOKEN` set for something else stays outside.
 # shellcheck disable=SC2086  # MOUNT_ARGS is deliberately word-split
 $DOCKER run --rm \
   $MOUNT_ARGS \
@@ -114,8 +109,7 @@ $DOCKER run --rm \
   -e "ALP_SDK_REF=${ALP_SDK_REF:-dev}" \
   -e "ZEPHYR_SDK_VERSION=${ZEPHYR_SDK_VERSION:-1.0.1}" \
   -e "ZEPHYR_SDK_INSTALL_TIMEOUT=${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}" \
-  -e TAN_GITHUB_TOKEN \
-  "$IMAGE" bash -c '
+  "$RUN_IMAGE" bash -c '
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 bash /scripts/ci/apt-bounded.sh update -qq >/dev/null 2>&1

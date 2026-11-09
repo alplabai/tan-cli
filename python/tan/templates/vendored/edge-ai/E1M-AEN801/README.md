@@ -1,6 +1,6 @@
 # cold-chain-monitor
 
-> **`[UNTESTED]` on hardware -- v0.9 paper-correct.** The `cold_chain` core
+> **`[UNTESTED]` on hardware -- paper-correct.** The `cold_chain` core
 > is host-unit-tested on `native_sim/native/64`; the full app runs end-to-end on
 > native_sim with synthetic environment data covering the states. HiL with a
 > real BME280 + a trained model is bench-gated.
@@ -43,6 +43,19 @@ CC,768.0,CONDENSATION_RISK,5.0,95.0,4.3,5.0,0.0
 
 ## Build
 
+From this directory, or from your own copy of it:
+
+```bash
+tan build
+tan flash
+```
+
+`tan` builds one image per Zephyr core on the SoM: a core this `board.yaml` does not declare gets the SDK's idle `alp-stock-shim` image (on an E1M-AEN SoM, `m55_he` here, in `build/m55_he-zephyr/`); see [docs/heterogeneous-builds.md](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/heterogeneous-builds.md).
+
+### Inside an SDK checkout (twister / CI)
+
+These commands only work from an alp-sdk checkout, because `gen_example_alp_conf.py` writes `generated/alp.conf` there.
+
 ```
 # writes ./generated/alp.conf, which west reads below (#866)
 tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
@@ -50,10 +63,11 @@ west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_F
 west flash
 ```
 
-For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template
-edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,
-`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host
-the `renesas-rzv2n-deepx` family) and `tan validate` refuses it.
+The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103`
+-- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`, the same PCB without
+it. DEEPX is reached from the A55 side, so using it means a new project
+with a V2M `som.sku`, an `m33_sm` core and an A55/Yocto app, not a
+one-line `som.sku` edit here.
 
 ## Model
 
@@ -62,13 +76,13 @@ the `renesas-rzv2n-deepx` family) and `tan validate` refuses it.
      models/ is a child of this dir, not a sibling -- don't "fix" this. -->
 
 No model is shipped (stub + deterministic classifier/fallback). See
-[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/examples/ai/cold-chain-monitor/models/README.md) for the
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/examples/ai/cold-chain-monitor/models/README.md) for the
 autoencoder training recipe.
 
 ## Tests
 
 In the alp-sdk tree, unit tests live in
-[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/tests/unit/cold_chain) and run with:
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.18.0/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain

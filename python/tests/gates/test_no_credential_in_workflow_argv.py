@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """No workflow or shell script may hand a credential to a tool on a CLI flag.
 
-tan-cli#1185. `python/tan/core/toolchain_provision.py`'s `SDK_TOKEN_ENV_VARS`
-block states the invariant in its own words -- a token goes in an environment
-variable, not a CLI flag, because a flag
+tan-cli#1185. The invariant is that a token goes in an environment variable
+(or a file the tool reads), not a CLI flag, because a flag
 
     lands the value in shell history, in the host process table for the whole
     (multi-minute) run, and in any CI log that echoes the command
 
--- and tan-cli#1143 is the whole design that follows from it: `tan bootstrap`
-carries its token to `west sdk install` out of band through a private netrc
-(`bootstrap_cmd._stage_sdk_credential`) rather than through
-`--personal-access-token`.
+-- and tan-cli#1143 designed `tan bootstrap` around it (a private netrc
+rather than `--personal-access-token`). tan-cli#1556 then removed tan's own
+`west sdk install` and its credential handling altogether; the two workflow
+steps below, which stage their own netrc, are the remaining sites the
+invariant governs.
 
 Two workflow steps did the opposite anyway (`getting-started.yml`'s
 "install the Zephyr SDK (west sdk install, the printed remedy)" and
@@ -53,10 +53,9 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 #: Credential-bearing CLI flags. Deliberately short: every entry here has to
 #: be a flag whose VALUE is a secret, measured on a real tool, not a guess.
 #: `--personal-access-token` is `west sdk install`'s (Zephyr v4.4.1
-#: `scripts/west_commands/sdk.py`, the `args.personal_access_token` branch
-#: `toolchain_provision.WEST_SDK_TOKEN_FLAG_ATTR` pins). A flag that merely
-#: NAMES a variable (`-e TAN_GITHUB_TOKEN`, as PR #1184 forwards into the
-#: container) is not one of these and must never be added: name-only is the
+#: `scripts/west_commands/sdk.py`, the `args.personal_access_token` branch).
+#: A flag that merely NAMES a variable (`docker run -e NAME`, no `=value`)
+#: is not one of these and must never be added: name-only is the
 #: safe form this gate is protecting.
 CREDENTIAL_FLAGS = ("--personal-access-token",)
 

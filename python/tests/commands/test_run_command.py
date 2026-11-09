@@ -787,3 +787,38 @@ def test_the_internal_failure_catch_all_reports_the_pin_warning_too(
     text = CliRunner().invoke(_app(), ["run"]).stderr
     assert "warning: .alp/sdk-path names" in text
     assert "run: internal failure" in text
+
+
+def test_internal_run_flash_arm_carries_the_build_steps_issues(tmp_path, monkeypatch):
+    """tan-cli#1482: a partial build's warnings must survive onto the FLASH arm."""
+    from tan.envelope import Issue
+
+    warn = Issue("build.missing-tool", "warning", "west not found; skipped m55_he")
+    monkeypatch.setattr(
+        run_cmd, "_build", lambda **_k: (ExitCode.SUCCESS, {"slices": [], "warnings": []}, [warn])
+    )
+    monkeypatch.setattr(run_cmd, "decide_run_action", lambda *a, **k: RunAction.FLASH)
+    monkeypatch.setattr(
+        flash_cmd, "_run", lambda **k: (ExitCode.SUCCESS, {"entries": []}, [], ["flash: ok"], None)
+    )
+    _exit, _data, issues, text = run_cmd._run(
+        build_root=str(tmp_path), sdk_root="/sdk", sdk_root_for_stamp="/sdk", board_yaml=None,
+        flash=True, core=None, json_mode=False,
+    )
+    assert warn in issues
+    assert any("west not found" in line for line in text)
+    assert text[-1] == "flash: ok"
+
+
+def test_run_prologue_failure_is_an_envelope_not_a_traceback(monkeypatch):
+    """tan-cli#1482: a deleted cwd (`Path.cwd()` raising) used to escape."""
+
+    def raise_gone():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(run_cmd.Path, "cwd", staticmethod(raise_gone))
+    result = CliRunner().invoke(_app(), ["run", "--format", "json"])
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is False
+    assert result.exit_code == 5
+    assert any(i["code"] == "run.internal-failure" for i in doc["issues"])

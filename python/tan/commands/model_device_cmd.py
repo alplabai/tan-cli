@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from tan.commands.build_output import ProjectContext, resolve_project_context
-from tan.commands.model_device_live import LiveOptions, LiveRefusal, LiveRun, live_console
+from tan.commands.model_device_live import LiveOptions, LiveRefusal, LiveRun, live_console, preflight
 from tan.commands.model_host_cmd import (
     ab_empty_data,
     resolve_model_path,
@@ -250,6 +250,51 @@ def _note_loaded(data: dict, flashes: dict, role: str, flash: dict | None) -> No
         data["flash"] = dict(flashes)
 
 
+def _preflight_both(contexts: list[ProjectContext], live: LiveOptions) -> Issue | None:
+    """tan-cli#1522: both projects' preflight (board.yaml, manifest, ITCM slice)
+    up front -- B's refusal must not come after A already reset the board."""
+    for ctx in contexts:
+        refused = preflight(ctx, live)
+        if refused is not None:
+            return refused
+    return None
+
+
+def _scope_mismatch(a_row: dict, b_row: dict) -> list[Issue]:
+    """tan-cli#1522: latencies measured differently (a window span is an upper
+    bound) make `faster`/`latencyRatio` not like-for-like."""
+    if a_row["latencyScope"] == b_row["latencyScope"]:
+        return []
+    return [Issue(
+        "model.device-ab-scope-mismatch", "warning",
+        f"A's latency is {a_row['latencyScope']} but B's is {b_row['latencyScope']}: "
+        "the two are not like-for-like (a window span includes the energy polling and is an "
+        "upper bound), so `faster` and `latencyRatio` are not a reliable comparison; "
+        "print LATENCY-RESULT on both sides.",
+    )]
+
+
+def _second_context(context: ProjectContext, capture: str | None,
+                    against_capture: str | None, live: LiveOptions) -> ProjectContext | Issue:
+    """B's project context, or the refusal for a mixed/underspecified A-vs-B."""
+    if bool(capture) != bool(against_capture):
+        return Issue(
+            "model.device-ab-mixed-sources", "error",
+            "`ab --device` takes both sides live (--against-project, --confirm) or both from "
+            "captures (--capture and --against-capture), not one of each; nothing was run.",
+        )
+    context_b = context
+    if not against_capture and live.against_project:
+        context_b = resolve_project_context(live.against_project, None, live.sdk_root)
+    if not against_capture and context_b is context:
+        return Issue(
+            "model.device-live-needs-two-projects", "error",
+            "`ab --device` without --against-capture runs each project in turn: pass the second "
+            "project with --against-project (nothing was run).",
+        )
+    return context_b
+
+
 def run_device_ab(
     *,
     context: ProjectContext,
@@ -265,27 +310,19 @@ def run_device_ab(
     issues: list[Issue] = []
     flashes: dict[str, dict] = {}
     live = live or LiveOptions()
-    if bool(capture) != bool(against_capture):
-        return project, sdk, data, [Issue(
-            "model.device-ab-mixed-sources", "error",
-            "`ab --device` takes both sides live (--against-project, --confirm) or both from "
-            "captures (--capture and --against-capture), not one of each; nothing was run.",
-        )], ExitCode.VALIDATION_FAILURE
-    context_b = context
-    if not against_capture and live.against_project:
-        context_b = resolve_project_context(live.against_project, None, live.sdk_root)
-    if not against_capture and context_b is context:
-        return project, sdk, data, [Issue(
-            "model.device-live-needs-two-projects", "error",
-            "`ab --device` without --against-capture runs each project in turn: pass the second "
-            "project with --against-project (nothing was run).",
-        )], ExitCode.VALIDATION_FAILURE
+    context_b = _second_context(context, capture, against_capture, live)
+    if isinstance(context_b, Issue):
+        return project, sdk, data, [context_b], ExitCode.VALIDATION_FAILURE
     sides = (("A", source, capture, context), ("B", against, against_capture, context_b))
     # Both labels first: a missing model file must refuse before A loads the board.
     labels = [_device_label(ctx, raw) for _, raw, _, ctx in sides]
     for label in labels:
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
+    if not capture:
+        refused = _preflight_both([ctx for _r, _raw, _c, ctx in sides], live)
+        if refused is not None:
+            return project, sdk, data, [refused], ExitCode.VALIDATION_FAILURE
     for (role, _raw, cap, ctx), label in zip(sides, labels):
         run = _console_for(ctx, cap, label, f"model {role}", live)
         if isinstance(run, LiveRefusal):
@@ -303,6 +340,7 @@ def run_device_ab(
     (a_row, a_res), (b_row, b_res) = rows
     cmp = compare(a_res, b_res)
     data["a"], data["b"] = a_row, b_row
+    issues.extend(_scope_mismatch(a_row, b_row))
     data["comparison"] = {
         "faster": cmp.faster,
         "latencyRatio": cmp.latency_ratio,

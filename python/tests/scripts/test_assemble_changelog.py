@@ -726,6 +726,11 @@ def test_the_guard_does_not_fire_on_this_repos_real_pending_fragments() -> None:
     already-folded test, not a similarity heuristic -- 0 hits across all 162
     fragments pending here. A guard that fired would block every fold."""
     buckets = ac.load_fragments(REPO_ROOT / "changelog.d")
+    if not any(buckets.values()):
+        # A release-prep tree: every fragment is folded and the section is
+        # retitled to its version, so there is no Unreleased header and
+        # nothing pending for the guard to misfire on.
+        pytest.skip("no pending fragments (release-prep tree)")
     lines = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
     start, end = ac.find_unreleased(lines)
     assert ac.already_folded(lines[start + 1:end], buckets) == []

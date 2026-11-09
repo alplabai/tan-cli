@@ -135,8 +135,8 @@ binaries is on `PATH` and names the same `winget` command. It does not wait for
 the Zephyr SDK to be missing first — a host that already has the SDK and no
 7-Zip is exactly the host whose next `west sdk install` dies with
 `Zephyr SDK setup requires '7z'` (tan-cli#736). `tan bootstrap`'s own
-cross-toolchain phase (below) checks for the same thing before it ever runs
-`west sdk install` itself, and refuses cleanly instead of hitting that error.
+cross-toolchain phase (below) extracts the Windows `.7z` archives itself and
+checks for a 7-Zip before downloading anything, refusing cleanly instead.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -195,68 +195,34 @@ What those commands do:
    compiler and re-verifies its stamp rather than reinstalling. Pass
    `--no-toolchain` to skip this phase (the rest of `bootstrap` is
    unaffected, and `native_sim` builds never need a cross toolchain at all).
-   This phase does **not** need `file` on PATH, on any host: it passes
-   `--no-hosttools` to the underlying `west sdk install` (tan-cli#1176), so
-   the SDK's own host-tools step -- the part that needs `file`, and that dies
-   with "Host tools installation failed" naming nothing without it -- never
-   runs at all. That is deliberate: it is what lets this phase complete on a
-   host carrying only the prerequisites above. What it skips is the SDK's
-   `hosttools/` bundle, so this phase installs no `dtc`, `openocd`, `bossac`
-   or `qemu-system-*`; Zephyr treats `dtc` and `openocd` as optional and a
-   real-silicon build needs neither, but if you want them, run the manual
-   command below WITHOUT `--no-hosttools` (and then you do need `file`).
-   This phase lists the SDK releases through the GitHub API, whose anonymous
-   quota is counted **per source IP** -- so behind a shared office egress, a
-   corporate VPN or a runner pool it can be exhausted by traffic that is not
-   yours, and the download fails with `403 API rate limit exceeded`. Set
-   `$TAN_GITHUB_TOKEN` to authenticate it. The token needs no scopes --
-   listing public releases requires none.
-
-   `tan` also reads `$GH_TOKEN` and `$GITHUB_TOKEN`, in that order behind
-   `$TAN_GITHUB_TOKEN`, so an existing `gh auth login` session or a CI job's
-   own token authenticates the download with nothing new to set. That means
-   an **ambient** `$GH_TOKEN` you set for something else will be used here
-   too; `$TAN_GITHUB_TOKEN` overrides it for `tan` alone, and unsetting all
-   three restores the anonymous download exactly as it was. Every message
-   `tan` prints about this names the **variable**, never its value, and the
-   `bootstrap.sdk-credential-unstaged` warning tells you when a variable was
-   set but not used.
-
-   How the token is handled, since it is a secret:
-
-   - **Environment only, never a flag.** There is deliberately no
-     `--github-token`: a flag value lands in shell history, in the host
-     process table for the whole multi-minute download, and in the argv
-     people paste into bug reports.
-   - **Never an argv element.** `tan` stages it in a private `netrc` and
-     points `west sdk install` at it with `$NETRC`, so it appears in no log,
-     no `--dry-run` plan, no `data.plannedCommands` and no JSON envelope.
-   - **Offered to `api.github.com` and to nothing else.** This is *narrower*
-     than `west sdk install --personal-access-token`, which puts an
-     `Authorization` header on the session: a netrc credential is matched per
-     host, so the release CDN that serves the actual multi-hundred-megabyte
-     archive never sees your token.
-   - **It touches disk.** The staged `netrc` is a real file -- mode `0600`
-     inside a `0700` directory under the toolchain root, deleted when the
-     download returns and swept on the next `tan bootstrap` if a crash
-     skipped that. It is deliberately not under `$TMPDIR`: that sweep
-     identifies what to delete by NAME, and a name is only proof of
-     ownership inside a directory `tan` owns. The sweep also leaves alone
-     anything recent enough to belong to a concurrent `tan bootstrap` --
-     under six hours old — so two `tan` runs at once cannot silently
-     de-authenticate each other.
-   - **It replaces your own `netrc` for that one child.** `$NETRC` has no
-     `~/.netrc` fallback behind it, so an unrelated credential in your own
-     `~/.netrc` is not visible to `west sdk install` while `tan` is
-     authenticating the download. Nothing is set at all when you supply no
-     token.
-   - **`tan` stops claiming it if it cannot verify the route.** The netrc
-     hand-off depends on how the Zephyr in your workspace handles credentials,
-     which `tan` neither owns nor pins. Before printing that it authenticated
-     the download, `tan` checks the `west sdk install` in that workspace still
-     matches what the hand-off was measured against; if it does not, you get a
-     `bootstrap.sdk-credential-unverified` warning naming what to do instead,
-     rather than an assurance that quietly stopped being true.
+   What the phase verifies (tan-cli#1496, tan-cli#1556): `tan` downloads both
+   pinned archives itself -- the SDK's minimal bundle and the
+   `arm-zephyr-eabi` toolchain -- and hashes each against alp-sdk's sha256 pin
+   (`metadata/toolchains.json`) while it streams. Nothing is re-hashed from
+   disk afterwards. A hash mismatch refuses with
+   `bootstrap.toolchain-pin-mismatch` -- and only then does `tan` read the
+   release's own `sha256.sum`, to say what it is consistent with (an upstream
+   republish, or bytes changed in transit) -- as evidence to check on the
+   release page, never as a reason to move the pin (tan-cli#1559); the sum
+   never blocks an
+   install on its own. An archive that cannot be fetched (offline, a SOCKS
+   proxy) refuses with `bootstrap.toolchain-pin-unverified`; both stamp
+   nothing; a pinned archive upstream does not serve (HTTP 404/410) refuses
+   with `bootstrap.toolchain-install` and is not retried. The stamp records
+   what was checked: an install by a `tan` before tan-cli#1556 is reported as
+   having had only its toolchain archive pin-checked, and one before
+   tan-cli#1496 as never compared with the pin.
+   `tan` no longer runs `west sdk install` for this. West ignored
+   `--install-dir` whenever CMake could find the pinned SDK version anywhere
+   it searches (your home directory, a `bin` directory on `PATH`, the CMake
+   package registry), and it registered tan's temporary install directory in
+   that registry. It also listed releases through the rate-limited GitHub
+   API. None of that happens now: the phase needs no GitHub token, writes no
+   CMake package-registry entry, and removes the dead entries older `tan`
+   versions left (tan-cli#1553). It also installs nothing from the SDK's
+   `hosttools/` bundle, so it needs no `file` on PATH; Zephyr treats `dtc`
+   and `openocd` as optional and a real-silicon build needs neither, but if
+   you want them, run the manual command below (and then you do need `file`).
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 
@@ -359,7 +325,7 @@ move.
 | Remove build output | `tan clean` |
 | Generate configuration files | `tan generate` |
 | Check the host setup | `tan doctor` |
-| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
+| Start a serial monitor, or record one headlessly with input and baud change | `tan monitor`, `tan monitor --capture --port rfc2217://gw:4001 --send v --reopen-at 23040 --on STOP` (see [monitor capture](docs/monitor.md)) |
 | Generate debugger settings | `tan debug-config` |
 | List examples and presets | `tan examples`, `tan presets` |
 | Explain resolved project settings | `tan inspect` |
@@ -395,6 +361,10 @@ from `--capture FILE` or live (a RAM-run of the built `diagnostics.link: itcm`
 project; the live form resets the device and needs `--confirm`). Run `tan model
 --help` for every flag.
 
+`tan clean --build-root PATH` takes the same PATH as `tan build --build-root` (the
+project tree, relative to the current directory) and removes `PATH/build`; it
+refuses a target that holds a `board.yaml`.
+
 `tan flash`, `tan size` and `tan image` accept `--build-root PATH` to read the
 `system-manifest.yaml` from a build root other than `<project>/build`, the same
 root `tan build --build-root` wrote to.
@@ -417,6 +387,13 @@ running image about 10 ms after start, while the envelope still reports
 after start, or the cycle counts it prints are wrong. Every successful `--ram`
 run (and its `--dry-run`) carries the info issue
 `flash.ram-debugger-detach-clears-trcena` as a reminder.
+
+Experimental (tan-cli#1372, off by default, pending a bench A/B): with `--ram-console`,
+setting `TAN_FLASH_RAM_HOLD=1` keeps the load session open for the `--wait` window
+(`... go; Sleep <wait_ms>; exit`, no halt after `go`, no DEMCR/DWT write) and the
+following `ram_console_buf` reread session does not wait again. The session timeout
+covers the wait, the envelope reports `ram.holdSession: true`, and the TRCENA info
+issue then says the clear happens at session close, after the wait.
 
 `--watch <addr>[:<words>][@<period-ms>]` (repeatable, `--ram` only) samples target
 memory in the same J-Link session that starts the image, for the `--wait` window,
@@ -463,6 +440,48 @@ cache root, unless `--force`). `tan sdk install` and
 `tan sdk switch` are not implemented yet, so clone the SDK yourself and use
 `--sdk-root` or let `tan init` write the project pin.
 
+## Alp Platform releases
+
+An Alp Platform release (`Alp Platform 26.11`, full version `26.11.0`) is a
+dated, bench-validated set of component versions: alp-sdk, tan-cli,
+alp-sdk-vscode and the GD32 and CC3501E bridge firmware. Each is defined by one
+`platform.yaml` (schema `alp-platform-v1`) published as a release asset of
+`alplabai/alp-platform`. Versions are `YY.M.MICRO[-rcN]` with the month never
+zero-padded: `27.2.0` is accepted, `27.02.0` is refused and the message names
+`27.2.0`. The first line is 26.11 (November 2026); a new line ships every one
+to two months. Pinning is optional; a workspace without a pin behaves as before.
+
+```sh
+tan platform use 26.11         # latest GA MICRO of the 26.11 line
+tan platform use 26.11.1       # an exact release (an -rcN is named in full)
+tan platform use --manifest ./platform.yaml   # a local file, no network
+tan platform list              # published releases, newest first (--include-rc for pre-releases)
+tan platform show              # the pinned platform and each component's status
+tan platform clear             # remove the pin
+```
+
+`list` prints the published releases of `alplabai/alp-platform`, newest first and
+grouped by line, marking the pinned one; with `--format json`, `data` is
+`{"releases": [{"version", "line", "prerelease", "published"}], "pinned": <version or null>}`.
+A 403 or 404 while that repository is private means a `GITHUB_TOKEN` with read
+access is needed.
+
+`use` validates the manifest, then writes it byte-for-byte to
+`<west topdir>/.alp/platform.yaml` (`<west topdir>` is the directory holding
+`.west/`). It refuses an unknown `schema`, unknown top-level keys, and a
+CC3501E `gpe_stamp` at or below its `gpe_floor` (flashing such a stamp
+permanently bricks the bridge). `GITHUB_TOKEN`, when set, is sent with the
+GitHub requests. `use` never writes firmware to a board, and never updates tan
+itself: tan has no SDK-switching mechanism yet, so when the pinned alp-sdk
+differs from the checkout, it reports the version to check out
+(`git checkout v<version>`, then `tan bootstrap`) as a next step, and reports a
+tan mismatch as a warning (`platform.tan-off-manifest`).
+
+`tan doctor` reports the pin as `data.platform` (`null` when there is no pin)
+and a `platform` check: `warn` when a component whose installed version tan can
+read (alp-sdk, tan-cli) differs from the pin, `fail` when the pin is
+unreadable or invalid. The other components report `status: "unknown"`.
+
 ## Automation and JSON output
 
 Add `--format json` for machine-readable output:
@@ -499,7 +518,7 @@ of that, and **every registered command parses them**:
 `tan/core/global_flags.py` holds the shared spec and injects it into any
 command that does not already declare the flag itself. What keeps that true is
 split in two. `tests/gates/test_global_flags_gate.py` fails the build for the
-29 commands that reject an unknown option; it cannot speak for `lock`,
+30 commands that reject an unknown option; it cannot speak for `lock`,
 `migrate` and `quality`, which register `ignore_unknown_options`
 (`west_forward_cmd.py`) and would swallow an undeclared flag into the `west`
 passthrough rather than reject it — those three are held by

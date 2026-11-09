@@ -25,6 +25,7 @@ from typing import Any, Callable
 import typer
 
 from tan.commands import flash_cmd as fc
+from tan.commands import flash_raw
 from tan.commands import reset_confirm as rc_mod
 from tan.commands.monitor_cmd import MonitorError
 from tan.core import reset_plan as rp
@@ -192,6 +193,18 @@ def _run(
             "reset.wrapper-required", "error",
             f"{PLACE_ENV} is set but the J-Link program is not the configured wrapper ({reason}); "
             "nothing was spawned."))
+    if place:
+        # The wrapper's holder check is `<host>/<user>`, identical for every session of one
+        # user, so a pulse here could reset a board ANOTHER session holds (tan-cli#1457). Demand
+        # exactly what `tan flash --raw` demands: this session's lease nonce, labgrid showing
+        # us as the holder of this acquisition, and --probe-usb-path equal to the place's swd
+        # port. Refused before any spawn.
+        refusal, _verified = flash_raw._reservation_refusal(place, exe, probe_usb_path)
+        if refusal is not None:
+            return _fail(data, Issue(
+                "reset.reservation-required", "error",
+                f"refusing to pulse nRESET without a provably held bench reservation: {refusal} "
+                "Nothing was spawned."))
     # Single-spawn mode only when the J-Link program IS the configured wrapper: a real SEGGER
     # JLinkExe given JLINK_RUN_PLACE would skip ShowEmuList and pulse whichever probe
     # enumerates first.
@@ -256,8 +269,11 @@ def reset(
     probe_serial: str = typer.Option(None, "--probe-serial", metavar="SN", help="J-Link serial for this run."),
     probe_usb_path: str = typer.Option(
         None, "--probe-usb-path", metavar="BUS-PORT",
-        help="Select the J-Link at this USB port path (e.g. 3-4.2); verified before the JLinkExe "
-        "spawn exactly as `tan flash` does (TAN_PROBE_USB_PATH is exported for a masking wrapper)."),
+        help="Select the J-Link at this USB port path (e.g. 3-4.2). Without JLINK_RUN_PLACE it is "
+        "verified (ShowEmuList) before the JLinkExe spawn, as `tan flash` does. With JLINK_RUN_PLACE it "
+        "must equal the leased place's swd port (checked against labgrid before any spawn), there is "
+        "no ShowEmuList, and the wrapper's TAN_PROBE_ISOLATED_USB_PATH handshake is checked only "
+        "AFTER the pulse has run (TAN_PROBE_USB_PATH is exported for the masking wrapper)."),
     confirm_console: str = typer.Option(
         None, "--confirm-console", metavar="PORT",
         help="Serial port (or rfc2217:// URL) to watch for the reboot; opened before the pulse. "
@@ -276,17 +292,22 @@ def reset(
     jlink: str = typer.Option(
         None, "--jlink", metavar="PATH",
         help=f"The J-Link Commander binary (otherwise {JLINK_ENV}, PATH, then a SEGGER install root; "
-        "never the project .venv)."),
+        "never the project .venv). With JLINK_RUN_PLACE set, TAN_JLINK_WRAPPER (the absolute path of "
+        "the board-farm shim) is used instead and any other program is refused (reset.wrapper-required)."),
     output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
 ) -> None:
     """ONE bare nRESET pulse through J-Link: `r0`, wait --pulse-ms, `r1`. No connect, no halt, no
     connect-under-reset, no retry; it does not flash. Set JLINK_RUN_PLACE (with --probe-usb-path) in the
-    environment to pick the board-farm place for this command.
+    environment to pick the board-farm place for this command; that requires the session lease
+    (reset.reservation-required otherwise).
 
     \b
     tan reset --probe-usb-path 3-4.2
     JLINK_RUN_PLACE=aen-evk-02 tan reset --probe-usb-path 3-4.2 --pulse-ms 200 --format json
-    tan reset --probe-usb-path 3-4.2 --confirm-console rfc2217://gw:4001 --expect 'Zephyr'
+    tan reset --probe-usb-path 3-4.2 --confirm-console rfc2217://gw:4001 --expect 'Booting Zephyr'
+    (pick a banner printed some time AFTER reset: text emitted before J-Link exits is not counted)
+    (with JLINK_RUN_PLACE: also needs TAN_JLINK_WRAPPER, this session's TAN_LEASE_NONCE from
+    scripts/bench/tan-lease.sh, and labgrid-client showing you as the holder)
     (the reset is only claimed with --confirm-console; otherwise resetObserved is "unknown")
     """
     json_mode = resolve_format(output_format, ctx.obj, choices=OutputFormat) == "json"

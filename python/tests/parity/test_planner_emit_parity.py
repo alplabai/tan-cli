@@ -2404,6 +2404,104 @@ def test_shared_headers_match_the_build_plans_own_shared_artefact(
         + _first_diff(shared[0], got))
 
 
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_storage_mounts_c_matches_the_build_plans_own_shared_artefact(
+    planners, board
+):
+    """tan-cli#1216 (alp-sdk#2820): when the plan carries
+    `generated/storage_mount_table.c` (a mountable `storage:` partition),
+    `--emit storage-mounts-c` returns those exact bytes, which are also what
+    `emit_storage_mounts_c` prints.  When it does not, the standalone emit
+    keeps printing the empty table it always did."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith("/generated/storage_mount_table.c")]
+    from tan.planner.cli import emit_artefact
+    from tan.planner.headers import emit_storage_mounts_c, has_storage_mounts
+
+    got = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+    assert got == emit_storage_mounts_c(project)
+    if has_storage_mounts(project):
+        assert len(shared) == 1, f"{board}: plan carries {len(shared)} tables"
+        assert got == shared[0], (
+            f"{board}: --emit storage-mounts-c diverges from the build-plan's "
+            "sharedArtefacts " + _first_diff(shared[0], got))
+    else:
+        assert shared == [], f"{board}: plan carries a table with no mounts"
+
+
+def test_storage_mounts_c_with_no_mounts_is_the_empty_table(planners):
+    """No mountable partition: the plan omits the table and the standalone
+    emit is the same empty table as before the plan carried one."""
+    from tan.planner.cli import emit_artefact
+    from tan.planner.headers import emit_storage_mounts_c, has_storage_mounts
+
+    _, relocated = planners
+    for board in _boards():
+        try:
+            project = relocated.load_board_yaml(board)
+        except Exception:  # noqa: BLE001
+            continue
+        if has_storage_mounts(project):
+            continue
+        plan = json.loads(relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build")))
+        assert not any(a["path"].endswith("storage_mount_table.c")
+                       for a in plan["sharedArtefacts"])
+        out = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+        assert out == emit_storage_mounts_c(project) and out.strip()
+        return
+    pytest.skip("every example board mounts storage")
+
+
+#: Two littlefs partitions with `mount:` on E1M-AEN301's ospi0 NOR: no example
+#: board has a `status: ok` mountable partition, so the carried branch of the
+#: agreement test needs a synthetic one.
+_MOUNTED_STORAGE = """\
+name: test-aen-storage
+som:
+  sku: E1M-AEN301
+  hw_rev: r1
+
+cores:
+  m55_hp:
+    os: zephyr
+    app: ./m55_hp
+
+storage:
+  - { name: settings,        size_kib: 64,  fs: littlefs, flash_device: ospi0, mount: /lfs/settings }
+  - { name: app_data,        size_kib: 128, fs: littlefs, flash_device: ospi0, mount: /lfs/app }
+  - { name: mcuboot_scratch, size_kib: 32,  fs: raw,      flash_device: ospi0 }
+"""
+
+
+def test_storage_mounts_c_is_carried_when_a_partition_mounts(planners, tmp_path):
+    """The plan carries exactly one `generated/storage_mount_table.c` and
+    `--emit storage-mounts-c` returns those bytes (the table lists the
+    mounts)."""
+    from tan.planner.cli import emit_artefact
+
+    _, relocated = planners
+    board = tmp_path / "board.yaml"
+    board.write_text(_MOUNTED_STORAGE, encoding="utf-8")
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"] == "build/generated/storage_mount_table.c"]
+    assert len(shared) == 1
+    got = emit_artefact(project, "storage-mounts-c", board_yaml=board)
+    assert got == shared[0]
+    assert "/lfs/settings" in got and "/lfs/app" in got
+
+
 #: A `boot:` block that loads but `emit_sysbuild_conf` refuses: an explicit
 #: two-slot swap on E1M-AEN801's single-slot `memory_map:`.  (rsa3072 is
 #: refused at load on this family, so it cannot reach the emitters.)

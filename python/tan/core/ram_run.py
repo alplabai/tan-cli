@@ -82,6 +82,9 @@ class ElfImage:
     segments: tuple[Segment, ...]
     #: name -> (address, size)
     symbols: dict[str, tuple[int, int]]
+    #: names the symbol table defines more than once at different addresses (static
+    #: symbols of the same name in several files); `symbols` keeps the first of them.
+    ambiguous: frozenset[str] = frozenset()
 
 
 def parse_elf(data: bytes) -> ElfImage:
@@ -105,16 +108,19 @@ def parse_elf(data: bytes) -> ElfImage:
             )
             if p_type == 1:  # PT_LOAD
                 segments.append(Segment(p_paddr, p_vaddr, p_filesz, p_memsz, p_flags))
-        symbols = _symbols(data, shoff, shentsize, shnum)
+        symbols, ambiguous = _symbols(data, shoff, shentsize, shnum)
     except struct.error as err:
         raise RamRunError(f"truncated ELF file ({err})") from err
-    return ElfImage(entry, tuple(segments), symbols)
+    return ElfImage(entry, tuple(segments), symbols, ambiguous)
 
 
-def _symbols(data: bytes, shoff: int, shentsize: int, shnum: int) -> dict[str, tuple[int, int]]:
+def _symbols(
+    data: bytes, shoff: int, shentsize: int, shnum: int
+) -> tuple[dict[str, tuple[int, int]], frozenset[str]]:
     out: dict[str, tuple[int, int]] = {}
+    ambiguous: set[str] = set()
     if not shoff or not shnum:
-        return out
+        return out, frozenset()
     if shnum > MAX_SECTIONS:
         raise RamRunError(f"the ELF declares {shnum} sections; refusing to parse it")
     headers = [
@@ -143,8 +149,9 @@ def _symbols(data: bytes, shoff: int, shentsize: int, shnum: int) -> dict[str, t
             end = strtab.find(b"\0", st_name)
             name = strtab[st_name : end if end >= 0 else None].decode("ascii", "replace")
             if name:
-                out.setdefault(name, (st_value, st_size))
-    return out
+                if out.setdefault(name, (st_value, st_size)) != (st_value, st_size):
+                    ambiguous.add(name)
+    return out, frozenset(ambiguous)
 
 
 # ── the image plan ──────────────────────────────────────────────────────────
@@ -314,32 +321,63 @@ def plan_ram_image(
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def preamble(serial: str | None, speed: int, device: str) -> list[str]:
+def ap_pin_lines(ap_addr: int) -> list[str]:
+    """J-Link Commander lines that pin the attach to the AHB-AP at `ap_addr` (tan-cli#1566).
+
+    On the Ensemble E8 (a CoreSight SoC-600 / DPv3 part) J-Link's own AP scan attaches to
+    the FIRST M55 it finds: the HP's 0x00200000 when the resident image keeps the HP
+    powered, the HE's 0x00300000 otherwise. Declaring the AP with its address and making
+    it the AHB-AP to use removes that dependency. `CORESIGHT_SetIndexAHBAPToUse` alone is
+    not enough on DPv3: with a user AP map J-Link skips detection and cannot read an AP
+    whose address it was not given. Bench, E1M-AEN803 (labgrid e1m-aen-evk-01,
+    2026-11-08): Addr=0x00300000 -> `AP[0]: Core found`, CPUID 0x411FD220; the control
+    Addr=0x00200000 with the HP powered off -> `Could not find core`."""
+    if not isinstance(ap_addr, int) or isinstance(ap_addr, bool) or not 0 <= ap_addr <= 0xFFFFFFFF:
+        raise RamRunError(f"AP address {ap_addr!r} is not a 32-bit integer")
+    return [
+        f"exec CORESIGHT_AddAP = Index=0 Type=AHB-AP Addr=0x{ap_addr:08X}",
+        "exec CORESIGHT_SetIndexAHBAPToUse = 0",
+    ]
+
+
+def preamble(serial: str | None, speed: int, device: str, ap_addr: int | None = None) -> list[str]:
     """Everything up to and including `connect`, shared by both sessions. `serial` and
     `device` must be plain tokens and `speed` an int, or this refuses -- they are
-    the only free-form values in either script."""
+    the only free-form values in either script. `ap_addr` (optional) pins the attach to
+    that AHB-AP before `connect` (`ap_pin_lines`)."""
     if not isinstance(speed, int) or isinstance(speed, bool) or speed <= 0:
         raise RamRunError(f"J-Link speed {speed!r} is not a positive integer")
     for label, value in (("serial", serial), ("device", device)):
         if value is not None and not _SAFE_TOKEN.match(value):
             raise RamRunError(f"the J-Link {label} {value!r} is not a plain token")
     lines = [f"SelectEmuBySN {serial}"] if serial else []
-    return [*lines, "si SWD", f"speed {speed}", f"device {device}", "connect"]
+    pin = ap_pin_lines(ap_addr) if ap_addr is not None else []
+    return [*lines, "si SWD", f"speed {speed}", f"device {device}", *pin, "connect"]
 
 
 def load_script(
-    pre: Sequence[str], binary_path: str, image: RamImage, after_go: Sequence[str] = ()
+    pre: Sequence[str],
+    binary_path: str,
+    image: RamImage,
+    after_go: Sequence[str] = (),
+    hold_ms: int = 0,
 ) -> str:
     # Every address below is an `int` rendered with `0x%X`, never a string; the
     # caller passes only a path it staged itself (and already validated).
     """`connect; halt; loadbin; setpc; go` -- the proven Flow C load session.
     `loadbin` resets the core and re-reads the vector table (SP); `setpc` enters
     the reset handler. No MRAM address appears anywhere. `after_go` are extra read-only
-    lines run in the same session once the image is going (`tan.core.ram_watch`)."""
+    lines run in the same session once the image is going (`tan.core.ram_watch`).
+
+    `hold_ms > 0` (experimental hold mode, `TAN_FLASH_RAM_HOLD=1`, tan-cli#1372) keeps the
+    session open for that long after `go` with a plain `Sleep <ms>`: no halt, no register
+    or DEMCR/DWT write follows `go` (a halt after go+Sleep leaves the core incoherent,
+    alp-sdk#2076)."""
     if any(c in binary_path for c in "\r\n\0"):
         raise RamRunError("the image path carries a control character")
     return "\n".join(
-        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", *after_go, "exit"]
+        [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", *after_go,
+         *([f"Sleep {int(hold_ms)}"] if hold_ms > 0 else []), "exit"]
     ) + "\n"
 
 
@@ -494,6 +532,12 @@ def check_session(transcript: str, *, loadbin: bool) -> str | None:
 
 _AP_ADDR = re.compile(r"AP\[(\d+)\]\s*\(APAddr\s+(0x[0-9A-Fa-f]+)\)")
 _AP_CORE_FOUND = re.compile(r"AP\[(\d+)\]:\s*Core found")
+#: A user-specified AP map (`ap_pin_lines`, tan-cli#1566) makes J-Link skip its AP scan,
+#: so no `AP[n] (APAddr ...)` line appears; the address comes from the echoed command.
+_AP_PINNED = re.compile(r"CORESIGHT_AddAP\s*=\s*Index=(\d+)\b[^\n]*?\bAddr=(0x[0-9A-Fa-f]+)")
+#: J-Link's banner line proving it accepted the pinned map; without it the echoed
+#: `CORESIGHT_AddAP` is only what tan SENT, not what J-Link used.
+_AP_MAP_ACCEPTED = re.compile(r"AP map detection skipped|User specified AP map")
 _CPUID = re.compile(r"CPUID register:\s*(0x[0-9A-Fa-f]+)")
 _FOUND = re.compile(r"^Found Cortex-M\S*.*$", re.MULTILINE)
 
@@ -514,6 +558,12 @@ def attached_core(transcript: str) -> dict | None:
     transcript names no Core-found AP. More than one distinct Core-found AP is
     reported as `multiple`."""
     addrs = {int(m.group(1)): m.group(2) for m in _AP_ADDR.finditer(transcript)}
+    pinned: set[int] = set()
+    if _AP_MAP_ACCEPTED.search(transcript):
+        for m in _AP_PINNED.finditer(transcript):
+            if int(m.group(1)) not in addrs:
+                addrs[int(m.group(1))] = m.group(2)
+                pinned.add(int(m.group(1)))
     found = [int(m.group(1)) for m in _AP_CORE_FOUND.finditer(transcript)]
     cpuid = _CPUID.search(transcript)
     line = _FOUND.search(transcript)
@@ -528,6 +578,10 @@ def attached_core(transcript: str) -> dict | None:
     }
     if len(ports) > 1:
         out["multiple"] = [addrs.get(p) for p in ports]
+    elif out["apAddr"] is not None:
+        # `pinned`: the address is the one tan wrote, so the HE verdict is true by
+        # construction and the ITCM comparison is the independent identity evidence.
+        out["apAddrSource"] = "pinned" if ports[0] in pinned else "scanned"
     return out
 
 
@@ -550,16 +604,6 @@ def ap_verdict(attached: dict | None) -> str:
     except (TypeError, ValueError):
         return "unidentified"
     return {HE_AP_ADDR: "he", HP_AP_ADDR: "hp"}.get(addr, "unidentified")
-
-
-def combine_verdicts(ap: str, itcm: str) -> str:
-    """The AP is the PRIMARY identification; the ITCM-alias read corroborates. Agreement
-    or silence from the secondary keeps the primary; a contradiction is `conflict`. With
-    no usable AP the ITCM verdict stands alone."""
-    if ap in ("he", "hp"):
-        other = "hp" if ap == "he" else "he"
-        return "conflict" if itcm == other else ap
-    return itcm
 
 
 # ── which core did the generic attach land on? (tan-cli#1354) ───────────────

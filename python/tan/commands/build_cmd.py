@@ -105,7 +105,14 @@ from tan.commands.build.token_substitution import (
 )
 from tan.commands.build.workspace_patches import workspace_patch_issues
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
-from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
+from tan.core.user_defines import (
+    UserDefineError,
+    apply_core_defines,
+    apply_user_defines,
+    define_pairs,
+    parse_core_defines,
+    user_defines_problem,
+)
 from tan.core.board_files import all_topology_boards, unmatched_board_file_messages
 from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
@@ -129,7 +136,7 @@ from tan.core.sdk_discovery import (
     sdk_ladder_divergence_issue,
     with_sdk_search,
 )
-from tan.core.shapes import SDK_MARKER, is_sdk_root
+from tan.core.shapes import SDK_MARKER, is_sdk_root, rejected_sdk_root_message
 from tan.env import stderr_is_tty, terminal_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1304,6 +1311,8 @@ def _build(
     # already carries its defines in `plain_plan_text`.
     defines: list[str] | None = None,
     define_cores: list[str] | None = None,
+    # tan-cli#1579: `{coreId: [-DNAME=VALUE]}` applied to that slice only.
+    core_defines: dict[str, list[str]] | None = None,
 ) -> tuple[ExitCode, dict, list[Issue]]:
     define_slices: list[str] = []
     if plain_plan_text is not None:
@@ -1322,6 +1331,15 @@ def _build(
             except UserDefineError as err:
                 raise BuildError(err.code, err.message, ExitCode.VALIDATION_FAILURE) from err
             plan = parse_build_plan(text)
+    slice_defines: dict[str, list[str]] = {c: list(defines or []) for c in define_slices}
+    if core_defines:
+        try:
+            text = apply_core_defines(text, core_defines)
+        except UserDefineError as err:
+            raise BuildError(err.code, err.message, ExitCode.VALIDATION_FAILURE) from err
+        plan = parse_build_plan(text)
+        for c, d in core_defines.items():
+            slice_defines[c] = slice_defines.get(c, []) + d
 
     if mode == _MODE_PLAN:
         # Parsed (so a plan that will not load is still refused with its own
@@ -1343,7 +1361,6 @@ def _build(
         plan, demotions = apply_plan_token_substitution(
             plan,
             board_yaml_path=board_yaml,
-            exec_base=build_root,
             sdk_root=sdk_root,
             python=build_python.python,
             toolchain_root=toolchain.root,
@@ -1453,7 +1470,7 @@ def _build(
         json_mode=json_mode,
         pristine=pristine,
         slice_refusals=_python_refusals(build_python, demotions, mode),
-        user_defines={c: define_pairs(defines) for c in define_slices} if defines else None,
+        user_defines={c: define_pairs(d) for c, d in slice_defines.items()} or None,
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
@@ -1517,9 +1534,9 @@ def _build(
     issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
-    # A plain Zephyr build (`--board`) has no board.yaml, so no manifest to write:
-    # expected, not a warning (the stderr note still says why).
-    if manifest_reason is not None and plain_plan_text is None:
+    # The plain route (`--board`) has its own writer (tan-cli#1381), so a failed
+    # write there is as real as on the planned route (tan-cli#1517).
+    if manifest_reason is not None:
         # A failed manifest write used to report only through `on_output`
         # (stderr) -- so the envelope said `ok: true, issues: []` while
         # `system-manifest.yaml` still named the PREVIOUS run's status and
@@ -1553,6 +1570,8 @@ def _build(
     }
     if defines and define_slices:
         data["defines"] = {"args": list(defines), "slices": define_slices}
+    if core_defines:
+        data["coreDefines"] = {c: list(d) for c, d in core_defines.items()}
     return exit_code, data, issues
 
 
@@ -1710,6 +1729,15 @@ def build(
         help="Scope -D to the Zephyr slice(s) with this coreId, repeatable "
         "(default: every Zephyr slice).",
     ),
+    core_define: list[str] = typer.Option(
+        None,
+        "--core-define",
+        metavar="CORE:NAME=VALUE",
+        help="A CMake definition for ONE Zephyr slice (its coreId), repeatable, so one "
+        "run can give each core its own -D (`--core-define m55_hp:SHIELD=a "
+        "--core-define m55_he:SHIELD=b`); added after any plain -D (tan-cli#1579). "
+        "Planned (board.yaml) builds only.",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     pristine: bool = typer.Option(
         False,
@@ -1855,7 +1883,20 @@ def build(
             ExitCode.VALIDATION_FAILURE,
             json_mode,
         )
+    core_defines: dict[str, list[str]] = {}
+    if core_define:
+        if board is not None:
+            _refuse("build.conflicting-flags", "`--core-define` needs a planned build; with "
+                    "`--board` there is one slice, use `-D`.", ExitCode.VALIDATION_FAILURE, json_mode)
+        core_defines, bad = parse_core_defines(core_define)
+        if bad is not None and bad[0] == "build.define-reserved":
+            _refuse("build.define-reserved", bad[1], ExitCode.VALIDATION_FAILURE, json_mode)
+        if bad is not None:
+            _refuse("build.invalid-argument", bad[1], ExitCode.VALIDATION_FAILURE, json_mode)
     plain_plan_text: str | None = None
+    # The raw flag, kept before `sdk_root` is reassigned to the RESOLVED root (None
+    # for a rejected flag) so the refusal below can name what the caller typed.
+    sdk_root_flag = sdk_root
     if board is not None or define:
         _refuse_plain_route(board, define, board_yaml, plan_from, mode, json_mode)
 
@@ -2030,12 +2071,19 @@ def build(
             plain_plan_text=plain_plan_text,
             defines=normalise_defines(define or [])[0],
             define_cores=list(core) if core else None,
+            core_defines=core_defines or None,
         )
     except BuildError as err:
         message = err.message
         if err.code == "build.sdk-root-unresolved":
             # tan-cli#1423: where the ladder looked, beside the message's own remedy.
-            message = with_sdk_search(message, workspace_root)
+            if (sdk_root_flag or "").strip():
+                # `--sdk-root` is terminal (I-31): no other tier was tried, so
+                # name the rejected value instead of recommending the flag or
+                # claiming the ladder was searched (tan-cli#1521).
+                message = rejected_sdk_root_message(sdk_root_flag, "Nothing was built.")
+            else:
+                message = with_sdk_search(message, workspace_root)
         exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", message)]
     except Exception as err:  # noqa: BLE001 -- see below
         # The port's most-repeated defect class: an uncaught exception

@@ -786,7 +786,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # Registered as `bootstrap.sdk-credential-unstaged` in
         # contract/issue-codes.json before bumping.
         #
-        # 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
+        # 35 (tan-cli#1498 added the adopted-root pre-download refusal); was 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
         # runtime tripwire under that netrc route: ONE new
         # `log.warn("sdk-credential-unverified", ...)` call site, taken
         # instead of the `Authenticating the Zephyr SDK download ...` line
@@ -798,7 +798,23 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # collapsing them would put two verdicts behind one wire string.
         # Registered as `bootstrap.sdk-credential-unverified` in
         # contract/issue-codes.json before bumping.
-        expected_calls=34,
+        # 41, not 34, since tan-cli#1496: the pre/post-install sum checks and the
+        # toolchain download carry seven new `log.warn` sites, all on the registered
+        # `toolchain-pin-mismatch` / `toolchain-pin-unverified` / `toolchain-install`;
+        # 42 = 34 + 7 (#1496) + 1 (#1503, merged from dev).
+        # 43 since tan-cli#1552: `_west_reused_an_existing_sdk` adds one
+        # `log.warn("toolchain-install", ...)`, an already-registered code.
+        # 38 since tan-cli#1556: tan installs the minimal bundle itself, so the
+        # west failure warn, the reuse refusal, the post-west sum re-check, and
+        # all three `sdk-credential-*` warns are gone (codes retired from
+        # contract/issue-codes.json, pre-consumer); the two pinned installs now
+        # share `_report_fetch_failure`'s four warns plus one row-count refusal.
+        # 36 since tan-cli#1559: `_check_release_sum` and its two warns are gone
+        # (the sum is fetched only to explain a mismatch, inside
+        # `_report_fetch_failure`'s existing `toolchain-pin-mismatch` warn).
+        # 37 since tan-cli#1547: a relocation also warns
+        # `bootstrap.relocated-pins-stale` (registered).
+        expected_calls=37,
         # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
         # with the `FAILED`/`UNCHECKED` constants (declared below in
         # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
@@ -858,7 +874,9 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         #     counted) with a second, SDK-published authority for the same
         #     `core-unknown` code.
         # 9 -> 10.
-        expected_calls=10,
+        #   tan-cli#1488  `_core_required_failure` -- `debug-config.core-required`
+        #     (registered), a multi-core build with no `--core`. 10 -> 11.
+        expected_calls=11,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(
@@ -911,7 +929,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # guard (`crates/tan-cli/src/commands/validate.rs:124-129`):
         # `python-too-old`, the one #376 left out while its own module docstring
         # claimed three guards were implemented.
-        expected_calls=7,
+        expected_calls=8,
         sites=1,
     ),
     ("tan/commands/doctor_cmd.py", "checks_to_issues"): dict(
@@ -1026,7 +1044,8 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=80,
+        # 85 (tan-cli#1571): the `platform` check.
+        expected_calls=85,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

@@ -87,6 +87,23 @@ _NONCE_RE = re.compile(r"[0-9a-f]{32,128}")
 LABGRID_DIRS = ("~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin")
 
 
+def _read_blobs(specs: list[RawSpec]) -> tuple[list[RawSpec], list[str]]:
+    """Each spec with its size filled in, plus the sha256s. J-Link runs with cwd=<west topdir>,
+    not tan's cwd, so the path is made absolute once here: the file hashed is then the file
+    loadbin/verifybin open (tan-cli#1513)."""
+    sized: list[RawSpec] = []
+    digests: list[str] = []
+    for spec in specs:
+        path = os.path.abspath(spec.path)
+        try:
+            size, digest = os.path.getsize(path), sha256_of(path)
+        except OSError as err:
+            raise RawError(f"cannot read {path} ({err})") from err
+        sized.append(RawSpec(path, spec.address, size))
+        digests.append(digest)
+    return sized, digests
+
+
 def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     """Raw-write one slice's MRAM. Returns `(rc, entry, text-lines)` like `_flash_entry`."""
     kind, entry_id = target.kind, target.id
@@ -114,15 +131,7 @@ def run_raw_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     # ── the blobs: parsed, read, hashed and range-checked before anything is spawned ──
     try:
         specs = [parse_raw(raw) for raw in ctx.raw]
-        sized: list[RawSpec] = []
-        digests: list[str] = []
-        for spec in specs:
-            try:
-                size, digest = os.path.getsize(spec.path), sha256_of(spec.path)
-            except OSError as err:
-                raise RawError(f"cannot read {spec.path} ({err})") from err
-            sized.append(RawSpec(spec.path, spec.address, size))
-            digests.append(digest)
+        sized, digests = _read_blobs(specs)
         validate_ranges(sized, *reversed(_mram_window(ctx)))
         device = fa_str_checked(flash_args, "jlink_flash_device", False)
         if device is None:

@@ -279,6 +279,31 @@ def changelog_section_body(target: str) -> str:
     return "\n".join(body).strip()
 
 
+_BOT_BUMP_BULLET = re.compile(
+    r"^- `TAN_VERSION` moved to `[^`]+` off the published `[^`]+` tag"
+    r"[^\n]*(?:\n[ \t]+[^\n]*)*",
+    re.MULTILINE,
+)
+
+
+def changelog_has_user_facing_body(target: str) -> bool:
+    """Does the section hold anything besides bump_dev_version's own bullet?
+
+    That bot bullet opens `## [X] -- Unreleased` right after a prerelease tag
+    so a development tree's section is never empty, but it is internal
+    bookkeeping: counting it as content would let a stable tag publish a
+    release page with no preamble at all (tan-cli#1524).
+    """
+    body = _BOT_BUMP_BULLET.sub("", changelog_section_body(target))
+    body = re.sub(r"^### .*$", "", body, flags=re.MULTILINE)
+    return bool(body.strip())
+
+
+def changelog_carries_bot_bullet(target: str) -> bool:
+    """Is bump_dev_version's bullet still in the section?"""
+    return _BOT_BUMP_BULLET.search(changelog_section_body(target)) is not None
+
+
 def changelog_problems(tan_version: str) -> list[str]:
     """The section release.yml will slice must exist, and a development tree's
     must still be open. Both halves failed silently before: #212 made a missing
@@ -305,6 +330,23 @@ def changelog_problems(tan_version: str) -> list[str]:
                 f"slices a release body with nothing in it -- after four "
                 f"PyInstaller freezes, with the tag already pushed and "
                 f"immutable. Write the section, or move TAN_VERSION."
+            ]
+        if not is_development and not changelog_has_user_facing_body(target):
+            return [
+                f"CHANGELOG.md's `## [{target}]` section holds only the "
+                f"automated `TAN_VERSION moved to ...` bump bullet. That bullet "
+                f"keeps a development tree's section non-empty, but a v{target} "
+                f"tag would publish it as the whole release body. Carry the "
+                f"preamble (BREAKING list, alp-sdk floor) and the real entries "
+                f"into this section first."
+            ]
+        if not is_development and changelog_carries_bot_bullet(target):
+            return [
+                f"CHANGELOG.md's `## [{target}]` section still carries the "
+                f"automated `TAN_VERSION moved to ...` bump bullet. It is "
+                f"internal bookkeeping and a v{target} tag would publish it as "
+                f"a user-facing entry. Delete it when carrying the preamble "
+                f"over."
             ]
         return []
     return [

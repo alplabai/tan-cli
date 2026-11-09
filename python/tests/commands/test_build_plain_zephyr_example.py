@@ -295,3 +295,36 @@ def test_plain_route_stamps_and_records_defines(world):
     assert stamp.read_text() == "SHIELD=a\n"
     env = envelope_of(_run(world, "--board", BOARD, "-D", "SHIELD=b"))
     assert "build.configure-cache-reset" in [i["code"] for i in env["issues"]]
+
+
+@posix_only
+def test_plain_route_manifest_write_failure_reaches_the_envelope(world):
+    # tan-cli#1517: the plain route has its own manifest writer, so a failed
+    # write must be reported, not swallowed as ok:true / issues:[].
+    assert envelope_of(_run(world, "--board", BOARD))["ok"] is True
+    manifest = world["out"] / "build" / "system-manifest.yaml"
+    assert manifest.is_file()
+    manifest.chmod(0o444)
+    world["out"].joinpath("build").chmod(0o555)
+    try:
+        if os.access(manifest, os.W_OK):
+            pytest.skip("permissions are not enforced for this user")
+        env = envelope_of(_run(world, "--board", BOARD))
+    finally:
+        world["out"].joinpath("build").chmod(0o755)
+        manifest.chmod(0o644)
+    assert "build.manifest-write-failed" in [i["code"] for i in env["issues"]]
+
+
+def test_plain_route_rejected_sdk_root_names_the_flag(world, tmp_path):
+    # tan-cli#1521: a rejected --sdk-root is terminal; the refusal names it
+    # rather than claiming the whole ladder was searched.
+    bad = tmp_path / "not-an-sdk"
+    bad.mkdir()
+    proc = run_tan(
+        "build", "--project", str(world["app"]), "--board", BOARD,
+        "--sdk-root", str(bad), "--format", "json", cwd=world["out"],
+    )
+    (issue,) = [i for i in envelope_of(proc)["issues"] if i["code"] == "build.sdk-root-unresolved"]
+    assert str(bad) in issue["message"]
+    assert "Neither" not in issue["message"]

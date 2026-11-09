@@ -710,3 +710,20 @@ def test_lease_changed_parser_is_strict():
     assert raw_write.lease_changed("  changed: a\n  changed: b\n") is None
     assert raw_write.lease_changed("  changed:\n") is None
     assert raw_write.lease_changed("nothing") is None
+
+
+def test_a_relative_blob_path_is_the_file_hashed_and_the_file_written(
+        tmp_path, tmp_path_factory, monkeypatch):
+    """tan-cli#1513: J-Link runs in the west topdir, so the script must carry an absolute path."""
+    blobs, _paths = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    bench = tmp_path_factory.mktemp("bench")  # tan's cwd, away from the J-Link stub dir
+    (bench / "a.bin").write_bytes(blobs[0])
+    (bench / "b.bin").write_bytes(blobs[1])
+    monkeypatch.chdir(bench)
+    rc, data, issues, _lines, _sdk = _run(tmp_path, ["a.bin@0x80010000", "b.bin@0x8057C000"])
+    assert rc == 0, (data, issues)
+    script = jl.scripts[-1]
+    assert f"loadbin {bench / 'a.bin'} 0x80010000" in script
+    assert f"verifybin {bench / 'b.bin'} 0x8057C000" in script
+    assert [w["sha256"] for w in data["entries"][0]["raw"]["writes"]] == [_sha(b) for b in blobs]

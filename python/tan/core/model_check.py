@@ -141,7 +141,7 @@ def _exact_hint_line(report: dict) -> str | None:
     """The upgrade-path advertisement -- ethos_u only (the sole backend with
     a free, un-gated compiler), and only while the report is STILL a static
     screen. Suppressed when a note already explains an `--exact` attempt
-    (`tan.model.check._maybe_exact_ethos_u`'s own notes all open with
+    (`tan.model.check._exact_ethos_u`'s own notes all open with
     "--exact ..."); printing both would repeat the same install command
     twice in one report. Deliberately NOT a substring check on "vela" --
     every ethos_u table is itself named `<variant>@vela-<ver>.json`

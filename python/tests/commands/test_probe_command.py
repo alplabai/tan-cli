@@ -14,6 +14,7 @@ from tan.cli import app
 from tan.commands import flash_cmd, probe_cmd
 from tan.core import probe_plan as pp
 from tan.core.jlink_probe import JLinkProbe
+from tan.core import ram_run
 from tan.core.ram_run import preamble
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
@@ -460,6 +461,7 @@ def test_target_and_contradiction_and_dpidr_rules():
     assert pp.is_he_target("m55_he", None) and pp.is_he_target(None, "m55_he")
     assert not pp.is_he_target("m55_hp", "m55_he") and not pp.is_he_target(None, None)
     assert pp.core_contradiction("m55_he", "conflict-hp") and pp.core_contradiction("m55_hp", "he")
+    assert pp.core_contradiction("m55_he", "conflict")  # tan-cli#1488
     assert pp.core_contradiction("m55_he", "unidentified") is None
     assert pp.core_contradiction(None, "hp") is None
     assert pp.dpidr_state(None, "0x1") is None and pp.dpidr_state("0x4C013477", None) == "unread"
@@ -471,3 +473,44 @@ def test_a_core_with_no_slice_is_reported_in_the_envelope(env, monkeypatch):
     FakeJlink(monkeypatch, ap="hp")
     rc, _d, issues, _ = _run(env, "read", "0x80010000", "1", core="m55_hp", build_root=_manifest(env))
     assert rc == 0 and codes(issues) == ["probe.no-manifest"] and "no slice" in issues[0].message
+
+
+# tan-cli#1566: the same E8 HE pin as `tan flash --ram`.
+@pytest.mark.parametrize(
+    "silicon, core, pinned",
+    [
+        ("alif:ensemble:e8", "m55_he", True),
+        ("alif:ensemble:e4", "m55_he", False),
+        ("alif:ensemble:e8", "m55_hp", False),
+    ],
+)
+def test_the_he_pin_reaches_probe_only_for_an_e8_he_attach(env, monkeypatch, silicon, core, pinned):
+    from tan.commands import build_output
+
+    (env / "metadata").mkdir()
+    monkeypatch.setattr(probe_cmd, "resolve_metadata_sdk_root", lambda *_a: env)
+    monkeypatch.setattr(
+        build_output, "read_sdk_som_and_soc", lambda *a, **k: (silicon, "V", [], 0, [])
+    )
+    jl = FakeJlink(monkeypatch)
+    slices = [(core, "{jlink_device: Cortex-M55}")]
+    _run(env, "identify", build_root=_manifest(env, slices=slices), core=core)
+    pin = "exec CORESIGHT_AddAP = Index=0 Type=AHB-AP Addr=0x00300000"
+    scripts = jl.probe_scripts()
+    assert scripts and all((pin in s) is pinned for s in scripts)
+    if pinned:  # the pin sits right before `connect`, as in the --ram attach
+        assert all(
+            s.splitlines()[s.splitlines().index("connect") - 2 : s.splitlines().index("connect")]
+            == ram_run.ap_pin_lines(ram_run.HE_AP_ADDR)
+            for s in scripts
+        )
+
+
+def test_build_root_is_the_dir_above_build_as_for_flash(env, monkeypatch):
+    """tan-cli#1589: the `--build-root` value `tan build`/`tan flash` take
+    (manifest at <root>/build/) also finds the manifest here."""
+    _manifest(env)
+    _rc, data, issues, _ = _run(env, "identify", build_root=str(env), core="m55_he")
+    assert data["manifestPresent"] is True
+    assert data["buildRoot"] == str(env / "build")  # where the manifest was found, as flash
+    assert "probe.no-manifest" not in codes(issues)

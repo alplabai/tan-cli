@@ -95,15 +95,80 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`a5a137c7b`**
-  (`a5a137c7b594ebb5d451177803c0eb324069e86b`, alp-sdk `dev`) — the
-  `0dee99fb5` -> `a5a137c7b` planner re-sync (alp-sdk#2795 `pinctrl_som_power`,
-  #2736 in range). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
-  <a5a137c7b>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
+- **Current vendor point (all templates):** **`a70eec741`**
+  (`a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7`, alp-sdk `dev`) — the tan-cli#1585 planner re-sync. No
+  scaffold input moved between `65583f78a` and this commit (`templates/**` is untouched and the 12
+  `examples/**` files that changed -- `aen-evk-demo`, `aen-lptimer-regcheck`, `aen-power-stop`,
+  `microros-ros2-v2n`, `uart-rx-ringbuf` -- are not scaffold templates or catalog entries), so no vendored byte changed; `scaffold_byte_parity.py --sdk <a70eec741>` is rc 0,
+  **10/10**. The pin moved in the same change as every other pin site.
+
+- **Prior vendor point (all templates):** **`65583f78a`**
+  (`65583f78a6f93743235b56f0723cb36df7cc0df0`, alp-sdk `dev`, 42 commits past tag `v0.18.0`) — the
+  tan-cli#1569 planner re-sync (the alp-sdk#3033 signing-key fix needed a pin that carries it). Unlike the
+  last several re-syncs this one DID move scaffold inputs, so the tree was re-vendored by a 3-way merge
+  per file (base = the old emit, theirs = the new emit, ours = the vendored bytes with its deliberate edits):
+  doc links `v0.17.0` -> `v0.18.0`; `edge-ai` and `sensor` `src/main.c` / `board.yaml` link comments;
+  `iot` `src/cc3501e_bridge.c`, `src/main.c`, `board.yaml`, README; the `multicore-mailbox` AEN801 tree
+  (README, `board.yaml`, both `main.c`, `testcase.yaml`, and twelve new per-board `boards/*.conf|overlay`
+  files the emit now ships). Two deliberate-edit changes: the `edge-ai`/`E1M-AEN801` `README.md`
+  `deepx_v2m_note` entry is RETIRED (alp-sdk's emit now says a DEEPX path needs a new project with a V2M
+  `som.sku`, which is what the correction said), and `multicore-mailbox`'s `board.yaml`
+  `e1m_modules_pointer` entry was RE-ANCHORED on the new SRAM0 `sram_ipc` sentence (same dead-pointer
+  defect, new words). `scaffold_byte_parity.py --sdk <65583f78a>` is rc 0, **10/10**. The pin moved in the
+  same change as every other pin site.
+
+- **Earlier vendor point (all templates):** **`84132b98a`**
+  (`84132b98a53a9f0e5ef9e7622a38c6d637439873`, alp-sdk tag `v0.17.0`) — the stable release
+  merge, for tan `0.7.0` (tan-cli#1258). Re-vendored links only: the emit's doc-link renderer
+  now renders `blob|tree/v0.17.0/`, so every vendored `v0.17.0-rc2` link (19 files) plus the
+  matching `DELIBERATE_EDITS` strings in `scaffold_byte_parity.py` moved to `v0.17.0`. No other
+  byte changed. `scaffold_byte_parity.py --sdk <v0.17.0>` is rc 0, **10/10**; before the swap,
+  10/10 FAIL. The pin moved in the same change as every other pin site.
+
+- **Prior vendor point (all templates):** **`84a6e0d21`**
+  (`84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`, alp-sdk tag `v0.17.0-rc2`) — the release merge of `dev` at
+  `1d20103ba` (tree-identical to it except the release bump). See the note below.
+
+  The `84a6e0d21` -> `64481b8e9` planner re-sync (tan-cli#1525) moves ONE scaffold input:
+  alp-sdk#2826 (`b874b1334`, warm-aware CC3501E bring-up in every `cc3501e_bridge` copy, #2797)
+  rewrote `examples/aen/aen-cc3501e-*/src/cc3501e_bridge.c`, which the `iot` scaffold ships as
+  `iot/E1M-AEN801/src/cc3501e_bridge.c`. That one file was re-vendored byte-for-byte from the emit
+  (the bytes are the only change; the vendor-point label above is unchanged because the rest of the
+  tree is identical at both commits), and
+  `scaffold_byte_parity.py --sdk <64481b8e9 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
+  The `64481b8e9` -> `7584a3562` planner re-sync (tan-cli#1541) moves no scaffold input. Its
+  `examples/**` edits (`aen-power-stop`, `aen-trace-runner`, `aen-hp-core-smoke`) are not templates
+  or catalog entries, so nothing was re-vendored and the label above is unchanged.
+  `scaffold_byte_parity.py --sdk <7584a3562 + local v0.17.0-rc2 tag>` is rc 0, **10/10**.
+
+- **Prior vendor point (all templates):** **`1d20103ba`**
+  (`1d20103ba367668ab4ed9b139dc69c246198d2f1`, alp-sdk `dev`) — the
+  `5a612e24a` -> `1d20103ba` planner re-sync (alp-sdk#2822: carveout.py
+  `_resolve_mailbox_channel`, kconfig.py RAM console size). The range moves no scaffold input, so nothing was re-vendored and `scaffold_byte_parity.py --sdk
+  <1d20103ba>` is rc 0, **10/10** (template, sku) pairs PASS against the tree
   unchanged. The pin moves in the same change as `parity.yml`'s
   `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
   `ref:` and `test_planner_relocation_freshness.py`'s
   `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`.
+
+  Re-vendored links only, for tan `v0.7.0-rc1` (tan-cli#1258): alp-sdk
+  `v0.17.0-rc2` (tag commit `84a6e0d211d6cc7898e1c3827cfff9b43ed309c7`,
+  tree-identical to this point plus the release bump) is cut from this commit, so the emit's doc-link renderer renders
+  `blob|tree/v0.17.0-rc2/`, and every vendored `v0.17.0-rc1` link (20 files)
+  plus the matching `DELIBERATE_EDITS` strings in `scaffold_byte_parity.py`
+  moved to `v0.17.0-rc2`. No other byte changed. Verified against a checkout
+  carrying a local `v0.17.0-rc2` tag (what `release-sdk-parity`'s
+  `fetch-tags: true` checkout sees): `scaffold_byte_parity.py` rc 0, **10/10**
+  pairs PASS; before the swap, 10/10 FAIL.
+
+- **Prior vendor point (all templates):** **`5a612e24a`**
+  (`5a612e24ad895f35a1365792f9e52ee929926d2d`) — the
+  `a5a137c7b` -> `5a612e24a` planner re-sync (alp-sdk#2820); nothing re-vendored.
+
+- **Prior vendor point (all templates):** **`a5a137c7b`**
+  (`a5a137c7b594ebb5d451177803c0eb324069e86b`) — the
+  `0dee99fb5` -> `a5a137c7b` planner re-sync (alp-sdk#2795, #2736); nothing re-vendored.
 
 - **Prior vendor point (all templates):** **`183b05509`**
   (`183b05509b37b44c25d3b8ae64c1aa1a10523ffd`, alp-sdk `dev`) — the
@@ -654,7 +719,7 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.17.0-rc1` — the ref every shipped doc link in this tree pins, and the
+- Ref: `v0.18.0` — the ref every shipped doc link in this tree pins, and the
   one `tests/core/test_template_integrity.py` reads off THIS line to check
   them against. It is the emit's OWN rendered ref rather than a hand-edit:
   the emit renders the link ref from the SDK's `VERSION` (dropping any
@@ -668,14 +733,17 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`a5a137c7b`** (alp-sdk `dev`, full sha
-  `a5a137c7b594ebb5d451177803c0eb324069e86b`) — the checkout the emit was RUN
+- Commit: **`a70eec741`** (alp-sdk `dev`, full sha
+  `a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `0dee99fb5` (tan-cli#1440), and before that
+  This line used to say `84132b98a` (tan-cli#1258), and before that `1d20103ba` (tan-cli#1487), and before that
+  `5a612e24a` (tan-cli#1216), and before that
+  `a5a137c7b` (tan-cli#1393), and before that
+  `0dee99fb5` (tan-cli#1440), and before that
   `c4eb27645` (tan-cli#1427), and before that
   `030de105d` (tan-cli#1401), and before that
   `2d2a85333` (tan-cli#1216), and before that
@@ -779,7 +847,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **fifty-one** live entries
+The `DELIBERATE_EDITS` table below currently carries **fifty** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand). The `34c11c9de` re-vendor retired fourteen of the
 forty-one below — every `workflow_pointer` entry — and added twenty-four
@@ -1033,8 +1101,8 @@ strictness exists to catch.
    forward — lives in alp-sdk's `examples/ai/cold-chain-monitor/README.md`
    and `src/main.c`, not here. Filed upstream as alp-sdk#1688; this entry
    retires the moment that lands and this tree is re-vendored.
-5. **`edge-ai`/`E1M-AEN801`'s `README.md`: the DEEPX DX-M1 retarget sentence
-   (tan-cli#814, re-anchored tan-cli#1001 review after a false retirement).**
+5. **(RETIRED at tan-cli#1569, history only) `edge-ai`/`E1M-AEN801`'s `README.md`: the DEEPX DX-M1 retarget sentence
+   (tan-cli#814, re-anchored tan-cli#1001 review after a false retirement).** The `65583f78a` re-vendor's emit says it: "a new project with a V2M `som.sku` ... not a one-line `som.sku` edit here". Entry 6 below (the `board.yaml` half) is still live.
    The original tan-cli#814 emit said "Flip `som.sku` in `board.yaml` to
    `E1M-V2M101` for the DEEPX DX-M1 path" — correct on the `E1M-V2N101`
    sibling (V2N101/V2M101 share one PCB, so every other field the flip

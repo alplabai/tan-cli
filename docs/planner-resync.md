@@ -44,3 +44,6 @@ The bot's re-sync PRs and hand-finished ones both use that prefix.
    merged.
 3. A bot re-sync PR that nobody has picked up does not block other PRs.
    Whoever picks it up re-syncs on top of the `dev` they find.
+
+Who updates a branch that has to rebase after a re-sync is covered in
+`docs/pr-branch-updates.md`.

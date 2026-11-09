@@ -54,6 +54,14 @@ def _point_home_at(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
 
 
+def _plant_gcc(root: Path) -> None:
+    bindir = root / "gnu" / "arm-zephyr-eabi" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    gcc = bindir / _GCC_NAME
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+
+
 def test_no_sdk_root_is_unknown_not_a_guess(tmp_path, monkeypatch):
     _point_home_at(monkeypatch, tmp_path)
     check = doctor_cmd.toolchain_check(None)
@@ -83,12 +91,52 @@ def test_a_verified_stamp_matching_the_pin_is_a_pass(tmp_path, monkeypatch):
     manifest = tp.parse_toolchain_manifest(MANIFEST)
     store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
     store_dir.mkdir(parents=True)
+    _plant_gcc(store_dir)
     stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
     (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
 
     check = doctor_cmd.toolchain_check(sdk_root)
     assert check.status == "pass"
     assert manifest.version in check.detail
+    # tan-cli#1483: never claims the archive bytes were checked against the pin.
+    assert "not re-hashed" in check.detail
+
+
+def test_a_stamp_over_a_deleted_compiler_is_a_fail_not_verified(tmp_path, monkeypatch):
+    """tan-cli#1483: the stamp is written after a compiler probe, but a later
+    partial delete must not keep reporting 'verified'."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    store_dir.mkdir(parents=True)
+    stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert check.fix == "tan bootstrap"
+    assert "gone" in check.detail
+    assert not tp.store_compiler_present(store_dir, is_windows=os.name == "nt")
+
+
+def test_a_mismatched_first_host_sdk_does_not_hide_an_installed_pinned_copy(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1483: adoption checked only the FIRST detected root."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    home = tmp_path / "home"
+    old = home / "zephyr-sdk-0.17.0"
+    good = home / "zephyr-sdk-1.0.1"
+    for root, ver in ((old, "0.17.0"), (good, "1.0.1")):
+        _plant_gcc(root)
+        (root / "sdk_version").write_text(ver + "\n", encoding="utf-8")
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(old))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "pass"
+    assert str(good) in check.detail
 
 
 def test_a_stamp_for_a_moved_pin_is_a_fail_not_a_pass_version_skew_masquerading_as_health(
@@ -161,6 +209,8 @@ def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, m
     assert check.status == "pass"
     assert "1.0.1" in check.detail
     assert str(host_sdk) in check.detail
+    # tan-cli#1520: matched on the sdk_version text only -> same caveat as the stamped pass.
+    assert "never compared with the pin" in check.detail
     # No tan-written stamp exists anywhere -- this is the host-scan path,
     # not `stamp_matches_pin`, that produced the pass.
     manifest = tp.parse_toolchain_manifest(MANIFEST)
@@ -235,3 +285,76 @@ def test_doctor_and_bootstrap_agree_by_construction_same_verdict_function(tmp_pa
     assert doctor_verdict is bootstrap_verdict is True
     # Both modules reach the identical function object, not two copies.
     assert doctor_cmd.toolchain_provision.stamp_matches_pin is bootstrap_cmd.toolchain_provision.stamp_matches_pin
+
+
+def _stamp(root: Path) -> None:
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / tp.STAMP_FILENAME).write_text(
+        tp.render_stamp(tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi")),
+        encoding="utf-8",
+    )
+
+
+def test_adopted_root_with_a_gone_compiler_does_not_say_bootstrap_repairs_it(tmp_path, monkeypatch):
+    """tan-cli#1498: `tan bootstrap` never repairs a directory under an adopted
+    ALP_TOOLCHAIN_ROOT, so doctor must not offer it as the remedy."""
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    _stamp(adopted / tp.store_dir_name(manifest.version))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "to repair it" not in check.detail
+    assert "will not repair" in check.detail
+    assert "ALP_TOOLCHAIN_ROOT" in check.detail
+    assert not check.fix
+
+
+def test_default_root_with_a_gone_compiler_still_points_at_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    _stamp(tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "tan bootstrap" in check.detail
+    assert check.fix == "tan bootstrap"
+
+
+def test_adopted_root_with_a_different_pin_stamp_does_not_offer_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store = adopted / tp.store_dir_name(manifest.version)
+    store.mkdir(parents=True)
+    (store / tp.STAMP_FILENAME).write_text(
+        tp.render_stamp(tp.ToolchainStamp("0.0.1-other", "0" * 64, "arm-zephyr-eabi")),
+        encoding="utf-8",
+    )
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "different pin" in check.detail
+    assert "will not repair" in check.detail
+    assert not check.fix
+
+
+def test_adopted_root_with_an_unstamped_existing_dir_does_not_offer_bootstrap(tmp_path, monkeypatch):
+    _point_home_at(monkeypatch, tmp_path)
+    adopted = tmp_path / "bench"
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    (adopted / tp.store_dir_name(manifest.version)).mkdir(parents=True)
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "will not repair" in check.detail
+    assert not check.fix

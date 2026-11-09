@@ -101,6 +101,51 @@ class RunResult:
     power_mj: float | None       # None on host — on-board monitor read (HW-gated)
     runs: int
     energy: EnergyMeasurement | None = None  # None until a real bench run populates it
+    # Set when the caller's sample was cast to the model input dtype (tan-cli#1497).
+    input_cast: str | None = None
+
+
+_ORT_DTYPES = {
+    "float": "float32", "float16": "float16", "double": "float64",
+    "int64": "int64", "int32": "int32", "int16": "int16", "int8": "int8",
+    "uint64": "uint64", "uint32": "uint32", "uint16": "uint16", "uint8": "uint8",
+    "bool": "bool",
+}
+
+
+def _np_dtype(ort_type: str) -> str:
+    """`tensor(int64)` -> `int64`; anything unrecognised (sequences, strings)
+    falls back to float32, the previous behaviour (tan-cli#1486)."""
+    inner = ort_type[ort_type.find("(") + 1:ort_type.rfind(")")] if "(" in ort_type else ort_type
+    return _ORT_DTYPES.get(inner, "float32")
+
+
+def _sample(shape: list, ort_type: str, seed: int) -> Any:
+    import numpy as np
+    dtype = _np_dtype(ort_type)
+    dims = [(1 if not isinstance(d, int) else d) for d in shape]
+    if np.dtype(dtype).kind == "f":
+        return np.random.default_rng(seed).standard_normal(dims).astype(dtype)
+    return np.zeros(dims, dtype=dtype)   # token ids / pixels / flags: a valid, deterministic value
+
+
+def describe_input_cast(sample_dtype: Any, want: str) -> str | None:
+    """A sentence when casting a `sample_dtype` sample to @want changes its
+    dtype (tan-cli#1497), naming the silent value loss when float becomes
+    integer/bool; None when no cast happens."""
+    import numpy as np
+    have = np.dtype(sample_dtype)
+    if have == np.dtype(want):
+        return None
+    msg = f"input sample dtype {have} was cast to the model input dtype {want}"
+    wd = np.dtype(want)
+    if wd.kind == "b":
+        msg += "; every nonzero value became True"
+    elif have.kind == "f" and wd.kind in "iu":
+        msg += "; fractional values were truncated toward zero"
+    elif not np.can_cast(have, wd, "safe"):
+        msg += "; precision or range may be lost"
+    return msg
 
 
 def default_input(onnx_path: Path, *, seed: int = 0) -> Any:
@@ -111,10 +156,10 @@ def default_input(onnx_path: Path, *, seed: int = 0) -> Any:
     import onnxruntime as ort
     try:
         sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-        shape = [(1 if not isinstance(d, int) else d) for d in sess.get_inputs()[0].shape]
+        first = sess.get_inputs()[0]
+        return _sample(first.shape, first.type, seed)
     except Exception as exc:
         raise MeasureError(f"could not load model {Path(onnx_path).name}: {exc}") from exc
-    return np.random.default_rng(seed).standard_normal(shape).astype(np.float32)
 
 
 def run_host(onnx_path: Path, input_array: Any, *, runs: int = 20) -> RunResult:
@@ -122,19 +167,27 @@ def run_host(onnx_path: Path, input_array: Any, *, runs: int = 20) -> RunResult:
     import onnxruntime as ort
     try:
         sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-        name = sess.get_inputs()[0].name
-        x = input_array.astype(np.float32)
-        out = sess.run(None, {name: x})[0]          # warm-up + a real output
+        inputs = sess.get_inputs()
+        # The sample feeds the FIRST input in that input's own dtype; any further
+        # inputs get a deterministic default sample (tan-cli#1486).
+        raw = np.asarray(input_array)
+        want = _np_dtype(inputs[0].type)
+        input_cast = describe_input_cast(raw.dtype, want)
+        feed = {inputs[0].name: raw.astype(want)}
+        for extra in inputs[1:]:
+            feed[extra.name] = _sample(extra.shape, extra.type, 0)
+        out = sess.run(None, feed)[0]          # warm-up + a real output
         times = []
         for _ in range(max(1, runs)):
             t0 = perf_counter()
-            sess.run(None, {name: x})
+            sess.run(None, feed)
             times.append((perf_counter() - t0) * 1000.0)
     except Exception as exc:
         raise MeasureError(f"host run failed: {exc}") from exc
     return RunResult(backend="cpu-host", latency_ms=round(median(times), 3),
                      output_argmax=int(np.asarray(out).ravel().argmax()),
-                     peak_sram_kib=None, power_mj=None, runs=len(times))
+                     peak_sram_kib=None, power_mj=None, runs=len(times),
+                     input_cast=input_cast)
 
 
 @dataclass(frozen=True)

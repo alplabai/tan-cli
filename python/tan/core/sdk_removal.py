@@ -249,6 +249,11 @@ def removal_would_take_out(candidate: str, target: str) -> bool:
         return True
     if not (is_absolute_either_platform(candidate) and is_absolute_either_platform(target)):
         return False
+    if _nested_inside(candidate, target):
+        # Removing a directory removes everything under it: a candidate that
+        # LIVES INSIDE the target (`sdk remove sdk-cache` while
+        # `sdk-cache/v0.19.0` is pinned) is destroyed with it.
+        return True
     try:
         if os.path.islink(target):
             # Removing a link unlinks the LINK, so the only thing this
@@ -261,6 +266,50 @@ def removal_would_take_out(candidate: str, target: str) -> bool:
         # Missing, unreadable, or containing a NUL -- the same best-effort
         # degrade every other filesystem read in this module applies. `False`
         # here is the lexical arm's answer, already computed above.
+        return False
+
+
+def _lex(path: str) -> str:
+    return os.path.normcase(path).replace("\\", "/").rstrip("/")
+
+
+def _lexically_inside(child: str, parent: str) -> bool:
+    """`child` is strictly below `parent`, compared on whole components."""
+    c, p = _lex(child), _lex(parent)
+    return bool(p) and c != p and c.startswith(p + "/")
+
+
+def _nested_inside(child: str, parent: str) -> bool:
+    """`child` is strictly below the real directory `parent` -- lexically, or
+    after resolving symlinks in either spelling. A `parent` that is itself a
+    link is never an ancestor: unlinking it destroys nothing behind it."""
+    if _lexically_inside(child, parent):
+        return True
+    try:
+        if os.path.islink(parent):
+            return False
+        return _lexically_inside(os.path.realpath(child), os.path.realpath(parent))
+    except (OSError, ValueError):
+        return False
+
+
+def removal_would_damage(candidate: str, target: str) -> bool:
+    """Whether removing `target` destroys `candidate` OR cuts a piece out of
+    it: `target` is a strict subdirectory of the load-bearing `candidate`
+    (`sdk remove ~/.alp/sdk-cache/v0.19.0/metadata` against a pinned
+    `v0.19.0`). Leaves the install half-present, so it refuses like any other
+    orphaning removal."""
+    if removal_would_take_out(candidate, target):
+        return True
+    if not (is_absolute_either_platform(candidate) and is_absolute_either_platform(target)):
+        return False
+    if _lexically_inside(target, candidate):
+        return True
+    try:
+        if os.path.islink(target):
+            return False
+        return _lexically_inside(os.path.realpath(target), os.path.realpath(candidate))
+    except (OSError, ValueError):
         return False
 
 

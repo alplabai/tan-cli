@@ -203,15 +203,26 @@ def test_version_probe_stays_within_the_onedir_budget():
     caught the original regression, and the e2e harness (getting-started.yml)
     asserts correctness only, never speed.
     """
-    start = time.monotonic()
-    subprocess.run(
-        [str(BINARY), "--version"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=5,
-    )
-    elapsed = time.monotonic() - start
+    # One untimed warm-up launch, then the best of three. The first exec of a
+    # freshly unpacked macOS bundle pays a one-time dylib verification cost
+    # (tan-cli#1506) that is not what this gate is about: the v0.7.0-rc1 tag's
+    # macos-15-intel build measured 1.20 s and then 0.83 s on single cold
+    # shots while the same tree is ~0.29 s warm on Linux. A --onefile
+    # regression re-extracts on EVERY launch, so its best-of-three stays at
+    # its 0.83-0.88 s floor and still fails this gate.
+    def _probe() -> float:
+        start = time.monotonic()
+        subprocess.run(
+            [str(BINARY), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+        return time.monotonic() - start
+
+    _probe()
+    elapsed = min(_probe() for _ in range(3))
     assert elapsed < 0.6, (
         f"--version took {elapsed:.2f}s -- over the 0.6s onedir budget "
         f"(measured local baseline: 0.27-0.34s over 10 runs; a --onefile "

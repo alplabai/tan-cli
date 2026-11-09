@@ -60,10 +60,10 @@ the release page is the summary — see `alp-lab:writing-release-notes`).
 
 ## `file:line` citations
 
-**Prefer the symbol to the coordinate.** `SDK_TOKEN_ENV_VARS` in
-`tan/core/toolchain_provision.py` cannot rot; the same constant's line number
-did, by 79 lines, before that fragment was ever folded (tan-cli#1191's title
-case). A fragment sits in this directory for weeks while the tree moves
+**Prefer the symbol to the coordinate.** `stamp_provenance` in
+`tan/core/toolchain_provision.py` cannot rot; a constant's line number in that
+same file did, by 79 lines, before its fragment was ever folded (tan-cli#1191's
+title case). A fragment sits in this directory for weeks while the tree moves
 underneath it, and `splice()` copies it byte-for-byte, so a stale coordinate
 ships permanently. Five rotted citations were measured in one day; `parity.yml`
 line numbers have moved by 43 lines in a single day, then another 19.

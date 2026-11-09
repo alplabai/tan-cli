@@ -2519,3 +2519,30 @@ def test_build_cross_drive_refusal_reaches_the_envelope_as_a_coded_issue(project
     message = next(i.message for i in issues if i.code == "build.cross-drive-workspace")
     assert "`C:`" in message
     assert "`E:`" in message
+
+
+def test_build_root_elsewhere_does_not_trip_the_tokened_project_root_guard(project, tmp_path):
+    """tan-cli#1590: `--build-root` only moves the output. `${PROJECT_ROOT}` is
+    the board.yaml directory; comparing it with the build root refused every
+    tokened plan built with `--build-root DIR`."""
+    from tan.commands.build_cmd import _MODE_MATERIALISE, _build
+
+    (project / "board.yaml").write_text("sku: S\n", encoding="utf-8")
+    doc = {
+        "schemaVersion": 1, "generatedBy": "t", "planPathMode": "tokened",
+        "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+        "slices": [], "sharedArtefacts": [], "warnings": [],
+    }
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    out = tmp_path / "elsewhere"
+    out.mkdir()
+    _exit, _data, issues = _build(
+        mode=_MODE_MATERIALISE,
+        plan_from=str(write_plan(tmp_path, doc)),
+        build_root=str(out),
+        sdk_root=str(sdk),
+        sdk_root_for_stamp=None,
+        board_yaml=str(project / "board.yaml"),
+    )
+    assert "build.project-root-mismatch" not in [i.code for i in issues]

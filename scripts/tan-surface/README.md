@@ -238,7 +238,7 @@ token reaching `alp.conf`) is an SDK-side schema gap.
 
 ### Re-derived against `dev` (2026-10-10)
 
-The command-surface list was re-walked against `tan --help` (35 commands) for
+The command-surface list was re-walked against `tan --help` (33 commands) for
 tan-cli#1464: `probe` and `reset` were registered but missing from
 `KNOWN_COMMANDS`, so the drift step failed on them. New hardware-free cases:
 `sdk remove` (missing argument refuses; an absent version under a throwaway

@@ -26,7 +26,14 @@ from typing import Any, Callable, Optional
 from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
-from .headers import emit_dts_partitions, emit_dts_reservations, emit_ipc_contract_h
+from .carveout import resolve_carve_outs
+from .headers import (
+    emit_dts_partitions,
+    emit_dts_reservations,
+    emit_ipc_contract_h,
+    emit_storage_mounts_c,
+    has_storage_mounts,
+)
 from .kconfig import (
     _resolve_console,
     _slice_alp_conf,
@@ -223,6 +230,9 @@ def _v1_shaped_project(project: BoardProject) -> dict[str, Any]:
             "hw_rev": project.hw_rev,
         },
         "pins": list(project.raw.get("pins") or []),
+        # west-libraries reads `ota.provider` to emit the out-of-tree OTA
+        # client module (mender-mcu-client).
+        "ota": dict(project.ota),
         "board": ({
             "name":   project.board_name,
             "hw_rev": project.board_hw_rev,
@@ -381,6 +391,17 @@ def _slice_west_libs_artefact(
     return (WEST_LIBS_ARTEFACT, _slice_west_libraries(project, slice_))
 
 
+def _emit_storage_mount_table(project: BoardProject) -> str:
+    """The `storage_mount_table.c` contents, or "" when board.yaml `storage:`
+    declares no mountable partition.  The standalone emit prints an empty
+    table for that case, which the plan has no reason to carry, so the
+    conditional-artefact rule (empty -> absent) keys off `has_storage_mounts`
+    rather than off the text, which is never empty (alp-sdk#2820)."""
+    if not has_storage_mounts(project):
+        return ""
+    return emit_storage_mounts_c(project)
+
+
 #: Every shared generated artefact: `(path under the build root, emitter,
 #: conditional)`.  ONE call site per artefact: `_shared_artefacts` (the plan)
 #: and `_shared_artefact` (the standalone `--emit`) both run the emitter from
@@ -401,6 +422,7 @@ _SHARED_EMITTERS: tuple[tuple[str, Callable[[BoardProject], str], bool], ...] = 
     ("generated/dts-partitions.dtsi", emit_dts_partitions, False),
     ("alp_sysbuild.conf", emit_sysbuild_conf, True),
     ("sysbuild/tfm/tfm.conf", emit_tfm_sysbuild_conf, True),
+    ("generated/storage_mount_table.c", _emit_storage_mount_table, True),
 )
 
 
@@ -518,8 +540,9 @@ def _slice_artifacts(build_dir: Path, slice_: Slice,
     `build/` level.  It used to be missing (issue #1360): the plan named
     `<buildDir>/zephyr/zephyr.elf`, a path west never creates, and every
     consumer had to re-derive the real one from `buildDir` instead of
-    reading the block it was given -- the since-removed `tan renode` looked for
-    `build/m55_he-zephyr/zephyr/zephyr.elf` and found nothing.  The
+    reading the block it was given -- tan's since-retired `renode`
+    verb (ADR 0022) looked for `build/m55_he-zephyr/zephyr/zephyr.elf`
+    and found nothing.  The
     `build/` level is west's, not this planner's, which is exactly why
     it belongs in the reported path and not in each reader's head.
 
@@ -772,6 +795,19 @@ def emit_build_plan(
     # byte-identical no matter where `--emit build-plan` is invoked from
     # (issue #596).
     base_dir = Path(board_yaml).resolve().parent
+    # An absolute build root under neither the project nor the SDK cannot
+    # be tokenised, so every slice command would null and a consumer
+    # honouring `nullCommand: skip` would report a green build that built
+    # nothing (issue #2953).  Refuse it up front.
+    # `.root`, not is_absolute(): on Windows a drive-less '\build' has a
+    # root but no drive, so is_absolute() is False although it is not
+    # relative to the project either.
+    if build_root.root and not any(
+            build_root.is_relative_to(r) for r in (base_dir, REPO)):
+        raise OrchestratorError(
+            f"--build-root '{build_root}' is outside both the project "
+            f"({base_dir}) and the SDK checkout ({REPO}); use a path "
+            f"under one of them (or a relative path)")
     slices_out: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
@@ -1038,6 +1074,23 @@ def emit_build_plan(
         {"path": p.as_posix(), "contents": c}
         for p, c in _shared_artefacts(project, build_root)
     ]
+    # A blocked IPC carve-out still emits zero-stub macros (so consumers
+    # compile), which makes the slice builds green: surface it here, the
+    # one place a plan consumer sees the defect before runtime.
+    for carve in resolve_carve_outs(project):
+        if carve.status != "blocked":
+            continue
+        for core_id in carve.endpoints:
+            warnings.append({
+                "code":    "blocked-ipc-carveout",
+                "coreId":  core_id,
+                "message": (f"ipc channel '{carve.name}' is blocked "
+                            f"({carve.reason or 'unknown reason'}); "
+                            f"alp/system_ipc.h carries zero stubs for it, "
+                            f"so the slices build but the channel fails "
+                            f"at runtime"),
+            })
+
     plan: dict[str, Any] = {
         "schemaVersion":   1,
         # Additive to schemaVersion 1 (issue #865): every path in this plan

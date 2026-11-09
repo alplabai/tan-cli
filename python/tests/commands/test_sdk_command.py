@@ -2543,3 +2543,123 @@ def test_remove_named_version_is_looked_up_under_destination(
     assert env["data"]["removed"] is True
     assert not target.exists()
     assert not (workspace / "v0.19.0").exists(), "must not have looked under cwd instead"
+
+
+def test_remove_refuses_an_ancestor_of_the_active_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1483: removing a directory that CONTAINS the pinned install
+    deleted it with `ok: true` and no `--force` (the old comparison only
+    matched the same directory)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    group = cache_with_canary / "group"
+    target = make_sdk_root(group / "v0.24.0", version="0.24.0")
+    write_pointer(workspace / ".alp" / "sdk-path", target)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(group),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert refused["data"]["wasActive"] is True
+    assert target.exists()
+
+
+def test_remove_refuses_a_subtree_inside_the_active_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1483: removing `<active>/metadata` left the install 'partial'
+    with no refusal."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = make_sdk_root(cache_with_canary / "v0.25.0", version="0.25.0")
+    inner = target / "metadata"
+    inner.mkdir(exist_ok=True)
+    write_pointer(workspace / ".alp" / "sdk-path", target)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(inner),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert refused["data"]["wasActive"] is True
+    assert inner.exists()
+
+
+def test_remove_refuses_an_ancestor_of_a_registered_sdk_without_force(
+    tmp_path, isolated_home, cache_with_canary
+):
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    group = cache_with_canary / "group"
+    target = make_sdk_root(group / "v0.26.0", version="0.26.0")
+    write_registry(isolated_home, {other_project: target}, dated=True)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(group),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert target.exists()
+
+
+def test_forced_subtree_remove_reports_the_registry_entry_that_contains_it(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1498: a forced removal of a directory INSIDE a registered
+    install damages that entry without deleting it. It is not pruned (the
+    install it names still exists) but must not stay silent either."""
+    install = make_sdk_root(cache_with_canary / "v0.31.0", version="0.31.0")
+    subtree = install / "scripts"
+    assert subtree.is_dir()
+    project = tmp_path / "project-a"
+    project.mkdir()
+    write_registry(isolated_home, {project: install}, dated=True)
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", str(subtree), "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    damaged = [i for i in forced["issues"] if i["code"] == "sdk.remove-registry-entry-damaged"]
+    assert len(damaged) == 1
+    assert str(project) in damaged[0]["message"]
+    registry = json.loads((isolated_home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8"))
+    assert str(project) in registry, "the install it names still exists, so it is not pruned"
+
+
+def test_forced_remove_of_an_unrelated_dir_raises_no_damaged_warning(
+    tmp_path, isolated_home, cache_with_canary
+):
+    kept = make_sdk_root(cache_with_canary / "v0.32.0", version="0.32.0")
+    gone = make_sdk_root(cache_with_canary / "v0.33.0", version="0.33.0")
+    project = tmp_path / "project-a"
+    project.mkdir()
+    write_registry(isolated_home, {project: kept}, dated=True)
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.33.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert not gone.exists()
+    assert not [i for i in forced["issues"] if i["code"] == "sdk.remove-registry-entry-damaged"]

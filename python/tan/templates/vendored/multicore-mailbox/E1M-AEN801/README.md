@@ -25,7 +25,45 @@ hardware mailbox, wait for a reply, read the result back.
 
 ## Build
 
-### native_sim (no peer core; HP-side init only)
+From this directory, or from your own copy of it:
+
+```bash
+tan build
+tan flash --core m55_hp
+tan flash --core m55_he
+```
+
+`board.yaml` declares both `m55_hp` (`app: ./src`) and `m55_he`
+(`app: ./peer`) as real project cores, so one `tan build` produces both
+images -- no topology-default `alp-stock-shim` placeholder on the HE side.
+
+The peer-side firmware lives at
+[`./peer/main.c`](peer/main.c) -- HE-side
+image that waits on the same mbox, reads the staged shmem
+payload, and writes back an echo via reverse send.  (alp-sdk's own
+upstream copy of this example lives at
+`examples/multicore/mproc-mailbox/peer/main.c`, not part of this
+scaffolded project.)
+
+Flash both into the matching SoC partitions (HP -> RTSS-HP slot,
+HE -> RTSS-HE slot) and the roundtrip completes:
+
+```
+[mproc] init mbox + shmem
+[mproc] sending payload  "hello-from-HP" (13 bytes)
+[mproc-peer] request offset=0 len=13
+[mproc-peer] payload  "hello-from-HP"
+[mproc-peer] replied "echo: hello-from-HP" (19 bytes)
+[mproc] HE replied via mbox callback
+[mproc] HE replied       "echo: hello-from-HP" (19 bytes)
+[mproc] done
+```
+
+### Inside an SDK checkout (twister / CI)
+
+These commands only work from an alp-sdk checkout, because `gen_example_alp_conf.py` writes `generated/alp.conf` there.
+
+native_sim (no peer core; HP-side init only):
 
 ```bash
 # writes ./generated/alp.conf, which west reads below (#866)
@@ -43,25 +81,6 @@ Expected output:
 [mproc] done
 ```
 
-### Real silicon (AEN dual-core, both images built from this project)
-
-The peer-side firmware lives at
-[`./peer/main.c`](peer/main.c) -- HE-side
-image that waits on the same mbox, reads the staged shmem
-payload, and writes back an echo via reverse send.  (alp-sdk's own
-upstream copy of this example lives at
-`examples/multicore/mproc-mailbox/peer/main.c`, not part of this
-scaffolded project.)
-
-`board.yaml` declares both `m55_hp` (`app: ./src`) and `m55_he`
-(`app: ./peer`) as real project cores, so one `tan build` now
-produces both images -- no more topology-default `alp-stock-shim`
-placeholder on the HE side:
-
-```bash
-tan build --project .
-```
-
 Each core can also be built standalone with `west build` directly
 (e.g. while iterating on one side):
 
@@ -69,35 +88,21 @@ Each core can also be built standalone with `west build` directly
 # HP side.
 # writes ./generated/alp.conf, which west reads below (#866)
 tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
-west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
+west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
 
 # HE side.
 # writes ./peer/generated/alp.conf, which west reads below (#866)
 tan generate --target zephyr-conf --core m55_he --sdk-root "$ALP_SDK_ROOT" --output peer/generated/alp.conf
-west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he ./peer -- -DEXTRA_CONF_FILE=generated/alp.conf
+west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he ./peer -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
-```
-
-Flash both into the matching SoC partitions (HP -> RTSS-HP slot,
-HE -> RTSS-HE slot) and the roundtrip completes:
-
-```
-[mproc] init mbox + shmem
-[mproc] sending payload  "hello-from-HP" (13 bytes)
-[mproc-peer] request offset=0 len=13
-[mproc-peer] payload  "hello-from-HP"
-[mproc-peer] replied "echo: hello-from-HP" (19 bytes)
-[mproc] HE replied via mbox callback
-[mproc] HE replied       "echo: hello-from-HP" (19 bytes)
-[mproc] done
 ```
 
 ## Reference
 
-- [`<alp/mproc.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/mproc.h) -- mailbox + shmem
+- [`<alp/mproc.h>`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/include/alp/mproc.h) -- mailbox + shmem
   + hwsem API.
-- [`docs/v1.0-readiness.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/v1.0-readiness.md) §4 --
+- [`docs/v1.0-readiness.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/v1.0-readiness.md) §4 --
   this example is one of the v1.0 reference-app flagships; both the
   HP host and the HE peer now build from this one project, with
   HiL verification of the round-trip still ahead.

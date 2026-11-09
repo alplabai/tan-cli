@@ -2806,7 +2806,7 @@ def test_an_omitted_target_kind_infers_zephyr_mcu_from_the_built_manifest(tmp_pa
     root = str(tmp_path).replace("\\", "/")
     write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
 
-    env = envelope(run_cli(tmp_path, "--format", "json"))
+    env = envelope(run_cli(tmp_path, "--core", "m55_hp", "--format", "json"))
 
     assert env["exitCode"] == 0, env
     assert env["data"]["targetKind"] == ZEPHYR_MCU
@@ -3540,3 +3540,51 @@ def test_inferred_target_kind_stays_native_host_for_a_pure_native_sim_manifest()
     target, code, ambiguous = infer_target_kind(manifest, None, None)
 
     assert target == NATIVE_HOST and code is None and ambiguous is None
+
+
+def test_a_multi_core_build_without_core_is_refused_listing_the_cores(tmp_path):
+    """tan-cli#1488: two Zephyr cores and no --core used to exit 0 and write the
+    first slice's ELF with programsDevice:true. Now refused like tan probe/flash."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    for argv in (
+        ("--format", "json"),
+        ("--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json"),
+    ):
+        env = envelope(run_cli(tmp_path, *argv))
+        assert env["exitCode"] == 2, env
+        issue = next(i for i in env["issues"] if i["code"] == "debug-config.core-required")
+        assert "m55_hp, m55_he" in issue["message"], issue
+    assert not launch_json(tmp_path).exists()
+
+
+def test_the_jlink_launch_config_pins_the_probe_serial_from_the_manifest(tmp_path):
+    """tan-cli#1488: flash_args.jlink_serial becomes cortex-debug serialNumber."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    text = MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root).replace(
+        "  status: ok\n  build_dir: " + root + "/build/m55_he-zephyr/build\n",
+        "  status: ok\n  flash_args:\n    jlink_serial: '123456789'\n  build_dir: "
+        + root + "/build/m55_he-zephyr/build\n",
+    )
+    assert "123456789" in text
+    write_manifest(tmp_path, text)
+
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_he",
+            "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0, env
+    assert env["data"]["configuration"]["serialNumber"] == "123456789"
+
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_hp",
+            "--preview", "--format", "json",
+        )
+    )
+    assert "serialNumber" not in env["data"]["configuration"]

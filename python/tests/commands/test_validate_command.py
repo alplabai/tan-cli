@@ -70,6 +70,16 @@ SDK: Path | None = sdk_root()
 _CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
+@pytest.fixture(autouse=True)
+def _pin_the_subprocess_engine(monkeypatch):
+    """Everything below drives the SPAWN path against a stand-in
+    `scripts/validate_board_yaml.py`, which is now the opt-in engine
+    (`TAN_VALIDATE_ENGINE=subprocess`, tan-cli#270); the default engine is
+    covered, against the stand-in-free real SDK and hermetically, in
+    `test_validate_inprocess_engine.py`."""
+    monkeypatch.setenv(validate_cmd.VALIDATE_ENGINE_ENV, "subprocess")
+
+
 def _write(tmp_path, text):
     (tmp_path / "board.yaml").write_text(text, encoding="utf-8")
 

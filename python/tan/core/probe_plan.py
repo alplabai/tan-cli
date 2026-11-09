@@ -191,6 +191,8 @@ def claimed_core(core: str | None, selected_id: str | None) -> str | None:
 def core_contradiction(core: str | None, verdict: str) -> str | None:
     """A message when the attach `verdict` (`ram_run` vocabulary, or the bare AP verdict)
     contradicts the claimed `--core`; `None` when it agrees or says nothing."""
+    if core == "m55_he" and verdict == "conflict":
+        return f"--core m55_he, but the attach verdict is contradictory ({verdict})"
     if core == "m55_he" and verdict in ("hp", "conflict-hp"):
         return f"--core m55_he, but the probe attached to the M55-HP ({verdict})"
     if core == "m55_hp" and verdict in ("he", "conflict"):
@@ -226,8 +228,10 @@ def read_script(pre: Sequence[str], address: int, words: int) -> str:
     return "\n".join([*pre, f"mem32 0x{address:X}, 0x{words:X}", "exit"]) + "\n"
 
 
-def make_preamble(serial: str | None, speed: int, device: str = DEFAULT_DEVICE) -> list[str]:
-    return preamble(serial, speed, device)
+def make_preamble(
+    serial: str | None, speed: int, device: str = DEFAULT_DEVICE, ap_addr: int | None = None
+) -> list[str]:
+    return preamble(serial, speed, device, ap_addr=ap_addr)
 
 
 def script_verbs(script: str) -> list[str]:

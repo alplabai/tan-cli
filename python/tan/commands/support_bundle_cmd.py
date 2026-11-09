@@ -254,7 +254,12 @@ def _home_pattern(variant: str) -> re.Pattern[str]:
     return re.compile(
         rf"(?<![^{lead_class}])"  # string start, or a leading boundary before it
         + re.escape(variant)
-        + rf"(?=[{re.escape(_SEPARATORS)}]|[{break_class}]|$)"  # sep, break, or end
+        + rf"(?=[{re.escape(_SEPARATORS)}]|[{break_class}]|$)",  # sep, break, or end
+        # A drive-anchored (Windows) home names a case-INSENSITIVE volume: VS Code
+        # hands tan `c:\\Users\\Alice` for a `C:\\Users\\Alice` profile, and a
+        # case-sensitive match would leak the account name (tan-cli#1483). A POSIX
+        # home stays case-sensitive -- `/home/Alice` and `/home/alice` differ there.
+        re.IGNORECASE if drive_anchored else 0,
     )
 
 

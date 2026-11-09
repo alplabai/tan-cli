@@ -144,6 +144,13 @@ def capture(
             before = len(pending)
             *lines, pending = (pending + chunk).split(b"\n")
             pending = pending[-_MAX_PENDING:]
+            # A read that returns at or after the deadline is still searched
+            # whole (tan-cli#1515). Its size is bounded by `in_waiting` (and
+            # each line by MAX_SEARCH_CHARS), so it needs no flood guard. Only
+            # scanning that itself overruns the deadline stops, and then only
+            # the lines already searched are committed, so the log never holds
+            # a line the result says was not searched.
+            late = clock() >= deadline
             end = -before  # offset of the current line's end within `chunk`
             for raw in lines:  # each complete line is new data: search it once
                 end += len(raw) + 1
@@ -155,8 +162,8 @@ def capture(
                     # same read are neither logged nor reported.
                     commit(chunk[: max(0, end)])
                     return done(True, line)
-                if clock() >= deadline:
-                    commit(chunk)
+                if not late and clock() >= deadline:
+                    commit(chunk[: max(0, end)])
                     return done(False, None)
                 if actions is not None and actions.take_flush():
                     # Baud changed: the rest of this read and the partial line

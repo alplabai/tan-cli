@@ -177,19 +177,25 @@ def make_scratch(setools_dir: str, parent: str | None = None) -> str:
     filesystem failure; the half-built directory is removed first."""
     root = tempfile.mkdtemp(prefix="tan-setools-", dir=parent)
     try:
+        shared_key = os.path.join(setools_dir, _KEY_DIR)
+        key_abs = os.path.abspath(shared_key)
+
+        def _skip_keys(directory: str, names: list[str]) -> list[str]:
+            # The signing keys are never copied: a kill between a copy and its removal would
+            # leave them in the temp directory (tan-cli#1485). They are linked in below.
+            return [n for n in names if os.path.abspath(os.path.join(directory, n)) == key_abs]
+
         for entry in os.scandir(setools_dir):
             if entry.name == "build":
                 continue
             dst = os.path.join(root, entry.name)
             if entry.is_dir(follow_symlinks=False) and entry.name not in _LINK_DIRS:
-                shutil.copytree(entry.path, dst, symlinks=True)
+                shutil.copytree(entry.path, dst, symlinks=True, ignore=_skip_keys)
             else:
                 _link_or_copy(entry.path, dst)
-        shared_key = os.path.join(setools_dir, _KEY_DIR)
-        scratch_key = os.path.join(root, _KEY_DIR)
-        if os.path.isdir(shared_key) and os.path.isdir(scratch_key):
-            shutil.rmtree(scratch_key)
-            _link_or_copy(shared_key, scratch_key)
+        scratch_utils = os.path.dirname(os.path.join(root, _KEY_DIR))
+        if os.path.isdir(shared_key) and os.path.isdir(scratch_utils):
+            _link_or_copy(shared_key, os.path.join(root, _KEY_DIR))
         for sub in ("config", "images", "logs"):
             os.makedirs(os.path.join(root, "build", sub))
     except BaseException:

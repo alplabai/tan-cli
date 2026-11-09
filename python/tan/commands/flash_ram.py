@@ -60,6 +60,7 @@ from tan.core.flash_plan import (
 from tan.core.jlink_binary import resolve_jlink
 from tan.core import ram_watch
 from tan.core.ram_run import (
+    HE_AP_ADDR,
     CODE_CONSOLE_SYMBOL_MISSING,
     CODE_CORE_MISMATCH,
     CODE_CORE_UNCONFIRMED,
@@ -88,8 +89,49 @@ METHOD = "ram_run"
 #: Default `--wait` (seconds the app runs before the console is read) -- the raw
 #: script's `sleep_ms` default of 1500.
 DEFAULT_WAIT_S = 1.5
+#: Experimental (tan-cli#1372 ask 2, pending bench A/B): keep the load session open for
+#: the `--wait` window after `go` and skip the separate pre-read wait.
+HOLD_ENV = "TAN_FLASH_RAM_HOLD"
 #: J-Link's own attach profile for a live core (the script's `JLINK_DEVICE_READ`).
 _DEFAULT_ATTACH_DEVICE = "Cortex-M55"
+
+#: The silicon whose M55-HE access port (0x00300000) is bench-proven (tan-cli#1566).
+#: Only that silicon pins it; any other part keeps J-Link's own AP scan, and the
+#: Core-found check after the attach still guards both.
+_HE_AP_PINNED_SILICON = "alif:ensemble:e8"
+
+
+def core_check_basis(evidence: dict[str, Any]) -> str:
+    """What `ram.coreCheck` rests on: a pinned AP is tan's own address, so the ITCM
+    comparison is the identity evidence; a scanned one is J-Link's finding."""
+    if (evidence.get("ap") or {}).get("apAddrSource") == "pinned":
+        return (
+            "the HE AP 0x00300000 was PINNED before connect (the address is tan's own, not "
+            "discovered); the IDENTITY evidence is the local ITCM 0x0 compared with the HE "
+            "global window 0x58000000 (the HP window is never read)"
+        )
+    return (
+        "DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
+        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE global window "
+        "0x58000000 (the HP window is never read)"
+    )
+
+
+def he_ap_for(silicon: str | None) -> int | None:
+    """The HE access port to pin for this silicon, or None to let J-Link scan."""
+    return HE_AP_ADDR if silicon == _HE_AP_PINNED_SILICON else None
+
+
+def silicon_for(sdk_root: str | None, sku: str | None) -> str | None:
+    """The silicon of `sku` from the SDK metadata. `tan probe` uses it so its attach
+    pins the AP exactly as `tan flash --ram` does."""
+    from tan.commands.build_output import read_sdk_som_and_soc
+
+    metadata_root = os.path.join(sdk_root, "metadata") if sdk_root else None
+    if not (metadata_root and sku and os.path.isdir(metadata_root)):
+        return None
+    walked = read_sdk_som_and_soc(metadata_root, sku, skipped=[], explain_unsupported=True)
+    return walked[0] if walked else None
 
 
 def _artefact_pair(path: str) -> tuple[str, str]:
@@ -177,7 +219,8 @@ def _run_ram_entry(
     except OSError as err:
         return fail(f"cannot read the built image ({err}); expected {elf_path} and {bin_path}")
     try:
-        apertures = _load_apertures(ctx, entry_id)
+        silicon_out: list[str] = []
+        apertures = _load_apertures(ctx, entry_id, silicon_out)
         image = plan_ram_image(
             parse_elf(elf_bytes), bin_bytes, core_id=entry_id, apertures=apertures
         )
@@ -224,13 +267,18 @@ def _run_ram_entry(
 
     try:
         staged = _stage_image(stack, bin_bytes)
-        pre = preamble(serial, speed, device)
+        pre = preamble(serial, speed, device, ap_addr=he_ap_for(silicon_out[0] if silicon_out else None))
     except (OSError, FlashPlanError, RamRunError) as err:
         return fail(f"cannot prepare the RAM-run ({err})")
     # `image.base`/`entry` and the console address/size are ints rendered with
     # `0x%X` by `ram_run`; the symbol NAME never reaches a script at all.
-    load = load_script(pre, commander_path(staged), image, watch_script)
     console = image.console
+    # A watch session already spans the whole --wait window, so it needs no extra Sleep.
+    hold = (
+        os.environ.get(HOLD_ENV) == "1" and bool(ctx.ram_console) and console is not None
+    )
+    hold_ms = watch_ms if hold and not watches else 0
+    load = load_script(pre, commander_path(staged), image, watch_script, hold_ms)
     argv = (
         "JLinkExe", "-device", device, "-if", "SWD", "-speed", str(speed),
         "-ExitOnError", "1", "-NoGui", "1", "-CommanderScript",
@@ -250,6 +298,7 @@ def _run_ram_entry(
         "initialSp": f"0x{image.initial_sp:08X}",
         "spNote": "from the vector table; applied by loadbin's reset, not written by tan",
         "wait": ctx.ram_wait, "writesMram": False,
+        "holdSession": hold,
     }
     if watches:
         report["ram"]["watch"] = {
@@ -280,7 +329,7 @@ def _run_ram_entry(
     if ctx.dry_run:
         msg = f"{METHOD}[{entry_id}]: would run -- {summary}; no MRAM write; nothing spawned"
         lines.append(f"  {msg}")
-        return 0, entry("ok", 0, msg, trcena_note=True, **warn_missing), lines
+        return 0, entry("ok", 0, msg, trcena_note=True, trcena_hold=hold, **warn_missing), lines
 
     # ── the confirm gate (bench round 7) ──
     # `loadbin` resets the core through AIRCR.SYSRESETREQ, a full-device reset that also
@@ -348,9 +397,7 @@ def _run_ram_entry(
         verdict, evidence = core_check(check_text)
     report["ram"]["coreCheck"] = {
         "verdict": verdict, **evidence, "assumeHe": bool(ctx.assume_he),
-        "basis": "DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
-        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE global window "
-        "0x58000000 (the HP window is never read)",
+        "basis": core_check_basis(evidence),
         **({"sessionError": bad} if bad else {}),
     }
     report["jlink"]["attachedCore"] = evidence.get("ap")
@@ -398,7 +445,10 @@ def _run_ram_entry(
         plan, ctx.capture, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
         timeout_s=(
             max(fc._FLASH_TIMEOUT_S, ram_watch.session_timeout_s(watches, watch_ms))
-            if watches else None
+            if watches
+            else max(fc._FLASH_TIMEOUT_S, hold_ms / 1000 + ram_watch.TIMEOUT_MARGIN_S)
+            if hold_ms
+            else None
         ),
     )
     spawn_ms = int(round((time.monotonic() - started) * 1000))
@@ -410,6 +460,9 @@ def _run_ram_entry(
     problem = problem or check_session(transcript, loadbin=True)
     if problem:
         return fail(f"the load session failed: {problem}")
+    # tan-cli#1497: from here the image IS on the board and the device was reset,
+    # whatever fails next; `model run --device` reads this to keep its provenance.
+    report["ram"]["loaded"] = True
     loaded_on = attached_core(transcript)
     checked_on = report["jlink"].get("attachedCore")
     if not (loaded_on and loaded_on.get("apAddr")):
@@ -482,7 +535,7 @@ def _run_ram_entry(
                 "(read it on the console, e.g. `tan monitor`); nothing to read over SWD"
             )
         else:
-            if not watches:  # a watch session already ran for the whole --wait window
+            if not watches and not hold:  # a watch/hold session already ran the whole --wait window
                 time.sleep(max(ctx.ram_wait, 0.0))
             read = fc._execute(
                 FlashPlan(argv=argv, ok_message="", jlink_script=read_script(pre, *console)),
@@ -507,13 +560,13 @@ def _run_ram_entry(
     return (
         0,
         entry("ok", 0, message, preflight_unarmed=unarmed,
-              reset_unconfirmed=bool(trouble or check_trouble), trcena_note=True,
+              reset_unconfirmed=bool(trouble or check_trouble), trcena_note=True, trcena_hold=hold,
               ram_watch_incomplete=watch_note, **warn_missing),
         lines,
     )
 
 
-def _load_apertures(ctx: Any, core_id: str) -> Any:
+def _load_apertures(ctx: Any, core_id: str, silicon_out: list[str] | None = None) -> Any:
     """The core's code/data apertures from the SoC metadata of the SDK in use
     (`sram_banks_kb` of the manifest SKU's silicon variant). Refuses -- never guesses a
     size -- when the SDK metadata, the SoM preset or the variant's banks cannot be
@@ -535,7 +588,9 @@ def _load_apertures(ctx: Any, core_id: str) -> Any:
             + (f" ({'; '.join(why)})" if why else "")
             + " -- refusing to guess the TCM sizes"
         )
-    _silicon, silicon_variant, variants, _flash_mb, _cores = walked
+    silicon, silicon_variant, variants, _flash_mb, _cores = walked
+    if silicon_out is not None:
+        silicon_out.append(silicon)  # the one metadata walk also feeds the AP pin
     variant = resolve_variant(silicon_variant, ctx.sku, variants)
     apertures = apertures_for(core_id, sram_banks(variant)) if variant else None
     if apertures is None:

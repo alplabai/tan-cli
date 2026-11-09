@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # `tan monitor --capture`: input and baud change (tan-cli#1451)
 
-Needs pyserial: `pip install "tan-cli[monitor]"`, or `pip install -e "./python[monitor]"` in a checkout. A bare editable install lacks it, and `tan monitor` then refuses with that same hint (`monitor.pyserial-missing`).
+Needs pyserial: `pip install "./python[monitor]"` from a checkout (tan-cli is not on PyPI), or `pip install pyserial`. A bare editable install lacks it, and `tan monitor` then refuses with that same hint (`monitor.pyserial-missing`).
 
 `--capture` records the console headlessly (no terminal needed, works over
 `rfc2217://` and `socket://` URLs). Two option groups let a bench session act

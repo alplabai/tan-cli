@@ -8,10 +8,10 @@ the path as written and the resolved target, each with its parents -- are owned
 by root or the current user and are not writable by others or by a group anyone
 else belongs to (a sticky directory is allowed).
 
-TODO(#1461/#1457): once #1454 merges, `flash_raw.py` and this module should
-share ONE implementation (and `tan reset` should also require the session
-lease nonce through the same helper). The check is copied here, not the lease
-code, so this PR does not depend on #1454.
+`tan reset` additionally requires the per-session lease nonce under
+`JLINK_RUN_PLACE` (tan-cli#1457): `reset_cmd` calls
+`flash_raw._reservation_refusal`, the same gate `tan flash --raw` uses. This module
+only judges the wrapper path; the two path checks are still separate copies.
 """
 from __future__ import annotations
 

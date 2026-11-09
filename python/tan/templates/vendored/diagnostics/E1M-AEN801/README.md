@@ -18,7 +18,7 @@ debugger.
 * **Portable, chip-free.** Only `<alp/*>` headers -- no chip driver,
   no vendor header -- so the *same* `src/main.c` builds and runs on
   every E1M family (a Ring 1 example per
-  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/portability.md)).
+  [`docs/portability.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/portability.md)).
 * **SKIP is not FAIL.** A check whose backend has no probe returns
   `ALP_ERR_NOSUPPORT`, which the self-test reports as **SKIP** -- "this
   backend can't answer", not "the hardware is broken". Conflating a
@@ -37,6 +37,19 @@ on-module EEPROM identity manifest lives on. Rebind it in
 `board.yaml` `pins:` to port to another board.
 
 ## Build
+
+From this directory, or from your own copy of it:
+
+```bash
+tan build
+tan flash
+```
+
+`tan` builds one image per Zephyr core on the SoM: a core this `board.yaml` does not declare gets the SDK's idle `alp-stock-shim` image (on an E1M-AEN SoM, `m55_he` here, in `build/m55_he-zephyr/`); see [docs/heterogeneous-builds.md](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/heterogeneous-builds.md).
+
+### Inside an SDK checkout (twister / CI)
+
+These commands only work from an alp-sdk checkout, because `scripts/gen_example_alp_conf.py` writes `generated/alp.conf` there.
 
 ```bash
 # Standalone, native_sim (emul I2C; identity/power checks SKIP):
@@ -92,7 +105,7 @@ still latches, so the twister console harness passes regardless.
 
 * **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM
   reads back blank -- the module was never run through
-  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/scripts/program_eeprom.py) at
+  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/scripts/program_eeprom.py) at
   production test. On a factory-fresh board this is expected; on a
   shipped SoM it is a real fault.
 * **SoM identity `ALP_ERR_IO`.** Magic present but the CRC/schema
@@ -106,7 +119,7 @@ still latches, so the twister console harness passes regardless.
 
 ## Reference
 
-- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/hw_info.h) -- SoM/SoC identity surface.
-- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/power.h) -- operating-point profile surface.
-- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/include/alp/peripheral.h) -- I2C surface.
-- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.
+- [`<alp/hw_info.h>`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/include/alp/hw_info.h) -- SoM/SoC identity surface.
+- [`<alp/power.h>`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/include/alp/power.h) -- operating-point profile surface.
+- [`<alp/peripheral.h>`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/include/alp/peripheral.h) -- I2C surface.
+- [`examples/peripheral-io/i2c-scanner/`](https://github.com/alplabai/alp-sdk/tree/v0.18.0/examples/peripheral-io/i2c-scanner) -- standalone bus-scan companion.

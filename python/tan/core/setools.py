@@ -64,7 +64,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -332,6 +332,25 @@ def slot0_config(
     return config
 
 
+def combined_slot0_config(
+    slices: Sequence[tuple[str, str, str]],
+    device_binary: str | None = None,
+) -> dict[str, Any]:
+    """The `app-gen-toc` config for ONE ATOC naming every slice (tan-cli#1509):
+    the optional `DEVICE` entry, then one entry per `(name, binary, mram_address)`
+    -- each exactly what [`slot0_config`] writes for a lone slice (`cpu_id` is the
+    upper-cased name). One slice gives `slot0_config`'s output verbatim."""
+    config: dict[str, Any] = {}
+    for n, (name, binary, address) in enumerate(slices):
+        config.update(
+            slot0_config(
+                name, binary, address, name.upper(),
+                device_binary=device_binary if n == 0 else None,
+            )
+        )
+    return config
+
+
 def read_atoc_address(setools_dir: str) -> str | None:
     """The ATOC placement `app-gen-toc` just wrote, out of its own
     `build/app-package-map.txt` report. Reuses `flash_plan
@@ -387,6 +406,7 @@ def sign_slot0(
     device_config: DeviceConfig | None = None,
     scratch_parent: str | None = None,
     on_scratch: Callable[[str], None] | None = None,
+    extra_slices: Sequence[tuple[str, str, str]] = (),
 ) -> SignedSlot0:
     """Run one `app-gen-toc` sign step in a PRIVATE scratch overlay of
     `setools_dir` ([`make_scratch`]): copy `artefact_bin` into the scratch
@@ -407,6 +427,10 @@ def sign_slot0(
     either -- the scratch `build/` starts empty, so a tool that exits 0 without
     writing is caught by the plain "no report / no blob" checks below.
 
+    `extra_slices` (`(entry_id, artefact_bin, mram_address)` each, tan-cli#1509)
+    adds further entries to the SAME config, so one ATOC names every slice; the
+    first slice is the one named by the positional arguments.
+
     Returns [`SignedSlot0`]; the caller owns `scratch_dir`. Raises
     `FlashPlanError` -- naming `app-gen-toc`'s own captured output where there is
     any -- on: a filesystem failure preparing the scratch tree, a spawn failure
@@ -416,6 +440,8 @@ def sign_slot0(
     scratch tree is already removed.
     """
     validate_identifier(entry_id, "the flash target id")
+    for extra_id, _bin, _addr in extra_slices:
+        validate_identifier(extra_id, "the flash target id")
     setools_dir = os.path.abspath(setools_dir)
     app_gen_toc = os.path.abspath(app_gen_toc)
     try:
@@ -433,7 +459,7 @@ def sign_slot0(
             on_scratch(scratch)
         signed = _sign_in_scratch(
             scratch, setools_dir, app_gen_toc, artefact_bin, entry_id, mram_address,
-            device_config,
+            device_config, extra_slices,
         )
         return dataclasses.replace(signed, shared_touched=_newer_than(setools_dir, started, before))
     except BaseException:
@@ -489,6 +515,7 @@ def _sign_in_scratch(
     entry_id: str,
     mram_address: str,
     device_config: DeviceConfig | None,
+    extra_slices: Sequence[tuple[str, str, str]] = (),
 ) -> SignedSlot0:
     binary_name = f"{entry_id}.bin"
     config_rel = os.path.join("build", "config", f"{entry_id}-slot0.json")
@@ -496,14 +523,17 @@ def _sign_in_scratch(
     atoc_blob_path = os.path.join(scratch, _ATOC_BLOB_REL)
     try:
         shutil.copyfile(artefact_bin, os.path.join(scratch, "build", "images", binary_name))
+        for extra_id, extra_bin, _addr in extra_slices:
+            shutil.copyfile(extra_bin, os.path.join(scratch, "build", "images", f"{extra_id}.bin"))
         if device_config is not None:
             shutil.copyfile(
                 device_config.path, os.path.join(scratch, "build", "config", device_config.name)
             )
         with open(os.path.join(scratch, config_rel), "w", encoding="utf-8", newline="\n") as fh:
             json.dump(
-                slot0_config(
-                    entry_id, binary_name, mram_address, entry_id.upper(),
+                combined_slot0_config(
+                    [(entry_id, binary_name, mram_address)]
+                    + [(i, f"{i}.bin", a) for i, _b, a in extra_slices],
                     device_binary=device_config.name if device_config is not None else None,
                 ),
                 fh,

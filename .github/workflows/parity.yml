@@ -988,7 +988,17 @@ env:
   # `pinctrl_som_power` group; the planner oracle was re-captured and is
   # byte-identical (the oracle modes do not render the Zephyr board); scaffold
   # parity is 10/10 unchanged.
-  PINNED_SDK_TAG: a5a137c7b594ebb5d451177803c0eb324069e86b
+  # `84132b98a` -> `65583f78a` (alp-sdk `dev`, tan-cli#1569, alp-sdk#3033's
+  # SDK-anchored signing key): the same lockstep sites move together. Unlike the
+  # last few re-syncs this one moved scaffold inputs, so the vendored tree was
+  # re-vendored (`scaffold_byte_parity.py` 10/10), the planner oracle re-captured
+  # in full (735 emits), and the seam1 oracle re-vendored from alp-sdk's copies.
+  # `65583f78a` -> `a70eec741` (alp-sdk `dev`, tan-cli#1585 / #1546): the same
+  # lockstep sites move together. Two hand-ports (`zephyr_board.py`,
+  # `project_emit/dts.py`), no mirrored-module change; the planner oracle was
+  # re-captured (only AEN `system-manifest.yaml` moved) and scaffold parity is
+  # 10/10 with no re-vendor.
+  PINNED_SDK_TAG: a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1319,7 +1329,7 @@ env:
   # `0dee99fb5` -> `183b05509` -> `a5a137c7b` (tan-cli#1393). Re-captured with the same
   # command; every emit byte-identical, only `PROVENANCE.txt`'s `alp-sdk ref`
   # moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: a5a137c7b594ebb5d451177803c0eb324069e86b
+  PINNED_PLANNER_ORACLE_SDK_REF: a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
@@ -1549,7 +1559,7 @@ jobs:
       # `python/tests/gates/test_interpreter_policy.py` enforces the pair
       # (which jobs may float, which must pin, and that the floating full-suite
       # job still selects the whole suite).
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x" # ceiling -- see the policy note above
 
@@ -2282,7 +2292,7 @@ jobs:
       # `tan` under test IS this interpreter now (tan-cli#269 retired the
       # self-contained cargo binary), so a floating newest-3.x would decide
       # what the seam executes.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -2500,7 +2510,7 @@ jobs:
 
       - name: upload seam2 logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: seam2-logs
           path: |
@@ -2586,7 +2596,7 @@ jobs:
       # Pinned, NOT `3.x`, for the same reason seam2 pins it: `tan` IS this
       # interpreter now (tan-cli#269), and `python/pyproject.toml` floors at
       # 3.12.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -2622,25 +2632,6 @@ jobs:
       # the silent failure this job is for, so the artefacts are asserted.
       - name: tan bootstrap (the customer's first command)
         working-directory: ws/alp-sdk
-        env:
-          # tan-cli#1163. `tan bootstrap`'s final phase lists the Zephyr SDK
-          # releases through the GitHub API, whose anonymous quota is counted
-          # PER SOURCE IP and shared across every hosted runner in the region --
-          # so it is exhausted by traffic that is not ours, and the job dies
-          # with `403 API rate limit exceeded` for a reason unrelated to the
-          # change under test. Measured three times in one day on PRs touching
-          # neither bootstrap nor the SDK.
-          #
-          # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
-          # (tan-cli#840's probe among them): those steps invoke `gh` directly,
-          # so they need the name that tool reads. This step invokes
-          # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
-          # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
-          # and the tan-specific name cannot change `gh`'s ambient behaviour
-          # inside this step. tan passes it to `west sdk install` out of band,
-          # so it reaches no argv, log, `--dry-run` plan or envelope
-          # (tan-cli#1143). Listing public releases needs no scopes.
-          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tan bootstrap --non-interactive \
@@ -2672,9 +2663,9 @@ jobs:
       # This step used to assert the OPPOSITE -- that `zephyrSdk` is a hard
       # `fail` right here -- on the premise that "bootstrap has just succeeded
       # and the host still cannot build". That premise died at tan-cli#1186.
-      # This job passes TAN_GITHUB_TOKEN precisely so `tan bootstrap` can run
-      # its own ADR-0021 toolchain acquisition, and on a networked runner it
-      # does; the old assertion only held because `zephyrSdk` was BLIND to the
+      # `tan bootstrap` runs its own ADR-0021 toolchain acquisition (since
+      # tan-cli#1556 a direct, pin-hashed download that needs no credential),
+      # and on a networked runner it does; the old assertion only held because `zephyrSdk` was BLIND to the
       # store bootstrap fills (`~/.alp/toolchains/...`), which is the exact
       # defect #1186 fixed. So the step was asserting the bug.
       #
@@ -2809,7 +2800,7 @@ jobs:
 
       - name: upload first-blink logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: first-blink-logs
           path: |
@@ -3088,7 +3079,7 @@ jobs:
           ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
           path: alp-sdk-planner-oracle
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -3629,14 +3620,31 @@ jobs:
       # about to be published under THIS tag still match the alp-sdk a
       # customer installing it today will pair it with" -- #889's whole
       # point. Release-blocking is the right call here where it is not there.
+      #
+      # A PRE-RELEASE tan tag (a hyphen, e.g. `v0.7.0-rc1` -- the same test
+      # release.yml's `prerelease:` flag uses) is measured against alp-sdk's
+      # newest published NON-DRAFT release INCLUDING pre-releases instead
+      # (tan-cli#1258, decided 2026-10-10: a tan rc may pair with an alp-sdk
+      # rc). `releases/latest` never returns a pre-release, so without this a
+      # tan rc cut on an alp-sdk rc floor is measured against the previous
+      # stable alp-sdk and reds by construction. A stable tan tag keeps
+      # `releases/latest`, unchanged. `/releases` lists newest-created first.
       - name: resolve latest published alp-sdk release
         id: alp_sdk_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAN_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+          case "${TAN_TAG}" in
+            *-*)
+              tag=$(gh api 'repos/alplabai/alp-sdk/releases?per_page=30' \
+                --jq '[.[] | select(.draft | not)][0].tag_name // ""')
+              echo "::notice::tan tag ${TAN_TAG} is a pre-release: resolving alp-sdk's newest non-draft release, pre-releases included" ;;
+            *)
+              tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name) ;;
+          esac
           case "${tag}" in
             ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
               echo "::error::alp-sdk releases/latest returned something that is not a plain git ref: '${tag}'"
@@ -3685,7 +3693,7 @@ jobs:
           ref: ${{ env.PINNED_PLANNER_ORACLE_SDK_REF }}
           path: alp-sdk-planner-oracle
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 

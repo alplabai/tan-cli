@@ -238,6 +238,32 @@ def explicit_core_unknown_message(core: str, slices: list[dict[str, Any]]) -> st
     )
 
 
+def multi_core_without_core_message(target: str, slices: list[dict[str, Any]]) -> str | None:
+    """tan-cli#1488: a message when `--core` is omitted but this build has more
+    than one hardware slice of `target`'s class, so picking "the first" would
+    program a core the caller may not have meant; `None` otherwise. Mirrors
+    `tan probe` / `tan flash`, which refuse the same case."""
+    manifest_os = MANIFEST_OS_BY_TARGET.get(target)
+    if manifest_os is None or target == NATIVE_HOST:
+        return None
+    cores = list(
+        dict.fromkeys(
+            s["core_id"]
+            for s in slices
+            if s.get("os") == manifest_os
+            and isinstance(s.get("core_id"), str)
+            and not is_native_sim_board(s.get("board"))
+        )
+    )
+    if len(cores) < 2:
+        return None
+    return (
+        f"--core was not given, and this project's build/system-manifest.yaml has "
+        f"more than one {target} core ({', '.join(cores)}); the launch configuration "
+        "programs one core's image, so pass --core to say which one to debug."
+    )
+
+
 def _ambiguous_target_classes_message(targets: set[str]) -> str:
     # The mapped --target-kind SPELLINGS (`zephyr-mcu`), never the raw
     # manifest `os` value (`zephyr`) -- pasting the bare `os` value into
@@ -552,6 +578,11 @@ class LaunchResolution:
     #: build, and no SDK-published metadata, can ever resolve. `None` unless
     #: the caller passed one.
     gdbserver_address: str | None = None
+    #: J-Link probe serial (`flash_args.jlink_serial` of the selected slice) --
+    #: the probe `tan flash` would select. Pinned as cortex-debug's
+    #: `serialNumber` so F5 cannot open a different J-Link when several are
+    #: attached (tan-cli#1488). `None` leaves the probe unpinned.
+    probe_serial: str | None = None
 
 
 def fill_debug_probe_identity_gaps(
@@ -634,6 +665,8 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
             draft["miDebuggerPath"] = resolution.gdb_path
         elif is_cortex:
             draft["gdbPath"] = resolution.gdb_path
+    if is_cortex and draft.get("servertype") == JLINK and resolution.probe_serial is not None:
+        draft["serialNumber"] = resolution.probe_serial
     if is_cortex and draft.get("servertype") == OPENOCD:
         if resolution.server_path is not None:
             draft["serverpath"] = resolution.server_path

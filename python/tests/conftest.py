@@ -1684,3 +1684,19 @@ def _no_host_segger_install_roots(monkeypatch):
     from tan.core import jlink_binary
 
     monkeypatch.setattr(jlink_binary, "_install_roots", lambda env, platform: [])
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_cmake_package_registry(monkeypatch, tmp_path):
+    """tan-cli#1553: `tan bootstrap`'s toolchain phase prunes tan's own entries
+    from the HOST's CMake package registry (HKCU on Windows). Point every
+    in-process test at an empty per-test registry instead, so no test reads or
+    writes the developer's or runner's real one; the tests that exercise the
+    real backends opt back in (test_bootstrap_sdk_registry_1553.py)."""
+    from tan.commands import bootstrap_sdk_registry
+
+    monkeypatch.setattr(
+        bootstrap_sdk_registry,
+        "host_registry",
+        lambda: bootstrap_sdk_registry.PosixRegistry(tmp_path / "cmake-package-registry"),
+    )

@@ -39,12 +39,17 @@ one resolves:
    `tan build` runs (unlike the manifest field below), but is scoped to
    whatever shell/session set it.
 3. **`flash_args.setools_dir`** in `build/system-manifest.yaml` — lowest
-   precedence, and **not durable**: `tan build` regenerates this file on
-   every run (`python/tan/commands/build/manifest.py`), and alp-sdk's own
-   emit carries no `setools_dir` key at all. A hand-edit here is silently
-   overwritten by your next build. Prefer the flag or the environment
-   variable for anything you want to survive a rebuild; treat this field as
-   build-owned, not a place to hand-author a durable setting.
+   precedence, **never executed** (tan-cli#1343/#1344), and **not durable**: the
+   manifest is project-controlled, and tan will not run an `app-gen-toc` a
+   checkout picked for a write to a board. A manifest-only source is still
+   *found* (so the messages can name it), but a confirmed `tan flash` refuses it
+   as `flash.setools-untrusted-source` before any spawn, and `--dry-run` / an
+   unconfirmed run skip the sign (`setools.signSkipped: true`, issue
+   `flash.preview-sign-skipped`) instead of reporting the ATOC placement. Name
+   the install yourself with the flag or the environment variable. `tan build`
+   also regenerates this file on every run
+   (`python/tan/commands/build/manifest.py`) and alp-sdk's own emit carries no
+   `setools_dir` key, so a hand-edit here would be overwritten anyway.
 
 If none of the three resolves, `tan flash` refuses with a message naming all
 three sources, in this same order, and how to set each one — it never
@@ -80,13 +85,16 @@ one install can no longer cross-pair (tan-cli#380) without any lock. The scratch
 tree is removed when the entry finishes; the entry reports it as
 `setools: {dir, source, scratch, scratchRemoved}`.
 
-A successful sign names which SETOOLS install did it (`--setools-dir`,
-`SETOOLS_DIR`, or `flash_args.setools_dir` — see `setools.source` in `tan
-flash`'s own output), not only a failed one.
+A successful sign names which SETOOLS install did it (`--setools-dir` or
+`SETOOLS_DIR`; see `setools.source` in `tan flash`'s own output), not only a
+failed one. A manifest-only `flash_args.setools_dir` never signs (see source 3
+above).
 
 Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
 `app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
-placement. They still never spawn `JLinkExe`.
+placement, **when the install came from `--setools-dir` or `SETOOLS_DIR`**. With a
+manifest-only source the preview skips the sign and says so. They still never
+spawn `JLinkExe`.
 
 ### The `DEVICE` entry (tan-cli#1322)
 
@@ -156,11 +164,23 @@ containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU ma
 have not been reset` first triggers a read-only, non-halting DHCSR check in a fresh
 session: only `S_RESET_ST` set with `S_HALT` and `S_LOCKUP` clear (and no `Reset:`
 or halt trouble in that session) proves the reset took (`jlink.resetConfirmedBy:
-"dhcsr"`, no issue code). Because J-Link's own reads usually clear it, a second non-halting
-witness also confirms: three `DWT_PCSR` (0xE000101C) PC samples that all fall inside the
-image just flashed (`resetConfirmedBy: "pcsr"`, `jlink.reset: "new-image-running"` -- PCSR proves the new code
-runs, not that the Secure Enclave pin reset took; the ranges are the PF_X LOAD segments of the
-app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes). `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
+"dhcsr"`, no issue code). J-Link's own reads usually clear it, and `DWT_PCSR` (0xE000101C) PC samples inside the flashed image's range
+(the PF_X LOAD segments of the app ELF; `0xFFFFFFFF` and `0x00000000` are no sample, any sample outside vetoes) do **not**
+substitute: an image previously linked at the same slot0 address covers the same range and produces the same samples
+(tan-cli#1537). They only set `jlink.coreRunning` (and `bootProbe.pcsrInImageRange`); `jlink.reset` stays `unconfirmed`, and
+`new-image-running` / `resetConfirmedBy: "pcsr"` are no longer emitted. What does confirm a boot (tan-cli#1539, `jlink.reset: "booted"`, `jlink.resetConfirmedBy:
+"uptime"`): the same non-halting probe session also reads the kernel tick counter `curr_tick` (a `uint64_t`) four times,
+600 ms apart, at the address the ELF being flashed (`<artefact>.elf`) gives it -- never a hardcoded one, and only inside a RAM
+LOAD segment in the slice core's own DTCM / E8 SRAM0, never HP ITCM `0x50000000`. The tick rate is the ELF's
+`CONFIG_SYS_CLOCK_TICKS_PER_SEC` symbol, else the `.config` beside it. tan takes a monotonic timestamp when the write session
+ends and another when the probe ends; the counter must rise across the reads and its last value, as seconds, must not exceed
+the time elapsed between those two timestamps plus 1 s of slack (the reset tail runs inside the write session, so the image
+boots just before the first timestamp). That proves the running image booted after the write ended (SysTick freezes while the core is halted for the write, so
+an image already running resumes with its pre-write uptime and passes only if that was under the 1 s slack); it does **not** prove the SE PIN reset took, so the value is
+`booted`, not `pin-reset`, and the message says "boot proven, PIN reset not". `bootProbe.uptime` records `symbol`, `address`,
+`ticks` (hex strings), `ticksPerSec` and `elapsedSinceWriteSeconds`. A counter that is flat (halted or gated), larger than the
+elapsed time, or all-ones, a missing / duplicated / unreadable symbol, or an unknown tick rate keeps `unconfirmed`, with no new
+failure. A sleeping app whose timer fires less often than the 1.8 s read window stays `unconfirmed`. `S_RETIRE_ST` / `S_SLEEP` alone clear on read and are also
 the old image idling, so they only set `jlink.coreRunning` ("core running, reset not
 proven"). Otherwise the message becomes `PIN-reset NOT confirmed` and `flash.jlink-reset-unconfirmed` (info) appear.
 
@@ -221,7 +241,7 @@ inside some `JLinkExe` on `PATH` is not consulted); and `labgrid-client` (absolu
 host/user (real-uid account) as the single `acquired:` holder, with the leased place's `swd` USB path equal to the selected probe's (`--probe-usb-path`). The wrapper and `labgrid-client` must be owned by root or you and not writable by others or by a shared group, along the symlink's own chain and the resolved target's. This guards against accidental writes; it is
 not a security boundary. The MRAM window is the SKU's own variant `mram_mb` at the SoC
 document's `soc_flash_base`; a SKU that does not resolve is refused. The envelope's
-`raw.writes[]` carries each blob's `sha256`, address and sector span;
+`raw.writes[]` carries each blob's absolute `path` (the file hashed and written), `sha256`, address and sector span;
 `raw.resetCommands` is `false` (no reset command is sent, but `loadbin` may halt the
 core). Power-cycle afterwards so the Secure Enclave boots the restored contents.
 
@@ -507,8 +527,13 @@ manifest that still declares `flash_method: swd_probe` is refused by name.
 
 ## `tan flash --ram`: is the probe on the HE core? (tan-cli#1354)
 
-A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds, and its
-`Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
+A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds -- except on
+`alif:ensemble:e8`, where tan pins the HE AHB-AP `0x00300000` before `connect`
+(`exec CORESIGHT_AddAP` + `exec CORESIGHT_SetIndexAHBAPToUse`, tan-cli#1566); other silicon
+keeps the scan. `tan probe` pins the same way for `--core m55_he`. A pinned address is tan's
+own, so the AP verdict is true by construction (`ap.apAddrSource` is `pinned`, honoured only
+when J-Link's banner says it used the user-specified AP map); the ITCM read below is then
+the identity check. The `Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
 anything, `--ram` runs one read-only session (`connect`, then three `mem32` reads --
 no halt, no write) and decides from two independent facts:
 
@@ -537,7 +562,9 @@ Halt/reset trouble in the load transcript (`CPU could not be halted`, `Could not
 core`, `SYSRESETREQ has confused core`, `Reset: Failed`, `CPU may have not been reset`) is
 reported as `jlink.resetFailures` plus the `flash.jlink-reset-unconfirmed` warning, and the
 message says the load only worked through a J-Link fallback. The words read and the verdicts are in
-`ram.coreCheck`.
+`ram.coreCheck`. `ram.loaded` (`data.entries[].ram`) is `true` once the load session is
+proven (the image is on the board and the device was reset), whatever fails afterwards; it is
+absent when the entry failed before that point.
 
 A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
 (`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever

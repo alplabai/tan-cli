@@ -242,6 +242,12 @@ def test_doctor_data_key_set_matches_contract_dataKeys():
     for step in next_steps:
         assert isinstance(step, str)
 
+    # tan-cli#1571: `platform` is null on this (pin-less) host; the populated
+    # shape is checked against the file's own `items` in
+    # tests/commands/test_platform_command.py.
+    platform_decl = DOCTOR_DATA_KEYS["dataKeys"]["platform"]
+    assert data["platform"] is None and platform_decl["nullable"]
+
 
 def test_doctor_forced_missing_prerequisites_exercises_optional_and_missing_prereq_paths():
     """The half a healthy-host run cannot prove: that every declared

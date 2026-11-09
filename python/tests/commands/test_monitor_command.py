@@ -349,7 +349,7 @@ def test_frozen_build_without_the_extra_reports_pyserial_missing_not_a_tan_bug(m
     assert codes == ["monitor.pyserial-missing"], envelope
     assert "monitor.internal-failure" not in codes
     assert result.exit_code == 1, f"expected RUNTIME_FAILURE, got {result.exit_code}"
-    assert 'tan-cli[monitor]' in envelope["issues"][0]["message"]
+    assert './python[monitor]' in envelope["issues"][0]["message"]
     # tan-cli#1213: `contract/envelopes/monitor-no-port` is PUBLISHED, pairing
     # `["monitor", "--format", "json"]` with a `data.availablePorts` -- and this
     # is that same argv answering without the extra. The ABSENCE of that key

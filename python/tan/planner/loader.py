@@ -1278,13 +1278,13 @@ def _validate_cross_fields(
         if att_root == "optiga_trust_m":
             if _is_i2c_chip_unassembled(som_preset, "optiga_trust_m"):
                 # alp-sdk#2316 (tan-cli#1295), same class as alp-sdk#2311's
-                # OSPI guard: E1M-AEN801/803 carry
-                # `capabilities.optiga_trust_m: true` and name the part
-                # under `on_module:`, but the part itself is DNP
-                # (`assembled: false` on its i2c_devices entry).  The
-                # population fact wins -- an attestation root on a part
-                # this SKU does not carry would build and then fail on
-                # silicon.
+                # OSPI guard: every E1M-AEN SKU names the part under
+                # `on_module:` with `assembled: false` (IC1 is DNP on the
+                # shared AEN PCB, alp-sdk#2958), and
+                # capabilities.optiga_trust_m now follows population
+                # (alp-sdk#2990).  The population fact wins -- an
+                # attestation root on a part this SKU does not carry would
+                # build and then fail on silicon.
                 where = f"SoM {sku}" if sku else "this SoM"
                 yaml_ref = (f"metadata/e1m_modules/{sku}.yaml" if sku
                             else "its SoM preset YAML")
@@ -1342,7 +1342,7 @@ def _library_alias_table(metadata_root: Path) -> dict[str, str]:
     path = metadata_root / "library-aliases-v1.json"
     if not path.is_file():
         return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = strict_json_loads(path.read_text(encoding="utf-8"), source=path)
     aliases = doc.get("aliases")
     return dict(aliases) if isinstance(aliases, dict) else {}
 

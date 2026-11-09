@@ -16,21 +16,36 @@ If `[hello] tick 0` doesn't appear, the suspect list is short:
     on the wrong UART, wrong baud rate, or wrong USB enumeration.
 
 Pin down which one BEFORE moving on to alp-sdk's
-[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/gpio-button-led)
+[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.18.0/examples/peripheral-io/gpio-button-led)
 or
-[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.17.0-rc1/examples/peripheral-io/i2c-scanner)
+[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.18.0/examples/peripheral-io/i2c-scanner)
 -- neither is part of this scaffolded project.
 
 ## What this shows
 
-* The minimal `board.yaml` v2 shape: `schema_version`, `som.sku`,
-  `board.name`, one `cores.<id>` with an empty `peripherals: []`.
+* The minimal `board.yaml` shape: `som.sku`, `preset`, one
+  `cores.m55_hp` with an empty `peripherals: []`.
 * That `prj.conf` stays empty -- all CONFIG_* selection comes from
   the loader-generated `alp.conf`.
 * The Zephyr boot -> `main()` -> printf path with no peripheral
   initialisation in between.
 
 ## Build
+
+From this directory, or from your own copy of it:
+
+```bash
+tan build
+tan flash
+```
+
+To start your own copy: `tan init --from-example peripheral-io/hello-world`.
+
+`tan` builds one image per Zephyr core on the SoM: a core this `board.yaml` does not declare gets the SDK's idle `alp-stock-shim` image (on an E1M-AEN SoM, `m55_he` here, in `build/m55_he-zephyr/`); see [docs/heterogeneous-builds.md](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/heterogeneous-builds.md).
+
+### Inside an SDK checkout (twister / CI)
+
+These commands only work from an alp-sdk checkout, because `scripts/gen_example_alp_conf.py` writes `generated/alp.conf` there.
 
 ```bash
 # Standalone, native_sim (host binary; no hardware needed):
@@ -52,12 +67,17 @@ west flash
 |--------------|----------------------------------------------------------|
 | E1M-AEN      | Alif first USART -> FTDI USB-UART on E1M-EVK (115200 8N1) |
 | E1M-V2N      | Renesas SCIF -> FTDI USB-UART on E1M-X-EVK (115200 8N1)   |
-| E1M-V2N-M1   | Same as V2N                                              |
+| E1M-V2M      | Same as V2N                                              |
 | native_sim   | Host binary stdout                                       |
 
-Open the serial port in your terminal of choice (115200 8N1).
-The recommended cross-platform tool is `tio` -- one binary, one
-syntax on Linux, macOS, and Windows:
+Open the serial port with `tan monitor --port <port>` (115200 8N1):
+
+```bash
+tan monitor --port <your-serial-device>
+```
+
+Any terminal works too; `tio` is a good cross-platform one -- one
+binary, one syntax on Linux, macOS, and Windows:
 
 ```
 tio -b 115200 <your-serial-device>
@@ -65,7 +85,7 @@ tio -b 115200 <your-serial-device>
 
 Per-OS device naming (and the alternative terminals each OS
 prefers) is documented in
-[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cross-platform-setup.md)
+[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/cross-platform-setup.md)
 section 7.7.
 
 <!-- cross-platform-lint:ignore -->
@@ -100,9 +120,9 @@ LPT)").
 
 ## Reference
 
-- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/firmware-quickstart.md)
+- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/firmware-quickstart.md)
   -- single-OS bring-up walk-through.
-- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/cross-platform-setup.md)
+- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/cross-platform-setup.md)
   -- Windows/macOS/Linux toolchain + serial-port notes.
-- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.17.0-rc1/docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.18.0/docs/troubleshooting.md)
   -- common boot/flash/console failures + fixes.

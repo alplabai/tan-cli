@@ -117,8 +117,9 @@ class SramFit:
 
     @property
     def no_fit(self) -> bool:
-        """True the moment EITHER axis is a certain `NO_FIT` -- what `tan
-        model build` refuses the whole per-model build on. A `SKIPPED` axis
+        """True the moment EITHER axis is a certain `NO_FIT` -- the
+        per-target skip `tan model build` records (the model is refused only
+        when no ethos_u target fits). A `SKIPPED` axis
         never contributes: an unresolvable SRAM0 total, or an arena budget
         this project's board.yaml never actually declared, is an unanswered
         question, never treated as a failure (`resolve_arena_budget`)."""

@@ -168,6 +168,7 @@ from tan.core.bootstrap import (
     reported_missing,
     select_linux_install,
 )
+from tan.commands.platform_doctor import pin_report
 from tan.core.consent import can_prompt
 from tan.core import devicetree_lint
 from tan.core.doctor_git import (
@@ -1127,6 +1128,10 @@ def west_resolved_check(
     return Check("westResolved", "pass", f"west {_fmt(version)} resolved: {found}.", scope="project")
 
 
+#: tan-cli#1520: the verified remedy for a missing Zephyr SDK toolchain.
+ZEPHYR_SDK_BOOTSTRAP_FIX = "tan bootstrap"
+
+
 def zephyr_sdk_install_command() -> str:
     """The exact `west sdk install` invocation the `zephyrSdk` check's `fix`
     names -- the ONE place it is assembled, mirroring
@@ -1135,6 +1140,12 @@ def zephyr_sdk_install_command() -> str:
     doctor` above reports it, and names the exact install command"; this is
     what makes that promise true rather than a second, independently-worded
     copy able to drift from it.
+
+    tan-cli#1520: this is now the README's MANUAL command only. The
+    `zephyrSdk` check and `tan build`'s missing-SDK message deliberately
+    diverge from the Rust oracle and point at `tan bootstrap` instead, because
+    this command's setup.sh fetches the toolchain archive with no integrity
+    check, skipping the alp-sdk sha256 pin (#1501).
     """
     return f"west sdk install --version {ZEPHYR_SDK_INSTALL_VERSION} -t arm-zephyr-eabi"
 
@@ -1177,50 +1188,20 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         if env_dir
         else "ZEPHYR_SDK_INSTALL_DIR unset"
     )
-    # tan-cli#424: on POSIX that command needs `file(1)`, which NOTHING else
-    # tells the customer about -- the SDK's own host-tools step dies with
-    # "ERROR: Host tools installation failed" / "FATAL ERROR: command
-    # `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed", naming neither the tool
-    # nor a remedy. Isolated to that single variable in a pristine
-    # ubuntu:24.04: identical bootstrapped workspace, identical HOME, `file`
-    # the only difference -- WITH it `west sdk install` exits 0 ("All done"),
-    # WITHOUT it exits 1 with those two lines.
-    #
-    # Named HERE rather than added to the manifest's `prerequisites`, because
-    # `tan bootstrap` genuinely does not need it and succeeds without it --
-    # promoting it there would refuse hosts over a tool the bootstrap never
-    # uses. What MAKES that claim true is that `tan bootstrap`'s automatic
-    # acquisition path passes `--no-hosttools`
-    # (`tan.core.toolchain_provision.west_sdk_install_argv`), so it never runs
-    # the SDK's host-tools step and never reaches `file` at all; between
-    # tan-cli#990 (which added that path) and tan-cli#1176 (which added the
-    # flag) the sentence above was FALSE -- `tan bootstrap` ran the very
-    # command this note is about and failed on exactly these two lines. Do not
-    # delete the flag without moving `file` into the prerequisites manifest.
-    # The command in `zephyr_sdk_install_command()` above carries no
-    # `--no-hosttools` on purpose (it mirrors the Rust oracle verbatim), which
-    # is why the note below still applies to it.
-    #
-    # This is the message immediately preceding the failure, which is
-    # where it is actionable. Same shape as `seven_zip_check` above: a
-    # host-tool prerequisite of `west sdk install` itself, surfaced beside the
-    # command that needs it rather than folded into the bootstrap gate.
-    host_tool_note = (
-        ""
-        if os.name == "nt"
-        else " On Linux/macOS the SDK's host-tools step also needs `file` on PATH"
-        " (Debian/Ubuntu: `sudo apt-get install -y file`); without it the install"
-        ' fails with "Host tools installation failed" and names nothing.'
-    )
+    # tan-cli#1520: the remedy is `tan bootstrap`, NOT the oracle's
+    # `west sdk install ... -t arm-zephyr-eabi` (deliberate divergence): that
+    # command's setup.sh downloads the toolchain archive with no integrity
+    # check, bypassing the alp-sdk sha256 pin that #1501 made the boundary.
+    # `tan bootstrap` verifies the archive and passes `--no-hosttools`, so the
+    # tan-cli#424 `file(1)` prerequisite note no longer applies to this fix.
     return Check(
         "zephyrSdk",
         "fail",
-        f"Zephyr SDK toolchain not detected ({where}) -- from "
-        f"an initialised west workspace, run `{zephyr_sdk_install_command()}`.",
+        f"Zephyr SDK toolchain not detected ({where}) -- run `{ZEPHYR_SDK_BOOTSTRAP_FIX}`.",
         f"Install the Zephyr SDK toolchain (arm-zephyr-eabi, version "
-        f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
-        f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
-        "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+        f"{ZEPHYR_SDK_INSTALL_VERSION}) with `{ZEPHYR_SDK_BOOTSTRAP_FIX}`, which "
+        "verifies the downloaded archive against the alp-sdk pin; a hand-run "
+        "`west sdk install` does not.",
         scope="host",
     )
 
@@ -1232,6 +1213,23 @@ def _toolchain_store_dir(
         os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
     )
     return Path(root.path_str) / toolchain_provision.store_dir_name(manifest.version)
+
+
+def _toolchain_root_adopted() -> bool:
+    """`$ALP_TOOLCHAIN_ROOT` is set: tan did not necessarily create that root
+    and `tan bootstrap` never deletes or repairs an unverified store
+    directory in it (tan-cli#1498)."""
+    return toolchain_provision.resolve_toolchain_root(
+        os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    ).adopted
+
+
+def _adopted_store_remedy(store_dir: Path) -> str:
+    return (
+        f"ALP_TOOLCHAIN_ROOT is an adopted root, so `tan bootstrap` will not repair "
+        f"it -- remove {store_dir} yourself (or unset ALP_TOOLCHAIN_ROOT), then run "
+        f"`tan bootstrap`."
+    )
 
 
 def _host_toolchain_matching_pin(
@@ -1285,18 +1283,20 @@ def _host_toolchain_matching_pin(
     the specific `<root>/<store leaf for this manifest version>` directory
     keeps the guard narrow enough to still hold under that escape hatch.
     """
-    root = _zephyr_sdk_detected_root()
-    if root is None:
-        return None
     try:
-        if root.resolve().is_relative_to(_toolchain_store_dir(manifest).resolve()):
-            return None
+        store = _toolchain_store_dir(manifest).resolve()
     except OSError:
-        pass
-    version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
-    if version_text is None or version_text.strip() != manifest.version:
-        return None
-    return root
+        store = None
+    for root in _zephyr_sdk_detected_roots():
+        try:
+            if store is not None and root.resolve().is_relative_to(store):
+                continue
+        except OSError:
+            pass
+        version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+        if version_text is not None and version_text.strip() == manifest.version:
+            return root
+    return None
 
 
 def toolchain_check(sdk_root: str | None) -> Check:
@@ -1364,10 +1364,32 @@ def toolchain_check(sdk_root: str | None) -> Check:
     store_dir = _toolchain_store_dir(manifest)
     stamp_text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
     stamp = toolchain_provision.parse_stamp(stamp_text) if stamp_text is not None else None
+    adopted = _toolchain_root_adopted()
     if toolchain_provision.stamp_matches_pin(stamp, manifest):
+        if not toolchain_provision.store_compiler_present(store_dir, is_windows=os.name == "nt"):
+            if adopted:
+                return Check(
+                    "toolchain",
+                    "fail",
+                    f"{store_dir} carries a verification stamp for {manifest.version} "
+                    f"but its arm-zephyr-eabi-gcc is gone -- "
+                    f"{_adopted_store_remedy(store_dir)}",
+                    scope="project",
+                )
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for {manifest.version} but "
+                f"its arm-zephyr-eabi-gcc is gone -- run `tan bootstrap` to repair it.",
+                "tan bootstrap",
+                scope="project",
+            )
         return Check(
             "toolchain", "pass",
-            f"arm-zephyr-eabi {manifest.version} verified at {store_dir}.",
+            f"arm-zephyr-eabi {manifest.version} installed at {store_dir}; version and "
+            f"compiler were checked at install. Provenance: "
+            f"{toolchain_provision.stamp_provenance(stamp)}; "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}.",
             scope="project",
         )
     host_root = _host_toolchain_matching_pin(manifest)
@@ -1377,10 +1399,22 @@ def toolchain_check(sdk_root: str | None) -> Check:
             "pass",
             f"arm-zephyr-eabi {manifest.version} detected at {host_root} -- not tan's "
             f"own store, but its `sdk_version` matches this checkout's pin, so this "
-            f"host already has what `tan bootstrap` would otherwise download again.",
+            f"host already has what `tan bootstrap` would otherwise download again. "
+            f"That match is the `sdk_version` text file only: this install was never "
+            f"compared with the pin (its archive may have been fetched unchecked); "
+            f"{toolchain_provision.ARCHIVE_SHA256_NOTE}.",
             scope="project",
         )
     if stamp is not None:
+        if adopted:
+            return Check(
+                "toolchain",
+                "fail",
+                f"{store_dir} carries a verification stamp for a different pin (this "
+                f"checkout now pins {manifest.version}) -- "
+                f"{_adopted_store_remedy(store_dir)}",
+                scope="project",
+            )
         return Check(
             "toolchain",
             "fail",
@@ -1388,6 +1422,14 @@ def toolchain_check(sdk_root: str | None) -> Check:
             f"checkout now pins {manifest.version}) -- run `tan bootstrap` to "
             f"acquire the current pin.",
             "tan bootstrap",
+            scope="project",
+        )
+    if adopted and store_dir.is_dir():
+        return Check(
+            "toolchain",
+            "fail",
+            f"no verified arm-zephyr-eabi {manifest.version} toolchain at {store_dir} "
+            f"-- {_adopted_store_remedy(store_dir)}",
             scope="project",
         )
     return Check(
@@ -2590,6 +2632,12 @@ def _read_sdk_version(root: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def platform_check(report: tuple[dict | None, str, str]) -> Check:
+    status, detail = report[1:]
+    fix = {"warn": "tan platform use <line>", "fail": "tan platform clear"}.get(status)
+    return Check("platform", status, detail, fix, scope="project")
+
+
 def summarise(checks: list[Check]) -> dict[str, int]:
     """`pass`/`warn`/`fail` counts. `unknown` lands in NONE of them, so
     `sum(summary.values())` can be smaller than `len(checks)` -- deliberate, and
@@ -2866,24 +2914,23 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     return roots
 
 
-def _zephyr_sdk_detected_root() -> Path | None:
-    """The SAME scan `_zephyr_sdk_detected` runs, but returns the root that
-    validated instead of collapsing it to a bool -- `toolchain_check` (issue
-    #474 / tan-cli#990 review) needs the actual directory back so it can read
-    ITS `sdk_version` file and compare against the pin, not just know that
-    "some" toolchain exists somewhere. `ZEPHYR_SDK_INSTALL_DIR` wins first,
-    matching `_zephyr_sdk_detected`'s own precedence; the first validated
-    `zephyr-sdk*` entry under `_zephyr_sdk_scan_roots()` otherwise.
+def _zephyr_sdk_detected_roots() -> list[Path]:
+    """EVERY root the scan validates, in precedence order (tan-cli#1483: the
+    adoption check needs to see all of them, not just the first -- a
+    mismatched `ZEPHYR_SDK_INSTALL_DIR` must not hide an installed copy of the
+    pinned version). `ZEPHYR_SDK_INSTALL_DIR` first, then each `zephyr-sdk*`
+    entry under `_zephyr_sdk_scan_roots()`.
 
     Never raises: an unreadable or missing scan root is "nothing found
     there", not a doctor crash.
     """
+    found: list[Path] = []
     env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
     if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
-        return Path(env_dir)
+        found.append(Path(env_dir))
     for root in _zephyr_sdk_scan_roots():
         try:
-            entries = list(root.iterdir())
+            entries = sorted(root.iterdir())
         except OSError:
             continue
         for entry in entries:
@@ -2892,8 +2939,14 @@ def _zephyr_sdk_detected_root() -> Path | None:
                 and not _is_toolchain_wreckage(entry.name)
                 and _zephyr_sdk_root_valid(entry)
             ):
-                return entry
-    return None
+                found.append(entry)
+    return found
+
+
+def _zephyr_sdk_detected_root() -> Path | None:
+    """The first root `_zephyr_sdk_detected_roots` validates, or `None`."""
+    roots = _zephyr_sdk_detected_roots()
+    return roots[0] if roots else None
 
 
 def _zephyr_sdk_detected() -> bool:
@@ -3909,6 +3962,7 @@ def _collect(
     workspace_root: str = ".",
     sdk_tier: str | None = None,
     broken_global_default: str | None = None,
+    platform_result: tuple[dict | None, str, str] | None = None,
     on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
     """Every probe, in report order. `probe`/`on_path`/`_read_text` are the
@@ -4065,6 +4119,7 @@ def _collect(
     )
     if libraries is not None:
         _add(libraries)
+    _add(platform_check(platform_result if platform_result is not None else pin_report(sdk_root)))
     workspace_path = west_workspace_dir(
         workspace_root, Path(sdk_root) if sdk_root is not None else None
     )
@@ -4273,7 +4328,12 @@ def _collect(
     # `warn`, not a `fail`: see `seven_zip_check`'s docstring and
     # tan-cli#204 for why the SEVERITY is right and only the GATE was wrong.
     if os.name == "nt":
-        _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
+        # tan-cli#1523: same predicate `tan bootstrap`'s preflight uses, so
+        # doctor cannot pass a host (unar-only, or 7z.exe only in the cwd)
+        # that bootstrap refuses.
+        from tan.commands.bootstrap_toolchain_fetch import _find_seven_zip
+
+        _add(seven_zip_check(_find_seven_zip() is not None))
 
     # tan-cli#1323: the precedence `tan flash` applies (`resolve_setools_dir`),
     # minus the per-run `--setools-dir` flag doctor cannot see: $SETOOLS_DIR,
@@ -4558,6 +4618,7 @@ def doctor(
             """
             _print_stream_lines(render_check_lines(check.as_dict(), width, color), check.name)
 
+        platform_result = pin_report(sdk_root)
         checks = _collect(
             sdk_root,
             build=build,
@@ -4566,6 +4627,7 @@ def doctor(
             workspace_root=str(workspace_root),
             sdk_tier=sdk_tier,
             broken_global_default=broken_global_default,
+            platform_result=platform_result,
             on_check=_print_check if stream else None,
         )
         # tan-cli#91 / ADR 0021: `--fix` only ever RUNS anything when a human
@@ -4639,6 +4701,7 @@ def doctor(
             "checks": [c.as_dict() for c in checks],
             "nextSteps": next_steps(checks),
             "missingPrerequisites": missing_prerequisites,
+            "platform": platform_result[0],
         }
     except Exception as err:  # noqa: BLE001
         # The port's most-repeated defect class: an uncaught exception escapes as

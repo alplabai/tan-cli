@@ -24,8 +24,11 @@ from typing import Any, Callable
 import typer
 
 from tan.commands import flash_cmd as fc
+from tan.commands import flash_ram as fr
+from tan.commands.build_output import resolve_metadata_sdk_root
 from tan.core import probe_plan as pp
 from tan.core.dp_id import _dp_id_value
+from tan.core.system_manifest import effective_build_root, find_manifest
 from tan.core.flash_plan import (
     _DEFAULT_JLINK_SPEED,
     FlashPlan,
@@ -91,12 +94,12 @@ def _arg_issue(err: pp.ProbeArgError) -> Issue:
     return Issue("probe.bad-argument", "error", str(err))
 
 
-def _load_slices(build_root: str) -> tuple[list[tuple[str, dict]], bool, Issue | None]:
-    """`(slices, manifest present, warning)`. An existing but unusable manifest is a
+def _load_slices(build_root: str) -> tuple[list[tuple[str, dict]], bool, Issue | None, str]:
+    """`(slices, manifest present, warning, sku)`. An existing but unusable manifest is a
     `probe.manifest-unusable` warning: the comparison it would have armed is skipped."""
-    path = fc._abs_join(build_root, "system-manifest.yaml")
+    path = find_manifest(build_root, fc._is_file)
     if not fc._is_file(path):
-        return [], False, None
+        return [], False, None, ""
     try:
         manifest = parse_system_manifest(fc._read(path))
     except Exception as err:  # noqa: BLE001 -- a broken manifest only loses the comparison
@@ -104,11 +107,13 @@ def _load_slices(build_root: str) -> tuple[list[tuple[str, dict]], bool, Issue |
             "probe.manifest-unusable", "warning",
             f"{path} exists but is not usable ({type(err).__name__}: {err}); the expect_dpidr "
             "comparison and the manifest's probe settings were skipped",
-        )
-    return [(sl.core_id, sl.flash_args) for sl in manifest.slices], True, None
+        ), ""
+    return [(sl.core_id, sl.flash_args) for sl in manifest.slices], True, None, manifest.sku
 
 
-def _attach_params(flash_args: dict[str, Any], jlink_report: dict[str, Any]):
+def _attach_params(
+    flash_args: dict[str, Any], jlink_report: dict[str, Any], ap_addr: int | None = None
+):
     """`(preamble, speed, expect_dpidr)` from the selected slice's flash_args; echoes a
     `jlink_device` substitution into the report."""
     serial = fa_str_checked(flash_args, "jlink_serial", False)
@@ -121,13 +126,22 @@ def _attach_params(flash_args: dict[str, Any], jlink_report: dict[str, Any]):
     speed = fa_int_checked(flash_args, "jlink_speed") or _DEFAULT_JLINK_SPEED
     if serial is not None:
         validate_identifier(serial, "jlink_serial", destination=fc._JLINK_SERIAL_DESTINATION)
-    return pp.make_preamble(serial, speed, device), speed, fa_str(flash_args, "expect_dpidr")
+    return pp.make_preamble(serial, speed, device, ap_addr), speed, fa_str(flash_args, "expect_dpidr")
+
+
+def _he_pin(core: str | None, project_dir: str, sku: str) -> int | None:
+    """The same E8 HE access-port pin `tan flash --ram` applies, so the two attach alike."""
+    if core != "m55_he":
+        return None
+    sdk = resolve_metadata_sdk_root(None, project_dir)
+    return fr.he_ap_for(fr.silicon_for(str(sdk) if sdk else None, sku))
 
 
 def _prepare(
     verb, core, build_root, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes
 ) -> _Run | _Result:
-    slices, present, warning = _load_slices(build_root)
+    slices, present, warning, sku = _load_slices(build_root)
+    build_root = effective_build_root(build_root, fc._is_file)
     flash_args, selected_id, ambiguity, note = pp.select_slice(slices, core)
     report: dict[str, Any] = {
         "core": core, "buildRoot": build_root, "writes": False, "manifestPresent": present,
@@ -158,8 +172,9 @@ def _prepare(
         guard = None
         if selection is not None and (selection.serial is not None or selection.visible is None):
             guard = fc._ProbeGuard(selection, snapshot, ctx.enumerate_probes, echo,
-                                   script_prefix=_SCRIPT_PREFIX)
-        pre, speed, expected = _attach_params(flash_args, report["jlink"])
+                                   script_prefix=_SCRIPT_PREFIX, jlink_source=found.source if found else None)
+        ap_addr = _he_pin((selected_id or core), project_dir, sku)
+        pre, speed, expected = _attach_params(flash_args, report["jlink"], ap_addr)
     except (FlashPlanError, RamRunError) as err:
         return _refuse(verb, Issue("probe.failed", "error", str(err)), report)
     if echo:
@@ -362,7 +377,9 @@ def probe(
     project: str = typer.Option(None, "--project", metavar="PATH", help="Project root (defaults to '.')."),
     build_root: str = typer.Option(
         None, "--build-root", metavar="PATH",
-        help="Build root holding system-manifest.yaml (default <project>/build). When present, its "
+        help="Build root, the same value `tan build`/`tan flash` take (manifest at "
+        "<PATH>/build/system-manifest.yaml; <PATH>/system-manifest.yaml also works; default "
+        "<project>/build). When present, its "
         "slice's flash_args supply expect_dpidr (compared by identify), jlink_serial/jlink_speed."),
     core: str = typer.Option(
         None, "--core", metavar="m55_he|m55_hp",

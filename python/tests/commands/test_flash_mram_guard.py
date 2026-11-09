@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import struct
+import time
 
 import pytest
 
@@ -144,14 +145,36 @@ def test_an_elf_far_older_than_its_bin_is_refused_as_stale(tmp_path):
 
 
 @posix_only
-@pytest.mark.parametrize("age", [-3600, 0, 5], ids=["newer", "same-time", "seconds-older"])
-def test_an_elf_newer_or_just_older_than_its_bin_is_trusted(tmp_path, age):
+@pytest.mark.parametrize("age", [0, 5], ids=["same-time", "seconds-older"])
+def test_an_elf_not_newer_than_its_bin_is_trusted(tmp_path, age):
     """A normal build links the ELF, then `objcopy`s the .bin seconds later."""
     message = flash_mram_guard.mram_link_guard(
         _pair(tmp_path, elf_age_s=age), "m55_he", slot0=SLOT0
     )
-    assert message is not None and "older than the .bin" not in message
+    assert message is not None and "older than" not in message
     assert "lowest LOAD segment" in message  # judged on its load address, not its age
+
+
+@posix_only
+@pytest.mark.parametrize("via", ["bin", "elf"])
+def test_a_bin_older_than_its_elf_is_refused_whichever_the_manifest_names(tmp_path, via):
+    """tan-cli#1485: an ITCM-linked .bin left beside a fresh MRAM-linked ELF used to pass,
+    because the ELF alone was judged. Holds for an ELF artefact (the mramxip shape) too."""
+    binary = _pair(tmp_path, elf_age_s=-3600)  # ELF an hour NEWER than the .bin
+    artefact = binary if via == "bin" else str(tmp_path / "a.elf")
+    message = flash_mram_guard.mram_link_guard(artefact, "m55_he", slot0=SLOT0)
+    assert message is not None and "a.bin" in message and "older than its ELF" in message
+
+
+@posix_only
+def test_a_bin_older_than_its_elf_is_refused_on_flow_d(tmp_path, monkeypatch):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    elf = tmp_path / "build" / "a.elf"
+    elf.write_bytes(make_elf(base=SLOT0, entry=SLOT0 | 1))
+    os.utime(elf, (4_000_000_000, 4_000_000_000))  # far newer than the .bin `_flow_d_run` writes
+    rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
+    assert rc == 1 and [i.code for i in issues] == [CODE]
+    assert "older than its ELF" in issues[0].message
 
 
 @posix_only
@@ -247,3 +270,37 @@ def test_a_bare_bin_with_no_elf_beside_it_is_not_checked(tmp_path, monkeypatch):
     rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
     assert CODE not in [i.code for i in issues] and rc == 0
 
+
+def test_a_bin_much_newer_than_an_elf_artefact_is_refused(tmp_path):
+    """tan-cli#1514: naming the ELF (as the stale refusal advises) used to skip the check."""
+    _pair(tmp_path, elf_age_s=600)  # ELF 10 minutes older than the .bin
+    (tmp_path / "a.elf").write_bytes(make_elf(base=SLOT0))
+    os.utime(tmp_path / "a.elf", (2_000_000_000 - 600, 2_000_000_000 - 600))
+    message = flash_mram_guard.mram_link_guard(str(tmp_path / "a.elf"), "m55_he", slot0=SLOT0)
+    assert message is not None and "a.bin" in message and "much newer than its ELF" in message
+
+
+@posix_only
+@pytest.mark.parametrize("flash_args", [SLOT0_AND_ATOC, AUTO_SIGN], ids=["slot0+atoc", "auto-sign"])
+def test_an_elf_artefact_with_a_much_newer_bin_is_refused_on_flow_d(
+    tmp_path, monkeypatch, flash_args
+):
+    """tan-cli#1514, wiring: both call sites (mramxip loadbin, SETOOLS auto-sign) refuse."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    elf = tmp_path / "build" / "a.elf"
+    elf.write_bytes(make_elf(base=SLOT0, entry=SLOT0 | 1))
+    past = time.time() - 600  # `_flow_d_run` writes the .bin now, so it is 600 s newer
+    os.utime(elf, (past, past))
+    jlink: list = []
+    monkeypatch.setattr(
+        flash_cmd, "_spawn_jlink",
+        lambda *a, **k: jlink.append((a, k)) or flash_cmd._Outcome(success=True, stdout=""),
+    )
+    spawned: list = []
+    kwargs = {} if flash_args is SLOT0_AND_ATOC else {"flash_args": flash_args}
+    rc, _d, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, spawned=spawned, output_artefact="a.elf", **kwargs
+    )
+    assert rc == 1 and [i.code for i in issues] == [CODE]
+    assert "much newer than its ELF" in issues[0].message
+    assert spawned == [] and jlink == []

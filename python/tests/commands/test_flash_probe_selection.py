@@ -583,3 +583,35 @@ def test_the_preflight_reuses_a_verification_nothing_ran_since():
         assert len(listings) == 2
     finally:
         mp.undo()
+
+
+def test_ambiguous_with_a_usb_path_names_the_resolved_binary_and_what_it_needs():
+    """tan-cli#1591: a usb path was given, the J-Link tan resolved is not an
+    isolating wrapper, so the refusal says which binary and what to do."""
+    import pytest as _pytest
+
+    def fake(argv, script, *a, **k):
+        return flash_cmd._Outcome(
+            success=True, returncode=0,
+            stdout="\n".join(
+                f"J-Link[{i}]: Connection: USB, Serial number: {A.serial}" for i in range(3)
+            ),
+        )
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(flash_cmd, "_spawn_jlink", fake)
+    mp.setattr(flash_cmd, "resolve_program_positions", lambda spawned, env, *a: (spawned, None))
+    try:
+        sel = jlink_probe.resolve_probe_selection(
+            [A, B, D], cli_serial=None, cli_usb_path="3-4.2", manifest_serial=None
+        )
+        guard = flash_cmd._ProbeGuard(
+            sel, jlink_probe.probe_set([A, B, D]), lambda: [A, B, D], {},
+            jlink_source="PATH",
+        )
+        msg = flash_cmd._probe_guard_refusal(guard, "/usr/bin/JLinkExe", None, None)
+    finally:
+        mp.undo()
+    assert guard.tripped_code == "ambiguous"
+    assert "/usr/bin/JLinkExe" in msg and "(PATH)" in msg
+    assert "--probe-usb-path needs a masking wrapper" in msg and "--jlink" in msg

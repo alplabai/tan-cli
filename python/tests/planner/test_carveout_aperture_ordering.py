@@ -270,18 +270,18 @@ class TestMramMainOrderingGuard:
                 f"carve-out placed at 0x{entry.base:x}, inside the live "
                 f"ATOC band -- exactly the alp-sdk#1365 hazard")
 
-    def test_raw_shmem_entry_on_aen801_also_stays_blocked(
+    def test_raw_shmem_entry_on_aen801_resolves_into_sram_ipc(
             self, split_a_metadata):
         """`mproc-mailbox`'s raw_shmem entry (m55_hp/m55_he, not
-        a32_cluster) exercises the same SoM/aperture with a different
-        `ipc.kind` -- the exclusion must not be accidentally scoped to
-        `rpmsg` alone."""
+        a32_cluster) must land in the SRAM0 `sram_ipc` row (alp-sdk#3011,
+        tan-cli#1569), never in a flash-class MRAM region."""
         from tan.planner import resolve_carve_outs
 
         project = _with_mram_main_resolved(_load(_mproc_mailbox_board(), split_a_metadata))
         entry = _by_name(resolve_carve_outs(project))["alp_shmem0"]
-        assert entry.status == "blocked"
-        assert "flash-class" in entry.reason
+        assert entry.status == "ok", entry.reason
+        assert entry.region == "sram_ipc"
+        assert 0x023E0000 <= entry.base < 0x023F0000
 
 
 class TestUnclassifiedWriteAuthorityLegCoverage:

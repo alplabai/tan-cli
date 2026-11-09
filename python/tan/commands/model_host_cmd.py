@@ -285,6 +285,17 @@ def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tup
         return Issue("model.run-failed", "error", str(err))
 
 
+def _cast_warnings(path: Path, result: Any) -> list[Issue]:
+    """`model.input-dtype-cast` (tan-cli#1497) when the sample (the user's
+    `--input` .npy, or tan's own generated sample reused for `ab`'s second
+    model) was cast to the model input dtype -- float to int truncates
+    silently otherwise."""
+    note = getattr(result, "input_cast", None)
+    if not note:
+        return []
+    return [Issue("model.input-dtype-cast", "warning", f"{path.name}: {note}")]
+
+
 def _host_preflight(
     context: ProjectContext, verb: str, raws: list[str | None], data: dict
 ) -> tuple[list[Path], None] | tuple[None, Issue]:
@@ -325,7 +336,7 @@ def run_run(
         return project, sdk, data, [measured], _refusal_exit(measured)
     data["model"] = paths[0].as_posix()
     data["result"] = _result_row(measured[0], paths[0])
-    return project, sdk, data, [], ExitCode.SUCCESS
+    return project, sdk, data, _cast_warnings(paths[0], measured[0]), ExitCode.SUCCESS
 
 
 def run_ab(
@@ -366,13 +377,30 @@ def run_ab(
         "bLatencyMs": cmp.b_latency_ms,
         "sizeDeltaBytes": cmp.size_delta_bytes,
     }
-    return project, sdk, data, [], ExitCode.SUCCESS
+    return (project, sdk, data,
+            [*_cast_warnings(a_path, a_res), *_cast_warnings(b_path, b_res)],
+            ExitCode.SUCCESS)
+
+
+def _device_summary(r: dict) -> str:
+    """tan-cli#1518: one measured on-device row, labelled with the scope of its
+    latency figure and the energy/SRAM it carries -- never as a host reference."""
+    parts = [f"{r.get('latencyMs')} ms/inference ({r.get('latencyScope')})"]
+    if r.get("peakSramKib") is not None:
+        parts.append(f"peak SRAM {r['peakSramKib']} KiB")
+    energy = r.get("energy")
+    if energy:
+        parts.append(f"energy {energy['valueMjPerInference']} mJ/inference ({energy['scope']})")
+    return f"{r.get('backend')}: " + ", ".join(parts)
 
 
 def render_run_text(data: dict) -> list[str]:
     r = data.get("result")
     if not r:
         return []
+    if r.get("tier") == "device":
+        return [f"{r.get('model') or '(no model file)'}: {_device_summary(r)}",
+                "measured on the device (tier: device)"]
     return [
         f"{r['model']}: {r['backend']} median {r['latencyMs']} ms over {r['runs']} runs, "
         f"output argmax {r['outputArgmax']}",
@@ -384,9 +412,19 @@ def render_ab_text(data: dict) -> list[str]:
     c = data.get("comparison")
     if not c:
         return []
+    a, b = data["a"], data["b"]
+    if a.get("tier") == "device" and b.get("tier") == "device":
+        size = c["sizeDeltaBytes"]
+        return [
+            f"A {a.get('model') or '(no model file)'}: {_device_summary(a)}",
+            f"B {b.get('model') or '(no model file)'}: {_device_summary(b)}",
+            f"faster: {c['faster']}; B/A latency ratio {c['latencyRatio']}"
+            + ("" if size is None else f"; size delta {size} bytes"),
+            "measured on the device (tier: device)",
+        ]
     return [
-        f"A {data['a']['model']}: {c['aLatencyMs']} ms, {data['a']['sizeBytes']} bytes",
-        f"B {data['b']['model']}: {c['bLatencyMs']} ms, {data['b']['sizeBytes']} bytes",
+        f"A {a['model']}: {c['aLatencyMs']} ms, {a['sizeBytes']} bytes",
+        f"B {b['model']}: {c['bLatencyMs']} ms, {b['sizeBytes']} bytes",
         f"faster: {c['faster']}; B/A latency ratio {c['latencyRatio']}; size delta {c['sizeDeltaBytes']} bytes",
         "host reference only -- not SoM performance",
     ]

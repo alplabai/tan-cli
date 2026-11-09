@@ -2904,3 +2904,47 @@ def test_from_example_without_a_generated_alp_conf_reader_says_nothing(tmp_path)
 
     assert proc.returncode == 0, env["issues"]
     assert not [i for i in env["issues"] if i["code"] == "init.alp-conf-pregeneration"]
+
+
+# tan-cli#1484: re-running init must not silently re-pin the SDK.
+def test_rerun_with_a_different_sdk_is_a_would_overwrite_not_a_silent_repin(tmp_path):
+    sdk_a = _sdk_checkout(tmp_path / "sdk_a")
+    sdk_b = _sdk_checkout(tmp_path / "sdk_b")
+    base = ("init", "--template", "minimal-app", "--name", "app", "--format", "json")
+    first = run_tan(*base, "--sdk-root", str(sdk_a), cwd=tmp_path)
+    assert first.returncode == 0, first.stdout
+    pointer = tmp_path / "app" / ".alp" / "sdk-path"
+    before = pointer.read_text(encoding="utf-8")
+
+    second = run_tan(*base, "--sdk-root", str(sdk_b), cwd=tmp_path)
+    env = envelope(second)
+    assert second.returncode == 3
+    assert issue(env)["code"] == "init.would-overwrite"
+    assert ".alp/sdk-path" in issue(env)["message"]
+    assert pointer.read_text(encoding="utf-8") == before
+
+    forced = run_tan(*base, "--sdk-root", str(sdk_b), "--force", cwd=tmp_path)
+    assert forced.returncode == 0, forced.stdout
+    assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == (tmp_path / "sdk_b").as_posix()
+
+
+def test_rerun_with_the_same_sdk_is_still_clean(tmp_path):
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    args = ("init", "--template", "minimal-app", "--name", "app", "--sdk-root", str(sdk),
+            "--format", "json")
+    assert run_tan(*args, cwd=tmp_path).returncode == 0
+    assert run_tan(*args, cwd=tmp_path).returncode == 0
+
+
+def test_cores_with_board_yaml_is_refused_not_dropped(tmp_path):
+    board = tmp_path / "my.yaml"
+    board.write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--som", "E1M-AEN801", "--cores",
+        "a32_cluster:off", "--board-yaml", str(board), "--name", "app", "--format", "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+    assert proc.returncode != 0
+    assert issue(env)["code"] == "init.scaffold-input-conflict"
+    assert not (tmp_path / "app").exists()

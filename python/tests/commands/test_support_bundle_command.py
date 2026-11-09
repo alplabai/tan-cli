@@ -953,3 +953,15 @@ def test_the_drive_anchored_relaxation_does_not_over_redact():
     posix = ("/home/<user>",)
     assert _redact("/srv//home/<user>/proj", posix) == "/srv//home/<user>/proj"
     assert _redact("file:///home/<user>/proj", posix) == "file:///home/<user>/proj"
+
+
+def test_redaction_of_a_windows_home_is_case_insensitive():
+    """tan-cli#1483: a lowercase drive letter from VS Code leaked the account
+    name past the case-sensitive pattern."""
+    payload = {"workspaceRoot": "c:/users/alice/proj", "sdk": "c:\\Users\\ALICE\\sdk"}
+    redacted = _redact(payload, ("C:\\Users\\Alice", "C:/Users/Alice"))
+    assert redacted == {"workspaceRoot": "<home>/proj", "sdk": "<home>\\sdk"}
+
+
+def test_redaction_of_a_posix_home_stays_case_sensitive():
+    assert _redact("/home/Alice/x /home/alice/x", ("/home/alice",)) == "/home/Alice/x <home>/x"

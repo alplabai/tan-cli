@@ -106,6 +106,7 @@ from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_cont
 # module, and `cli.py` already pulls `support_bundle_cmd` into every graph.
 from tan.commands.support_bundle_cmd import _RUNTIME_EXECUTABLES, _first_on_path
 from tan.core.atomic_write import atomic_write_text
+from tan.core.flash_plan import FlashPlanError, fa_str_checked, validate_identifier
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     GDBSERVER,
@@ -124,6 +125,7 @@ from tan.core.debug_launch import (
     create_launch_draft,
     create_launch_json_write_plan,
     explicit_core_unknown_message,
+    multi_core_without_core_message,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
     is_unresolved_placeholder,
@@ -355,6 +357,19 @@ def _select_slice(
     )
 
 
+def _slice_jlink_serial(slice_: dict[str, Any]) -> str | None:
+    """The slice's `flash_args.jlink_serial` -- the probe `tan flash` selects --
+    or `None` when absent or malformed (validated the way `tan flash` does, so
+    a value it would refuse is never written into launch.json)."""
+    try:
+        serial = fa_str_checked(slice_.get("flash_args"), "jlink_serial", False)
+        if serial is not None:
+            validate_identifier(serial, "jlink_serial")
+    except FlashPlanError:
+        return None
+    return serial
+
+
 def _runner_arg_values(argv: Any, flag: str) -> list[str]:
     """Every value a runner's argv gives for `flag`, in either form west emits:
     `--device=Cortex-M55` (inline) or `--config <path>` (separate token).
@@ -432,6 +447,9 @@ def _resolve_from_build(
         if target == NATIVE_HOST:
             artefact = native_sim_exe_beside(artefact)
         resolution.executable = _workspace_relative(workspace_root, artefact)
+
+    if server == JLINK:
+        resolution.probe_serial = _slice_jlink_serial(slice_)
 
     build_dir = _str_or_none(slice_.get("build_dir"))
     if build_dir is None:
@@ -1516,6 +1534,24 @@ def _target_kind_ambiguous_failure(
     )
 
 
+def _core_required_failure(
+    generated_at: str, target: str, server: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#1488: `--core` omitted on a build with several cores of the
+    target class. The caller's own precondition (exit 2), like `tan probe` /
+    `tan flash`, which refuse the same case."""
+    return _failure(
+        generated_at=generated_at,
+        target=target,
+        server=server,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-required",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _no_debuggable_target_class_failure(
     generated_at: str, message: str, launch_json_path: str
 ) -> _Outcome:
@@ -1848,6 +1884,17 @@ def _run(
                     ),
                     launch_json_path,
                 )
+
+    # tan-cli#1488: several cores of this class and no --core -> refuse instead
+    # of silently programming the first slice's core.
+    if core is None:
+        multi_core = multi_core_without_core_message(
+            target, manifest_slices(_load_yaml(Path(workspace_root, "build", "system-manifest.yaml")))
+        )
+        if multi_core is not None:
+            return _core_required_failure(
+                generated_at, target, server, multi_core, launch_json_path
+            )
 
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a

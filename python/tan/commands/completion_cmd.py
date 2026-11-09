@@ -181,7 +181,7 @@ _COMMAND_NAMES = (
     "validate generate init scaffold examples doctor completion diff presets "
     "pinmux explain inspect trace debug-config support-bundle sdk bootstrap "
     "build kconfig image flash run clean size migrate lock quality "
-    "model monitor new-som faultdecode probe reset"
+    "model monitor new-som faultdecode probe reset platform"
 )
 
 
@@ -218,7 +218,7 @@ _tan_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cword=${COMP_CWORD}
 
-  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean size migrate lock quality model monitor new-som faultdecode probe reset"
+  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean size migrate lock quality model monitor new-som faultdecode probe reset platform"
   # `--version` is deliberately NOT in `global_flags` but IS in `root_flags`
   # (tan-cli#503): it is root-only, and no subcommand prints a version for it
   # -- see the module docstring's fifth exception for the measurement on all
@@ -422,6 +422,7 @@ _tan() {
     'debug-config:Generate a launch.json debug configuration'
     'support-bundle:Export support bundle payload'
     'sdk:Manage local SDK installs'
+    'platform:Pin the workspace to an Alp Platform release'
     'bootstrap:Set up the SDK build environment'
     'build:Build the project natively'
     'kconfig:Show the board-scoped Kconfig symbol menu'
@@ -640,6 +641,9 @@ complete -c tan -n '__fish_seen_subcommand_from completion' -l shell -d 'Shell t
 complete -c tan -n '__fish_seen_subcommand_from sdk' -a 'list install current switch'
 complete -c tan -n '__fish_seen_subcommand_from sdk' -l destination -d 'Cache root'
 complete -c tan -n '__fish_seen_subcommand_from sdk' -l global -d 'Pin the machine-global default'
+complete -c tan -n '__fish_seen_subcommand_from platform' -a 'use show clear list'
+complete -c tan -n '__fish_seen_subcommand_from platform' -l include-rc -d 'With list: include rc releases'
+complete -c tan -n '__fish_seen_subcommand_from platform' -l manifest -d 'Local platform.yaml'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-pip -d 'Skip pip install'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-west -d 'Skip west init/update'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l print-env -d 'Print environment lines only'

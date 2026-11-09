@@ -324,3 +324,30 @@ def test_a_broken_project_pin_is_reported_on_a_model_list(tmp_path, monkeypatch)
     doc = envelope(result)
     assert doc["ok"] is True
     assert [i["code"] for i in doc["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+# --- tan-cli#1486 ----------------------------------------------------------
+def _run(tmp_path, *args):
+    result = runner.invoke(app, [*args, "--project", str(tmp_path), "--format", "json"],
+                           catch_exceptions=False)
+    return result.exit_code, json.loads(result.stdout)
+
+
+def test_malformed_model_entries_are_board_yaml_invalid(tmp_path):
+    for entry in ("  - {name: m1, source: 5}\n", "  - {name: [a], source: x.tflite}\n",
+                  "  - {name: ../../x, source: x.tflite}\n",
+                  "  - {name: m1, source: x.tflite, compile: [a]}\n"):
+        board_yaml(tmp_path, models="models:\n" + entry)
+        code, doc = _run(tmp_path, "list")
+        assert code == 2, entry
+        assert doc["issues"][0]["code"] == "model.board-yaml-invalid", entry
+
+
+def test_subcommand_scoped_flags_are_refused_elsewhere(tmp_path):
+    board_yaml(tmp_path, models="models:\n  - {name: m1, source: x.tflite}\n")
+    for args in (("list", "--exact"), ("build", "--per-channel"), ("build", "--calibration", "c"),
+                 ("run", "a.onnx", "--against", "b.onnx")):
+        code, doc = _run(tmp_path, *args)
+        assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument", args
+        flag = next(a for a in args if a.startswith("--"))
+        assert flag in doc["issues"][0]["message"], args
