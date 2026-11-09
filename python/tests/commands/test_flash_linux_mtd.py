@@ -96,6 +96,9 @@ IMAGE = padded()
 
 
 def _fake_bin(tmp_path: Path) -> Path:
+    if os.name == "nt":
+        # Windows does not run a shebang script found on PATH, so the real ssh would run.
+        pytest.skip("the fake ssh/scp are python shebang scripts")
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
     for name in ("ssh", "scp"):
