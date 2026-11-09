@@ -387,6 +387,7 @@ def test_dry_run_with_facts_but_no_sdk_name_is_labelled_unverified(tmp_path):
     assert "NOT authoritative" in _entry(payload)["message"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not enforced on Windows")
 def test_the_snapshot_copy_is_private(tmp_path):
     deploy = fm._Deploy(
         SimpleNamespace(id="x"), SimpleNamespace(), lambda *a, **k: None, [], {}, "/x", {}
