@@ -1,9 +1,8 @@
 # `linux_mtd` — deploying a V2N / V2N-M1 CM33 image over the running Linux (tan-cli#1314)
 
-> **Not validated on silicon.** No V2N bench place existed when this backend was
-> written. The steps mirror the procedure in alp-sdk
-> `examples/multicore/rpmsg-v2n/README.md` ("Pad and flash to mtd1 @ 0x1a0000") and are
-> tested only against a fake `ssh`/`scp`. It needs a V2N bench run before you rely on it.
+> **Bench-checked once on E1M-V2M103** (2026-11-09, tan-cli#1477): an idempotent write of the
+> known CM33 image through every step, `mtd1` byte-identical afterwards, the `mtd0` refusal,
+> and a normal reboot. A write of a different CM33 image has not been run yet.
 
 `xspi_flashwriter` handles `mtd0`/`mtd1` only as bl2/fip over SCIF (its real write is
 HW-gated), and `zephyr_west_flash` has no RZ/V2N CM33 runner. On V2N / V2N-M1 the CM33
@@ -81,7 +80,9 @@ has the Thumb bit and lies in `0x08003000..0x08033000`. A raw `zephyr.bin` is re
    `flash.linux-mtd-cleanup-failed`.
 
 `ssh`/`scp` run with `BatchMode=yes` and `ConnectTimeout=10`: key authentication only, a
-password prompt is never possible. Host key checking is left at your ssh defaults. The target
+password prompt is never possible. Host key checking is left at your ssh defaults, so the
+board's host key must already be in `known_hosts` (otherwise ssh fails with `Host key
+verification failed`). The target
 needs `flash_erase`, `mtd_debug` (mtd-utils), `sha256sum` and `rm`.
 
 ## Guards
