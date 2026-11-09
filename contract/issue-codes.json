@@ -1982,14 +1982,6 @@
       "note": "Constructed as the whole literal at a `PlanParseError` call site in `build_plan.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "build.project-root-mismatch",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/build/token_substitution.py",
-      "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
       "code": "build.sdk-commit-mismatch",
       "status": "reserved",
       "severity": "error",

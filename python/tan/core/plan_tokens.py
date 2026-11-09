@@ -52,7 +52,6 @@ slice built from the stock-image token has none) -- `None` passes through
 untouched, the same as `command.cwd`.
 """
 import re
-import sys
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -250,43 +249,6 @@ def sdk_commit_mismatches(plan_commit: str, resolved_commit: str) -> bool:
         return False
     n = min(len(a), len(b))
     return a[:n].lower() != b[:n].lower()
-
-
-def _normalize(path: str) -> str:
-    """Lexically normalize (collapse `.`/`..`, drop empty segments) without
-    touching the filesystem -- the Python analogue of tan-core's
-    `path_guard::normalize`."""
-    posix = path.replace("\\", "/")
-    is_absolute = posix.startswith("/")
-    parts = posix.split("/")
-    out: list[str] = []
-    for part in parts:
-        if part in ("", "."):
-            continue
-        if part == "..":
-            # Matches Rust's `out.pop()`: a no-op on an empty accumulator,
-            # never appends a literal "..".
-            if out:
-                out.pop()
-            continue
-        out.append(part)
-    result = "/".join(out)
-    return f"/{result}" if is_absolute else result
-
-
-def project_root_diverges_from_exec_base(project_root: str, exec_base: str) -> bool:
-    """Guard 3: whether `${PROJECT_ROOT}` (the resolved `board.yaml`'s
-    directory) diverges from the executor's actual base dir. They're the
-    same directory only in the default config -- when a plan is tokened,
-    substituting `${PROJECT_ROOT}` from one and executing slices under the
-    other would silently build against the wrong tree."""
-    a, b = _normalize(project_root), _normalize(exec_base)
-    if sys.platform.startswith("win"):
-        # Lexical normalize doesn't fold drive-letter case, so
-        # `--board-yaml e:/...` vs `--project E:/...` -- the same path --
-        # would otherwise false-fail this guard.
-        return a.lower() != b.lower()
-    return a != b
 
 
 def _resolved_toolchain_root(values: TokenValues) -> str | None:

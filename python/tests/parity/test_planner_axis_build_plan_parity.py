@@ -195,7 +195,7 @@ board.write_text(BOARD.read_text(encoding="utf-8"), encoding="utf-8")
 # only the parsed plan.
 _plan_text, plan = _acquire_plan(None, str(SDK), str(board))
 plan, _demotions = apply_plan_token_substitution(
-    plan, board_yaml_path=str(board), exec_base=str(project_root),
+    plan, board_yaml_path=str(board),
     sdk_root=str(SDK), python="python3", toolchain_root=None)
 materialise_plan(plan, project_root)
 

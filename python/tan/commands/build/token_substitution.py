@@ -30,7 +30,6 @@ from tan.core.plan_tokens import (
     TokenValues,
     UnknownPlanPathMode,
     UnresolvedToolchainRoot,
-    project_root_diverges_from_exec_base,
     sdk_commit_mismatches,
     substitute_plan_tokens,
 )
@@ -240,7 +239,6 @@ def apply_plan_token_substitution(
     plan: BuildPlan,
     *,
     board_yaml_path: str | None,
-    exec_base: str,
     sdk_root: str | None,
     python: str,
     toolchain_root: str | None,
@@ -292,16 +290,6 @@ def apply_plan_token_substitution(
         )
     if project_root is None:
         project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
-
-    if project_root_diverges_from_exec_base(project_root, exec_base):
-        raise TokenSubstitutionError(
-            "build.project-root-mismatch",
-            f"plan is `planPathMode: tokened`, but ${{PROJECT_ROOT}} (`{project_root}`, the "
-            f"board.yaml directory) differs from where tan actually runs each slice's "
-            f"command (`{exec_base}`) -- refusing to build against the wrong tree. This only "
-            f"happens with a non-default `west_cwd`/`--project` split; align them, or drop "
-            f"`planPathMode` from the plan.",
-        )
 
     # ONE resolved sdk_root for the whole substitution. A tokened plan NEEDS
     # a real ${SDK_ROOT} value: degrading an unresolved sdk_root to "" would

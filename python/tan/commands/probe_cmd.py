@@ -28,6 +28,7 @@ from tan.commands import flash_ram as fr
 from tan.commands.build_output import resolve_metadata_sdk_root
 from tan.core import probe_plan as pp
 from tan.core.dp_id import _dp_id_value
+from tan.core.system_manifest import effective_build_root, find_manifest
 from tan.core.flash_plan import (
     _DEFAULT_JLINK_SPEED,
     FlashPlan,
@@ -96,7 +97,7 @@ def _arg_issue(err: pp.ProbeArgError) -> Issue:
 def _load_slices(build_root: str) -> tuple[list[tuple[str, dict]], bool, Issue | None, str]:
     """`(slices, manifest present, warning, sku)`. An existing but unusable manifest is a
     `probe.manifest-unusable` warning: the comparison it would have armed is skipped."""
-    path = fc._abs_join(build_root, "system-manifest.yaml")
+    path = find_manifest(build_root, fc._is_file)
     if not fc._is_file(path):
         return [], False, None, ""
     try:
@@ -140,6 +141,7 @@ def _prepare(
     verb, core, build_root, probe_serial, probe_usb_path, jlink_path, project_dir, enumerate_probes
 ) -> _Run | _Result:
     slices, present, warning, sku = _load_slices(build_root)
+    build_root = effective_build_root(build_root, fc._is_file)
     flash_args, selected_id, ambiguity, note = pp.select_slice(slices, core)
     report: dict[str, Any] = {
         "core": core, "buildRoot": build_root, "writes": False, "manifestPresent": present,
@@ -170,7 +172,7 @@ def _prepare(
         guard = None
         if selection is not None and (selection.serial is not None or selection.visible is None):
             guard = fc._ProbeGuard(selection, snapshot, ctx.enumerate_probes, echo,
-                                   script_prefix=_SCRIPT_PREFIX)
+                                   script_prefix=_SCRIPT_PREFIX, jlink_source=found.source if found else None)
         ap_addr = _he_pin((selected_id or core), project_dir, sku)
         pre, speed, expected = _attach_params(flash_args, report["jlink"], ap_addr)
     except (FlashPlanError, RamRunError) as err:
@@ -375,7 +377,9 @@ def probe(
     project: str = typer.Option(None, "--project", metavar="PATH", help="Project root (defaults to '.')."),
     build_root: str = typer.Option(
         None, "--build-root", metavar="PATH",
-        help="Build root holding system-manifest.yaml (default <project>/build). When present, its "
+        help="Build root, the same value `tan build`/`tan flash` take (manifest at "
+        "<PATH>/build/system-manifest.yaml; <PATH>/system-manifest.yaml also works; default "
+        "<project>/build). When present, its "
         "slice's flash_args supply expect_dpidr (compared by identify), jlink_serial/jlink_speed."),
     core: str = typer.Option(
         None, "--core", metavar="m55_he|m55_hp",

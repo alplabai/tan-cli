@@ -504,3 +504,13 @@ def test_the_he_pin_reaches_probe_only_for_an_e8_he_attach(env, monkeypatch, sil
             == ram_run.ap_pin_lines(ram_run.HE_AP_ADDR)
             for s in scripts
         )
+
+
+def test_build_root_is_the_dir_above_build_as_for_flash(env, monkeypatch):
+    """tan-cli#1589: the `--build-root` value `tan build`/`tan flash` take
+    (manifest at <root>/build/) also finds the manifest here."""
+    _manifest(env)
+    _rc, data, issues, _ = _run(env, "identify", build_root=str(env), core="m55_he")
+    assert data["manifestPresent"] is True
+    assert data["buildRoot"] == str(env / "build")  # where the manifest was found, as flash
+    assert "probe.no-manifest" not in codes(issues)

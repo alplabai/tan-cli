@@ -1361,7 +1361,6 @@ def _build(
         plan, demotions = apply_plan_token_substitution(
             plan,
             board_yaml_path=board_yaml,
-            exec_base=build_root,
             sdk_root=sdk_root,
             python=build_python.python,
             toolchain_root=toolchain.root,

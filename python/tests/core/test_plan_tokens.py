@@ -13,7 +13,6 @@ from tan.core.plan_tokens import (
     UnresolvedToolchainRoot,
     sdk_commit_mismatches,
     substitute_plan_tokens,
-    project_root_diverges_from_exec_base,
 )
 
 LEGACY = """{
@@ -384,7 +383,7 @@ def test_demoted_slice_config_artefact_contents_with_unknown_token_is_still_a_ha
 
 
 # ---------------------------------------------------------------------------
-# sdk_commit_mismatches / project_root_diverges_from_exec_base
+# sdk_commit_mismatches
 # ---------------------------------------------------------------------------
 
 
@@ -402,17 +401,6 @@ def test_sdk_commit_mismatch_short_vs_full_sha_agrees_by_common_prefix():
     assert sdk_commit_mismatches("deadbee", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") is False
     assert sdk_commit_mismatches("DEADBEE", "deadbeefdead") is False
     assert sdk_commit_mismatches("deadbee", "1234567abcdef") is True
-
-
-def test_project_root_diverges_from_exec_base_default_config_agrees():
-    assert project_root_diverges_from_exec_base("/work/proj", "/work/proj") is False
-    assert project_root_diverges_from_exec_base("/work/proj/", "/work/proj") is False
-
-
-def test_project_root_diverges_from_exec_base_nested_board_yaml():
-    assert (
-        project_root_diverges_from_exec_base("/work/proj/examples/foo", "/work/proj") is True
-    )
 
 
 # ---------------------------------------------------------------------------
