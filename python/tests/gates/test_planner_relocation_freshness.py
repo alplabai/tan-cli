@@ -1450,7 +1450,25 @@ from tests.conftest import sdk_root
 #: (735 emits over 105 boards): only 76 AEN `system-manifest.yaml` files
 #: changed (the storage region's narrowed `accessible_from`), and the scaffold
 #: needed no re-vendor (10/10).
-PINNED_SDK_COMMIT = "a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7"  # alp-sdk dev -- tan-cli#1585 re-sync
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `a70eec74` -> `af567fec`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:   scripts/alp_orchestrate/loader.py: merged
+#:   scripts/alp_orchestrate/orchestrator.py: merged
+#:   scripts/alp_orchestrate/partition.py: merged
+#:   scripts/alp_orchestrate/validate.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 6daf1cf63 fix(orchestrate): OTA boards must pin offset_kib on every partition (Refs #2988) (#3107)
+#:   - c0b4744ef fix(scripts): md5 reads the media, deeper-root tokens, PSA memory-map errors, Mender update-poll variable (#2988, #2989) (#3098)
+PINNED_SDK_COMMIT = "af567fecc6d70b489b910ce58a27766180fe92cc"  # alp-sdk dev -- tan-cli#1585 re-sync
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1498,24 +1516,24 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "92f48ed55a469120c4a434efd62d25b6307e02438e5d35d6b7950a45234d6371",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "243de94b61177571831aadb1fbdeed8888568a89d18ec6d96ae94d12b2a1cb97",
-    "kconfig.py": "790f180661b83f6dbf635b00c4f0e238535e014c6172bf62d976e1722ae1d2bb",
+    "kconfig.py": "7c7daa682f653bda97ba08f64e50fdf6aea8143fd3105c113caea7efc5892444",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "6d73affaefacc2b4597b556e7a58ba4bbc80715a1b903bff693b76da62523d73",
     "linux_ownership.py": "6545d851e8520e576d896608bfebcef74631b320284f50973d4de32e774135aa",
-    "loader.py": "ce8b207a870780da8541fb1f6989b487dcfb33f6e6b211fb80eeab4c3d3f6f7a",
+    "loader.py": "dfc4eee3a90b3189ce73bad6d3b097d0e881b7ce0f6eaa4b0606f4e117a511e4",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "6f47dfbe3dd3873afbba3b6736c1c43c3273fc2ff7fb0700a93fa2ff713c26f8",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "76026caf0b0d2da8efbdeba0f5e3564580841a829f9b152c023b8b4bae4f2a86",
-    "orchestrator.py": "98d3b194670c9b07c1d1836bd0a73ad427add96bef31db9cacf4e5e82dd90c25",
+    "orchestrator.py": "c8ef29e62395ba55fbfb78828413369bae5906e0fcfb41d5d5d16789d3e876d8",
     "ownership.py": "b4738efacd19f2d833b1adef38e375bc50017c279cc4069b744d0496304efb8b",
-    "partition.py": "8af0b005703c6c3b7bc15710dcbe5b2a8bc157323b659a2193374174aa9f1164",
+    "partition.py": "aa2dcadafd299be74493ec835877e1925faf51f8b0614557118999849517ed53",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "255494c4397912d800ab695a48ff35b9ab9233bc8c5136893cc39488ee6234c3",
     "secure.py": "d3725750cf20d4bcb9a3f7e5916a08307c3c28a4d6b3c9e4d104be187a68826d",
     "slugs.py": "4e914a71468ec41529a970783f29501d1ec387ad748fc792cb6dfb53b9818adb",
     "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
-    "validate.py": "0981ca5a07d5dc5845bbcd13c4f00534285490e52ab2ef8fd8022188b8a850e6",
+    "validate.py": "20e93f8ad1788dae2739d3dbc654af832d8b1cb31478ffccad4f6c355cc3e687",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -2552,7 +2570,20 @@ PINNED_HASHES: dict[str, str] = {
 #: `scripts/alp_project_emit/dts.py` -> `tan/planner/project_emit/dts.py`:
 #: `_parse_board_macros` drops `#ifdef ALP_<BOARD>_HW_REV_<REV>` ... `#endif`
 #: blocks so only the un-guarded base routes are read.
-HAND_PORT_PINNED_SDK_COMMIT = "a70eec7411d3e92bc9a60ef8bacf3cdcb8e2f2f7"  # alp-sdk dev -- tan-cli#1585 hand-ports
+#: AUTOMATED RE-SYNC (hand-port / HAND_PORT_HASHES): `a70eec74` -> `af567fec`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+HAND_PORT_PINNED_SDK_COMMIT = "af567fecc6d70b489b910ce58a27766180fe92cc"  # alp-sdk dev -- tan-cli#1585 hand-ports
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
